@@ -21,7 +21,7 @@ pub enum NameError {
     Slash,
     #[error("a name cannot contain a NUL character")]
     Nul,
-    #[error("a name cannot be longer than 255 bytes")]
+    #[error("a name cannot be longer than {} bytes", MAX_NAME_BYTES)]
     TooLong,
     #[error("a name cannot be spelled like Bolt's own folder (.bolt)")]
     BoltSpelling,
@@ -74,8 +74,9 @@ fn is_ignorable(c: char) -> bool {
 
 fn is_bolt_spelling(name: &str) -> bool {
     let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
-    // NTFS ignores everything after ':' (streams such as `::$INDEX_ALLOCATION`).
-    let base = kept.split(':').next().unwrap_or("");
+    // NTFS ignores everything after ':' (streams such as `::$INDEX_ALLOCATION`), and a
+    // backslash starts a sub-path on Windows (Git's is_ntfs_dotgit stops at both).
+    let base = kept.split([':', '\\']).next().unwrap_or("");
     let base = base.trim_end_matches(['.', ' ']).to_ascii_lowercase();
     // `bolt~1`..`bolt~4` are NTFS 8.3 short names of `.bolt` (Git accepts ~1..~4).
     base == ".bolt" || matches!(base.as_bytes(), [b'b', b'o', b'l', b't', b'~', b'1'..=b'4'])
@@ -196,6 +197,9 @@ mod tests {
             "bolt~1",
             "BOLT~1",
             "bolt~4",
+            ".bolt\\x",
+            ".BOLT.\\x",
+            "bolt~1\\x",
             ".bolt::$INDEX_ALLOCATION",
             ".bolt:stream",
             ".b\u{200C}olt",
