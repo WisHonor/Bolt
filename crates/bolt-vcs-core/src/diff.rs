@@ -524,9 +524,24 @@ mod tests {
     }
 
     /// Names that sort differently as a folder (`name/`) than as a file: they differ from each
-    /// other in bytes just below and just above `/`.
+    /// other in bytes just below and just above `/`. Some are not ASCII, so that a byte is not a
+    /// character.
     fn name() -> impl Strategy<Value = String> {
-        let names = vec!["a", "a ", "a-", "a-b", "a.", "a.txt", "a0", "a~", "ab", "b"];
+        let names = vec![
+            "a",
+            "a ",
+            "a-",
+            "a-b",
+            "a.",
+            "a.txt",
+            "a0",
+            "a~",
+            "ab",
+            "b",
+            "\u{e9}",
+            "\u{e9}-x",
+            "\u{65e5}\u{672c}",
+        ];
         prop::sample::select(names).prop_map(str::to_owned)
     }
 

@@ -617,7 +617,7 @@ fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
 
 /// A started project whose newest save has one level of folders more than a save may have, and
 /// a file `mine.txt` to save next to it.
-fn project_after_a_save_too_deep_to_compare() -> Env {
+fn project_with_a_save_too_deep_to_walk() -> Env {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
     plant_save(env.root(), |pack| {
@@ -633,8 +633,37 @@ fn project_after_a_save_too_deep_to_compare() -> Env {
 }
 
 #[test]
+fn show_of_a_save_too_deep_to_walk_prints_only_the_error() {
+    let env = project_with_a_save_too_deep_to_walk();
+    let out = env.bolt().arg("show").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stdout),
+        "",
+        "nothing is printed before the refusal"
+    );
+    assert!(
+        text(&out.stderr).contains("too large"),
+        "{}",
+        text(&out.stderr)
+    );
+    // As JSON, the error alone: no half of the save's own document in front of it.
+    let out = env.bolt().args(["--json", "show"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too large"),
+        "{json}"
+    );
+    assert!(json.get("changes").is_none(), "{json}");
+}
+
+#[test]
 fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
-    let env = project_after_a_save_too_deep_to_compare();
+    let env = project_with_a_save_too_deep_to_walk();
     let out = env.bolt().args(["save", "my work"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
@@ -649,7 +678,7 @@ fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
 
 #[test]
 fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
-    let env = project_after_a_save_too_deep_to_compare();
+    let env = project_with_a_save_too_deep_to_walk();
     let out = env
         .bolt()
         .args(["--json", "save", "my work"])
