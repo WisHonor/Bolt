@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 10
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 11
 
 ## 1. Vision
 
@@ -106,7 +106,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 8. Repository layout in `.bolt/`; shared vs. local config; format version, feature list, upgrades → [decision 008](decisions/008-layout-and-settings.md)
 - [x] 9. Storage engine: loose vs. packed objects, compression, deltas and full-copy cadence, chunking algorithm and thresholds, garbage collection → [decision 009](decisions/009-storage-engine.md)
 - [x] 10. Operation log: undo/redo semantics per command, two commands at once, how long undo lasts → [decision 010](decisions/010-operation-log.md)
-- [ ] 11. Fast `status` and safe `goto`: file-state cache, timestamp traps, file watching, never overwriting unsaved work
+- [x] 11. Fast `status` and safe `goto`: file-state cache, timestamp traps, file watching, never overwriting unsaved work → [decision 011](decisions/011-status-and-write-out.md)
 
 **Stage 4 — Collaboration** (constraints only, for now)
 - [ ] 12. Lines and combining: naming, remote lines, tags, three-way merge, renames
@@ -239,6 +239,15 @@ head ─► redo     main → ptvz
         save     main → kxqm
 ```
 
+### 5.9 Fast status and safe writing ([decision 011](decisions/011-status-and-write-out.md))
+
+**In plain words.** `status` remembers each file's size and last-modified time, so it only re-reads files that look changed. Anything that writes files plans first, re-checks each file right before replacing it, and never overwrites work you haven't saved.
+
+- **Cache:** size, time, file ID and fingerprint per file, in `.bolt/cache/`; files changed "too recently" are always re-read; `bolt status --full` re-reads everything.
+- **Watcher:** later, optional, and only ever a speed-up.
+- **Writing files:** plan → stop if unsaved work would be overwritten → re-check each file just before replacing it → temp file + rename → the whole switch journaled.
+- **Files in use (Windows):** retry briefly, finish the rest, name the program holding the file, then finish with one more command.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -252,7 +261,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* new files are tracked automatically and unusually large saves ask first (decision 003); preset ignore rules (topic 16); secret warnings (topic 18).
 8. **The working-copy model drives undo, conflicts and shelving.** *Answered by decision 003:* a separate folder with automatic safety copies.
 9. **File-model basics** (line endings, executable bit, symlinks, empty folders, path encoding, case and Unicode collisions, nested projects). *Answered by decision 004.*
-10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission. *Name rules and write-out safety: decision 004. Files held open and retries: topic 11.*
+10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission. *Name rules and write-out safety: decision 004. Files held open and retries: decision 011.*
 11. **Big-file identity.** *Answered by decision 005:* files are identified by their contents, never by their chunk list.
 12. **Hashed objects need a hand-specified byte format.** *Answered by decision 005:* a hand-written format with exactly one valid encoding per object; serde only for data that is never fingerprinted.
 13. **Renames are guessed** when changes come from comparing snapshots. *Answered by decision 006:* saves carry move notes for moves Bolt is certain about; how merges use them follows in topic 12.
@@ -273,6 +282,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Signed saves.** [Room reserved in the save format (decision 006).]
 - **Conflict algebra** (jj-style automatic simplification of conflicts). [Planned by the owner, after v0.2; decision 007's format already allows it.]
 - **Deltas for small text files.** [Added later as a storage feature through the `.bolt/format` feature list (decision 009).]
+- **File watcher** for faster `status`. [After v0.1, optional; it may only narrow what gets checked, never decide correctness (decision 011).]
 - **Store on another drive, or shared between projects** (like Git LFS's `lfs.storage` setting). [Later; keep the store's location a single setting internally.]
 - **Structural diff and merge** (tree-sitter). [Later.]
 - **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Very hard and OS-specific; not before v1.]
@@ -315,6 +325,7 @@ Working names; command names can still change (topic 17).
 - **Move note**: a record inside a save that a file moved, kept only when Bolt is certain.
 - **Pack**: a file in `.bolt/store/` holding many pieces of data plus an index, written in one go so a crash can't leave half of it.
 - **Undo window**: how far back undo reaches; 30 days by default.
+- **Cache**: remembered facts that speed Bolt up, like file sizes and times; always safe to delete.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
