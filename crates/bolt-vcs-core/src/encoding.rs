@@ -1,6 +1,7 @@
 //! Strict byte encoding building blocks (docs/storage-format.md section 1).
 
 use crate::id::{ChangeId, Id};
+use crate::names::NameError;
 
 /// Why a byte string was rejected.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -21,6 +22,8 @@ pub enum DecodeError {
     LimitExceeded { field: &'static str, limit: u64 },
     #[error("invalid value: {0}")]
     Invalid(&'static str),
+    #[error("invalid name: {0}")]
+    InvalidName(#[from] NameError),
 }
 
 /// Appends encoded values to a growing buffer.
