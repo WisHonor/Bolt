@@ -37,16 +37,36 @@ fn print_listing_vectors() {
         size: 5,
     }])
     .unwrap();
-    let rows: Vec<String> = [("empty-listing", Listing::empty()), ("one-file", one)]
-        .iter()
-        .map(|(n, l)| {
-            format!(
-                "  {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
-                hex(&l.encode()),
-                l.id()
-            )
-        })
-        .collect();
+    // Raw-byte order ("B" 0x42 < "a" 0x61 < "é" 0xc3a9), every kind a save writes,
+    // a two-byte size (128 = 80 01) and an empty file.
+    let entry = |name: &str, kind, fill, size| Entry {
+        name: name.into(),
+        kind,
+        id: Id([fill; 32]),
+        size,
+    };
+    let mixed = Listing::new(vec![
+        entry("B", EntryKind::Folder, 0x44, 0),
+        entry("a", EntryKind::File, 0x11, 128),
+        entry("b", EntryKind::Executable, 0x22, 7),
+        entry("l", EntryKind::Symlink, 0x33, 1),
+        entry("é", EntryKind::File, 0x55, 0),
+    ])
+    .unwrap();
+    let rows: Vec<String> = [
+        ("empty-listing", Listing::empty()),
+        ("one-file", one),
+        ("mixed", mixed),
+    ]
+    .iter()
+    .map(|(n, l)| {
+        format!(
+            "  {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
+            hex(&l.encode()),
+            l.id()
+        )
+    })
+    .collect();
     println!("[\n{}\n]", rows.join(",\n"));
 }
 
