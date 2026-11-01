@@ -3,8 +3,9 @@
 use crate::encoding::{Reader, Writer};
 use crate::fsio;
 use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
+use crate::safe_fs;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -369,10 +370,16 @@ impl PackReader {
     /// Opens a pack and checks its header, trailer, index checksum and that every entry lies
     /// inside the file without overlapping another.
     pub fn open(path: &Path) -> Result<PackReader, PackError> {
-        let file = File::open(path)?;
         let corrupt = |reason: String| PackError::Corrupt {
             path: path.to_path_buf(),
             reason,
+        };
+        // A link, pipe or device named like a pack is damage, never followed or waited on.
+        let file = match safe_fs::open_regular(path, OpenOptions::new().read(true)) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                return Err(corrupt("it is not a regular file".into()));
+            }
+            opened => opened?,
         };
         let len = file.metadata()?.len();
         if len < PACK_HEADER_LEN + TRAILER_LEN {

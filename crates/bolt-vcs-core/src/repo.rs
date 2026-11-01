@@ -13,6 +13,7 @@ use crate::fsio::{self, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackWriter};
+use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
 
@@ -91,6 +92,42 @@ fn damaged(detail: impl Into<String>) -> RepoError {
     }
 }
 
+/// A `safe_fs` refusal (a link, special file or oversized file where `.bolt` must hold a real
+/// one) is damage; any other error stays an I/O error.
+fn refused(e: io::Error) -> RepoError {
+    match e.kind() {
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => damaged(e.to_string()),
+        _ => e.into(),
+    }
+}
+
+/// The folders that must be real folders, never links or junctions (storage-format.md §10),
+/// parents first.
+fn fixed_folders(bolt: &Path) -> [PathBuf; 6] {
+    let store = bolt.join("store");
+    let packs = store.join("packs");
+    [
+        bolt.to_owned(),
+        store,
+        packs,
+        bolt.join("state"),
+        bolt.join("cache"),
+        bolt.join("tmp"),
+    ]
+}
+
+/// Refuses a `.bolt` whose fixed folders are links, junctions or files. A missing one passes:
+/// `init` creates them, and a command that needs one fails without it.
+fn check_shape(bolt: &Path) -> Result<(), RepoError> {
+    for dir in fixed_folders(bolt) {
+        match safe_fs::check_real_dir(&dir) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(refused(e)),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatInfo {
     pub features: BTreeSet<String>,
@@ -154,10 +191,10 @@ fn parse_head(bytes: &[u8]) -> Result<Id, RepoError> {
 
 /// `state/head` of the `.bolt` folder `bolt`, or `None` before the first commit.
 fn read_head(bolt: &Path) -> Result<Option<Id>, RepoError> {
-    match fs::read(bolt.join("state").join("head")) {
+    match safe_fs::read_capped(&bolt.join("state").join("head"), safe_fs::MAX_HEAD_BYTES) {
         Ok(bytes) => parse_head(&bytes).map(Some),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(refused(e)),
     }
 }
 
@@ -191,6 +228,10 @@ impl Repository {
         let already = || RepoError::AlreadyAProject {
             root: root.to_owned(),
         };
+        let bolt = root.join(".bolt");
+        // Before anything is created: creating a folder through a planted link would write
+        // outside the project.
+        check_shape(&bolt)?;
         if format_path(root).try_exists()? {
             return Err(already());
         }
@@ -199,10 +240,10 @@ impl Repository {
                 root: outer.to_owned(),
             });
         }
-        let bolt = root.join(".bolt");
-        for sub in ["store/packs", "state", "cache", "tmp"] {
-            fsio::create_dir_durable(&bolt.join(sub))?;
+        for dir in fixed_folders(&bolt) {
+            fsio::create_dir_durable(&dir)?;
         }
+        check_shape(&bolt)?;
         bolt_platform::hide_path(&bolt)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
@@ -272,12 +313,15 @@ impl Repository {
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
         let bolt = root.join(".bolt");
-        let text = match fs::read(bolt.join("format")) {
+        // Nothing in `.bolt` is read before its folders are known to be real folders.
+        check_shape(&bolt)?;
+
+        let text = match safe_fs::read_capped(&bolt.join("format"), safe_fs::MAX_FORMAT_BYTES) {
             Ok(bytes) => {
                 String::from_utf8(bytes).map_err(|_| damaged("the format file is not text"))?
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RepoError::NotAProject),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(refused(e)),
         };
         let format = parse_format(&text)?;
         let tmp = bolt.join("tmp");
@@ -307,15 +351,17 @@ impl Repository {
         }
         for entry in fs::read_dir(&self.tmp)? {
             let path = entry?.path();
-            if path.is_file() {
+            // Only Bolt's own temporary files: never a link, a folder or a name it doesn't make.
+            let ours = path.file_name().is_some_and(fsio::is_temp_name);
+            if ours && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
                 fsio::remove_file(&path)?;
             }
         }
         Ok(())
     }
 
-    fn open_lock_file(&self) -> io::Result<File> {
-        fsio::open_lock_file(&self.bolt.join("state").join("lock"))
+    fn open_lock_file(&self) -> Result<File, RepoError> {
+        fsio::open_lock_file(&self.bolt.join("state").join("lock")).map_err(refused)
     }
 
     #[must_use]
@@ -351,7 +397,8 @@ impl Repository {
 
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
     pub fn head(&self) -> Result<Id, RepoError> {
-        parse_head(&fs::read(self.bolt.join("state").join("head"))?)
+        let head = self.bolt.join("state").join("head");
+        parse_head(&safe_fs::read_capped(&head, safe_fs::MAX_HEAD_BYTES).map_err(refused)?)
     }
 
     /// The newest diary entry this handle can see: the one when it was opened, or when it
@@ -379,7 +426,11 @@ impl Repository {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 // Best effort: the text is only for the message.
-                let info = fs::read_to_string(state.join("lock-info")).unwrap_or_default();
+                let info =
+                    safe_fs::read_capped(&state.join("lock-info"), safe_fs::MAX_LOCK_INFO_BYTES)
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .unwrap_or_default();
                 on_wait(&info);
                 file.lock()?;
             }
@@ -624,6 +675,88 @@ mod tests {
         assert_eq!(repo.tmp_dir(), dir.path().join(".bolt/tmp"));
         assert_eq!(repo.packs_dir(), dir.path().join(".bolt/store/packs"));
         assert!(!repo.signatures_allowed());
+    }
+
+    #[test]
+    fn open_refuses_a_linked_fixed_folder() {
+        let who = entry(0).who;
+        let folders = [
+            ".bolt",
+            ".bolt/store",
+            ".bolt/store/packs",
+            ".bolt/state",
+            ".bolt/cache",
+            ".bolt/tmp",
+        ];
+        for folder in folders {
+            let dir = tempfile::tempdir().unwrap();
+            Repository::init(dir.path(), &who).unwrap();
+            let link = folder
+                .split('/')
+                .fold(dir.path().to_owned(), |path, name| path.join(name));
+            // The real folder moves outside, so the project would still work through the link.
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("moved");
+            std::fs::rename(&link, &target).unwrap();
+            let bait = target.join("tmp-0123456789abcdef");
+            std::fs::write(&bait, b"someone else's file").unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            #[cfg(windows)]
+            crate::test_support::junction(&link, &target);
+            match Repository::open(dir.path()) {
+                Err(RepoError::Damaged { detail }) => assert!(
+                    detail.starts_with(&link.display().to_string()),
+                    "{folder}: {detail}"
+                ),
+                other => panic!("{folder}: {:?}", other.map(|_| ())),
+            }
+            assert!(
+                bait.exists(),
+                "{folder}: a file in the link's target was deleted"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_tmp_removes_only_bolts_own_names() {
+        let (dir, _repo) = project();
+        let tmp = dir.path().join(".bolt").join("tmp");
+        let (_, made) = fsio::create_temp(&tmp).unwrap();
+        for name in [
+            "tmp-0123456789abcdef",
+            "notes.txt",
+            "tmp-xyz",
+            "tmp-ABCDEF0123456789",
+        ] {
+            std::fs::write(tmp.join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(tmp.join("tmp-1111111111111111")).unwrap();
+        Repository::open(dir.path()).unwrap();
+        assert!(!made.exists(), "a temp file Bolt made was kept");
+        let mut left: Vec<String> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "notes.txt",
+                "tmp-1111111111111111",
+                "tmp-ABCDEF0123456789",
+                "tmp-xyz"
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_bolt_folder_is_a_real_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path(), &entry(0).who).unwrap();
+        let bolt = dir.path().join(".bolt");
+        assert!(bolt_platform::is_hidden(&bolt).unwrap());
+        crate::safe_fs::check_real_dir(&bolt).unwrap();
     }
 
     #[test]

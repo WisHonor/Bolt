@@ -1,6 +1,6 @@
 //! The one way Bolt opens files it doesn't trust (everything in `.bolt/`, settings files and
-//! `.boltignore`): links are never followed, only regular files are accepted, and reads are
-//! capped (storage-format.md §10 and §12).
+//! `.boltignore`): links are never followed (except to the user's own settings), only regular
+//! files are accepted, and reads are capped (storage-format.md §10 and §12).
 
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
@@ -42,7 +42,28 @@ pub fn open_regular(path: &Path, options: &OpenOptions) -> io::Result<File> {
 /// Reads the regular file at `path` (see `open_regular`), refusing one larger than `max` bytes
 /// without reading past `max + 1`.
 pub fn read_capped(path: &Path, max: u64) -> io::Result<Vec<u8>> {
-    let file = open_regular(path, OpenOptions::new().read(true))?;
+    read_to_cap(
+        open_regular(path, OpenOptions::new().read(true))?,
+        path,
+        max,
+    )
+}
+
+/// Like `read_capped`, but follows links. Only for the user's own settings files, which dotfile
+/// managers keep as links; never for a file a project can bring. What the link reaches must
+/// still be a regular file.
+pub fn read_capped_following_links(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    // Looked at before opening, because opening a named pipe waits for a writer.
+    // shortcut: a pipe swapped in between the look and the open still waits, which needs write
+    // access to the user's own files; open without blocking (platform crate) if that matters.
+    if !fs::metadata(path)?.is_file() {
+        return Err(not_regular(path));
+    }
+    read_to_cap(File::open(path)?, path, max)
+}
+
+/// Reads `file`, refusing more than `max` bytes without reading past `max + 1`.
+fn read_to_cap(file: File, path: &Path, max: u64) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max {
@@ -104,6 +125,9 @@ fn not_regular(path: &Path) -> io::Error {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    #[cfg(windows)]
+    use crate::test_support::junction;
+    use crate::test_support::symlink;
 
     /// The options the change-lock file is opened with: read, write, create, never truncate.
     fn lock_options() -> OpenOptions {
@@ -124,45 +148,6 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
         let expected = "is not a real folder (it is a link, junction or file)";
         assert_eq!(err.to_string(), format!("{} {expected}", path.display()));
-    }
-
-    /// Makes `link` point at `target`; false, with a note, where Windows lacks the privilege.
-    fn symlink(target: &Path, link: &Path) -> bool {
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, link).unwrap();
-            true
-        }
-        #[cfg(windows)]
-        {
-            let made = if target.is_dir() {
-                std::os::windows::fs::symlink_dir(target, link)
-            } else {
-                std::os::windows::fs::symlink_file(target, link)
-            };
-            match made {
-                Ok(()) => true,
-                // ERROR_PRIVILEGE_NOT_HELD: symlinks need Developer Mode or admin rights.
-                Err(e) if e.raw_os_error() == Some(1314) => {
-                    eprintln!("note: symlink check skipped, this account can't create symlinks");
-                    false
-                }
-                Err(e) => panic!("can't create a symlink: {e}"),
-            }
-        }
-    }
-
-    /// A Windows junction (no privilege needed) at `link`, pointing at the folder `target`.
-    #[cfg(windows)]
-    fn junction(link: &Path, target: &Path) {
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(made.success());
     }
 
     #[test]
@@ -208,6 +193,50 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let expected = format!("{} is larger than 3 bytes", path.display());
         assert_eq!(err.to_string(), expected);
+    }
+
+    #[test]
+    fn following_read_takes_links_to_regular_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, b"abc").unwrap();
+        assert_eq!(read_capped_following_links(&target, 3).unwrap(), b"abc");
+        let err = read_capped_following_links(&target, 2).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let missing = read_capped_following_links(&dir.path().join("missing"), 3);
+        assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_not_regular(read_capped_following_links(dir.path(), 3), dir.path());
+        let link = dir.path().join("link");
+        if symlink(&target, &link) {
+            assert_eq!(read_capped_following_links(&link, 3).unwrap(), b"abc");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn following_read_refuses_pipes_and_devices_without_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("config.toml");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let zero = dir.path().join("zero");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        // A hang fails this test instead of stopping the whole run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (f, z) = (fifo.clone(), zero.clone());
+        std::thread::spawn(move || {
+            let from_fifo = read_capped_following_links(&f, 65).map(|_| ());
+            let from_zero = read_capped_following_links(&z, 65).map(|_| ());
+            let _ = tx.send((from_fifo, from_zero));
+        });
+        let (from_fifo, from_zero) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a named pipe hung");
+        assert_not_regular(from_fifo, &fifo);
+        assert_not_regular(from_zero, &zero);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use ignore::WalkBuilder;
 
@@ -17,6 +18,7 @@ use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
 use crate::pack::{ObjectKind, PackError, PackWriter};
 use crate::repo::{RepoError, Repository};
+use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
 
@@ -234,8 +236,28 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
+/// What is wrong with the `.boltignore` in `dir`, named by its project path. A missing one is
+/// fine; one that exists must be a regular UTF-8 file of at most 1 MiB (storage-format.md §12).
+fn boltignore_problem(root: &Path, dir: &Path) -> Option<String> {
+    let file = dir.join(".boltignore");
+    let problem = match safe_fs::read_capped(&file, safe_fs::MAX_BOLTIGNORE_BYTES) {
+        Ok(bytes) => std::str::from_utf8(&bytes).err()?.to_string(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        Err(e) => e.to_string(),
+    };
+    let rel = shown(file.strip_prefix(root).unwrap_or(&file));
+    Some(format!("{rel}: {problem}"))
+}
+
 fn walk(root: &Path) -> Result<Folders, SaveError> {
     let mut folders = Folders::from([(String::new(), Vec::new())]);
+    // `ignore` opens each folder's .boltignore itself before it hands the folder out: it follows
+    // links, reads without a limit and drops read errors without a word. So each one is checked
+    // first, the top folder's here and every other one before `ignore` enters its folder.
+    if let Some(detail) = boltignore_problem(root, root) {
+        return Err(SaveError::Ignore { detail });
+    }
+    let problem = Arc::new(OnceLock::new());
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -245,32 +267,34 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
         .parents(false)
         .follow_links(false)
         .add_custom_ignore_filename(".boltignore")
-        .filter_entry(|e| {
-            let dir = e.file_type().is_some_and(|t| t.is_dir());
-            !(dir && matches!(e.file_name().to_str(), Some(".bolt" | ".git")))
+        .filter_entry({
+            let (root, problem) = (root.to_owned(), Arc::clone(&problem));
+            move |e| {
+                if !e.file_type().is_some_and(|t| t.is_dir()) {
+                    return true;
+                }
+                if matches!(e.file_name().to_str(), Some(".bolt" | ".git")) {
+                    return false;
+                }
+                match boltignore_problem(&root, e.path()) {
+                    // Not entered, so `ignore` never opens the file; the save stops below.
+                    Some(detail) => {
+                        let _ = problem.set(detail);
+                        false
+                    }
+                    None => true,
+                }
+            }
         })
         .build();
     for item in walker {
         let entry = item.map_err(|e| walk_error(root, e))?;
-        // A broken or unreadable .boltignore comes with its folder's entry, not as an error
-        // item; going on without it would save the files it was meant to keep out.
+        // A broken .boltignore comes with its folder's entry, not as an error item; going on
+        // without it would save the files it was meant to keep out.
         if let Some(err) = entry.error() {
             return Err(SaveError::Ignore {
                 detail: describe(root, err),
             });
-        }
-        // `ignore` drops read errors on ignore files without a word (an unreadable file, a
-        // folder, bytes that aren't UTF-8), so read each one whole here first.
-        if entry.file_type().is_some_and(|t| t.is_dir()) {
-            let file = entry.path().join(".boltignore");
-            match fs::read_to_string(&file) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    return Err(SaveError::Ignore {
-                        detail: format!("{}: {e}", shown(file.strip_prefix(root).unwrap_or(&file))),
-                    });
-                }
-                _ => {}
-            }
         }
         let path = entry.path();
         let rel_path = path.strip_prefix(root).unwrap_or(path);
@@ -311,6 +335,11 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
             path: path.to_owned(),
             rel,
             executable: executable_bits(&meta),
+        });
+    }
+    if let Some(detail) = problem.get() {
+        return Err(SaveError::Ignore {
+            detail: detail.clone(),
         });
     }
     for children in folders.values_mut() {
@@ -903,16 +932,70 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
-    /// The save must stop with `Ignore` naming `.boltignore`, and change nothing.
-    fn assert_ignore_problem(repo: &mut Repository) {
+    /// The save must stop with `Ignore` naming `.boltignore`, and change nothing. Returns the
+    /// problem's text.
+    fn assert_ignore_problem(repo: &mut Repository) -> String {
         let head = repo.head().unwrap();
-        match save_now(repo) {
-            Err(SaveError::Ignore { detail }) => {
-                assert!(detail.starts_with(".boltignore: "), "{detail}");
-            }
+        let detail = match save_now(repo) {
+            Err(SaveError::Ignore { detail }) => detail,
             other => panic!("{:?}", other.map(|_| ())),
-        }
+        };
+        assert!(detail.starts_with(".boltignore: "), "{detail}");
         assert_eq!(repo.head().unwrap(), head);
+        detail
+    }
+
+    #[test]
+    fn symlinked_boltignore_stops_the_save() {
+        let (dir, mut repo) = project();
+        let outside = tempfile::tempdir().unwrap();
+        let patterns = outside.path().join("patterns");
+        fs::write(&patterns, b"*.key\n").unwrap();
+        write(dir.path(), "secret.key", b"x");
+        if !crate::test_support::symlink(&patterns, &dir.path().join(".boltignore")) {
+            return;
+        }
+        let detail = assert_ignore_problem(&mut repo);
+        assert!(detail.contains("regular file"), "{detail}");
+    }
+
+    #[test]
+    fn oversized_boltignore_stops_the_save() {
+        let (dir, mut repo) = project();
+        // One comment line, 1 MiB + 1 byte with its newline.
+        let mut big = vec![b'#'; 1 << 20];
+        big.push(b'\n');
+        write(dir.path(), ".boltignore", &big);
+        let detail = assert_ignore_problem(&mut repo);
+        assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boltignore_pipe_stops_the_save_without_hanging() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "sub/secret.key", b"x");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("sub/.boltignore"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Opening a named pipe waits for a writer, so the save runs on another thread: a hang
+        // fails this test instead of stopping the whole run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(save_now(&mut repo).map(|_| ()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the save hung on a named pipe");
+        match result {
+            Err(SaveError::Ignore { detail }) => assert!(
+                detail.starts_with("sub/.boltignore: ") && detail.contains("regular file"),
+                "{detail}"
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

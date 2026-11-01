@@ -1,10 +1,13 @@
 //! The single place every disk write goes through: temp files, atomic replacement, durable
 //! renames, and the fault points that crash tests use.
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::safe_fs;
 
 /// Creates a new, empty file named `tmp-<16 random hex>` in `tmp_dir`.
 pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
@@ -17,6 +20,15 @@ pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
         .create_new(true)
         .open(&path)?;
     Ok((file, path))
+}
+
+/// Whether `name` is one `create_temp` makes: `tmp-` and 16 lowercase hex digits.
+pub fn is_temp_name(name: &OsStr) -> bool {
+    name.to_str()
+        .and_then(|n| n.strip_prefix("tmp-"))
+        .is_some_and(|hex| {
+            hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 /// Replaces `dest` with `bytes` so that, even after a crash, it holds either the old or the
@@ -85,15 +97,17 @@ pub fn remove_file(path: &Path) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-/// Opens the change-lock file for reading and writing, creating it if needed. Its contents
-/// never matter, so it is never truncated.
+/// Opens the change-lock file for reading and writing, creating it if needed, never through a
+/// link (`safe_fs::open_regular`). Its contents never matter, so it is never truncated.
 pub fn open_lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    safe_fs::open_regular(
+        path,
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
 }
 
 /// Flushes a folder's entries to disk. Windows has no such call: a rename there is not written

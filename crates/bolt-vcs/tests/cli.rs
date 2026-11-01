@@ -106,6 +106,27 @@ fn start_without_a_name_explains_how_to_set_it() {
     assert!(!env.root().join(".bolt").exists());
 }
 
+/// Dotfile managers (stow, Nix home-manager) keep the user's own settings as links.
+#[cfg(unix)]
+#[test]
+fn start_reads_the_users_own_config_through_a_link() {
+    let env = Env::new();
+    let dotfiles = tempfile::tempdir().unwrap();
+    let real = dotfiles.path().join("bolt.toml");
+    std::fs::write(
+        &real,
+        "[user]\nname = \"Ada\"\nemail = \"ada@example.com\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&real, env.config.path().join("config.toml")).unwrap();
+    let out = env
+        .bolt_anonymous(env.root())
+        .arg("start")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
 #[test]
 fn start_json_output() {
     let env = Env::new();

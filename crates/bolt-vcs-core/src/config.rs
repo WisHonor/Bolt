@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::safe_fs;
 use crate::save::Person;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,18 +59,23 @@ fn both(name: Option<String>, email: Option<String>) -> Option<Identity> {
     }
 }
 
-/// The identity in a `config.toml` file, if it exists and names both.
-fn from_file(path: &Path) -> Result<Option<Identity>, ConfigError> {
+/// The identity in a `config.toml` file, if it exists and names both. `read` is
+/// `safe_fs::read_capped` for a project's file, which never follows a link, and
+/// `safe_fs::read_capped_following_links` for the user's own.
+fn from_file(
+    path: &Path,
+    read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
+) -> Result<Option<Identity>, ConfigError> {
     let invalid = |detail: String| ConfigError::Invalid {
         path: path.to_owned(),
         detail,
     };
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
+    let bytes = match read(path, safe_fs::MAX_CONFIG_BYTES) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(invalid(e.to_string())),
     };
-    let file: ConfigFile = toml::from_str(&text).map_err(|e| invalid(e.message().to_owned()))?;
+    let file: ConfigFile = toml::from_slice(&bytes).map_err(|e| invalid(e.message().to_owned()))?;
     Ok(file.user.and_then(|u| both(u.name, u.email)))
 }
 
@@ -93,13 +99,16 @@ pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigErro
         return Ok(identity);
     }
     if let Some(root) = project_root
-        && let Some(identity) = from_file(&root.join(".bolt").join("config.toml"))?
+        && let Some(identity) = from_file(
+            &root.join(".bolt").join("config.toml"),
+            safe_fs::read_capped,
+        )?
     {
         return Ok(identity);
     }
     let path = user_config_path();
     if let Some(path) = &path
-        && let Some(identity) = from_file(path)?
+        && let Some(identity) = from_file(path, safe_fs::read_capped_following_links)?
     {
         return Ok(identity);
     }
@@ -127,21 +136,22 @@ mod tests {
     fn reads_the_user_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        assert_eq!(from_file(&path).unwrap(), None);
+        let read = |path: &Path| from_file(path, safe_fs::read_capped);
+        assert_eq!(read(&path).unwrap(), None);
         std::fs::write(
             &path,
             "[user]\nname = \"Ada\"\nemail = \"ada@example.com\"\n",
         )
         .unwrap();
-        let ada = from_file(&path).unwrap().unwrap();
+        let ada = read(&path).unwrap().unwrap();
         assert_eq!(
             (ada.name.as_str(), ada.email.as_str()),
             ("Ada", "ada@example.com")
         );
         std::fs::write(&path, "[user]\nname = \"Ada\"\n").unwrap();
-        assert_eq!(from_file(&path).unwrap(), None);
+        assert_eq!(read(&path).unwrap(), None);
         std::fs::write(&path, "[user\n").unwrap();
-        assert!(matches!(from_file(&path), Err(ConfigError::Invalid { .. })));
+        assert!(matches!(read(&path), Err(ConfigError::Invalid { .. })));
     }
 
     #[test]

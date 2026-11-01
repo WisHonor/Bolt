@@ -112,7 +112,7 @@ fn mkfifo(path: &Path) {
 fn bolt_capped(env: &Env, dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
-        .arg("ulimit -v 1500000; exec \"$0\" \"$@\"")
+        .arg("ulimit -v 1500000 2>/dev/null; exec \"$0\" \"$@\"")
         .arg(assert_cmd::cargo::cargo_bin("bolt"))
         .args(args)
         .current_dir(dir)
@@ -129,7 +129,6 @@ fn bolt_capped(env: &Env, dir: &Path, args: &[&str]) -> Command {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-1: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt1_symlinked_bolt_tmp_does_not_delete_files_outside_the_project() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -151,7 +150,6 @@ fn rt1_symlinked_bolt_tmp_does_not_delete_files_outside_the_project() {
 /// Windows twin of RT-1: a junction needs no privileges. UNVERIFIED in the Linux sandbox.
 #[cfg(windows)]
 #[test]
-#[ignore = "RT-1: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -211,7 +209,6 @@ fn win_junction_in_project_is_not_walked_into() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-2: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt2_symlinked_packs_folder_does_not_make_save_write_outside_the_project() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -237,7 +234,6 @@ fn rt2_symlinked_packs_folder_does_not_make_save_write_outside_the_project() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-2: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt2_symlinked_lock_file_does_not_create_files_outside_the_project() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -255,7 +251,6 @@ fn rt2_symlinked_lock_file_does_not_create_files_outside_the_project() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-2: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt2_start_does_not_build_a_repository_through_a_symlinked_bolt_folder() {
     let env = Env::new();
     let outside = tempfile::tempdir().unwrap();
@@ -274,7 +269,6 @@ fn rt2_start_does_not_build_a_repository_through_a_symlinked_bolt_folder() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-3: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt3_fifo_as_state_head_does_not_hang_history() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -292,7 +286,6 @@ fn rt3_fifo_as_state_head_does_not_hang_history() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-3: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -305,7 +298,6 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-3: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt3_fifo_as_project_config_does_not_hang_save() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -326,7 +318,6 @@ fn rt3_fifo_as_project_config_does_not_hang_save() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-4: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt4_state_head_pointing_at_dev_zero_is_refused_not_read_forever() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -343,7 +334,6 @@ fn rt4_state_head_pointing_at_dev_zero_is_refused_not_read_forever() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-4: fixed by Task 3 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt4_project_config_pointing_at_dev_zero_is_refused_not_read_forever() {
     let env = Env::new();
     env.ok(&["start"]);
