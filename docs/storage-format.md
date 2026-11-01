@@ -98,6 +98,7 @@ person:
 ```
 
 - Parents must be distinct.
+- **Limits:** person name and email at most 4 KiB each; move-note paths (`from`, `to`) at most 4 KiB each; extra-field keys at most 256 bytes. Move notes must be strictly sorted by `to` and extra-field keys strictly sorted (so no duplicates); readers reject anything else.
 - **Defined extra fields:** `line` holds the name of the line the save was made on, as UTF-8 (decision 012). `git-commit` holds, as hex, the Git commit an imported save came from; `git-original-message` holds the original bytes of a Git message that couldn't be converted to UTF-8 exactly (decision 019). Readers keep extra fields they don't understand.
 - **Signatures (later):** the signed bytes will be the save encoded with an empty signature field (decisions 006 and 019).
 

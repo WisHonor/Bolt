@@ -5,6 +5,7 @@ pub mod encoding;
 pub mod id;
 pub mod listing;
 pub mod names;
+pub mod save;
 
 #[cfg(test)]
 pub(crate) mod test_support;

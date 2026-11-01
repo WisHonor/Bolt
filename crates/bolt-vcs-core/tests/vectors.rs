@@ -1,9 +1,11 @@
 //! Test vectors for the storage format (docs/storage-format.md).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use bolt_core::id::Id;
+use bolt_core::id::{ChangeId, Id};
 use bolt_core::listing::{Entry, EntryKind, Listing};
+use bolt_core::save::{MoveNote, Person, Save};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -59,5 +61,76 @@ fn listing_vectors_hold() {
         let l = Listing::decode(&unhex(&v.hex)).unwrap_or_else(|e| panic!("{}: {e}", v.name));
         assert_eq!(hex(&l.encode()), v.hex, "{}", v.name);
         assert_eq!(l.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+fn person() -> Person {
+    Person {
+        name: "A".into(),
+        email: "a@b".into(),
+        time_ms: 0,
+        tz_offset_min: 0,
+    }
+}
+
+fn save_vector_inputs() -> Vec<(&'static str, Save)> {
+    let minimal = Save {
+        root: Id([0; 32]),
+        parents: vec![],
+        author: person(),
+        saver: person(),
+        message: "m".into(),
+        change_id: ChangeId([0; 16]),
+        move_notes: vec![],
+        signature: vec![],
+        extra: BTreeMap::new(),
+    };
+    let mut rich = minimal.clone();
+    rich.parents = vec![Id([1; 32])];
+    rich.extra.insert("line".into(), b"main".to_vec());
+    rich.move_notes = vec![MoveNote {
+        from: "a.txt".into(),
+        to: "b.txt".into(),
+    }];
+    vec![("minimal", minimal), ("with-parent-line-and-move", rich)]
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/save.json"]
+fn print_save_vectors() {
+    let rows: Vec<String> = save_vector_inputs()
+        .iter()
+        .map(|(n, s)| {
+            format!(
+                "  {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
+                hex(&s.encode()),
+                s.id()
+            )
+        })
+        .collect();
+    println!(
+        "[
+{}
+]",
+        rows.join(
+            ",
+"
+        )
+    );
+}
+
+#[test]
+fn save_vectors_hold() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/save.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let s = Save::decode(&unhex(&v.hex), false).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(hex(&s.encode()), v.hex, "{}", v.name);
+        assert_eq!(s.id().to_hex(), v.id, "{}", v.name);
     }
 }
