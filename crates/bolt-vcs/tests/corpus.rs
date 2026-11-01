@@ -47,11 +47,23 @@ const CASES: &[&[&str]] = &[
     &["\u{FEFF}.bolt"],
     &[".bolt:stream"],
     &[".BOLT.\\x"],
+    &[".BOLT"],
+    &[".Bolt"],
+    &[".bolt. ."],
+    &[".bolt\\x"],
+    &["bolt~1\\x"],
+    &[".bolt::$INDEX_ALLOCATION"],
     // Not portable (folder_problems).
     &["CON"],
     &["con.txt"],
     &["Aux"],
     &["COM1"],
+    &["CONIN$"],
+    &["CONOUT$"],
+    &["COM\u{b9}"],
+    &["COM0"],
+    &["nul .txt"],
+    &["a\u{1}b"],
     &["lpt9.log"],
     &["name."],
     &["name "],
@@ -68,6 +80,13 @@ const CASES: &[&[&str]] = &[
     &["\u{e9}", "e\u{301}"],
 ];
 
+fn history_of(root: &Path, config: &Path) -> Vec<u8> {
+    let out = bolt(root, config).arg("history").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("good save"));
+    out.stdout
+}
+
 #[test]
 fn every_malicious_name_stops_the_save() {
     let mut ran = 0;
@@ -82,9 +101,11 @@ fn every_malicious_name_stops_the_save() {
             .assert()
             .success();
         if !create_all(root, case) {
-            continue; // this system cannot hold these names
+            eprintln!("skipped (this system cannot hold these names): {case:?}");
+            continue;
         }
         ran += 1;
+        let history_before = history_of(root, config.path());
 
         let out = bolt(root, config.path())
             .args(["save", "bad"])
@@ -96,16 +117,22 @@ fn every_malicious_name_stops_the_save() {
         // Names with control or special characters may be shown escaped; compare on the
         // first printable run of the name, which every case has.
         let shown = case[0].escape_debug().to_string();
+        let shown_hex: String = case[0]
+            .chars()
+            .map(|c| {
+                if c < ' ' {
+                    format!("\\x{:02x}", c as u32)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect();
         assert!(
-            stderr.contains(case[0]) || stderr.contains(&shown),
+            stderr.contains(case[0]) || stderr.contains(&shown) || stderr.contains(&shown_hex),
             "{case:?}: {stderr}"
         );
 
-        let out = bolt(root, config.path()).arg("history").output().unwrap();
-        let history = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert_eq!(out.status.code(), Some(0), "{case:?}");
-        assert!(history.contains("good save"), "{case:?}: {history}");
-        assert!(!history.contains("bad"), "{case:?}: {history}");
+        assert_eq!(history_of(root, config.path()), history_before, "{case:?}");
     }
     assert!(ran > 0, "no case could be created on this system");
 }

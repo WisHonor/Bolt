@@ -20,10 +20,15 @@ jobs:
         with:
           workspaces: fuzz
       - run: cargo +nightly install cargo-fuzz --locked
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
       - name: Fuzz every target
         run: |
           for t in decode_listing decode_save decode_diary open_pack name_rules format_file; do
-            cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 || exit 1
+            cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 || exit 1
           done
       - name: Upload crash files
         if: failure()
