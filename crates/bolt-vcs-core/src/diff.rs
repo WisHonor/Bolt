@@ -30,7 +30,8 @@ pub struct FileChange {
 ///
 /// Folders the two saves share are not read. Each save is held to the limits of
 /// storage-format.md section 3 on its own (`MAX_SAVE_DEPTH` levels, `MAX_SAVE_ENTRIES` entries
-/// counted along every path); passing one gives `StoreError::SaveTooLarge`.
+/// counted along every path); passing one gives `StoreError::SaveTooLarge`. The folders that
+/// differ are walked twice, the first time only to check the limits.
 pub fn diff_saves(
     store: &Store,
     old_root: Option<Id>,
@@ -45,13 +46,30 @@ pub(crate) fn diff_saves_with_limit(
     new_root: Id,
     max_entries: u64,
 ) -> Result<Vec<FileChange>, StoreError> {
+    // The first walk only counts. Without it, the 3.6 KB tree bomb of RT-10 would have the
+    // changes of 10 million files in memory (over 1 GiB) before the entry limit refused it.
+    walk_diff(store, old_root, new_root, max_entries, None)?;
+    let mut out = Vec::new();
+    walk_diff(store, old_root, new_root, max_entries, Some(&mut out))?;
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/// Compares the saves, adding what differs to `out` if there is one, and holds them to the
+/// limits either way.
+fn walk_diff(
+    store: &Store,
+    old_root: Option<Id>,
+    new_root: Id,
+    max_entries: u64,
+    mut out: Option<&mut Vec<FileChange>>,
+) -> Result<(), StoreError> {
     let too_large = |detail| StoreError::SaveTooLarge { detail };
     // Each save is held to the limits on its own, so two saves that pass can always be compared.
     let (mut old_seen, mut new_seen) = (
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
     );
-    let mut out = Vec::new();
     // The pairs of folders still to compare, each with its name and how many levels down it is.
     // They wait here instead of in a call per level, so a save nested thousands of levels deep
     // cannot overflow the stack (RT-6). The roots go first.
@@ -100,18 +118,19 @@ pub(crate) fn diff_saves_with_limit(
                 _ => continue,
             };
             let Some(shown) = fnew.or(fo) else { continue };
-            out.push(FileChange {
-                path: format!("{path}{name}"),
-                change,
-                kind: shown.kind,
-                old_kind: fo.map(|e| e.kind),
-                old_size: fo.map(|e| e.size),
-                new_size: fnew.map(|e| e.size),
-            });
+            if let Some(out) = out.as_deref_mut() {
+                out.push(FileChange {
+                    path: format!("{path}{name}"),
+                    change,
+                    kind: shown.kind,
+                    old_kind: fo.map(|e| e.kind),
+                    old_size: fo.map(|e| e.size),
+                    new_size: fnew.map(|e| e.size),
+                });
+            }
         }
     }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    Ok(())
 }
 
 fn listing_of(store: &Store, id: Option<Id>) -> Result<Listing, StoreError> {
