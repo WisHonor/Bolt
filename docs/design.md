@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 12
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 13
 
 ## 1. Vision
 
@@ -82,7 +82,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | **Confirmed** by decision 010: one diary for the whole repository, editor-style undo/redo, 30-day undo window | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
-| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download and locking in topics 13, 14 | 5, 9, 13, 14 |
+| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download: decision 013. Locking in topic 14 | 5, 9, 13, 14 |
 | T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Rules live in `bolt.toml` + `.boltignore` at the project root (decision 008); preset contents in topic 16 | 8, 16 |
 | T11 | On-disk format version number from day one | **Confirmed**, with a feature list, by decision 008 | 8 |
 | T12 | Crates: `bolt-core` (engine library) + `bolt` (CLI) | Keep the split; those package names are taken on crates.io, though the command can still be `bolt` | Deferred: name |
@@ -110,7 +110,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 
 **Stage 4 — Collaboration** (constraints only, for now)
 - [x] 12. Lines and combining: naming, remote lines, tags, three-way merge, renames → [decision 012](decisions/012-lines.md) (full combining design before v0.2)
-- [ ] 13. Partial download and offline behaviour
+- [x] 13. Partial download and offline behaviour → [decision 013](decisions/013-local-data-and-offline.md)
 - [ ] 14. Locking semantics
 - [ ] 15. Sync protocol, server storage model, permissions
 
@@ -259,6 +259,16 @@ head ─► redo     main → ptvz
 - **Combining (v0.2):** three-way merge per file; text merged line by line; binaries never merged automatically; move notes followed.
 - **Server lines (v0.3):** shown as `main@origin`.
 
+### 5.11 What's on your computer ([decision 013](decisions/013-local-data-and-offline.md))
+
+**In plain words.** Your computer always has the whole history (every save, folder listing and small-file version) plus the current version of every big file, as real files. Older versions of big files download when you need them, and pinning keeps chosen ones available offline.
+
+- **Always local:** saves, folder listings, diary entries, every small-file version.
+- **Big files:** current versions fully downloaded (never stubs); older versions on request; offline errors name exactly what's missing.
+- **Pinning:** keep chosen saves or folders available offline.
+- **Freeing space:** only versions the server has confirmed it holds can be dropped.
+- **Later:** partial workspaces for huge projects.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -296,7 +306,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **File watcher** for faster `status`. [After v0.1, optional; it may only narrow what gets checked, never decide correctness (decision 011).]
 - **Store on another drive, or shared between projects** (like Git LFS's `lfs.storage` setting). [Later; keep the store's location a single setting internally.]
 - **Structural diff and merge** (tree-sitter). [Later.]
-- **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Very hard and OS-specific; not before v1.]
+- **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Not planned (decision 013); revisit only if measurements of engine start-up reads show it would pay off.]
+- **Partial workspaces** (choose which folders to download at all). [After v0.3 (decision 013).]
 - **Web platform and asset previews.** [After the server.]
 - **Live two-way Git sync.** [Not promised (decision 002); the importer's commit-mapping table keeps the door open.]
 - **Perforce import.** Many game studios use Perforce; a natural second importer after Git. [Later.]
@@ -337,6 +348,7 @@ Working names; command names can still change (topic 17).
 - **Pack**: a file in `.bolt/store/` holding many pieces of data plus an index, written in one go so a crash can't leave half of it.
 - **Undo window**: how far back undo reaches; 30 days by default.
 - **Cache**: remembered facts that speed Bolt up, like file sizes and times; always safe to delete.
+- **Pinning**: marking saves or folders so they stay available offline.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
