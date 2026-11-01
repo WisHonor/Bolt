@@ -35,9 +35,9 @@
 - Create: `crates/bolt-vcs/tests/redteam.rs` (copied from the session copy), `docs/redteam/2026-11-01-milestone-1.md` (the report), `redteam/attacks/{rt4-dev-zero-head.sh,crash-sweep.sh,save-probes.sh}`
 - Modify: `docs/security.md` §6 (one line linking the report)
 
-Source copy: `C:\Users\elmas\AppData\Local\Temp\claude\C--Users-elmas-Desktop-Bolt\249b14b9-6dd5-446a-a530-d21c158c38df\scratchpad\redteam-m1` (paths inside it match the repository's). Read files there; never run anything from it on the host.
+Source: `.superpowers/redteam-m1/` in the repository folder (git-ignored): `redteam.rs`, `report-m1.md`, `attacks/*.sh`. Read them; never run the attack scripts on the host.
 
-- [ ] **Step 1:** Copy the three kinds of files above into the repository. In the report, change the "Proof tests" line to point at `crates/bolt-vcs/tests/redteam.rs` and the run command to `cargo test -p bolt-vcs --test redteam`.
+- [ ] **Step 1:** Copy them into the repository: `redteam.rs` → `crates/bolt-vcs/tests/redteam.rs`, `report-m1.md` → `docs/redteam/2026-11-01-milestone-1.md`, `attacks/*.sh` → `redteam/attacks/`. In the report, change the "Proof tests" line to point at `crates/bolt-vcs/tests/redteam.rs` and the run command to `cargo test -p bolt-vcs --test redteam`.
 - [ ] **Step 2:** Mark every test that fails today `#[ignore = "RT-<n>: fixed by Task <k> of plans/2026-11-01-red-team-m1-fixes.md"]` using this map: RT-1, RT-2, RT-3, RT-4 → Task 3; RT-5 and `win_junction_in_project_is_not_walked_into` → Task 4; RT-6, RT-10 → Task 5; RT-7, RT-8 → Task 6; RT-9 → Task 7. The Windows tests (`rt1_windows_…`, `win_junction_…`) are marked the same way.
 - [ ] **Step 3:** Verify: `cargo test -p bolt-vcs --test redteam` passes with every failing test ignored (on Windows: the 3 Windows tests ignored, the RT-7 and RT-9 tests ignored, RT-6 ignored). Linux proof that they fail already exists in the report; don't run attack code on the host. Then fmt, clippy, full tests.
 - [ ] **Step 4:** Commit: `Add the milestone 1 red-team proof tests, ignored until fixed`.
