@@ -228,8 +228,8 @@ header:
 entries, one after another:
   u8      object kind
   id      id
-  varint  uncompressed size
-  varint  stored size
+  u64     uncompressed size
+  u64     stored size
   u8      compression (0 = none, 1 = zstd)
   stored bytes
 index:
@@ -263,7 +263,9 @@ A reader must:
 - check the fingerprint of every object it reads: plain BLAKE3 for content, the record's context string otherwise;
 - treat the same ID found in two packs as the same object (packs can overlap while being merged).
 
-Uncompressed sizes are at most 2^40 bytes (1 TiB).
+Each entry's header is a fixed 50 bytes, so a writer that streams an object can fill the header in after writing its data.
+
+Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
 
 ## 12. Project files (outside `.bolt/`)
 

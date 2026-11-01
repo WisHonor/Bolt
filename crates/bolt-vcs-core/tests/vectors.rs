@@ -3,6 +3,7 @@
 
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::listing::{Entry, EntryKind, Listing};
+use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
 use bolt_core::save::{MoveNote, Person, Save};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -132,5 +133,54 @@ fn save_vectors_hold() {
         let s = Save::decode(&unhex(&v.hex), false).unwrap_or_else(|e| panic!("{}: {e}", v.name));
         assert_eq!(hex(&s.encode()), v.hex, "{}", v.name);
         assert_eq!(s.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+#[derive(Deserialize)]
+struct PackVector {
+    name: String,
+    file: String,
+    hex: String,
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/pack.json"]
+fn print_pack_vector() {
+    let root = tempfile::tempdir().unwrap();
+    let mut w = PackWriter::create(root.path()).unwrap();
+    w.add_record(ObjectKind::FolderListing, &Listing::empty().encode())
+        .unwrap();
+    let path = w.finish(root.path()).unwrap().unwrap();
+    println!(
+        "[\n  {{\"name\": \"empty-listing\", \"file\": \"{}\", \"hex\": \"{}\"}}\n]",
+        path.file_name().unwrap().to_str().unwrap(),
+        hex(&std::fs::read(&path).unwrap())
+    );
+}
+
+#[test]
+fn pack_vector_holds() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/pack.json"
+    ))
+    .unwrap();
+    let vectors: Vec<PackVector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    let root = tempfile::tempdir().unwrap();
+    for v in vectors {
+        let path = root.path().join(&v.file);
+        std::fs::write(&path, unhex(&v.hex)).unwrap();
+        let r = PackReader::open(&path).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(r.entries().len(), 1, "{}", v.name);
+        let e = r.entries()[0];
+        assert_eq!(e.kind, ObjectKind::FolderListing, "{}", v.name);
+        assert_eq!(e.id, Listing::empty().id(), "{}", v.name);
+        assert_eq!(
+            r.read_record(&e).unwrap(),
+            Listing::empty().encode(),
+            "{}",
+            v.name
+        );
     }
 }

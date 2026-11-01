@@ -2,9 +2,11 @@
 #![forbid(unsafe_code)]
 
 pub mod encoding;
+pub mod fsio;
 pub mod id;
 pub mod listing;
 pub mod names;
+pub mod pack;
 pub mod save;
 
 #[cfg(test)]
