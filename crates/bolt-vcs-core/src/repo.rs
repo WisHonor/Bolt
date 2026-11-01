@@ -1,0 +1,507 @@
+//! The repository: the `format` file, the head pointer, the change lock and the commit protocol
+//! (docs/storage-format.md section 10, decision 010).
+
+use std::collections::BTreeSet;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::diary::DiaryEntry;
+use crate::encoding::DecodeError;
+use crate::fsio::{fault_point, write_atomic};
+use crate::id::Id;
+use crate::pack::{ObjectKind, PackError, PackWriter};
+use crate::store::{Store, StoreError};
+
+pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";
+
+#[derive(Debug, thiserror::Error)]
+pub enum RepoError {
+    #[error("Not inside a Bolt project.")]
+    NotAProject,
+    #[error("This folder is already a Bolt project.")]
+    AlreadyAProject { root: PathBuf },
+    #[error("This folder is inside a Bolt project at {}.", root.display())]
+    InsideAnotherProject { root: PathBuf },
+    #[error("This project uses {detail}, which this version of Bolt doesn't understand.")]
+    NewerFormat { detail: String },
+    #[error("This project's Bolt data looks damaged: {detail}.")]
+    Damaged { detail: String },
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Pack(#[from] PackError),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+}
+
+impl RepoError {
+    /// What the user can do next, if there is something to say.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        Some(
+            match self {
+                RepoError::NotAProject => "Run `bolt start` to make this folder a Bolt project.",
+                RepoError::InsideAnotherProject { .. } => {
+                    "Run Bolt commands there, or pick a folder outside it."
+                }
+                RepoError::NewerFormat { .. } => "Update Bolt to open it.",
+                RepoError::Damaged { .. } => {
+                    "Nothing was changed. Ask for help before trying to repair it."
+                }
+                _ => return None,
+            }
+            .to_owned(),
+        )
+    }
+}
+
+fn damaged(detail: impl Into<String>) -> RepoError {
+    RepoError::Damaged {
+        detail: detail.into(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatInfo {
+    pub features: BTreeSet<String>,
+}
+
+/// A word Bolt could plausibly write in a later format: lowercase letters, digits and `-`.
+fn is_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Parses `.bolt/format`. Anything a newer Bolt could have written is `NewerFormat`;
+/// anything else that isn't exactly right is `Damaged`.
+pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
+    let damaged_format = || damaged("the format file is not in the expected form");
+    let mut lines = text
+        .strip_suffix('\n')
+        .ok_or_else(damaged_format)?
+        .split('\n');
+    match lines
+        .next()
+        .and_then(|l| l.strip_prefix("bolt-repository "))
+    {
+        Some("1") => {}
+        Some(v) if v.bytes().all(|b| b.is_ascii_digit()) && !v.is_empty() => {
+            return Err(RepoError::NewerFormat {
+                detail: format!("repository format \"bolt-repository {v}\""),
+            });
+        }
+        _ => return Err(damaged_format()),
+    }
+    match lines.next().and_then(|l| l.strip_prefix("hash ")) {
+        Some("blake3") => {}
+        Some(h) if is_word(h) => {
+            return Err(RepoError::NewerFormat {
+                detail: format!("the hash \"{h}\""),
+            });
+        }
+        _ => return Err(damaged_format()),
+    }
+    // This version knows no features yet, so any further line is a refusal.
+    if let Some(line) = lines.next() {
+        return Err(match line.strip_prefix("feature ") {
+            Some(f) if is_word(f) => RepoError::NewerFormat {
+                detail: format!("the feature \"{f}\""),
+            },
+            _ => damaged_format(),
+        });
+    }
+    Ok(FormatInfo {
+        features: BTreeSet::new(),
+    })
+}
+
+/// Proof that this process holds the change lock; dropping it releases the lock.
+pub struct ChangeLock {
+    _file: File,
+}
+
+pub struct Repository {
+    root: PathBuf,
+    bolt: PathBuf,
+    tmp: PathBuf,
+    packs: PathBuf,
+    format: FormatInfo,
+    store: Store,
+}
+
+impl Repository {
+    /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
+    pub fn open(root: &Path) -> Result<Repository, RepoError> {
+        let bolt = root.join(".bolt");
+        let text = match fs::read(bolt.join("format")) {
+            Ok(bytes) => {
+                String::from_utf8(bytes).map_err(|_| damaged("the format file is not text"))?
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RepoError::NotAProject),
+            Err(e) => return Err(e.into()),
+        };
+        let format = parse_format(&text)?;
+        let tmp = bolt.join("tmp");
+        let packs = bolt.join("store").join("packs");
+        let store = Store::open(&packs)?;
+        let repo = Repository {
+            root: root.to_owned(),
+            bolt,
+            tmp,
+            packs,
+            format,
+            store,
+        };
+        repo.clean_tmp()?;
+        Ok(repo)
+    }
+
+    /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
+    /// command holds the change lock; otherwise it may be a pack being written right now.
+    fn clean_tmp(&self) -> Result<(), RepoError> {
+        let lock = self.open_lock_file()?;
+        if lock.try_lock().is_err() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&self.tmp)? {
+            let path = entry?.path();
+            if path.is_file() {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_lock_file(&self) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.bolt.join("state").join("lock"))
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn tmp_dir(&self) -> &Path {
+        &self.tmp
+    }
+
+    #[must_use]
+    pub fn packs_dir(&self) -> &Path {
+        &self.packs
+    }
+
+    #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    #[must_use]
+    pub fn signatures_allowed(&self) -> bool {
+        self.format.features.contains("signatures")
+    }
+
+    pub fn new_pack(&self) -> Result<PackWriter, RepoError> {
+        Ok(PackWriter::create(&self.tmp)?)
+    }
+
+    /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
+    pub fn head(&self) -> Result<Id, RepoError> {
+        let bytes = fs::read(self.bolt.join("state").join("head"))?;
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|t| t.strip_suffix('\n'))
+            .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h))
+            .ok_or_else(|| damaged("state/head is not a lowercase fingerprint and a newline"))
+    }
+
+    /// The newest diary entry, read from the store.
+    pub fn current(&self) -> Result<(Id, DiaryEntry), RepoError> {
+        let id = self.head()?;
+        let bytes = self.store.read_record(&id, ObjectKind::DiaryEntry)?;
+        Ok((id, DiaryEntry::decode(&bytes)?))
+    }
+
+    /// Takes the change lock, waiting for another changing command if needed. `on_wait` is
+    /// called once, with that command's lock information, before waiting.
+    pub fn lock_for_change(
+        &self,
+        command: &str,
+        on_wait: &mut dyn FnMut(&str),
+    ) -> Result<ChangeLock, RepoError> {
+        let file = self.open_lock_file()?;
+        let state = self.bolt.join("state");
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                // Best effort: the text is only for the message.
+                let info = fs::read_to_string(state.join("lock-info")).unwrap_or_default();
+                on_wait(&info);
+                file.lock()?;
+            }
+            Err(TryLockError::Error(e)) => return Err(e.into()),
+        }
+        let started = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let info = format!(
+            "pid {}\ncommand {command}\nstarted {started}\n",
+            std::process::id()
+        );
+        write_atomic(&self.tmp, &state.join("lock-info"), info.as_bytes())?;
+        Ok(ChangeLock { _file: file })
+    }
+
+    /// Stores `entry` in `pack`, moves the pack into the store, then replaces `state/head`.
+    /// The command has happened exactly when the head is replaced (decision 010).
+    pub fn commit(
+        &mut self,
+        _lock: &ChangeLock,
+        mut pack: PackWriter,
+        entry: &DiaryEntry,
+    ) -> Result<Id, RepoError> {
+        let id = pack.add_record(ObjectKind::DiaryEntry, &entry.encode())?;
+        if let Some(path) = pack.finish(&self.packs)? {
+            self.store.register(&path)?;
+        }
+        fault_point("commit:before-head")?;
+        let head = format!("{id}\n");
+        write_atomic(
+            &self.tmp,
+            &self.bolt.join("state").join("head"),
+            head.as_bytes(),
+        )?;
+        Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diary::{Action, Position, State};
+    use crate::save::Person;
+    use std::collections::BTreeMap;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn format_file() {
+        assert!(parse_format(FORMAT_TEXT).unwrap().features.is_empty());
+        for (text, needle) in [
+            ("bolt-repository 2\nhash blake3\n", "bolt-repository 2"),
+            ("bolt-repository 1\nhash sha256\n", "sha256"),
+            (
+                "bolt-repository 1\nhash blake3\nfeature teleport\n",
+                "teleport",
+            ),
+        ] {
+            let err = parse_format(text).unwrap_err();
+            assert!(
+                matches!(err, RepoError::NewerFormat { .. }) && err.to_string().contains(needle),
+                "{text:?}"
+            );
+        }
+        for damaged in [
+            "",
+            "bolt-repository 1\n",
+            "bolt-repository 1\r\nhash blake3\r\n",
+            "hello\n",
+        ] {
+            assert!(
+                matches!(parse_format(damaged), Err(RepoError::Damaged { .. })),
+                "{damaged:?}"
+            );
+        }
+    }
+
+    /// A project made by hand: the folder layout and the `format` file, nothing committed.
+    fn project() -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::tempdir().unwrap();
+        let bolt = dir.path().join(".bolt");
+        for sub in ["store/packs", "state", "cache", "tmp"] {
+            std::fs::create_dir_all(bolt.join(sub)).unwrap();
+        }
+        std::fs::write(bolt.join("format"), FORMAT_TEXT).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        (dir, repo)
+    }
+
+    fn entry(save: u8) -> DiaryEntry {
+        DiaryEntry {
+            parent: None,
+            action: Action::Command,
+            command: "save".into(),
+            who: Person {
+                name: "A".into(),
+                email: "a@b".into(),
+                time_ms: 0,
+                tz_offset_min: 0,
+            },
+            bolt_version: "0.1.0".into(),
+            state: State {
+                lines: BTreeMap::from([("main".to_owned(), Id([save; 32]))]),
+                tags: BTreeMap::new(),
+                position: Position::OnLine("main".into()),
+                shelves: vec![],
+                remotes: BTreeMap::new(),
+            },
+            safety_copies: vec![],
+        }
+    }
+
+    fn commit(repo: &mut Repository, e: &DiaryEntry) -> Result<Id, RepoError> {
+        let lock = repo.lock_for_change("save", &mut |_| {})?;
+        let pack = repo.new_pack()?;
+        repo.commit(&lock, pack, e)
+    }
+
+    #[test]
+    fn head_round_trips() {
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        assert_eq!(repo.head().unwrap(), a);
+        assert_eq!(repo.current().unwrap(), (a, entry(1)));
+        let repo = Repository::open(dir.path()).unwrap();
+        assert_eq!(repo.current().unwrap(), (a, entry(1)));
+        let text = std::fs::read_to_string(repo.root().join(".bolt/state/head")).unwrap();
+        assert_eq!(text, format!("{a}\n"));
+    }
+
+    #[test]
+    fn head_rejects_garbage() {
+        let (dir, repo) = project();
+        let head = dir.path().join(".bolt/state/head");
+        let upper = format!("{}\n", Id([0xab; 32]).to_hex().to_uppercase());
+        let no_newline = Id([0xab; 32]).to_hex();
+        for bad in ["xyz\n", upper.as_str(), no_newline.as_str(), ""] {
+            std::fs::write(&head, bad).unwrap();
+            assert!(
+                matches!(repo.head(), Err(RepoError::Damaged { .. })),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_needs_a_format_file_and_cleans_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            Repository::open(dir.path()),
+            Err(RepoError::NotAProject)
+        ));
+        let (dir, repo) = project();
+        drop(repo);
+        let litter = dir.path().join(".bolt/tmp/tmp-0123456789abcdef");
+        std::fs::write(&litter, b"half a pack").unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        assert!(!litter.exists());
+        assert_eq!(repo.tmp_dir(), dir.path().join(".bolt/tmp"));
+        assert_eq!(repo.packs_dir(), dir.path().join(".bolt/store/packs"));
+        assert!(!repo.signatures_allowed());
+    }
+
+    #[test]
+    fn errors_say_what_to_do() {
+        assert_eq!(
+            RepoError::NotAProject.to_string(),
+            "Not inside a Bolt project."
+        );
+        assert!(
+            RepoError::NotAProject
+                .hint()
+                .unwrap()
+                .contains("bolt start")
+        );
+        let e = RepoError::Damaged { detail: "x".into() };
+        assert_eq!(e.to_string(), "This project's Bolt data looks damaged: x.");
+        assert!(e.hint().unwrap().contains("Nothing was changed"));
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn commit_is_all_or_nothing() {
+        use crate::fsio::fault;
+        use crate::verify::verify_store;
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        for n in 1.. {
+            assert!(n < 50, "the commit never succeeded");
+            let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+            let pack = repo.new_pack().unwrap();
+            fault::arm(n);
+            let result = repo.commit(&lock, pack, &entry(2));
+            fault::disarm();
+            drop(lock);
+            drop(repo);
+            repo = Repository::open(dir.path()).unwrap();
+            match result {
+                Err(_) => {
+                    assert_eq!(repo.head().unwrap(), a, "fault {n}");
+                    assert!(verify_store(repo.packs_dir()).is_ok(), "fault {n}");
+                }
+                Ok(b) => {
+                    assert_eq!(repo.head().unwrap(), b);
+                    assert_eq!(repo.current().unwrap().1, entry(2));
+                    assert!(verify_store(repo.packs_dir()).is_ok());
+                    // Faults hit the pack rename, after it, before the head, and the head write.
+                    assert!(n > 4, "only {} faults were injected", n - 1);
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn second_changer_waits_and_is_told_why() {
+        let (dir, repo) = project();
+        let root = dir.path().to_owned();
+        let (tx, rx) = mpsc::channel();
+        let a = thread::spawn(move || {
+            let repo = Repository::open(&root).unwrap();
+            let lock = repo
+                .lock_for_change("save", &mut |_| panic!("A should not wait"))
+                .unwrap();
+            tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(300));
+            let released = Instant::now();
+            drop(lock);
+            released
+        });
+        rx.recv().unwrap();
+        let mut told = Vec::new();
+        let lock = repo
+            .lock_for_change("undo", &mut |info| told.push(info.to_owned()))
+            .unwrap();
+        let got = Instant::now();
+        let released = a.join().unwrap();
+        assert!(got >= released, "B got the lock while A held it");
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("save"), "{told:?}");
+        drop(lock);
+    }
+
+    #[test]
+    fn readers_never_wait() {
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let _lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let root = dir.path().to_owned();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let repo = Repository::open(&root).unwrap();
+            tx.send(repo.head().unwrap()).unwrap();
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a);
+    }
+}

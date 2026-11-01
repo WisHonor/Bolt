@@ -1,12 +1,14 @@
 //! Bolt's engine library: objects, storage and history. No `unsafe` code is allowed here.
 #![forbid(unsafe_code)]
 
+pub mod diary;
 pub mod encoding;
 pub mod fsio;
 pub mod id;
 pub mod listing;
 pub mod names;
 pub mod pack;
+pub mod repo;
 pub mod save;
 pub mod store;
 pub mod verify;

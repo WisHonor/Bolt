@@ -186,7 +186,9 @@ safety copies, sorted by path:
   varint  size
 ```
 
-Line names follow decision 012's rules. The remote list stays empty until v0.3.
+Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique. The remote list stays empty until v0.3.
+
+- **Limits:** line, tag and shelf names at most 255 bytes (remote names too); tag messages at most 64 KiB; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines (in the state and per remote), 100,000 tags, 10,000 shelves, 64 remotes and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
 
 ## 10. Repository files in `.bolt/`
 
@@ -196,6 +198,7 @@ Line names follow decision 012's rules. The remote list stays empty until v0.3.
 | `store/packs/*.pack` | All stored objects (§11) | Yes |
 | `state/head` | ID of the newest diary entry | Yes |
 | `state/lock` | Lock file for changing commands | Yes |
+| `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
 | `cache/` | Rebuildable speed-ups | No |
 | `tmp/` | Files being written | No |
@@ -212,7 +215,7 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 
 **`state/head`** holds the lowercase hex ID of the newest diary entry followed by a newline. It is always replaced whole: written to `tmp/`, flushed to disk, then renamed.
 
-**`state/lock`** is held with an operating-system lock (`LockFileEx` on Windows, `flock` elsewhere) by every command that changes the repository. Its text (process ID, command, start time) is only informational, for the "waiting for another command" message.
+**`state/lock`** is held with an operating-system lock (`LockFileEx` on Windows, `flock` elsewhere) by every command that changes the repository. Its contents mean nothing. Once a command holds the lock, it replaces `state/lock-info` (through `tmp/` and a rename) with `pid <n>\ncommand <command>\nstarted <unix ms>\n`; a command that finds the lock busy shows that text in its "waiting for another command" message. The text lives in a separate file because Windows doesn't let other processes read a locked file; it is only informational and may be stale.
 
 **`state/journal`** is written (whole, through `tmp/` and a rename) before a command starts rewriting files in the folder, and removed after the command commits. It records the target diary entry, each planned file action (path, expected current ID, new ID) and the safety copies taken, followed by a BLAKE3 checksum of the bytes before it. If it exists when Bolt starts, Bolt finishes or rolls back the interrupted command (decision 010).
 

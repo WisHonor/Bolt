@@ -46,14 +46,14 @@ pub struct Save {
     pub extra: BTreeMap<String, Vec<u8>>,
 }
 
-fn write_person(w: &mut Writer, p: &Person) {
+pub(crate) fn write_person(w: &mut Writer, p: &Person) {
     w.string(&p.name);
     w.string(&p.email);
     w.i64(p.time_ms);
     w.i16(p.tz_offset_min);
 }
 
-fn read_person(r: &mut Reader) -> Result<Person, DecodeError> {
+pub(crate) fn read_person(r: &mut Reader) -> Result<Person, DecodeError> {
     Ok(Person {
         name: r.string(MAX_PERSON_FIELD_BYTES, "person name")?.to_owned(),
         email: r.string(MAX_PERSON_FIELD_BYTES, "person email")?.to_owned(),

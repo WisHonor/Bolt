@@ -1,6 +1,7 @@
 //! Test vectors for the storage format (docs/storage-format.md).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use bolt_core::diary::{Action, DiaryEntry, Position, State};
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
@@ -133,6 +134,52 @@ fn save_vectors_hold() {
         let s = Save::decode(&unhex(&v.hex), false).unwrap_or_else(|e| panic!("{}: {e}", v.name));
         assert_eq!(hex(&s.encode()), v.hex, "{}", v.name);
         assert_eq!(s.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+fn minimal_diary_entry() -> DiaryEntry {
+    DiaryEntry {
+        parent: None,
+        action: Action::Command,
+        command: "start".into(),
+        who: person(),
+        bolt_version: "0.1.0".into(),
+        state: State {
+            lines: BTreeMap::from([("main".to_owned(), Id([0; 32]))]),
+            tags: BTreeMap::new(),
+            position: Position::OnLine("main".into()),
+            shelves: vec![],
+            remotes: BTreeMap::new(),
+        },
+        safety_copies: vec![],
+    }
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/diary.json"]
+fn print_diary_vectors() {
+    let e = minimal_diary_entry();
+    println!(
+        "[\n  {{\"name\": \"minimal\", \"hex\": \"{}\", \"id\": \"{}\"}}\n]",
+        hex(&e.encode()),
+        e.id()
+    );
+}
+
+#[test]
+fn diary_vectors_hold() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/diary.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let e =
+            DiaryEntry::decode(&unhex(&v.hex)).unwrap_or_else(|err| panic!("{}: {err}", v.name));
+        assert_eq!(hex(&e.encode()), v.hex, "{}", v.name);
+        assert_eq!(e.id().to_hex(), v.id, "{}", v.name);
     }
 }
 
