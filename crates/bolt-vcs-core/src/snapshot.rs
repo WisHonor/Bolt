@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -583,7 +583,8 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
 }
 
 /// Stores one file in two passes: hash it, then copy it into `pack` unless the store or pack
-/// already holds it. A file that changes in between gives `ChangedDuringSave`.
+/// already holds it. A file that changes in between, or that is a link or special file by the
+/// time it is opened, gives `ChangedDuringSave`; links are never followed.
 pub(crate) fn store_file(
     pack: &mut PackWriter,
     store: &Store,
@@ -598,7 +599,14 @@ pub(crate) fn store_file(
         path: path.display().to_string(),
     };
     let stamp = |f: &File| f.metadata().map(|m| (m.len(), m.modified().ok()));
-    let mut file = File::open(path).map_err(unreadable)?;
+    // The scan saw a regular file, so a link or special file here was swapped in since (RT-5).
+    let mut file = safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
+        if e.kind() == io::ErrorKind::InvalidInput {
+            changed()
+        } else {
+            unreadable(e)
+        }
+    })?;
     let before = stamp(&file).map_err(unreadable)?;
     let mut hasher = ContentHasher::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -1245,5 +1253,85 @@ mod tests {
             store_file(&mut pack, repo.store(), &path, &mut append),
             Err(SaveError::ChangedDuringSave { .. })
         ));
+    }
+
+    /// Scans a project holding `victim.txt`, lets `make_link` put a link in its place (it says
+    /// whether it could make one), then reads the files as `save` does after its scan.
+    fn assert_swap_for_a_link_is_refused(make_link: impl FnOnce(&Path) -> bool) {
+        let (dir, repo) = project();
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, b"x").unwrap();
+        let folders = walk(dir.path()).unwrap();
+        fs::remove_file(&victim).unwrap();
+        if !make_link(&victim) {
+            return;
+        }
+        let mut pack = repo.new_pack().unwrap();
+        match build(repo.store(), &mut pack, &folders, &HashMap::new()) {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),
+            other => panic!("{other:?}"),
+        }
+        assert!(pack.is_empty());
+    }
+
+    #[test]
+    fn file_replaced_by_a_link_between_scan_and_read_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("id_ed25519");
+        fs::write(&secret, b"hunter2").unwrap();
+        assert_swap_for_a_link_is_refused(|victim| crate::test_support::symlink(&secret, victim));
+    }
+
+    /// Making a junction needs no privilege, so this runs on every Windows account.
+    #[cfg(windows)]
+    #[test]
+    fn file_replaced_by_a_junction_between_scan_and_read_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        assert_swap_for_a_link_is_refused(|victim| {
+            crate::test_support::junction(victim, outside.path());
+            true
+        });
+    }
+
+    #[test]
+    fn file_deleted_between_scan_and_read_is_still_unreadable() {
+        let (dir, repo) = project();
+        let mut pack = repo.new_pack().unwrap();
+        let gone = dir.path().join("gone.txt");
+        match store_file(&mut pack, repo.store(), &gone, &mut || {}) {
+            Err(SaveError::Unreadable { source, .. }) => {
+                assert_eq!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_replaced_by_a_pipe_between_scan_and_read_is_refused_without_hanging() {
+        let (dir, repo) = project();
+        // `.boltignore` is saved like any other file, so it can be swapped like one.
+        let pipe = dir.path().join(".boltignore");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Opening a named pipe waits for a writer, so the read runs on another thread: a hang
+        // fails this test instead of stopping the whole run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut pack = repo.new_pack().unwrap();
+            let stored = store_file(&mut pack, repo.store(), &pipe, &mut || {});
+            let _ = tx.send((stored, pack.is_empty()));
+        });
+        let (stored, pack_is_empty) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a named pipe hung");
+        assert!(
+            matches!(stored, Err(SaveError::ChangedDuringSave { .. })),
+            "{stored:?}"
+        );
+        assert!(pack_is_empty);
     }
 }

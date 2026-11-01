@@ -1,5 +1,6 @@
 //! Red-team session 1 (milestone 1, decision 024). Every test here asserts the SAFE behaviour
-//! and fails today because of the finding it is named after. See docs/redteam/2026-11-01-milestone-1.md.
+//! and fails without the fix for the finding it is named after (`win_junction_…` is the one
+//! guard that passed from the start). See docs/redteam/2026-11-01-milestone-1.md.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
@@ -158,9 +159,10 @@ fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
     let tmp = env.root().join(".bolt").join("tmp");
     std::fs::remove_dir_all(&tmp).unwrap();
     let st = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
+        .args(["/D", "/C", "mklink", "/J"])
         .arg(&tmp)
         .arg(victim.path())
+        .stdout(Stdio::null())
         .status()
         .unwrap();
     assert!(st.success());
@@ -169,8 +171,8 @@ fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
 }
 
 /// Windows: a junction INSIDE the project that points outside must be saved as a link, never
-/// walked into. UNVERIFIED (no Windows in the sandbox); expected to pass if junctions count as
-/// symlinks for both `ignore` and `symlink_metadata`.
+/// walked into. Verified on GitHub's Windows machine on 2026-11-01: it passes, because junctions
+/// count as symlinks for both `ignore` and `symlink_metadata`.
 #[cfg(windows)]
 #[test]
 fn win_junction_in_project_is_not_walked_into() {
@@ -180,13 +182,14 @@ fn win_junction_in_project_is_not_walked_into() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "hunter2").unwrap();
     let st = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
+        .args(["/D", "/C", "mklink", "/J"])
         .arg(env.root().join("j"))
         .arg(outside.path())
+        .stdout(Stdio::null())
         .status()
         .unwrap();
     assert!(st.success());
-    let _ = env.bolt().args(["save", "with junction"]).output().unwrap();
+    env.ok(&["save", "with junction"]);
     let repo = Repository::open(env.root()).unwrap();
     let (_, entry) = repo.current().unwrap();
     let save = repo
@@ -356,7 +359,6 @@ fn rt4_project_config_pointing_at_dev_zero_is_refused_not_read_forever() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-5: fixed by Task 4 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt5_save_never_stores_the_target_of_a_file_swapped_for_a_symlink() {
     use bolt_core::listing::EntryKind;
     use bolt_core::repo::Repository;
