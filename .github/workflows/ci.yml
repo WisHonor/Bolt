@@ -22,6 +22,13 @@ jobs:
       - name: cargo test
         shell: bash
         run: cargo test --workspace --all-features 2>&1 | tee -a test-output.txt; exit ${PIPESTATUS[0]}
+      # Saves a project nested 4,096 levels deep, and refuses one at 4,097, on a 1 MiB stack like
+      # bolt's main thread. A minute each, and only Windows can make paths that long, so these
+      # tests are #[ignore]d everywhere else. The filter must match only them.
+      - name: Real-depth save tests
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders 2>&1 | tee -a test-output.txt; exit ${PIPESTATUS[0]}
       - name: Show failing tests as annotations
         if: failure()
         shell: bash
