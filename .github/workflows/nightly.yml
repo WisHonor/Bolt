@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: "17 3 * * *"
   push:
-    branches: [milestone-1]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
