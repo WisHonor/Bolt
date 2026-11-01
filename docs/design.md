@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 14
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 15
 
 ## 1. Vision
 
@@ -112,7 +112,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 12. Lines and combining: naming, remote lines, tags, three-way merge, renames → [decision 012](decisions/012-lines.md) (full combining design before v0.2)
 - [x] 13. Partial download and offline behaviour → [decision 013](decisions/013-local-data-and-offline.md)
 - [x] 14. Locking semantics → [decision 014](decisions/014-locking.md)
-- [ ] 15. Sync protocol, server storage model, permissions
+- [x] 15. Sync protocol, server storage model, permissions → [decision 015](decisions/015-sync.md) (full protocol design before v0.3)
 
 **Stage 5 — Product surface and wrap-up**
 - [ ] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax
@@ -282,6 +282,17 @@ head ─► redo     main → ptvz
 - **Offline:** you can edit on request, with a warning; Bolt takes the lock when you're back online.
 - **Planned later:** smart locks that release once the change reaches the integration line.
 
+### 5.13 Syncing ([decision 015](decisions/015-sync.md))
+
+**In plain words.** Your copy and the server first compare which saves they have, then move only the missing pieces, each identified by its fingerprint. Every piece is checked on arrival, transfers resume where they stopped, and a big file that changed in one spot uploads only the changed chunks.
+
+- **Transport:** HTTPS; browser login; tokens in the OS credential store.
+- **Trust nothing:** both sides verify every piece against its fingerprint.
+- **Server storage:** chunk packs in object storage (S3 / R2), everything else in PostgreSQL; chunks are shared only within a project or organization, and only after proof of possession.
+- **Permissions:** roles per project and protected lines; folder-level permissions later.
+- **Folder remotes:** the same layout on a USB drive or NAS, for backups (no locks).
+- **Versioned protocol** from the first release.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -316,6 +327,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Signed saves.** [Room reserved in the save format (decision 006).]
 - **Conflict algebra** (jj-style automatic simplification of conflicts). [Planned by the owner, after v0.2; decision 007's format already allows it.]
 - **Smart locks** (locks that follow a change until it reaches the integration line). [Planned by the owner, after v0.3; decision 014's lock records allow it.]
+- **Folder remotes** (sync with a USB drive or NAS). [May come before the server; no locks there (decision 015).]
+- **Folder-level permissions.** [Later; hidden folders act like "not downloaded" (decision 015).]
 - **Deltas for small text files.** [Added later as a storage feature through the `.bolt/format` feature list (decision 009).]
 - **File watcher** for faster `status`. [After v0.1, optional; it may only narrow what gets checked, never decide correctness (decision 011).]
 - **Store on another drive, or shared between projects** (like Git LFS's `lfs.storage` setting). [Later; keep the store's location a single setting internally.]
@@ -364,6 +377,7 @@ Working names; command names can still change (topic 17).
 - **Cache**: remembered facts that speed Bolt up, like file sizes and times; always safe to delete.
 - **Pinning**: marking saves or folders so they stay available offline.
 - **Lock**: a "someone's working on this" claim on a file that can't be merged; while you hold it, nobody else can send changes to that file.
+- **Remote**: another copy you sync with: a server, or a plain folder such as a USB drive.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
