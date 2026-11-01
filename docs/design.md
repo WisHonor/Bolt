@@ -1,7 +1,8 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 17
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 18
+> **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
 
@@ -53,6 +54,7 @@ What it implies for the design:
 - **First audience:** game developers. The engine stays general; games set the priorities, first presets and benchmarks.
 - **Main platform:** Windows. macOS and Linux are supported and tested in CI from the start.
 - **v0.1, solo and local-only:** `start`, `save`, `status`, `changes`, `history`, `show`, `goto`, `discard`, `undo`/`redo`, Git import including Git LFS files ([decision 002](decisions/002-git-compatibility.md)), chunked big files. Big files are streamed, never loaded whole into memory. Presets: Code, Game (Unity, Unreal, Godot) and Custom ([decision 016](decisions/016-presets.md)).
+- **v0.1 milestones:** First save → Coming from Git → Working folder → Undo everything → Big files → Presets and polish ([decision 018](decisions/018-milestone-plan.md), [milestones.md](milestones.md)).
 - **v0.2:** lines and combine (branches, merging, conflicts).
 - **v0.3:** sync and locking for small teams; big files and old versions download on demand.
 - **Before 1.0:** Git export ([decision 002](decisions/002-git-compatibility.md)). Live two-way Git sync is not promised, but nothing may block it.
@@ -117,7 +119,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Stage 5 — Product surface and wrap-up**
 - [x] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax → [decision 016](decisions/016-presets.md)
 - [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
-- [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off
+- [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestone plan in [decision 018](decisions/018-milestone-plan.md); documents drafted; review and owner sign-off pending
 
 ## 5. Design
 
@@ -337,7 +339,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 13. **Renames are guessed** when changes come from comparing snapshots. *Answered by decision 006:* saves carry move notes for moves Bolt is certain about; how merges use them follows in topic 12.
 14. **Change IDs.** *Answered by decision 006:* 128 random bits, shown in the letters k–z, with divergence shown explicitly.
 15. **Build order.** Answered by decision 001: test infrastructure is built with the object store, a minimal Git importer follows saves and history, and chunked big files come before lines and combine. Locking waits for the server (v0.3).
-16. **A data-integrity tool written mostly by an AI while the owner learns Rust.** Subtle bugs can look fine in review. *Proposed rails, pending the owner's approval:* spec before code for anything on disk, test vectors for every format, `#![forbid(unsafe_code)]` in the engine, no panics in library code, small changes, and the owner reads every module that writes to disk.
+16. **A data-integrity tool written mostly by an AI while the owner learns Rust.** Subtle bugs can look fine in review. *Proposed rails, pending the owner's approval:* spec before code for anything on disk, test vectors for every format, `#![forbid(unsafe_code)]` in the engine, no panics in library code, small changes, and the owner reads every module that writes to disk. Written up in [security.md](security.md) §5.
 
 ## 7. Open questions and deferred decisions
 
