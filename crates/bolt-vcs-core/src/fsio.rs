@@ -51,10 +51,49 @@ pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    match to.parent() {
+    sync_parent(to)
+}
+
+/// Flushes the folder that holds `path`.
+fn sync_parent(path: &Path) -> io::Result<()> {
+    match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => sync_dir(p),
         _ => sync_dir(Path::new(".")),
     }
+}
+
+/// Creates `dir` and any missing folders above it, flushing each new folder's parent so the
+/// folders survive a crash.
+pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_dir_durable(parent)?;
+    }
+    match fs::create_dir(dir) {
+        Ok(()) => {}
+        // Another process made it first.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) => return Err(e),
+    }
+    sync_parent(dir)
+}
+
+/// Deletes a file. Not flushed: only used for leftovers, which may as well come back.
+pub fn remove_file(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+/// Opens the change-lock file for reading and writing, creating it if needed. Its contents
+/// never matter, so it is never truncated.
+pub fn open_lock_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
 }
 
 /// Flushes a folder's entries to disk. Windows has no such call; NTFS journals renames.
@@ -142,6 +181,15 @@ mod tests {
         write_atomic(root.path(), &dest, b"new").unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn create_dir_durable_makes_every_missing_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let deep = root.path().join("a").join("b").join("c");
+        create_dir_durable(&deep).unwrap();
+        create_dir_durable(&deep).unwrap();
+        assert!(deep.is_dir());
     }
 
     #[cfg(feature = "fault-injection")]

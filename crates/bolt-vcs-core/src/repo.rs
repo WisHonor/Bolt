@@ -2,14 +2,14 @@
 //! (docs/storage-format.md section 10, decision 010).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::encoding::DecodeError;
-use crate::fsio::{fault_point, write_atomic};
+use crate::fsio::{self, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackWriter};
@@ -157,7 +157,7 @@ impl Repository {
         }
         let bolt = root.join(".bolt");
         for sub in ["store/packs", "state", "cache", "tmp"] {
-            fs::create_dir_all(bolt.join(sub))?;
+            fsio::create_dir_durable(&bolt.join(sub))?;
         }
         bolt_platform::hide_path(&bolt)?;
         let tmp = bolt.join("tmp");
@@ -260,19 +260,14 @@ impl Repository {
         for entry in fs::read_dir(&self.tmp)? {
             let path = entry?.path();
             if path.is_file() {
-                fs::remove_file(path)?;
+                fsio::remove_file(&path)?;
             }
         }
         Ok(())
     }
 
     fn open_lock_file(&self) -> io::Result<File> {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.bolt.join("state").join("lock"))
+        fsio::open_lock_file(&self.bolt.join("state").join("lock"))
     }
 
     #[must_use]
