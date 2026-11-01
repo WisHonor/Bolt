@@ -15,7 +15,7 @@ pub const MAX_BOLTIGNORE_BYTES: u64 = 1 << 20;
 
 /// Opens `path` with `options` (custom flags are replaced) without following a link at its
 /// last part, and only if it is a regular file. A link, folder, pipe or device gives
-/// `InvalidInput`; any other error, `NotFound` included, comes back unchanged.
+/// `InvalidInput`; any other error from the open, `NotFound` included, comes back unchanged.
 pub fn open_regular(path: &Path, options: &OpenOptions) -> io::Result<File> {
     let file = match bolt_platform::no_follow(&mut options.clone()).open(path) {
         Ok(file) => file,
@@ -30,7 +30,9 @@ pub fn open_regular(path: &Path, options: &OpenOptions) -> io::Result<File> {
         }
         Err(e) => return Err(e),
     };
-    if is_regular(&file.metadata()?) {
+    // A Windows device opens, then fails the metadata query itself ("Incorrect function"): a
+    // handle that can't be shown to be a regular file counts as not one.
+    if file.metadata().is_ok_and(|m| is_regular(&m)) {
         Ok(file)
     } else {
         Err(not_regular(path))
@@ -250,6 +252,20 @@ mod tests {
             .expect("opening a named pipe hung");
         assert_not_regular(read, &fifo);
         assert_not_regular(write, &fifo);
+    }
+
+    #[test]
+    fn device_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // On Windows `nul` in any folder is the NUL device, whose metadata query itself fails.
+        let device = if cfg!(windows) {
+            dir.path().join("nul")
+        } else {
+            std::path::PathBuf::from("/dev/null")
+        };
+        let opened = open_regular(&device, OpenOptions::new().read(true));
+        assert_not_regular(opened, &device);
+        assert_not_regular(read_capped(&device, 65), &device);
     }
 
     #[test]
