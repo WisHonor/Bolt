@@ -39,11 +39,11 @@ Out of scope: malware already running as you on your own computer.
 | T4 | Two names that become one file on Windows or macOS (`README` / `readme`, Unicode normalization) | Refused on save; reported, never overwritten, on write-out | 004 |
 | T5 | Windows device names (`CON`, `NUL`, `AUX`, `COM1`, `CONIN$`…) and `name:stream` | Never written; reported | 004 |
 | T6 | Running code from a project (hooks, filters, merge drivers) | No hooks run on copy or import; `bolt.toml` is declarative; programs are named only in personal settings; Git import reads repositories through a library and never runs Git hooks or filters | 008, 017 |
-| T7 | Decompression bombs and size bombs | Every stored object records its real size and decompression stops there; hard limits on names, listings, messages, parents and chunk counts | 009, storage spec |
+| T7 | Decompression bombs and size bombs, including tree bombs (shared listings describing billions of files) | Every stored object records its real size and decompression stops there; hard limits on names, listings, messages, parents and chunk counts; at most 10,000,000 entries per save | 009, 025, storage spec |
 | T8 | Malformed or ambiguous records (two encodings of one record) | Strict readers accept exactly one encoding; fuzz-tested | 005 |
 | T9 | Tampered data on disk or from a server | Every object is checked against its fingerprint on every read and on receipt; packs carry index checksums | 005, 009, 015 |
 | T10 | Fingerprint collisions | BLAKE3-256 (no known attacks); the algorithm is a per-repository setting, so it can be replaced | 005 |
-| T11 | Resource exhaustion (deep nesting, huge entry counts, pathological diffs) | Limits in the storage spec; no unbounded recursion; time limits on diffs | storage spec |
+| T11 | Resource exhaustion (deep nesting, huge entry counts, pathological diffs) | Limits in the storage spec (at most 4,096 folder levels per save); no recursion per folder level; time limits on diffs | storage spec, 025 |
 | T12 | Accidentally saving secrets (`.env`, private keys, tokens) | Presets ignore `.env`; `bolt save` warns about files that look like secrets (key files, token formats such as `github_pat_…`, `ghp_…`, `AKIA…`) | 016 |
 | T13 | Token theft from disk or logs | Tokens live only in the OS credential store, never in config files or history; redacted in `--debug` output and in the commands recorded in diary entries | 015 |
 | T14 | Reading another customer's data by guessing fingerprints (v0.3+) | Dedup only within a project or organization; referencing an existing chunk requires proof of possession | 015 |
@@ -51,6 +51,11 @@ Out of scope: malware already running as you on your own computer.
 | T16 | Lock abuse (v0.3) | Only maintainers break locks; the holder is notified; every lock action is logged on the server | 014 |
 | T17 | Unsafe asset previews on the website (later) | Previews made in isolated workers; scripts stripped from SVG; strict content security policy | later |
 | T18 | Malicious or vulnerable dependencies | Few dependencies; `Cargo.lock` committed; `cargo-deny` and `cargo-audit` in CI; every new dependency reviewed | testing |
+| T19 | Links and special files inside `.bolt/` (a symlinked `tmp/` makes cleanup delete files elsewhere; a symlinked `store/packs` or `state/lock` writes elsewhere; a pipe or `/dev/zero` hangs or exhausts memory) | `.bolt/` and every fixed folder in it must be real folders, never links or junctions; its files must be regular files, opened without following links and read with a size cap; all of this in one module; cleanup removes only Bolt's own temporary names | 025 (red team) |
+| T20 | A file swapped for a link while `save` reads it, so the link's target is saved | Files are opened without following links, and the open file must be the same regular file the scan saw | 025 (red team) |
+| T21 | Terminal spoofing: bidi overrides, line separators and control characters in names, messages, paths and errors | Every untrusted piece of text is escaped before printing: control characters, bidi controls, line and paragraph separators | 025 (red team) |
+| T22 | A project claiming to be the user (its settings set the name and email on the user's saves) | Identity comes only from the environment and the user's own settings; a project's identity is ignored, with a note | 025 (red team) |
+| T23 | A repository planted in a parent folder (`C:\.bolt`, `/tmp/.bolt`) capturing commands run below it | Refuse a repository owned by another user account unless the user lists it in their own `safe-folders` | 025 (red team) |
 
 ## 5. Engineering rules (approved, decision 022)
 

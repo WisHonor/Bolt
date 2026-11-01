@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01; its red-team session ([decision 024](decisions/024-red-team-gate.md)), then milestone 2 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 24
+> **Phase:** building; milestone 1 done 2026-11-01; its red-team fixes ([decisions 024](decisions/024-red-team-gate.md) and [025](decisions/025-red-team-m1-rulings.md)), then milestone 2 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 25
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -184,7 +184,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** The project's rules live in two normal files at the top of your project, so they travel with it and are part of its history. Your personal settings stay on your machine and can never change the project's rules.
 
 - **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (same syntax as `.gitignore`).
-- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Anything that runs a program is personal only.
+- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from your own settings, never from a project's ([decision 025](decisions/025-red-team-m1-rulings.md)). Anything that runs a program is personal only.
 - **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
 - **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
 

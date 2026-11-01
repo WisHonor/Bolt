@@ -68,6 +68,7 @@ entries, sorted by name:
 
 - `name` must follow decision 004's always-on rules: valid UTF-8, not empty, not `.` or `..`, no `/`, no NUL, at most 255 bytes, and not `.bolt` under any spelling Windows or macOS would treat as `.bolt` (any letter case, trailing dots or spaces, the short name `BOLT~1`, a `:stream` suffix).
 - The portability rules (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, characters Windows forbids) are checked when saving, not when reading: imported histories may contain such names (decision 004).
+- **Limits for a whole save** ([decision 025](decisions/025-red-team-m1-rulings.md)): the folders reachable from a save's root listing may nest at most **4,096** levels below the root, and describe at most **10,000,000** entries in total, counting every path (a listing reached through two paths counts twice). A reader walking a save must stop with an error as soon as either limit is passed, and must not recurse once per folder level.
 
 ## 4. Save
 
@@ -204,6 +205,8 @@ Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
+**Shape of `.bolt/` itself** ([decision 025](decisions/025-red-team-m1-rulings.md)). A shared project can arrive with links planted inside `.bolt/`, so a reader must refuse a repository unless `.bolt/`, `store/`, `store/packs/`, `state/`, `cache/` and `tmp/` are real folders (never symbolic links or Windows junctions). Every file Bolt reads or writes in `.bolt/` is opened without following links and must be a regular file (never a pipe, device or folder), and reads are capped: `format` at most 4 KiB, `state/head` at most 65 bytes, `state/lock-info` and `config.toml` at most 4 KiB and 1 MiB. Clearing `tmp/` removes only Bolt's own temporary names (`tmp-` followed by 16 lowercase hex digits).
+
 **`format`** is UTF-8 text, one item per line:
 
 ```text
@@ -273,7 +276,7 @@ Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at mos
 ## 12. Project files (outside `.bolt/`)
 
 - **`bolt.toml`** (TOML; decisions 008 and 016). Draft keys: `preset`, `chunk-files-over`, `ask-before-saving-over`, and `[[rule]]` tables with `files`, `lockable`, `conflict-markers` and `moves-with-asset`. Unknown keys produce a warning. Final key names are settled when presets are built (milestone 6).
-- **`.boltignore`** files work like `.gitignore` files: one at the project root, and optionally more in subfolders, each using exactly the `.gitignore` pattern syntax relative to its own folder. `.bolt/` and `.git/` are always ignored (decision 019).
+- **`.boltignore`** files work like `.gitignore` files: one at the project root, and optionally more in subfolders, each using exactly the `.gitignore` pattern syntax relative to its own folder. `.bolt/` and `.git/` are always ignored (decision 019). A `.boltignore` must be a regular file of at most 1 MiB; a link, pipe or larger file stops the save with an error (decision 025).
 
 ## 13. Test vectors
 

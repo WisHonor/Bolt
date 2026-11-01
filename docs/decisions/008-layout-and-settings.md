@@ -23,7 +23,7 @@ The project's rules (what is chunked, lockable, ignored, how conflicts are shown
 
 **Two kinds of settings, never mixed**
 - *Project rules* live only in the two shared files.
-- *Personal settings* (identity, editor, merge tools, display) live in the user's config folder or `.bolt/config.toml` and are never shared.
+- *Personal settings* (identity, editor, merge tools, display) live in the user's config folder or `.bolt/config.toml` and are never shared. (Amended by [decision 025](025-red-team-m1-rulings.md): identity is never taken from `.bolt/config.toml`, since a shared project carries that file.)
 - Personal settings cannot change project rules. Anything that runs a program can only be a personal setting.
 
 **Layout of `.bolt/`**
