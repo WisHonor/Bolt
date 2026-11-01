@@ -91,13 +91,15 @@ fn is_reserved(name: &str) -> bool {
     ) {
         return true;
     }
-    // COM0-9 / LPT0-9 and the superscript digits Windows also treats as digits.
+    // Microsoft's "Naming Files, Paths, and Namespaces" page lists COM1-COM9 and LPT1-LPT9, and
+    // the same names with a superscript 1, 2 or 3 (U+00B9, U+00B2, U+00B3) as the digit. COM0
+    // and LPT0 are not on that list, and Windows 11 creates them as ordinary files, so they pass.
     ["COM", "LPT"].iter().any(|p| {
         up.strip_prefix(p).is_some_and(|d| {
             let mut it = d.chars();
             matches!(
                 (it.next(), it.next()),
-                (Some('0'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None)
+                (Some('1'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None)
             )
         })
     })
@@ -235,7 +237,6 @@ mod tests {
             "CONOUT$",
             "COM\u{b9}",
             "lpt\u{b3}.txt",
-            "COM0",
             "nul .txt",
         ] {
             assert!(
@@ -273,7 +274,15 @@ mod tests {
                 "{name}"
             );
         }
-        for fine in ["Player.cs", "console.txt", "COM10", "aux_data", "nul2"] {
+        for fine in [
+            "Player.cs",
+            "console.txt",
+            "COM10",
+            "aux_data",
+            "nul2",
+            "COM0",
+            "LPT0",
+        ] {
             assert!(name_problems(fine).is_empty(), "{fine}");
         }
     }

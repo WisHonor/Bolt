@@ -1,6 +1,6 @@
 # Bolt Security Plan — Draft
 
-> **Status:** design-phase draft (2026-10-31). Every defense here has a test in [testing.md](testing.md). The exact Windows naming rules are checked against Microsoft's documentation before milestone 1 implements name checking (decision 004).
+> **Status:** design-phase draft (2026-10-31). Every defense here has a test in [testing.md](testing.md). The Windows naming rules were checked against Microsoft's documentation on 2026-11-01 (see §6 and decision 004).
 
 **In plain words.** Bolt assumes that any project you copy, any repository you import and any server you talk to might be trying to hurt you: overwrite files outside the project, run code on your computer, fill your disk, or trick you with tampered history. Bolt's defenses are simple rules, each applied in one place, and every rule has a test.
 
@@ -72,9 +72,10 @@ See [testing.md](testing.md) §3: fuzz targets for every decoder and parser, a m
 
 **Red-team sessions** ([decision 024](decisions/024-red-team-gate.md)). Every milestone ends with a time-boxed session in which a fresh agent attacks Bolt from an isolated sandbox and must prove each finding with a failing test. Findings are fixed before the milestone counts as done; their tests join the corpus, and new threats are added to §4.
 
+**Windows name rules.** Checked on 2026-11-01 against Microsoft's "Naming Files, Paths, and Namespaces" page (dated 2024-08-28): Bolt refuses everything on that list, plus the console devices `CONIN$` and `CONOUT$`, while `COM0` and `LPT0`, which are not on it, stay ordinary names. Bolt also refuses `.bolt`'s short names (`bolt~1` to `bolt~4`) and its stream syntax (`.bolt::$INDEX_ALLOCATION`), because Windows treats both as `.bolt`.
+
 ## 7. Open items
 
-- Check the Windows naming rules (reserved names, short names, stream syntax) against Microsoft's documentation before implementing name checks.
 - Review Git's published vulnerabilities (path, symlink, case and submodule bugs) and add every relevant case to the corpus.
 - Write the server's threat model in detail before v0.3 (authentication, permissions, rate limits, audit log).
 - Add a `SECURITY.md` explaining how to report vulnerabilities before any public release.

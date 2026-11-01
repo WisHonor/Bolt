@@ -61,7 +61,6 @@ const CASES: &[&[&str]] = &[
     &["CONIN$"],
     &["CONOUT$"],
     &["COM\u{b9}"],
-    &["COM0"],
     &["nul .txt"],
     &["a\u{1}b"],
     &["lpt9.log"],
