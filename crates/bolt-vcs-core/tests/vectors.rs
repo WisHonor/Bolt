@@ -291,21 +291,71 @@ struct PackVector {
     name: String,
     file: String,
     hex: String,
+    /// Every object the pack holds: its kind number and its uncompressed bytes.
+    objects: Vec<PackObject>,
+}
+
+#[derive(Deserialize)]
+struct PackObject {
+    kind: u8,
+    hex: String,
+}
+
+/// A pack's objects: kind and uncompressed bytes, in the order they are added.
+type PackObjects = Vec<(ObjectKind, Vec<u8>)>;
+
+fn pack_vector_inputs() -> Vec<(&'static str, PackObjects)> {
+    // Repetitive text, so the writer stores it with zstd.
+    let content = "Hello, Bolt! ".repeat(40).into_bytes();
+    let listing = Listing::new(vec![Entry {
+        name: "hello.txt".into(),
+        kind: EntryKind::File,
+        id: Id(*blake3::hash(&content).as_bytes()),
+        size: content.len() as u64,
+    }])
+    .unwrap();
+    vec![
+        (
+            "empty-listing",
+            vec![(ObjectKind::FolderListing, Listing::empty().encode())],
+        ),
+        (
+            "two-objects",
+            // Written listing first (id 90b1…), so the index must reorder: content (437d…) first.
+            vec![
+                (ObjectKind::FolderListing, listing.encode()),
+                (ObjectKind::Content, content),
+            ],
+        ),
+    ]
 }
 
 #[test]
-#[ignore = "prints the vector; run by hand to regenerate tests/vectors/pack.json"]
-fn print_pack_vector() {
-    let root = tempfile::tempdir().unwrap();
-    let mut w = PackWriter::create(root.path()).unwrap();
-    w.add_record(ObjectKind::FolderListing, &Listing::empty().encode())
-        .unwrap();
-    let path = w.finish(root.path()).unwrap().unwrap();
-    println!(
-        "[\n  {{\"name\": \"empty-listing\", \"file\": \"{}\", \"hex\": \"{}\"}}\n]",
-        path.file_name().unwrap().to_str().unwrap(),
-        hex(&std::fs::read(&path).unwrap())
-    );
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/pack.json"]
+fn print_pack_vectors() {
+    let mut rows = Vec::new();
+    for (name, objects) in pack_vector_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut w = PackWriter::create(root.path()).unwrap();
+        for (kind, bytes) in &objects {
+            match kind {
+                ObjectKind::Content => w.add_content(bytes).unwrap(),
+                _ => w.add_record(*kind, bytes).unwrap(),
+            };
+        }
+        let path = w.finish(root.path()).unwrap().unwrap();
+        let objects: Vec<String> = objects
+            .iter()
+            .map(|(k, b)| format!("{{\"kind\": {}, \"hex\": \"{}\"}}", *k as u8, hex(b)))
+            .collect();
+        rows.push(format!(
+            "  {{\"name\": \"{name}\", \"file\": \"{}\", \"hex\": \"{}\", \"objects\": [{}]}}",
+            path.file_name().unwrap().to_str().unwrap(),
+            hex(&std::fs::read(&path).unwrap()),
+            objects.join(", ")
+        ));
+    }
+    println!("[\n{}\n]", rows.join(",\n"));
 }
 
 #[test]
@@ -322,15 +372,26 @@ fn pack_vector_holds() {
         let path = root.path().join(&v.file);
         std::fs::write(&path, unhex(&v.hex)).unwrap();
         let r = PackReader::open(&path).unwrap_or_else(|e| panic!("{}: {e}", v.name));
-        assert_eq!(r.entries().len(), 1, "{}", v.name);
-        let e = r.entries()[0];
-        assert_eq!(e.kind, ObjectKind::FolderListing, "{}", v.name);
-        assert_eq!(e.id, Listing::empty().id(), "{}", v.name);
-        assert_eq!(
-            r.read_record(&e).unwrap(),
-            Listing::empty().encode(),
-            "{}",
-            v.name
-        );
+        assert_eq!(r.entries().len(), v.objects.len(), "{}", v.name);
+        // The reader checks every fingerprint; each object must come back byte for byte.
+        let mut found: Vec<(u8, String)> = r
+            .entries()
+            .iter()
+            .map(|e| {
+                let bytes = if e.kind == ObjectKind::Content {
+                    let mut out = Vec::new();
+                    r.copy_content(e, &mut out).unwrap();
+                    out
+                } else {
+                    r.read_record(e).unwrap()
+                };
+                (e.kind as u8, hex(&bytes))
+            })
+            .collect();
+        let mut expected: Vec<(u8, String)> =
+            v.objects.into_iter().map(|o| (o.kind, o.hex)).collect();
+        found.sort();
+        expected.sort();
+        assert_eq!(found, expected, "{}", v.name);
     }
 }
