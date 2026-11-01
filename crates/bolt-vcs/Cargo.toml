@@ -15,6 +15,7 @@ fault-injection = ["bolt-vcs-core/fault-injection"]
 bolt-vcs-core = { path = "../bolt-vcs-core" }
 bolt-vcs-platform = { path = "../bolt-vcs-platform" }
 clap = { version = "4.6.7", features = ["derive"] }
+jiff = "0.2.38"
 serde_json = "1.0.154"
 
 [lints]

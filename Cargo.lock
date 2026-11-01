@@ -141,6 +141,7 @@ dependencies = [
  "bolt-vcs-platform",
  "clap",
  "insta",
+ "jiff",
  "serde_json",
  "tempfile",
 ]

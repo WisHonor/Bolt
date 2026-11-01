@@ -5,6 +5,9 @@ mod output;
 use std::process::ExitCode;
 
 use bolt_core::config::{ConfigError, load_identity, now_person};
+use bolt_core::diff::{ChangeKind, diff_saves};
+use bolt_core::history::{ResolveError, line_history, resolve, short_change_ids};
+use bolt_core::id::Id;
 use bolt_core::repo::{RepoError, Repository};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
@@ -72,16 +75,33 @@ impl From<SaveError> for Failure {
     }
 }
 
+impl From<ResolveError> for Failure {
+    fn from(e: ResolveError) -> Failure {
+        let hint = match &e {
+            ResolveError::NotFound(_) => Some("See your saves with: bolt history".to_owned()),
+            ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
+            ResolveError::Repo(r) => r.hint(),
+        };
+        Failure {
+            hint,
+            message: e.to_string(),
+        }
+    }
+}
+
 impl From<std::io::Error> for Failure {
     fn from(e: std::io::Error) -> Failure {
         RepoError::from(e).into()
     }
 }
 
-/// The short form of a save's change ID.
-fn short_id(save: &Save) -> String {
-    // shortcut: 4 letters may not be unique; Task 12 adds the shortest-unique-prefix rule.
-    save.change_id.to_letters().chars().take(4).collect()
+/// The shortest unique form of a save's change ID among the line's saves (and this one).
+fn short_of(repo: &Repository, id: &Id, save: &Save) -> Result<String, Failure> {
+    let mut saves = line_history(repo)?;
+    if !saves.iter().any(|(i, _)| i == id) {
+        saves.push((*id, save.clone()));
+    }
+    Ok(short_change_ids(&saves).remove(id).unwrap_or_default())
 }
 
 fn start(json: bool) -> Result<(), Failure> {
@@ -94,7 +114,7 @@ fn start(json: bool) -> Result<(), Failure> {
         hint: None,
     })?;
     let save = repo.store().save(id, repo.signatures_allowed())?;
-    let short = &short_id(&save);
+    let short = &short_of(&repo, id, &save)?;
     if json {
         println!(
             "{}",
@@ -137,7 +157,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
             save,
             changed_files,
         } => {
-            let short = short_id(&save);
+            let short = short_of(&repo, &save_id, &save)?;
             if json {
                 println!(
                     "{}",
@@ -164,10 +184,122 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 println!(
                     "Nothing to save: no changes since your last save ({}).",
-                    short_id(&last)
+                    short_of(&repo, &current, &last)?
                 );
             }
         }
+    }
+    Ok(())
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn history(json: bool) -> Result<(), Failure> {
+    let repo = Repository::discover(&std::env::current_dir()?)?;
+    let saves = line_history(&repo)?;
+    let shorts = short_change_ids(&saves);
+    if json {
+        let line = match &repo.current()?.1.state.position {
+            bolt_core::diary::Position::OnLine(name) => json!(name),
+            bolt_core::diary::Position::AtSave(_) => json!(null),
+        };
+        let list: Vec<_> = saves
+            .iter()
+            .map(|(id, s)| output::save_json(id, s, &shorts[id]))
+            .collect();
+        println!(
+            "{}",
+            json!({"bolt_json": BOLT_JSON, "line": line, "saves": list})
+        );
+    } else {
+        let now = now_ms();
+        for (id, s) in &saves {
+            let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
+            let title = s.message.lines().next().unwrap_or_default();
+            println!("{}  {when}  {}  {title}", shorts[id], s.author.name);
+        }
+    }
+    Ok(())
+}
+
+fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
+    let repo = Repository::discover(&std::env::current_dir()?)?;
+    let id = match text {
+        Some(t) => resolve(&repo, t)?,
+        None => line_history(&repo)?
+            .first()
+            .map(|(id, _)| *id)
+            .ok_or_else(|| Failure {
+                message: "This line has no saves.".into(),
+                hint: None,
+            })?,
+    };
+    let store = repo.store();
+    let save = store.save(&id, repo.signatures_allowed())?;
+    let old_root = match save.parents.first() {
+        Some(p) => Some(store.save(p, repo.signatures_allowed())?.root),
+        None => None,
+    };
+    let changes = diff_saves(store, old_root, save.root)?;
+    let short = short_of(&repo, &id, &save)?;
+    if json {
+        let list: Vec<_> = changes
+            .iter()
+            .map(|c| {
+                json!({
+                    "path": c.path,
+                    "change": match c.change {
+                        ChangeKind::Added => "added",
+                        ChangeKind::Removed => "removed",
+                        ChangeKind::Modified => "modified",
+                        ChangeKind::KindChanged => "kind-changed",
+                    },
+                    "kind": c.kind.as_str(),
+                    "old_size": c.old_size,
+                    "new_size": c.new_size,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            json!({"bolt_json": BOLT_JSON, "save": output::save_json(&id, &save, &short), "changes": list})
+        );
+        return Ok(());
+    }
+    let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
+    println!("Save {short} · {} · {when}", save.author.name);
+    println!(
+        "{}
+",
+        save.message.trim_end()
+    );
+    let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
+    for c in &changes {
+        let p = &c.path;
+        match c.change {
+            ChangeKind::Added => println!("  added     {p}  ({})", size(c.new_size)),
+            ChangeKind::Removed => println!("  removed   {p}  ({})", size(c.old_size)),
+            ChangeKind::Modified => {
+                println!(
+                    "  modified  {p}  ({} → {})",
+                    size(c.old_size),
+                    size(c.new_size)
+                );
+            }
+            ChangeKind::KindChanged => {
+                let old = c.old_kind.map_or("none", |k| k.as_str());
+                println!("  changed   {p}  ({old} → {})", c.kind.as_str());
+            }
+        }
+    }
+    if changes.is_empty() {
+        println!("  (no file changes)");
     }
     Ok(())
 }
@@ -177,10 +309,8 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Start => start(cli.json),
         Command::Save { message } => save(cli.json, message),
-        Command::History | Command::Show { .. } => Err(Failure {
-            message: "This command is not ready yet.".into(),
-            hint: None,
-        }),
+        Command::History => history(cli.json),
+        Command::Show { save } => show(cli.json, save.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

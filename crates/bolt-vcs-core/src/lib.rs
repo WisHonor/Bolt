@@ -6,6 +6,7 @@ pub mod diary;
 pub mod diff;
 pub mod encoding;
 pub mod fsio;
+pub mod history;
 pub mod id;
 pub mod listing;
 pub mod names;

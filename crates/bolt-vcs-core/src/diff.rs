@@ -19,6 +19,8 @@ pub struct FileChange {
     pub change: ChangeKind,
     /// The new kind, or the old one for a removed file.
     pub kind: EntryKind,
+    /// The kind before the change, if the path had a file.
+    pub old_kind: Option<EntryKind>,
     pub old_size: Option<u64>,
     pub new_size: Option<u64>,
 }
@@ -87,6 +89,7 @@ fn diff_folders(
             path,
             change,
             kind: shown.kind,
+            old_kind: fo.map(|e| e.kind),
             old_size: fo.map(|e| e.size),
             new_size: fnew.map(|e| e.size),
         });
