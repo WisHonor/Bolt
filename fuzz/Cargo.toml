@@ -1,0 +1,58 @@
+[package]
+name = "bolt-vcs-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+bolt-vcs-core = { path = "../crates/bolt-vcs-core" }
+
+# Not part of the main workspace, so `cargo test --workspace` and clippy never touch it.
+[workspace]
+
+[[bin]]
+name = "decode_listing"
+path = "fuzz_targets/decode_listing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_save"
+path = "fuzz_targets/decode_save.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_diary"
+path = "fuzz_targets/decode_diary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_pack"
+path = "fuzz_targets/open_pack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "name_rules"
+path = "fuzz_targets/name_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format_file"
+path = "fuzz_targets/format_file.rs"
+test = false
+doc = false
+bench = false

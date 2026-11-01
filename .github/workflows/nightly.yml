@@ -1,0 +1,34 @@
+name: Nightly fuzzing
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches: [milestone-1]
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      # 300 s per target nightly; 60 s on pushes so a run finishes quickly.
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '300' || '60' }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz every target
+        run: |
+          for t in decode_listing decode_save decode_diary open_pack name_rules format_file; do
+            cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 || exit 1
+          done
+      - name: Upload crash files
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
