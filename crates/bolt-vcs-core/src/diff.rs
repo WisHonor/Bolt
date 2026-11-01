@@ -80,6 +80,7 @@ enum Step {
     },
 }
 
+/// A name in a folder that the walk has not come to yet.
 struct Todo {
     name: String,
     /// How long the path of the folder holding the name is.

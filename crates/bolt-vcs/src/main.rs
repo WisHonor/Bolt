@@ -258,11 +258,11 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     // Counting first holds the saves to the limits and reads them for damage before anything is
     // printed, so a save that can't be listed prints only the error. The changes are then
     // printed as the walk finds them, and none is kept.
-    let changes = count_changes(store, old_root, save.root)?;
+    let count = count_changes(store, old_root, save.root)?;
     let short = short_of(&repo, &id, &save)?;
     if json {
-        // The document `json!` would make, in pieces: it keeps its keys in order, so `changes`
-        // comes between `bolt_json` and `save`.
+        // The document `json!` would make, in pieces: serde_json writes an object's keys in
+        // alphabetical order, so `changes` comes between `bolt_json` and `save`.
         print!("{{\"bolt_json\":{BOLT_JSON},\"changes\":[");
         let mut comma = "";
         for_each_change(store, old_root, save.root, |c| {
@@ -313,7 +313,7 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
         }
         Ok::<(), Failure>(())
     })?;
-    if changes == 0 {
+    if count == 0 {
         println!("  (no file changes)");
     }
     Ok(())
