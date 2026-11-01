@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 2
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 3
 
 ## 1. Vision
 
@@ -79,7 +79,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T3 | BLAKE3 hashing, zstd compression | Keep; settle details (hashing rules, skipping already-compressed data) | 5, 9 |
 | T4 | Objects: blobs, trees, saves, refs, plus an operation log | Mostly keep; likely add chunk lists and conflict entries; separate immutable objects from mutable state | 5–7, 10 |
 | T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | Mostly keep; author and committer kept separately with time zones (required by decision 002); a long random change ID; room for extensions | 6 |
-| T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | Keep, with guardrails against accidental huge or secret saves | 3 |
+| T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | Keep; the hardest feature on the list, so design the format early and build it late | 7 |
 | T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Keep; settle big-file identity first; dedup gains depend on file format | 5, 9, 13, 14 |
@@ -96,7 +96,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 2. Git interoperability scope: none, import only, or a two-way bridge → [decision 002](decisions/002-git-compatibility.md)
 
 **Stage 2 — Core model** (baked into every repository; hardest to change)
-- [ ] 3. Working-copy model: is your folder a live draft save (jj) or separate until you save (Git)? Tracking new files, partial saves, shelf
+- [x] 3. Working-copy model: is your folder a live draft save (jj) or separate until you save (Git)? Tracking new files, partial saves, shelf → [decision 003](decisions/003-working-copy-model.md)
 - [ ] 4. What a project can contain: path rules, line endings, executable bit, symlinks, empty folders, nested projects
 - [ ] 5. Object identity: what is hashed and how, ID format, canonical byte encoding, big-file identity, objects known but not downloaded
 - [ ] 6. The save object: fields, change IDs (generation, display, divergence), room for signatures and move hints
@@ -119,7 +119,23 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [ ] 17. Commands, names and aliases; error and output style (human-readable and `--json`)
 - [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off
 
-## 5. Risks and watch-outs
+## 5. Design
+
+The current design, by area. Each part links to the decision that set it.
+
+### 5.1 Your project folder and saves ([decision 003](decisions/003-working-copy-model.md))
+
+**In plain words.** Your project folder is separate from history: nothing enters history until you run `bolt save`. But Bolt never destroys unsaved work without keeping a copy first, so `undo` can always bring it back. It works like an IDE's local history, built into the version control system.
+
+- **Saving.** `bolt save "msg"` records every change in the folder; `bolt save <files or folders> "msg"` records only those. Choosing parts of a file comes later.
+- **Tracking.** New files are tracked automatically (there is no `add` step) unless ignore rules exclude them. A save that adds unusually much at once asks for confirmation first; the threshold is set per preset (topic 16), and a flag skips the question for scripts.
+- **Safety copies.** Before any command overwrites or removes unsaved work (`discard`, `goto`, `combine`, `undo`, `redo`, `shelf`), Bolt stores the current content of the affected files and records it in the operation log. Only files about to be touched are copied. Safety copies live in the normal object store, so content that is already stored costs nothing extra.
+- **Shelf.** `bolt shelf` sets unsaved changes aside as a hidden save and restores the folder; shelving is undoable.
+- **`goto` with unsaved changes.** Changes come along when nothing collides; otherwise Bolt stops and offers to shelve, save or discard them.
+- **Conflicts.** A save can contain unresolved conflicts, and the save records them (topic 7).
+- **`status`** only reads; it never writes to the store.
+
+## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
 
@@ -128,9 +144,9 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 3. **Precise claims.** Git is heavily optimized for code repositories; big files are where Bolt can clearly win. Git LFS does have locking (`git lfs lock`), and Git has partial clone (`--filter=blob:none`), which skips old file contents. The real problem is that both are add-ons: awkward, easy to bypass, unevenly supported by hosts.
 4. **Dedup depends on file format.** Chunking saves a lot when edits leave most bytes untouched (WAV, uncompressed source assets, appended datasets) and little on already-compressed formats (PNG, JPEG, MP4, ZIP-based files) or a retrained model where every weight changed. *Response:* measure on a real-asset corpus before claiming savings (topic 9).
 5. **Shared vs. local settings.** `.bolt/` is private and never copied, but chunk, lock and ignore rules must reach every teammate. *Response:* a versioned, declarative project file plus private local config (topics 8, 16). The shared file comes from strangers on `copy`, so it must never run commands or point to programs; Git keeps hooks and filter commands local for this reason.
-6. **Undo has edges.** Undo can't recall what others already received; undoing `discard`/`goto` requires the thrown-away files to be captured first (costly with large assets); undo history keeps old data alive. *Response:* explicit semantics per command, an undo window and a cleanup policy (topic 10).
-7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* preset ignore rules, a confirmation when a save adds unusually large or many new files, secret warnings, and a deliberate rule for new files (topic 3).
-8. **The working-copy model drives undo, conflicts and shelving.** The brief mixes Git (explicit save, shelf) and jj (operation log, sticky conflicts). In jj the working folder *is* a save kept up to date, which makes those features fall out naturally. *Response:* decided first among the core-model topics (topic 3).
+6. **Undo has edges.** Undo can't recall what others already received, and undo history keeps old data alive. Undoing `discard`/`goto` is answered by decision 003: safety copies capture unsaved work before it is overwritten. *Response:* explicit semantics per command, an undo window and a cleanup policy (topic 10).
+7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* new files are tracked automatically and unusually large saves ask first (decision 003); preset ignore rules (topic 16); secret warnings (topic 18).
+8. **The working-copy model drives undo, conflicts and shelving.** *Answered by decision 003:* a separate folder with automatic safety copies.
 9. **File-model basics are missing**: line endings, executable bit, symlinks, empty folders, path encoding, case and Unicode collisions, nested projects (topic 4).
 10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission.
 11. **Big-file identity.** A file's ID can be the hash of its bytes (same bytes always get the same ID, whatever the chunking settings) or the hash of its chunk list (a 50 GB download can be checked piece by piece, but chunking parameters freeze forever). It is the bottom brick of the format (topic 5).
@@ -140,11 +156,12 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 15. **Build order.** Answered by decision 001: test infrastructure is built with the object store, a minimal Git importer follows saves and history, and chunked big files come before lines and combine. Locking waits for the server (v0.3).
 16. **A data-integrity tool written mostly by an AI while the owner learns Rust.** Subtle bugs can look fine in review. *Proposed rails, pending the owner's approval:* spec before code for anything on disk, test vectors for every format, `#![forbid(unsafe_code)]` in the engine, no panics in library code, small changes, and the owner reads every module that writes to disk.
 
-## 6. Open questions and deferred decisions
+## 7. Open questions and deferred decisions
 
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects (open-source Unity projects first) for benchmarks and dedup measurements (topics 9, 18).
-- **CI:** GitHub Actions on Windows, macOS and Linux, set up as the first coding step (during design there is nothing to test). Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; revisit repository visibility then.
+- **CI:** GitHub Actions on Windows, macOS and Linux, set up as the first coding step (during design there is nothing to test). Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; revisit repository visibility then. In the same step, add a `.gitattributes` that stops Git converting line endings in this repo, so byte-exact test files stay byte-exact on Windows.
+- **Very large safety copies:** cap their size, or expire them sooner than other undo data? (topic 10)
 
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
 - **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before any public release: the `.bolt/` folder name gets baked into every repository.]
@@ -158,7 +175,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Live two-way Git sync.** [Not promised (decision 002); the importer's commit-mapping table keeps the door open.]
 - **Perforce import.** Many game studios use Perforce; a natural second importer after Git. [Later.]
 
-## 7. Prior art
+## 8. Prior art
 
 Learn from these; don't copy them.
 
@@ -178,7 +195,7 @@ Learn from these; don't copy them.
 | Git partial clone, sparse checkout, Scalar | Git's own answer to very large repositories |
 | Fossil | A whole repository in one SQLite file |
 
-## 8. Glossary
+## 9. Glossary
 
 Working names; command names can still change (topic 17).
 
@@ -192,3 +209,5 @@ Working names; command names can still change (topic 17).
 - **Chunk**: a piece of a big file. Identical pieces are stored once.
 - **Line**: a named line of work (Git: branch).
 - **Operation log**: a diary of every command that changed the repository; it is what makes undo possible.
+- **Safety copy**: a copy of unsaved work that Bolt keeps automatically before a command overwrites it, so undo can bring it back.
+- **Shelf**: a place to set unsaved changes aside and bring them back later (Git: stash).

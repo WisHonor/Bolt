@@ -16,7 +16,7 @@ A new version control system with its own engine (not a Git wrapper), written in
 - Plain language first (everyday analogies welcome), then the technical detail.
 - One topic at a time, in agenda order: explain it, give 2–3 realistic options with trade-offs and which existing VCS does each, recommend one, then wait for the owner's decision.
 - Be honest: push back on bad ideas, call out over-ambition, say when something is hard or already solved elsewhere.
-- After each decision: write the decision record, then update `docs/design.md` (the relevant section, the agenda checkbox, risks, open and deferred lists).
+- After each decision: write the decision record, update `docs/design.md` (the relevant section, the agenda checkbox, risks, open and deferred lists), then commit and push.
 
 ## Non-negotiable principles
 1. Never lose or corrupt user data: atomic writes, repository locking, hash verification on every read and every received object, crash safety.
