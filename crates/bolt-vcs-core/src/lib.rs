@@ -12,6 +12,7 @@ pub mod listing;
 pub mod names;
 pub mod pack;
 pub mod repo;
+pub mod safe_fs;
 pub mod save;
 pub mod snapshot;
 pub mod store;

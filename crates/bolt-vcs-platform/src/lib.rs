@@ -3,8 +3,28 @@
 //! This is the only crate where `unsafe` is allowed, and only for operating-system calls.
 //! The owner reviews every line of it.
 
+use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
+
+/// Makes `options` never follow a link at the last part of the path, so the caller can refuse
+/// it. Unix: opening a link fails (`O_NOFOLLOW`), and opening a named pipe doesn't wait for
+/// the other end (`O_NONBLOCK`; regular files ignore it). Windows: a link, junction or other
+/// reparse point opens as itself (`FILE_FLAG_OPEN_REPARSE_POINT`). Replaces any custom flags
+/// already set.
+pub fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+    }
+}
 
 /// Hides `path` in file browsers. On Windows this sets the "hidden" attribute; elsewhere a
 /// leading dot already hides it, so this only checks that `path` exists.

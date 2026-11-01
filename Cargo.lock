@@ -170,6 +170,7 @@ dependencies = [
 name = "bolt-vcs-platform"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "windows-sys",
 ]
 
