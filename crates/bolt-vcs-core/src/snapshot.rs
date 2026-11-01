@@ -250,10 +250,11 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
                 detail: describe(root, err),
             });
         }
-        // `ignore` drops read errors on ignore files without a word, so check them here.
+        // `ignore` drops read errors on ignore files without a word (an unreadable file, a
+        // folder, bytes that aren't UTF-8), so read each one whole here first.
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             let file = entry.path().join(".boltignore");
-            match File::open(&file) {
+            match fs::read_to_string(&file) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => {
                     return Err(SaveError::Ignore {
                         detail: format!("{}: {e}", shown(file.strip_prefix(root).unwrap_or(&file))),
@@ -855,6 +856,36 @@ mod tests {
             other => panic!("{:?}", other.map(|_| ())),
         }
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// The save must stop with `Ignore` naming `.boltignore`, and change nothing.
+    fn assert_ignore_problem(repo: &mut Repository) {
+        let head = repo.head().unwrap();
+        match save_now(repo) {
+            Err(SaveError::Ignore { detail }) => {
+                assert!(detail.starts_with(".boltignore: "), "{detail}");
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn non_utf8_boltignore_stops_the_save() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "secret.key", b"x");
+        // A byte that is not UTF-8: `ignore` would stop reading there and drop `secret.key`.
+        write(dir.path(), ".boltignore", b"# \xff\nsecret.key\n");
+        assert_ignore_problem(&mut repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boltignore_that_is_a_folder_stops_the_save() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "secret.key", b"x");
+        fs::create_dir(dir.path().join(".boltignore")).unwrap();
+        assert_ignore_problem(&mut repo);
     }
 
     #[test]
