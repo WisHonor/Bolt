@@ -181,6 +181,22 @@ mod tests {
         assert_eq!(opened.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_comes_back_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("head");
+        fs::write(&path, b"abc").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&path).is_ok() {
+            eprintln!("note: skipped, this user can read any file (root)");
+            return;
+        }
+        let read = read_capped(&path, 3);
+        assert_eq!(read.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
     #[test]
     fn over_the_cap_is_refused() {
         let dir = tempfile::tempdir().unwrap();
