@@ -3,6 +3,7 @@
 
 pub mod encoding;
 pub mod id;
+pub mod names;
 
 #[cfg(test)]
 mod tests {

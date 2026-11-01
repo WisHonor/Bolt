@@ -17,6 +17,7 @@ workspace = true
 blake3 = "1.8.7"
 getrandom = "0.4.3"
 thiserror = "2.0.21"
+unicode-normalization = "0.1.26"
 
 [dev-dependencies]
 proptest = "1.12.0"
