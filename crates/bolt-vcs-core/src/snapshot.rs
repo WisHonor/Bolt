@@ -7,9 +7,10 @@ use std::fmt::Write as _;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{Match, WalkBuilder};
 
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::diff_saves;
@@ -236,28 +237,90 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
-/// What is wrong with the `.boltignore` in `dir`, named by its project path. A missing one is
-/// fine; one that exists must be a regular UTF-8 file of at most 1 MiB (storage-format.md §12).
-fn boltignore_problem(root: &Path, dir: &Path) -> Option<String> {
+/// The rules of the `.boltignore` in `dir`, read once through `safe_fs` (storage-format.md §12:
+/// a regular UTF-8 file of at most 1 MiB) and parsed line by line as `ignore` would; none if
+/// it is missing. A problem names the file by its project path.
+fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, String> {
     let file = dir.join(".boltignore");
-    let problem = match safe_fs::read_capped(&file, safe_fs::MAX_BOLTIGNORE_BYTES) {
-        Ok(bytes) => std::str::from_utf8(&bytes).err()?.to_string(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
-        Err(e) => e.to_string(),
-    };
     let rel = shown(file.strip_prefix(root).unwrap_or(&file));
-    Some(format!("{rel}: {problem}"))
+    let bytes = match safe_fs::read_capped(&file, safe_fs::MAX_BOLTIGNORE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Gitignore::empty()),
+        Err(e) => return Err(format!("{rel}: {e}")),
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|e| format!("{rel}: {e}"))?;
+    let mut builder = GitignoreBuilder::new(dir);
+    let mut bad = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        // Like Git, a byte order mark at the start is not part of the first pattern.
+        let line = if i == 0 {
+            line.trim_start_matches('\u{feff}')
+        } else {
+            line
+        };
+        if let Err(e) = builder.add_line(Some(file.clone()), line) {
+            bad.push(format!("{rel}: line {}: {e}", i + 1));
+        }
+    }
+    if !bad.is_empty() {
+        return Err(bad.join("; "));
+    }
+    builder.build().map_err(|e| format!("{rel}: {e}"))
+}
+
+/// The `.boltignore` rules of the folders a walk is inside, nearest last, and the first problem
+/// found with one of those files.
+struct IgnoreRules {
+    root: PathBuf,
+    stack: Vec<(PathBuf, Gitignore)>,
+    problem: Option<String>,
+}
+
+impl IgnoreRules {
+    /// Whether the walk keeps `path`, decided as `ignore` decides for its own ignore files: the
+    /// nearest folder's file with a matching pattern wins, and in it the last such pattern. A
+    /// folder that is kept adds its own rules; one whose `.boltignore` fails is not entered, and
+    /// the problem is kept.
+    fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
+        // The walk is depth first, so the rules of folders `path` is not in are done with.
+        while self
+            .stack
+            .last()
+            .is_some_and(|(dir, _)| !path.starts_with(dir))
+        {
+            self.stack.pop();
+        }
+        for (_, rules) in self.stack.iter().rev() {
+            match rules.matched(path, is_dir) {
+                Match::Ignore(_) => return false,
+                Match::Whitelist(_) => break,
+                Match::None => {}
+            }
+        }
+        if is_dir {
+            match boltignore_rules(&self.root, path) {
+                Ok(rules) if rules.is_empty() => {}
+                Ok(rules) => self.stack.push((path.to_owned(), rules)),
+                Err(detail) => {
+                    self.problem.get_or_insert(detail);
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 fn walk(root: &Path) -> Result<Folders, SaveError> {
     let mut folders = Folders::from([(String::new(), Vec::new())]);
-    // `ignore` opens each folder's .boltignore itself before it hands the folder out: it follows
-    // links, reads without a limit and drops read errors without a word. So each one is checked
-    // first, the top folder's here and every other one before `ignore` enters its folder.
-    if let Some(detail) = boltignore_problem(root, root) {
-        return Err(SaveError::Ignore { detail });
-    }
-    let problem = Arc::new(OnceLock::new());
+    // Bolt reads each .boltignore itself, once, and applies its rules here: `ignore` would open
+    // the file again by path, following links and reading without a limit.
+    let top = boltignore_rules(root, root).map_err(|detail| SaveError::Ignore { detail })?;
+    let rules = Arc::new(Mutex::new(IgnoreRules {
+        root: root.to_owned(),
+        stack: vec![(root.to_owned(), top)],
+        problem: None,
+    }));
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -266,36 +329,20 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
         .ignore(false)
         .parents(false)
         .follow_links(false)
-        .add_custom_ignore_filename(".boltignore")
         .filter_entry({
-            let (root, problem) = (root.to_owned(), Arc::clone(&problem));
+            let rules = Arc::clone(&rules);
             move |e| {
-                if !e.file_type().is_some_and(|t| t.is_dir()) {
-                    return true;
-                }
-                if matches!(e.file_name().to_str(), Some(".bolt" | ".git")) {
+                let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+                if is_dir && matches!(e.file_name().to_str(), Some(".bolt" | ".git")) {
                     return false;
                 }
-                match boltignore_problem(&root, e.path()) {
-                    // Not entered, so `ignore` never opens the file; the save stops below.
-                    Some(detail) => {
-                        let _ = problem.set(detail);
-                        false
-                    }
-                    None => true,
-                }
+                let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
+                rules.keeps(e.path(), is_dir)
             }
         })
         .build();
     for item in walker {
         let entry = item.map_err(|e| walk_error(root, e))?;
-        // A broken .boltignore comes with its folder's entry, not as an error item; going on
-        // without it would save the files it was meant to keep out.
-        if let Some(err) = entry.error() {
-            return Err(SaveError::Ignore {
-                detail: describe(root, err),
-            });
-        }
         let path = entry.path();
         let rel_path = path.strip_prefix(root).unwrap_or(path);
         let rel = shown(rel_path);
@@ -337,10 +384,14 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
             executable: executable_bits(&meta),
         });
     }
-    if let Some(detail) = problem.get() {
-        return Err(SaveError::Ignore {
-            detail: detail.clone(),
-        });
+    // Going on without a folder's .boltignore would save the files it was meant to keep out.
+    let problem = rules
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .problem
+        .take();
+    if let Some(detail) = problem {
+        return Err(SaveError::Ignore { detail });
     }
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -911,6 +962,63 @@ mod tests {
         save_now(&mut repo).unwrap();
         write(dir.path(), "notes.txt", b"x");
         assert!(matches!(save_now(&mut repo), Ok(SaveOutcome::Saved { .. })));
+    }
+
+    #[test]
+    fn boltignore_rules_work_as_in_git() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        // A byte order mark is not part of the first pattern; the last matching pattern wins;
+        // `build/` matches folders only; nothing comes back from inside an ignored folder;
+        // `.git` never comes back.
+        let top = "\u{feff}*.log\n!keep.log\nbuild/\n!build/keep.txt\n!.git/\n";
+        write(root, ".boltignore", top.as_bytes());
+        write(root, "a.log", b"x");
+        write(root, "keep.log", b"x");
+        write(root, "build/out.bin", b"x");
+        write(root, "build/keep.txt", b"x");
+        write(root, "src/build", b"a file, not a folder");
+        write(root, ".git/config", b"x");
+        // The nearest .boltignore decides first: `sub` takes one .log file back, and the top
+        // one still ignores the other.
+        write(root, "sub/.boltignore", b"!debug.log\n");
+        write(root, "sub/debug.log", b"x");
+        write(root, "sub/other.log", b"x");
+        let id = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), id);
+        let paths: Vec<&str> = tree.keys().map(String::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                ".boltignore",
+                "keep.log",
+                "src",
+                "src/build",
+                "sub",
+                "sub/.boltignore",
+                "sub/debug.log"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folders_ignore_rules_end_with_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, ".boltignore", b"*.log\n");
+        write(root, "a/.boltignore", b"!x.log\n");
+        fs::create_dir(root.join("b")).unwrap();
+        let top = boltignore_rules(root, root).unwrap();
+        let mut rules = IgnoreRules {
+            root: root.to_owned(),
+            stack: vec![(root.to_owned(), top)],
+            problem: None,
+        };
+        // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach.
+        assert!(rules.keeps(&root.join("a"), true));
+        assert!(rules.keeps(&root.join("a").join("x.log"), false));
+        assert!(rules.keeps(&root.join("b"), true));
+        assert!(!rules.keeps(&root.join("b").join("x.log"), false));
     }
 
     #[test]
