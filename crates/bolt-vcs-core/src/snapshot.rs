@@ -809,14 +809,14 @@ mod tests {
         write(dir.path(), "sub/locked.txt", b"secret");
         let locked = dir.path().join("sub/locked.txt");
         #[cfg(unix)]
-        let _guard = {
+        {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
             // root reads everything, so there is nothing to test.
             if fs::read(&locked).is_ok() {
                 return;
             }
-        };
+        }
         #[cfg(windows)]
         let _guard = {
             use std::os::windows::fs::OpenOptionsExt;
