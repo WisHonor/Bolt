@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 16
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 17
 
 ## 1. Vision
 
@@ -116,7 +116,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 
 **Stage 5 — Product surface and wrap-up**
 - [x] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax → [decision 016](decisions/016-presets.md)
-- [ ] 17. Commands, names and aliases; error and output style (human-readable and `--json`)
+- [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
 - [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off
 
 ## 5. Design
@@ -302,6 +302,21 @@ head ─► redo     main → ptvz
 - **v0.1 presets:** Code (apps, websites, libraries, scripts), Game (Unity, Unreal, Godot), Custom. AI/data and Design/video later.
 - **Code preset:** no locks, markers for all text, ignore lists for every detected language, `.env` ignored, asks before saving more than about 100 MB at once, normal chunking for big files.
 - **Changing presets:** `bolt setup` shows the exact changes and applies them as an undoable change.
+
+### 5.15 Commands and messages ([decision 017](decisions/017-commands-and-output.md))
+
+**In plain words.** Bolt uses its own friendly words (`save`, `goto`, `combine`…) but quietly accepts Git's words too, so Git users aren't stuck. Every error explains what happened, why, and what to do next.
+
+| When | Commands (Git word) |
+|---|---|
+| Starting | `start` (init) · `setup` · `import` · `export` (before 1.0) |
+| Every day | `status` · `changes` (diff) · `save` (commit) · `discard` (restore) · `undo` / `redo` · `shelf` / `unshelf` (stash) |
+| History | `history` (log) · `show` · `who` (blame) · `goto` (checkout/switch) · `reverse` (revert) |
+| Lines (v0.2) | `line` (branch) · `combine` (merge) · `resolve` · `tag` |
+| Team (v0.3) | `copy` (clone) · `get` (pull) · `send` (push) · `lock` / `unlock` / `locks` · `login` · `pin` |
+| Upkeep | `verify` (fsck) · `tidy` (gc) |
+
+- **Output:** `--json` on every command; colors and progress only in a terminal; no questions without a terminal; examples first in help.
 
 ## 6. Risks and watch-outs
 
