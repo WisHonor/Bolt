@@ -599,7 +599,9 @@ pub(crate) fn store_file(
         path: path.display().to_string(),
     };
     let stamp = |f: &File| f.metadata().map(|m| (m.len(), m.modified().ok()));
-    // The scan saw a regular file, so a link or special file here was swapped in since (RT-5).
+    // A link or special file here was swapped in since the scan (RT-5). On Windows it can also be
+    // a non-link reparse point (a cloud placeholder, say) that the scan took for an ordinary file
+    // and `safe_fs` refuses; see security.md §7.
     let mut file = safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
         if e.kind() == io::ErrorKind::InvalidInput {
             changed()
