@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod diary;
+pub mod diff;
 pub mod encoding;
 pub mod fsio;
 pub mod id;
@@ -11,6 +12,7 @@ pub mod names;
 pub mod pack;
 pub mod repo;
 pub mod save;
+pub mod snapshot;
 pub mod store;
 pub mod verify;
 

@@ -197,3 +197,122 @@ fn bolt_folder_is_hidden_on_windows() {
     env.bolt().arg("start").assert().success();
     assert!(bolt_platform::is_hidden(&env.root().join(".bolt")).unwrap());
 }
+
+#[test]
+fn save_then_nothing_to_save() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    std::fs::create_dir(env.root().join("src")).unwrap();
+    std::fs::write(env.root().join("src/b.txt"), "b").unwrap();
+    let out = env
+        .bolt()
+        .args(["save", "Add two files\n\nThe details."])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let short = stdout
+        .strip_prefix("Saved ")
+        .and_then(|s| s.strip_suffix("  \"Add two files\"  (2 files)\n"))
+        .unwrap_or_else(|| panic!("{stdout:?}"));
+    assert_eq!(short.len(), 4);
+    let out = env.bolt().args(["save", "Again"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!("Nothing to save: no changes since your last save ({short}).\n")
+    );
+}
+
+#[test]
+fn save_requires_a_message() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    for args in [&["save"][..], &["save", ""], &["save", "  \n"]] {
+        let out = env.bolt().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("error: ") && err.contains("hint: ") && err.contains("bolt save \""),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn save_json_output() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let out = env
+        .bolt()
+        .args(["--json", "save", "Add a"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let mut json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let save = &json["save"];
+    let change_id = save["change_id"].as_str().unwrap();
+    assert_eq!(save["change_id_short"], change_id[..4]);
+    assert_eq!(save["id"].as_str().unwrap().len(), 64);
+    for person in ["author", "saver"] {
+        assert!(save[person]["time_ms"].as_i64().unwrap() > 1_700_000_000_000);
+        assert!(save[person]["tz_offset_min"].is_i64());
+    }
+    let redact = |v: &mut serde_json::Value| *v = "[redacted]".into();
+    let save = &mut json["save"];
+    for key in ["id", "change_id", "change_id_short"] {
+        redact(&mut save[key]);
+    }
+    for person in ["author", "saver"] {
+        for key in ["time_ms", "tz_offset_min"] {
+            redact(&mut save[person][key]);
+        }
+    }
+    insta::assert_json_snapshot!(json);
+    let out = env
+        .bolt()
+        .args(["--json", "save", "Again"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"bolt_json": 1, "result": "nothing-changed"})
+    );
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn interrupted_save_changes_nothing() {
+    use bolt_core::repo::Repository;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let first = Repository::open(env.root()).unwrap().current().unwrap().1;
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    for n in 1.. {
+        assert!(n < 50, "bolt save never finished");
+        let out = env
+            .bolt()
+            .args(["save", "Add a"])
+            .env("BOLT_FAULT_AT", n.to_string())
+            .output()
+            .unwrap();
+        if !text(&out.stderr).contains("injected crash") {
+            assert!(n > 1, "no fault point was reached");
+            break;
+        }
+        let repo = Repository::open(env.root()).unwrap();
+        let (_, entry) = repo.current().unwrap();
+        assert_eq!(entry.state, first.state, "fault {n}");
+        let report = bolt_core::verify::verify_store(repo.packs_dir());
+        assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
+    }
+    let out = env.bolt().args(["save", "Add a"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (_, entry) = Repository::open(env.root()).unwrap().current().unwrap();
+    assert_ne!(entry.state.lines["main"], first.state.lines["main"]);
+}

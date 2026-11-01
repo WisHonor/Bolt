@@ -18,6 +18,7 @@ blake3 = "1.8.7"
 bolt-vcs-platform = { path = "../bolt-vcs-platform" }
 directories = "6.0.0"
 getrandom = "0.4.3"
+ignore = "0.4.34"
 jiff = "0.2.38"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.21"

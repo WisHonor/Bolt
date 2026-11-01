@@ -273,7 +273,7 @@ Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at mos
 ## 12. Project files (outside `.bolt/`)
 
 - **`bolt.toml`** (TOML; decisions 008 and 016). Draft keys: `preset`, `chunk-files-over`, `ask-before-saving-over`, and `[[rule]]` tables with `files`, `lockable`, `conflict-markers` and `moves-with-asset`. Unknown keys produce a warning. Final key names are settled when presets are built (milestone 6).
-- **`.boltignore`** uses exactly the `.gitignore` pattern syntax, applied from the project root. `.bolt/` and `.git/` are always ignored (decision 019).
+- **`.boltignore`** files work like `.gitignore` files: one at the project root, and optionally more in subfolders, each using exactly the `.gitignore` pattern syntax relative to its own folder. `.bolt/` and `.git/` are always ignored (decision 019).
 
 ## 13. Test vectors
 
