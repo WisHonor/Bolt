@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 9
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 10
 
 ## 1. Vision
 
@@ -80,7 +80,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T4 | Objects: blobs, trees, saves, refs, plus an operation log | Mostly keep; chunk lists added by decision 005; conflict entries in topic 7; mutable state (lines, operation log) in topics 8 and 10 | 5–7, 10 |
 | T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | **Confirmed** with additions by decision 006: author and saver with time zones, 128-bit random change ID, move notes, signature slot, extra fields | 6 |
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
-| T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
+| T7 | Operation log; `undo`/`redo` work on any action | **Confirmed** by decision 010: one diary for the whole repository, editor-style undo/redo, 30-day undo window | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
 | T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download and locking in topics 13, 14 | 5, 9, 13, 14 |
 | T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Rules live in `bolt.toml` + `.boltignore` at the project root (decision 008); preset contents in topic 16 | 8, 16 |
@@ -105,7 +105,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Stage 3 — Local engine**
 - [x] 8. Repository layout in `.bolt/`; shared vs. local config; format version, feature list, upgrades → [decision 008](decisions/008-layout-and-settings.md)
 - [x] 9. Storage engine: loose vs. packed objects, compression, deltas and full-copy cadence, chunking algorithm and thresholds, garbage collection → [decision 009](decisions/009-storage-engine.md)
-- [ ] 10. Operation log: undo/redo semantics per command, two commands at once, how long undo lasts
+- [x] 10. Operation log: undo/redo semantics per command, two commands at once, how long undo lasts → [decision 010](decisions/010-operation-log.md)
 - [ ] 11. Fast `status` and safe `goto`: file-state cache, timestamp traps, file watching, never overwriting unsaved work
 
 **Stage 4 — Collaboration** (constraints only, for now)
@@ -195,6 +195,50 @@ The current design, by area. Each part links to the decision that set it.
 - **Cleanup:** keeps everything reachable from lines, shelves and the undo window; a grace period protects anything recent; cheap cleanup is automatic, repacking happens on request with a space estimate.
 - **Checking:** every object is verified against its fingerprint on read.
 
+### 5.8 Operation log and undo ([decision 010](decisions/010-operation-log.md))
+
+**In plain words.** Bolt keeps a diary of every command that changed something. Each entry records the whole state of the repository afterwards, so `undo` simply goes back to an earlier entry, like Ctrl+Z in an editor. Changing commands take turns, and a crash can never leave a command half-done.
+
+- **Entries:** objects in the store; each holds the full state (every line, where you are, shelves), the safety copies made, its parent, and metadata.
+- **Committing:** one pack (new data + entry), then `.bolt/state/head` is replaced atomically. Folder rewrites are journaled first, so an interrupted command is finished or rolled back on the next run.
+- **Undo/redo:** new entries that copy an earlier state and restore files from safety copies; nothing is erased, and undo can jump to any entry.
+- **Other people:** undo changes only your repository; for sent saves and locks, Bolt offers the opposite action (v0.3).
+- **Concurrency:** one changing command at a time behind an OS-held lock; read-only commands never wait.
+- **Undo window:** 30 days by default (personal setting), plus an optional size budget for safety copies.
+
+**Example** (illustrative; commands and wording are settled in topic 17):
+
+```text
+$ bolt save "Add double jump"
+Saved ptvz  "Add double jump"  (2 files)
+
+$ bolt discard Assets/Scripts/Player.cs
+Threw away your unsaved changes in Assets/Scripts/Player.cs (+31 −4 lines).
+A safety copy was kept. Changed your mind? bolt undo
+
+$ bolt undo
+Undid: discard Assets/Scripts/Player.cs
+  Player.cs is back, with your +31 −4 unsaved lines.
+
+$ bolt undo
+Undid: save ptvz "Add double jump"
+  ptvz is off line main; its changes are unsaved work again.
+
+$ bolt redo
+Redid: save ptvz "Add double jump"
+```
+
+Behind the scenes, `head` points at the newest diary entry, and every entry records the full state:
+
+```text
+head ─► redo     main → ptvz
+        undo     main → kxqm
+        undo     main → ptvz   + Player.cs restored from its safety copy
+        discard  main → ptvz   + safety copy of Player.cs
+        save     main → ptvz
+        save     main → kxqm
+```
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -204,7 +248,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 3. **Precise claims.** Git is heavily optimized for code repositories; big files are where Bolt can clearly win. Git LFS does have locking (`git lfs lock`), and Git has partial clone (`--filter=blob:none`), which skips old file contents. The real problem is that both are add-ons: awkward, easy to bypass, unevenly supported by hosts.
 4. **Dedup depends on file format.** Chunking saves a lot when edits leave most bytes untouched (WAV, uncompressed source assets, appended datasets) and little on already-compressed formats (PNG, JPEG, MP4, ZIP-based files) or a retrained model where every weight changed. *Response:* measure on a real-asset corpus before claiming savings (starting parameters in decision 009; measurement in topic 18).
 5. **Shared vs. local settings.** *Answered by decision 008:* project rules in `bolt.toml` + `.boltignore`, declarative only; personal settings are never shared and can never change project rules.
-6. **Undo has edges.** Undo can't recall what others already received, and undo history keeps old data alive. Undoing `discard`/`goto` is answered by decision 003: safety copies capture unsaved work before it is overwritten. *Response:* explicit semantics per command, an undo window and a cleanup policy (topic 10).
+6. **Undo has edges.** *Answered by decisions 003 and 010:* safety copies capture unsaved work; undo restores only your own repository and offers the opposite action for things others received; a 30-day undo window, with an optional size budget for safety copies.
 7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* new files are tracked automatically and unusually large saves ask first (decision 003); preset ignore rules (topic 16); secret warnings (topic 18).
 8. **The working-copy model drives undo, conflicts and shelving.** *Answered by decision 003:* a separate folder with automatic safety copies.
 9. **File-model basics** (line endings, executable bit, symlinks, empty folders, path encoding, case and Unicode collisions, nested projects). *Answered by decision 004.*
@@ -221,8 +265,6 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects (open-source Unity projects first) for benchmarks and dedup measurements (topics 9, 18).
 - **CI:** GitHub Actions on Windows, macOS and Linux, set up as the first coding step (during design there is nothing to test). Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; revisit repository visibility then. In the same step, add a `.gitattributes` that stops Git converting line endings in this repo, so byte-exact test files stay byte-exact on Windows.
-- **Very large safety copies:** cap their size, or expire them sooner than other undo data? (topic 10)
-
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
 - **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before any public release: the `.bolt/` folder name gets baked into every repository.]
 - **Contribution licensing**: CLA or DCO. [Matters if the server is AGPL and ever dual-licensed; decide before accepting outside contributions.]
@@ -272,6 +314,7 @@ Working names; command names can still change (topic 17).
 - **Divergent**: two saves that share one change ID, usually because two people edited the same save; Bolt shows both until you keep one.
 - **Move note**: a record inside a save that a file moved, kept only when Bolt is certain.
 - **Pack**: a file in `.bolt/store/` holding many pieces of data plus an index, written in one go so a crash can't leave half of it.
+- **Undo window**: how far back undo reaches; 30 days by default.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
