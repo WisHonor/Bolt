@@ -2,6 +2,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use assert_cmd::Command;
+#[cfg(unix)]
+use bolt_core::id::Id;
+#[cfg(unix)]
+use bolt_core::listing::{Entry, EntryKind, Listing};
+#[cfg(unix)]
+use bolt_core::pack::{ObjectKind, PackWriter};
 use bolt_core::repo::FORMAT_TEXT;
 use std::path::Path;
 use tempfile::TempDir;
@@ -520,4 +526,143 @@ fn hostile_text_cannot_drive_the_terminal() {
             "{out}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A save can have paths far too long to hold together. No real folder tree can be that long, so
+// the saves below are planted through Bolt's own library.
+// ---------------------------------------------------------------------------------------------
+
+/// A listing whose every entry has the same kind and points at the same object.
+#[cfg(unix)]
+fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id) -> Id {
+    let entries = names
+        .iter()
+        .map(|name| Entry {
+            name: name.clone(),
+            kind,
+            id,
+            size: 0,
+        })
+        .collect();
+    let listing = Listing::new(entries).unwrap();
+    pack.add_record(ObjectKind::FolderListing, &listing.encode())
+        .unwrap()
+}
+
+/// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
+#[cfg(unix)]
+fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
+    use bolt_core::diary::{Action, DiaryEntry};
+    use bolt_core::id::ChangeId;
+    use bolt_core::repo::Repository;
+    use bolt_core::save::Save;
+
+    let mut repo = Repository::open(root).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let parent_id = entry.state.lines["main"];
+    let parent = repo.store().save(&parent_id, false).unwrap();
+    let mut pack = repo.new_pack().unwrap();
+    let save = Save {
+        root: build(&mut pack),
+        parents: vec![parent_id],
+        author: parent.author.clone(),
+        saver: parent.saver.clone(),
+        message: "Planted".into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: parent.extra.clone(),
+    };
+    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), save_id);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: parent.author.clone(),
+        bolt_version: "0.1.0".into(),
+        state,
+        safety_copies: vec![],
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+}
+
+/// Folders one inside the other, and files at the bottom. All names are 255 bytes, so each file
+/// has a path of about `LONG_FOLDERS * 256` bytes, 100 KB, and the 2,500 paths together are over
+/// 250 MB: far more than `bolt` is given below, in packs of only 66 KB. A save of this kind is
+/// inside the limits of the format (4,096 levels, 10 million entries), so it must be readable.
+#[cfg(unix)]
+const LONG_FOLDERS: usize = 400;
+#[cfg(unix)]
+const LONG_FILES: usize = 2500;
+
+/// The address space `bolt` gets: about 3 times what it needs to run (`save` needs about 35 MB,
+/// mostly for the stack of its scanning thread), and well under all the long paths together.
+#[cfg(unix)]
+const CAP_KB: u32 = 100_000;
+
+#[cfg(unix)]
+fn plant_long_paths(root: &Path) {
+    plant_save(root, |pack| {
+        let empty = pack.add_content(b"").unwrap();
+        let files: Vec<String> = (0..LONG_FILES).map(|i| format!("{i:0>255}")).collect();
+        let mut id = add_listing(pack, &files, EntryKind::File, empty);
+        for _ in 0..LONG_FOLDERS {
+            id = add_listing(pack, &["d".repeat(255)], EntryKind::Folder, id);
+        }
+        id
+    });
+}
+
+/// `bolt <args>` in the project, with its address space capped, so that holding too much shows
+/// as an abort ("memory allocation of … bytes failed") rather than slowing the machine down.
+/// Where the system does not enforce the cap (macOS), the command runs without one, and the test
+/// passes there without proving anything.
+#[cfg(unix)]
+fn bolt_capped(env: &Env, args: &[&str]) -> std::process::Command {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!(
+            "ulimit -v {CAP_KB} 2>/dev/null; exec \"$0\" \"$@\""
+        ))
+        .arg(assert_cmd::cargo::cargo_bin("bolt"))
+        .args(args)
+        .current_dir(env.root())
+        .env_remove("BOLT_FAULT_AT")
+        .env("BOLT_USER_NAME", "Test")
+        .env("BOLT_USER_EMAIL", "test@example.com")
+        .env("BOLT_CONFIG_DIR", env.config.path());
+    cmd
+}
+
+#[cfg(unix)]
+#[test]
+fn show_does_not_hold_every_long_path_of_a_save_at_once() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    plant_long_paths(env.root());
+    // What `show` prints is hundreds of megabytes, so it goes nowhere.
+    let out = bolt_capped(&env, &["show"])
+        .stdout(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+#[cfg(unix)]
+#[test]
+fn save_does_not_hold_every_long_path_of_the_save_before_it() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    plant_long_paths(env.root());
+    std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
+    let out = bolt_capped(&env, &["save", "my work"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The long paths are all gone from the new save, and `mine.txt` is new.
+    let want = format!("  \"my work\"  ({} files)\n", LONG_FILES + 1);
+    let stdout = text(&out.stdout);
+    assert!(stdout.ends_with(&want), "{stdout:?}");
 }
