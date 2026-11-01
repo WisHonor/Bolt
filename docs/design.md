@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 13
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 14
 
 ## 1. Vision
 
@@ -56,7 +56,7 @@ What it implies for the design:
 - **v0.2:** lines and combine (branches, merging, conflicts).
 - **v0.3:** sync and locking for small teams; big files and old versions download on demand.
 - **Before 1.0:** Git export ([decision 002](decisions/002-git-compatibility.md)). Live two-way Git sync is not promised, but nothing may block it.
-- **Later:** conflict algebra on top of decision 007, hosting platform, GUI and editor plugins. Which presets ship in which version is decided in topic 16.
+- **Later:** conflict algebra on top of decision 007, smart locks on top of decision 014, hosting platform, GUI and editor plugins. Which presets ship in which version is decided in topic 16.
 
 **Scope of this design phase.** The brief describes several products: the engine (with a Git bridge), a sync server, and a hosting platform. This phase designs the **engine** in detail, and the server and platform only as far as the engine must respect them. Each gets its own design pass before it is built.
 
@@ -82,7 +82,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | **Confirmed** by decision 010: one diary for the whole repository, editor-style undo/redo, 30-day undo window | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
-| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download: decision 013. Locking in topic 14 | 5, 9, 13, 14 |
+| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download: decision 013. Locking: decision 014 | 5, 9, 13, 14 |
 | T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Rules live in `bolt.toml` + `.boltignore` at the project root (decision 008); preset contents in topic 16 | 8, 16 |
 | T11 | On-disk format version number from day one | **Confirmed**, with a feature list, by decision 008 | 8 |
 | T12 | Crates: `bolt-core` (engine library) + `bolt` (CLI) | Keep the split; those package names are taken on crates.io, though the command can still be `bolt` | Deferred: name |
@@ -111,7 +111,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Stage 4 — Collaboration** (constraints only, for now)
 - [x] 12. Lines and combining: naming, remote lines, tags, three-way merge, renames → [decision 012](decisions/012-lines.md) (full combining design before v0.2)
 - [x] 13. Partial download and offline behaviour → [decision 013](decisions/013-local-data-and-offline.md)
-- [ ] 14. Locking semantics
+- [x] 14. Locking semantics → [decision 014](decisions/014-locking.md)
 - [ ] 15. Sync protocol, server storage model, permissions
 
 **Stage 5 — Product surface and wrap-up**
@@ -269,6 +269,19 @@ head ─► redo     main → ptvz
 - **Freeing space:** only versions the server has confirmed it holds can be dropped.
 - **Later:** partial workspaces for huge projects.
 
+### 5.12 Locking ([decision 014](decisions/014-locking.md))
+
+**In plain words.** Files that can't be merged (textures, models, engine scenes) can be locked: while you hold the lock, nobody else can send changes to that file on any line. Locks arrive with the server in v0.3; locks that follow a change until it reaches `main` come later.
+
+- **Which files:** patterns in `bolt.toml`, filled in by presets.
+- **Early warning:** lockable files stay read-only until you lock them (a personal setting turns this off).
+- **Locking:** `bolt lock <file> "<why>"`; `bolt status` shows who holds what.
+- **Release:** automatic on send, unless you ask to keep the lock.
+- **Safety net:** the server refuses changes to files someone else has locked.
+- **Forgotten locks:** maintainers can break them; the holder is told and keeps their work.
+- **Offline:** you can edit on request, with a warning; Bolt takes the lock when you're back online.
+- **Planned later:** smart locks that release once the change reaches the integration line.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -302,6 +315,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]
 - **Signed saves.** [Room reserved in the save format (decision 006).]
 - **Conflict algebra** (jj-style automatic simplification of conflicts). [Planned by the owner, after v0.2; decision 007's format already allows it.]
+- **Smart locks** (locks that follow a change until it reaches the integration line). [Planned by the owner, after v0.3; decision 014's lock records allow it.]
 - **Deltas for small text files.** [Added later as a storage feature through the `.bolt/format` feature list (decision 009).]
 - **File watcher** for faster `status`. [After v0.1, optional; it may only narrow what gets checked, never decide correctness (decision 011).]
 - **Store on another drive, or shared between projects** (like Git LFS's `lfs.storage` setting). [Later; keep the store's location a single setting internally.]
@@ -349,6 +363,7 @@ Working names; command names can still change (topic 17).
 - **Undo window**: how far back undo reaches; 30 days by default.
 - **Cache**: remembered facts that speed Bolt up, like file sizes and times; always safe to delete.
 - **Pinning**: marking saves or folders so they stay available offline.
+- **Lock**: a "someone's working on this" claim on a file that can't be merged; while you hold it, nobody else can send changes to that file.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
