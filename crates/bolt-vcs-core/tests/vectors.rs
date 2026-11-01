@@ -114,7 +114,29 @@ fn save_vector_inputs() -> Vec<(&'static str, Save)> {
         from: "a.txt".into(),
         to: "b.txt".into(),
     }];
-    vec![("minimal", minimal), ("with-parent-line-and-move", rich)]
+    // Non-zero, asymmetric bytes so byte order and the sign of time-zone offsets are pinned.
+    let mut realistic = minimal.clone();
+    realistic.root = Id([0xab; 32]);
+    realistic.parents = vec![Id([2; 32]), Id([1; 32])];
+    realistic.author = Person {
+        name: "Zoé".into(),
+        email: "zoe@example.com".into(),
+        time_ms: 1_793_520_000_123,
+        tz_offset_min: -300,
+    };
+    realistic.saver.time_ms = 1_793_523_600_000;
+    realistic.saver.tz_offset_min = 60;
+    realistic.message = "Fix café menu ✓".into();
+    realistic.change_id = ChangeId([
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
+        0x10,
+    ]);
+    realistic.extra.insert("line".into(), b"main".to_vec());
+    vec![
+        ("minimal", minimal),
+        ("with-parent-line-and-move", rich),
+        ("realistic", realistic),
+    ]
 }
 
 #[test]
