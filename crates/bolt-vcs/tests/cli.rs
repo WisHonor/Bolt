@@ -223,6 +223,11 @@ fn save_then_nothing_to_save() {
         text(&out.stdout),
         format!("Nothing to save: no changes since your last save ({short}).\n")
     );
+    std::fs::write(env.root().join("a.txt"), "changed").unwrap();
+    let out = env.bolt().args(["save", "Change a"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.ends_with("  \"Change a\"  (1 file)\n"), "{stdout:?}");
 }
 
 #[test]
@@ -303,6 +308,7 @@ fn interrupted_save_changes_nothing() {
             .unwrap();
         if !text(&out.stderr).contains("injected crash") {
             assert!(n > 1, "no fault point was reached");
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
             break;
         }
         let repo = Repository::open(env.root()).unwrap();

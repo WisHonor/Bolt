@@ -243,6 +243,13 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
         .build();
     for item in walker {
         let entry = item.map_err(|e| walk_error(root, e))?;
+        // A broken or unreadable .boltignore comes with its folder's entry, not as an error
+        // item; going on without it would save the files it was meant to keep out.
+        if let Some(err) = entry.error() {
+            return Err(SaveError::Ignore {
+                detail: describe(root, err),
+            });
+        }
         let path = entry.path();
         let rel_path = path.strip_prefix(root).unwrap_or(path);
         let rel = shown(rel_path);
@@ -290,6 +297,26 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
     Ok(folders)
 }
 
+/// An `ignore` error with paths shown as project paths.
+fn describe(root: &Path, err: &ignore::Error) -> String {
+    match err {
+        ignore::Error::WithPath { path, err } => {
+            let rel = shown(path.strip_prefix(root).unwrap_or(path));
+            format!("{rel}: {}", describe(root, err))
+        }
+        ignore::Error::WithLineNumber { line, err } => {
+            format!("line {line}: {}", describe(root, err))
+        }
+        ignore::Error::WithDepth { err, .. } => describe(root, err),
+        ignore::Error::Partial(errs) => errs
+            .iter()
+            .map(|e| describe(root, e))
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => other.to_string(),
+    }
+}
+
 fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
     fn path_of(err: &ignore::Error) -> Option<&Path> {
         match err {
@@ -309,7 +336,7 @@ fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
         (Some(e), None) => RepoError::from(io::Error::new(e.kind(), e.to_string())).into(),
         // Anything else is a pattern Bolt could not understand.
         (None, _) => SaveError::Ignore {
-            detail: err.to_string(),
+            detail: describe(root, &err),
         },
     }
 }
@@ -797,6 +824,66 @@ mod tests {
         save_now(&mut repo).unwrap();
         write(dir.path(), "notes.txt", b"x");
         assert!(matches!(save_now(&mut repo), Ok(SaveOutcome::Saved { .. })));
+    }
+
+    #[test]
+    fn broken_boltignore_stops_the_save() {
+        let (dir, mut repo) = project();
+        let head = repo.head().unwrap();
+        write(dir.path(), "secret.key", b"x");
+        // `a[` would be fine: like Git, `ignore` reads an unclosed `[` literally.
+        write(dir.path(), ".boltignore", b"secret.key\n[z-a]\n");
+        match save_now(&mut repo) {
+            Err(SaveError::Ignore { detail }) => {
+                assert!(
+                    detail.contains(".boltignore") && detail.contains("[z-a]"),
+                    "{detail}"
+                );
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_boltignore_stops_the_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = project();
+        let head = repo.head().unwrap();
+        write(dir.path(), "secret.key", b"x");
+        write(dir.path(), ".boltignore", b"secret.key\n");
+        let ignore = dir.path().join(".boltignore");
+        fs::set_permissions(&ignore, fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads everything, so there is nothing to test.
+        if fs::read(&ignore).is_ok() {
+            return;
+        }
+        assert!(
+            matches!(save_now(&mut repo), Err(SaveError::Ignore { .. })),
+            "the save went ahead"
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_name_clashing_with_a_saved_name_is_refused() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "README", b"x");
+        save_now(&mut repo).unwrap();
+        let head = repo.head().unwrap();
+        write(dir.path(), "readme", b"y");
+        // A case-insensitive disk (macOS by default) can't hold both names.
+        if fs::read(dir.path().join("README")).unwrap() != b"x" {
+            return;
+        }
+        let Err(SaveError::NotPortable { problems }) = save_now(&mut repo) else {
+            panic!("the clashing name was accepted");
+        };
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].1.to_string().contains("readme"), "{problems:?}");
+        assert_eq!(repo.head().unwrap(), head);
     }
 
     #[cfg(unix)]
