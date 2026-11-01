@@ -96,7 +96,9 @@ pub fn open_lock_file(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Flushes a folder's entries to disk. Windows has no such call; NTFS journals renames.
+/// Flushes a folder's entries to disk. Windows has no such call: a rename there is not written
+/// through, so it keeps its order with earlier writes but can be lost on power failure
+/// (making it durable is a milestone 4 item).
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     if cfg!(unix) {
         File::open(dir)?.sync_all()
