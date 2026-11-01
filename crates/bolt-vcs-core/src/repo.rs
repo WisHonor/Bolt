@@ -70,11 +70,9 @@ pub struct FormatInfo {
     pub features: BTreeSet<String>,
 }
 
-/// A word Bolt could plausibly write in a later format: lowercase letters, digits and `-`.
+/// A name a later Bolt could have written: not empty, no whitespace or control characters.
 fn is_word(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// Parses `.bolt/format`. Anything a newer Bolt could have written is `NewerFormat`;
@@ -211,6 +209,8 @@ impl Repository {
         self.format.features.contains("signatures")
     }
 
+    /// Build packs only while holding the `ChangeLock`: `open` cleans `tmp/` whenever the lock
+    /// is free, which would delete a pack being built without it.
     pub fn new_pack(&self) -> Result<PackWriter, RepoError> {
         Ok(PackWriter::create(&self.tmp)?)
     }
@@ -233,7 +233,8 @@ impl Repository {
     }
 
     /// Takes the change lock, waiting for another changing command if needed. `on_wait` is
-    /// called once, with that command's lock information, before waiting.
+    /// called once, with that command's lock information, before waiting. `command` must
+    /// already be redacted: it is written to `state/lock-info` as given.
     pub fn lock_for_change(
         &self,
         command: &str,
@@ -264,13 +265,19 @@ impl Repository {
 
     /// Stores `entry` in `pack`, moves the pack into the store, then replaces `state/head`.
     /// The command has happened exactly when the head is replaced (decision 010).
+    ///
+    /// An entry that would not decode is refused before anything is written. Note: an `Io`
+    /// error can come from the final folder sync after the head was already replaced, so
+    /// callers must not report "nothing changed" for an `Io` error.
     pub fn commit(
         &mut self,
         _lock: &ChangeLock,
         mut pack: PackWriter,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
-        let id = pack.add_record(ObjectKind::DiaryEntry, &entry.encode())?;
+        let bytes = entry.encode();
+        DiaryEntry::decode(&bytes)?;
+        let id = pack.add_record(ObjectKind::DiaryEntry, &bytes)?;
         if let Some(path) = pack.finish(&self.packs)? {
             self.store.register(&path)?;
         }
@@ -301,6 +308,11 @@ mod tests {
         for (text, needle) in [
             ("bolt-repository 2\nhash blake3\n", "bolt-repository 2"),
             ("bolt-repository 1\nhash sha256\n", "sha256"),
+            ("bolt-repository 1\nhash sha3_256\n", "sha3_256"),
+            (
+                "bolt-repository 1\nhash blake3\nfeature large_files\n",
+                "large_files",
+            ),
             (
                 "bolt-repository 1\nhash blake3\nfeature teleport\n",
                 "teleport",
@@ -316,6 +328,9 @@ mod tests {
             "",
             "bolt-repository 1\n",
             "bolt-repository 1\r\nhash blake3\r\n",
+            "bolt-repository 1\nhash blake3\r\n",
+            "bolt-repository 1\nhash blake3\nfeature \n",
+            "bolt-repository 1\nhash blake3\nfeature a b\n",
             "hello\n",
         ] {
             assert!(
@@ -376,6 +391,16 @@ mod tests {
         assert_eq!(repo.current().unwrap(), (a, entry(1)));
         let text = std::fs::read_to_string(repo.root().join(".bolt/state/head")).unwrap();
         assert_eq!(text, format!("{a}\n"));
+    }
+
+    #[test]
+    fn commit_refuses_an_invalid_entry() {
+        let (_dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let mut bad = entry(2);
+        bad.state.position = Position::OnLine("dev".into());
+        assert!(matches!(commit(&mut repo, &bad), Err(RepoError::Decode(_))));
+        assert_eq!(repo.head().unwrap(), a);
     }
 
     #[test]
