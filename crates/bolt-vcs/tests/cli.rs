@@ -113,7 +113,10 @@ fn start_json_output() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let mut json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     // Check what the redactions hide, so a missing field can't hide behind one.
-    assert_eq!(json["root"], env.root().display().to_string());
+    // Compare canonical forms: on macOS the temp folder is under a symlink (/var is
+    // /private/var), and `bolt` reports the resolved path its working folder has.
+    let root = std::fs::canonicalize(json["root"].as_str().unwrap()).unwrap();
+    assert_eq!(root, std::fs::canonicalize(env.root()).unwrap());
     let save = &json["save"];
     let change_id = save["change_id"].as_str().unwrap();
     assert!(change_id.len() == 32 && change_id.bytes().all(|b| (b'k'..=b'z').contains(&b)));
