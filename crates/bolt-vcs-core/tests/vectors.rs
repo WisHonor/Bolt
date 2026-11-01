@@ -1,7 +1,7 @@
 //! Test vectors for the storage format (docs/storage-format.md).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use bolt_core::diary::{Action, DiaryEntry, Position, State};
+use bolt_core::diary::{Action, DiaryEntry, Position, SafetyCopy, State, Tag};
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
@@ -197,15 +197,76 @@ fn minimal_diary_entry() -> DiaryEntry {
     }
 }
 
+/// Every optional part of a diary entry, with distinct fill bytes so each id is easy to spot.
+fn full_diary_entry() -> DiaryEntry {
+    DiaryEntry {
+        parent: Some(Id([0x0d; 32])),
+        action: Action::Undo(Id([0x0e; 32])),
+        command: "undo".into(),
+        who: Person {
+            name: "Zoé".into(),
+            email: "zoe@example.com".into(),
+            time_ms: 1_793_520_000_123,
+            tz_offset_min: -300,
+        },
+        bolt_version: "0.1.0".into(),
+        state: State {
+            lines: BTreeMap::from([
+                ("feature/menu".to_owned(), Id([0x0f; 32])),
+                ("main".to_owned(), Id([0x0a; 32])),
+            ]),
+            tags: BTreeMap::from([(
+                "v1".to_owned(),
+                Tag {
+                    save: Id([0x07; 32]),
+                    message: "First playable ✓".into(),
+                },
+            )]),
+            position: Position::AtSave(Id([0x5a; 32])),
+            // Newest first, deliberately not in name order.
+            shelves: vec![
+                ("try-b".into(), Id([0xb2; 32])),
+                ("try-a".into(), Id([0xa1; 32])),
+            ],
+            remotes: BTreeMap::from([(
+                "origin".to_owned(),
+                BTreeMap::from([("main".to_owned(), Id([0x0c; 32]))]),
+            )]),
+        },
+        safety_copies: vec![
+            SafetyCopy {
+                path: "Assets/é.png".into(),
+                kind: EntryKind::File,
+                id: Id([0xe1; 32]),
+                size: 1000,
+            },
+            SafetyCopy {
+                path: "run.sh".into(),
+                kind: EntryKind::Executable,
+                id: Id([0xe2; 32]),
+                size: 12,
+            },
+        ],
+    }
+}
+
 #[test]
-#[ignore = "prints the vector; run by hand to regenerate tests/vectors/diary.json"]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/diary.json"]
 fn print_diary_vectors() {
-    let e = minimal_diary_entry();
-    println!(
-        "[\n  {{\"name\": \"minimal\", \"hex\": \"{}\", \"id\": \"{}\"}}\n]",
-        hex(&e.encode()),
-        e.id()
-    );
+    let rows: Vec<String> = [
+        ("minimal", minimal_diary_entry()),
+        ("full", full_diary_entry()),
+    ]
+    .iter()
+    .map(|(n, e)| {
+        format!(
+            "  {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
+            hex(&e.encode()),
+            e.id()
+        )
+    })
+    .collect();
+    println!("[\n{}\n]", rows.join(",\n"));
 }
 
 #[test]
