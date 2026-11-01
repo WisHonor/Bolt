@@ -13,6 +13,8 @@
 | 5 | **Big files** | Chunking, streaming, parallel hashing, Git LFS import (contents must be on disk, [decision 020](decisions/020-lfs-import.md)), and benchmarks against Git LFS |
 | 6 | **Presets and polish → v0.1** | The `bolt start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `bolt setup`; Git-word shortcuts; `--json`; `verify`; packaging |
 
+**Every milestone also ends with a red-team session** ([decision 024](decisions/024-red-team-gate.md)): a fresh agent attacks the milestone's code from an isolated sandbox, and every proven finding is fixed (or ruled on in writing) before the milestone is merged. Milestone 1's session runs before milestone 2 starts.
+
 **v0.1 ships when** every test passes on the three systems and both speed gates pass ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file uses at most about 500 MB of memory, and `status` on an unchanged 100,000-file project takes under 2 seconds on an SSD. Benchmark results against Git and Git LFS are published either way.
 
 After v0.1: v0.2 adds combining lines (plus renaming and deleting them); v0.3 adds syncing and locking ([design.md](design.md) §1).

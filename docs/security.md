@@ -65,6 +65,8 @@ Out of scope: malware already running as you on your own computer.
 
 See [testing.md](testing.md) §3: fuzz targets for every decoder and parser, a malicious-repository corpus with at least one case per threat above, Windows-specific tests, and crash tests.
 
+**Red-team sessions** ([decision 024](decisions/024-red-team-gate.md)). Every milestone ends with a time-boxed session in which a fresh agent attacks Bolt from an isolated sandbox and must prove each finding with a failing test. Findings are fixed before the milestone counts as done; their tests join the corpus, and new threats are added to §4.
+
 ## 7. Open items
 
 - Check the Windows naming rules (reserved names, short names, stream syntax) against Microsoft's documentation before implementing name checks.

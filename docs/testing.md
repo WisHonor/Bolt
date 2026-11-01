@@ -23,6 +23,7 @@
 | Differential tests | Importing a real Git repository gives exactly the same files, for every commit, as Git itself | `git` as the reference |
 | Fuzz tests | Decoders and parsers never crash, hang or over-allocate on garbage input | `cargo-fuzz` |
 | Malicious-repository corpus | Each attack in [security.md](security.md) is refused or handled safely | crafted repositories |
+| Red-team sessions | A determined attacker can't break what the other tests didn't think of; once per milestone ([decision 024](decisions/024-red-team-gate.md)) | a fresh agent in a no-network Docker sandbox |
 | CLI tests | Commands print what they should, both for people and as `--json` | `assert_cmd`, `insta` snapshots |
 | Benchmarks | Speed and size claims are true, and stay true | `criterion`, `hyperfine` |
 

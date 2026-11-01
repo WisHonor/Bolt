@@ -34,3 +34,4 @@ A new version control system with its own engine (not a Git wrapper), written in
 - One place per rule: name validation, path building and write-out each live in a single module that everything else uses.
 - Keep changes small; the owner reviews all code that touches disk or network before it is merged.
 - A task is done only when its tests pass on Windows, macOS and Linux.
+- A milestone is merged only after its red-team session (decision 024): a fresh agent attacks it from the no-network Docker sandbox, and every proven finding is fixed or ruled on in writing. Attack code never runs outside the sandbox or a `redteam/*` CI branch.
