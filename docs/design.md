@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 18
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 19 (019 proposed)
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -53,9 +53,9 @@ What it implies for the design:
 **First audience and roadmap** ([decision 001](decisions/001-first-audience-and-v0.1.md))
 - **First audience:** game developers. The engine stays general; games set the priorities, first presets and benchmarks.
 - **Main platform:** Windows. macOS and Linux are supported and tested in CI from the start.
-- **v0.1, solo and local-only:** `start`, `save`, `status`, `changes`, `history`, `show`, `goto`, `discard`, `undo`/`redo`, Git import including Git LFS files ([decision 002](decisions/002-git-compatibility.md)), chunked big files. Big files are streamed, never loaded whole into memory. Presets: Code, Game (Unity, Unreal, Godot) and Custom ([decision 016](decisions/016-presets.md)).
+- **v0.1, solo and local-only:** `start`, `save`, `status`, `changes`, `history`, `show`, `goto`, `discard`, `undo`/`redo`, Git import including Git LFS files ([decision 002](decisions/002-git-compatibility.md)), chunked big files. Big files are streamed, never loaded whole into memory. Presets: Code, Game (Unity, Unreal, Godot) and Custom ([decision 016](decisions/016-presets.md)). Lines can be created (by saving away from a line), listed and switched (decision 012).
 - **v0.1 milestones:** First save → Coming from Git → Working folder → Undo everything → Big files → Presets and polish ([decision 018](decisions/018-milestone-plan.md), [milestones.md](milestones.md)).
-- **v0.2:** lines and combine (branches, merging, conflicts).
+- **v0.2:** combining lines (merging, conflicts), plus renaming and deleting lines.
 - **v0.3:** sync and locking for small teams; big files and old versions download on demand.
 - **Before 1.0:** Git export ([decision 002](decisions/002-git-compatibility.md)). Live two-way Git sync is not promised, but nothing may block it.
 - **Later:** conflict algebra on top of decision 007, smart locks on top of decision 014, AI/data and Design/video presets (decision 016), hosting platform, GUI and editor plugins.
@@ -119,7 +119,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Stage 5 — Product surface and wrap-up**
 - [x] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax → [decision 016](decisions/016-presets.md)
 - [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
-- [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestone plan in [decision 018](decisions/018-milestone-plan.md); documents drafted; review and owner sign-off pending
+- [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestone plan in [decision 018](decisions/018-milestone-plan.md); documents drafted; review done (clarifications in [decision 019](decisions/019-review-clarifications.md)); owner questions and sign-off pending
 
 ## 5. Design
 
@@ -148,6 +148,7 @@ The current design, by area. Each part links to the decision that set it.
 - **Portability check on save:** new names that would break on Windows or macOS are refused (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, forbidden characters), unless the project relaxes the rule. Imported histories keep their names.
 - **Safety on write-out:** never through a symlink, never outside the project, never to a name the OS would misread; such entries are reported instead. Symlinks that leave the project, or that the OS can't create, become placeholder files with a warning.
 - **Nested projects:** a folder with its own `.bolt/` is left alone by the outer project.
+- **Entries this computer can't hold** (names Windows can't create, names that collide here, symlinks written as placeholders) stay in history untouched: `status` lists them as not written on this computer, and saves never record them as deleted or changed (decision 019).
 
 ### 5.3 How data is identified ([decision 005](decisions/005-object-identity.md))
 
@@ -258,6 +259,7 @@ head ─► redo     main → ptvz
 - **Names:** letters, digits, `-`, `_`, `.`, `/`; no spaces; no two names differing only by letter case; `bolt start` creates `main`.
 - **Not on a line:** after `goto` to a save, Bolt says you're looking at an older save; saving there asks for a new line name.
 - **Tags:** fixed names for important saves; they never move, and changing one asks first.
+- **In v0.1:** lines can be created (by saving away from a line), listed and switched; combining, renaming and deleting come in v0.2.
 - **Combining (v0.2):** three-way merge per file; text merged line by line; binaries never merged automatically; move notes followed.
 - **Server lines (v0.3):** shown as `main@origin`.
 
@@ -344,10 +346,10 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 ## 7. Open questions and deferred decisions
 
 **Open**: every unchecked agenda topic above, plus:
-- **Test data:** real game projects (open-source Unity projects first) for benchmarks and dedup measurements (topics 9, 18).
+- **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
 - **CI:** GitHub Actions on Windows, macOS and Linux, set up as the first coding step (during design there is nothing to test). Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; revisit repository visibility then. In the same step, add a `.gitattributes` that stops Git converting line endings in this repo, so byte-exact test files stay byte-exact on Windows.
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
-- **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before any public release: the `.bolt/` folder name gets baked into every repository.]
+- **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before format 1 freezes at the v0.1 release: the name is built into `.bolt/`, `bolt.toml`, `.boltignore` and the pack files' magic bytes. Until then, renaming only means changing constants (decision 019).]
 - **Contribution licensing**: CLA or DCO. [Matters if the server is AGPL and ever dual-licensed; decide before accepting outside contributions.]
 - **GUI and editor plugins** (Unreal, Unity, Godot, Blender). [All logic stays in the engine library so a GUI can embed it.]
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]

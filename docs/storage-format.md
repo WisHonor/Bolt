@@ -1,6 +1,6 @@
 # Bolt Storage Format — Draft
 
-> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016. Format 1 freezes once the first implementation has produced the test vectors in §13 and the owner has reviewed them; until then anything here may change.
+> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes at the v0.1 release. Until then anything here may change, and repositories made by development builds are disposable (decision 019).
 
 **In plain words.** This document says exactly which bytes Bolt writes, so any program, or a future version of Bolt, can read a Bolt repository without guessing. Everything Bolt stores is either a piece of file content or a small structured record (a folder listing, a save, a diary entry…). Each one is named by its fingerprint, packed into pack files, and checked against its fingerprint every time it is read.
 
@@ -74,7 +74,7 @@ entries, sorted by name:
 ```text
 u8         version = 1
 id         root folder listing
-varint     parent count (0 to 64)
+varint     parent count (0 to 1024)
 id × n     parents, in order (the first parent is the line the user was on)
 person     author
 person     saver
@@ -84,7 +84,7 @@ varint     move-note count (at most 100,000)
 move notes, sorted by `to`:
   string   from  (full path, `/`-separated)
   string   to    (full path, `/`-separated)
-bytes      signature (empty = unsigned; must be empty in format 1)
+bytes      signature (empty = unsigned; must be empty unless `.bolt/format` lists `feature signatures`)
 varint     extra-field count (at most 64)
 extra fields, sorted by key:
   string   key
@@ -94,12 +94,12 @@ person:
   string   name
   string   email
   i64      time, in milliseconds since 1970-01-01 UTC
-  i16      time-zone offset in minutes (−1439 to 1439)
+  i16      time-zone offset in minutes (any value; imported Git commits can carry unusual offsets)
 ```
 
 - Parents must be distinct.
-- **Defined extra fields:** `line` holds the name of the line the save was made on, as UTF-8 (decision 012). Readers keep extra fields they don't understand.
-- **Signatures (later):** the signed bytes will be the save encoded with an empty signature field (decision 006).
+- **Defined extra fields:** `line` holds the name of the line the save was made on, as UTF-8 (decision 012). `git-commit` holds, as hex, the Git commit an imported save came from; `git-original-message` holds the original bytes of a Git message that couldn't be converted to UTF-8 exactly (decision 019). Readers keep extra fields they don't understand.
+- **Signatures (later):** the signed bytes will be the save encoded with an empty signature field (decisions 006 and 019).
 
 ## 5. Change IDs
 
@@ -123,6 +123,7 @@ chunks, in file order:
 - The chunk sizes must add up to the file size.
 - After reassembling a file, a reader must check that its BLAKE3 hash equals the file ID before using it.
 - Chunking parameters are not part of the format: any chunk list that reassembles to the right bytes is valid.
+- Bolt finds a file's chunk list through an index from file ID to chunk list, kept in `cache/` and rebuilt from the chunk lists themselves, which contain the file ID (decision 019).
 
 ## 7. Project link
 
@@ -266,7 +267,7 @@ Uncompressed sizes are at most 2^40 bytes (1 TiB).
 ## 12. Project files (outside `.bolt/`)
 
 - **`bolt.toml`** (TOML; decisions 008 and 016). Draft keys: `preset`, `chunk-files-over`, `ask-before-saving-over`, and `[[rule]]` tables with `files`, `lockable`, `conflict-markers` and `moves-with-asset`. Unknown keys produce a warning. Final key names are settled when presets are built (milestone 6).
-- **`.boltignore`** uses exactly the `.gitignore` pattern syntax, applied from the project root. `.bolt/` is always ignored.
+- **`.boltignore`** uses exactly the `.gitignore` pattern syntax, applied from the project root. `.bolt/` and `.git/` are always ignored (decision 019).
 
 ## 13. Test vectors
 
@@ -276,7 +277,7 @@ The first implementation generates, and the owner reviews, vectors in `tests/vec
 - a small reference pack and a `.bolt/format` file;
 - invalid encodings that every reader must reject.
 
-Format 1 freezes once these exist.
+Vectors are added milestone by milestone, for the records each milestone builds; format 1 freezes at the v0.1 release (decision 019).
 
 ## 14. Open points
 
@@ -285,3 +286,4 @@ Format 1 freezes once these exist.
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
 - The signature format (later).
+- Importing Git LFS files whose contents aren't available locally (owner decision pending).

@@ -33,7 +33,7 @@ Out of scope: malware already running as you on your own computer.
 
 | # | Threat | Defense | Decided in |
 |---|---|---|---|
-| T1 | Path tricks: `..`, absolute paths, drive letters (`C:`), network paths (`\\server`), backslashes | Name rules on every listing entry; write-out builds paths only from validated names | 004 |
+| T1 | Path tricks: `..`, absolute paths, drive letters (`C:`), network paths (`\\server`), backslashes | Name rules on every listing entry (no empty, `.` or `..` parts, no `/` or NUL); names containing `\` or `:` may be stored but are never written out on Windows; write-out builds paths only from validated names | 004, 019 |
 | T2 | Writing into `.bolt/` through spellings Windows or macOS treat as `.bolt` (`.BOLT`, `.bolt.`, `BOLT~1`, `.bolt::$INDEX_ALLOCATION`) | Such names are invalid everywhere | 004 |
 | T3 | Writing through a symlink to reach outside the project | Write-out never follows symlinks and checks every path step; symlinks pointing outside become placeholder files | 004, 011 |
 | T4 | Two names that become one file on Windows or macOS (`README` / `readme`, Unicode normalization) | Refused on save; reported, never overwritten, on write-out | 004 |

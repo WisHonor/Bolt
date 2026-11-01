@@ -7,13 +7,13 @@
 | # | Milestone | Done when |
 |---|---|---|
 | 1 | **First save** | `bolt start`, `bolt save`, `bolt history` and `bolt show` work end to end on real projects, on the real formats, on all three systems |
-| 2 | **Coming from Git** | `bolt import` brings in a Git repository's history, and differential tests compare every commit with Git |
-| 3 | **Working folder** | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves and safety copies |
+| 2 | **Coming from Git** | `bolt import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git |
+| 3 | **Working folder** | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves, safety copies, and basic lines: saving after `goto` creates one, `line` lists them, `goto <line>` switches |
 | 4 | **Undo everything** | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy` |
 | 5 | **Big files** | Chunking, streaming, parallel hashing, Git LFS import, and benchmarks against Git LFS |
 | 6 | **Presets and polish → v0.1** | The `bolt start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `bolt setup`; Git-word shortcuts; `--json`; `verify`; packaging |
 
-After v0.1: v0.2 adds lines and combining; v0.3 adds syncing and locking ([design.md](design.md) §1).
+After v0.1: v0.2 adds combining lines (plus renaming and deleting them); v0.3 adds syncing and locking ([design.md](design.md) §1).
 
 ## Milestone 1: First save
 
@@ -53,7 +53,8 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 
 **7. Object store**
 - Store, fetch and check objects across many packs, skip objects that are already stored, and keep a rebuildable lookup cache in `cache/`.
-- *Done when:* property tests with random stores and fetches pass; deleting `cache/` changes nothing but speed.
+- An internal integrity check that walks every pack and object: the core of the later `bolt verify` command (milestone 6), used by tests from now on.
+- *Done when:* property tests with random stores and fetches pass; deleting `cache/` changes nothing but speed; the integrity check catches every corruption the pack tests introduce.
 
 **8. Diary, head and the lock**
 - Encode and decode diary entries (§9); replace `state/head` atomically; take the OS lock for changing commands, with the "waiting" message.
