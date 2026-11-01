@@ -8,6 +8,8 @@ pub mod listing;
 pub mod names;
 pub mod pack;
 pub mod save;
+pub mod store;
+pub mod verify;
 
 #[cfg(test)]
 pub(crate) mod test_support;

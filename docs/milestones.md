@@ -54,9 +54,9 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 - *Done when:* round-trip tests pass; flipping any single byte of a pack is detected; a writer killed halfway leaves the store unchanged; a decompression bomb is refused.
 
 **7. Object store**
-- Store, fetch and check objects across many packs, skip objects that are already stored, and keep a rebuildable lookup cache in `cache/`.
+- Store, fetch and check objects across many packs, skip objects that are already stored. The lookup index lives in memory for now (rebuilt when the store opens); storing it in `cache/` waits until measurements show a need.
 - An internal integrity check that walks every pack and object: the core of the later `bolt verify` command (milestone 6), used by tests from now on.
-- *Done when:* property tests with random stores and fetches pass; deleting `cache/` changes nothing but speed; the integrity check catches every corruption the pack tests introduce.
+- *Done when:* property tests with random stores and fetches pass; the integrity check catches every corruption the pack tests introduce.
 
 **8. Diary, head and the lock**
 - Encode and decode diary entries (§9); replace `state/head` atomically; take the OS lock for changing commands, with the "waiting" message.
