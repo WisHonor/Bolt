@@ -43,7 +43,7 @@
 
 ## 4. CI on GitHub
 
-- **Every push and pull request:** formatting check, clippy with warnings denied, every test on Windows, macOS and Linux, `cargo-deny` and `cargo-audit`.
+- **Every push and pull request:** formatting check, clippy with warnings denied, every test on Windows, macOS and Linux, a build without features, and `cargo-deny` (which also checks the RustSec advisory database).
 - **Nightly:** fuzzing for a fixed time per target, differential tests on larger repositories, and benchmarks with results kept for comparison.
 - Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; repository visibility is revisited when CI starts.
 - A `.gitattributes` file turns off Git's line-ending conversion, so test files stay byte-exact on Windows.
