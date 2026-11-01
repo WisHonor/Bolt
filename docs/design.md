@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 8
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 9
 
 ## 1. Vision
 
@@ -75,14 +75,14 @@ None of these is final until it has a decision record. "First review" is Claude'
 | # | Tentative decision | First review | Topic |
 |---|---|---|---|
 | T1 | Rust | Keep | — |
-| T2 | Users see snapshots; storage may use deltas with periodic full copies | Identity **confirmed** by decision 005: IDs never depend on how data is stored; storage strategy in topic 9 | 5, 9 |
-| T3 | BLAKE3 hashing, zstd compression | BLAKE3 **confirmed** by decision 005; zstd details in topic 9 | 5, 9 |
+| T2 | Users see snapshots; storage may use deltas with periodic full copies | **Confirmed**: identity by decision 005; storage by decision 009 (packs; deltas for small files come later) | 5, 9 |
+| T3 | BLAKE3 hashing, zstd compression | **Confirmed**: BLAKE3 (decision 005), zstd (decision 009) | 5, 9 |
 | T4 | Objects: blobs, trees, saves, refs, plus an operation log | Mostly keep; chunk lists added by decision 005; conflict entries in topic 7; mutable state (lines, operation log) in topics 8 and 10 | 5–7, 10 |
 | T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | **Confirmed** with additions by decision 006: author and saver with time zones, 128-bit random change ID, move notes, signature slot, extra fields | 6 |
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
-| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Big files are identified by their contents (decision 005); chunking details in topic 9; dedup gains depend on file format | 5, 9, 13, 14 |
+| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download and locking in topics 13, 14 | 5, 9, 13, 14 |
 | T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Rules live in `bolt.toml` + `.boltignore` at the project root (decision 008); preset contents in topic 16 | 8, 16 |
 | T11 | On-disk format version number from day one | **Confirmed**, with a feature list, by decision 008 | 8 |
 | T12 | Crates: `bolt-core` (engine library) + `bolt` (CLI) | Keep the split; those package names are taken on crates.io, though the command can still be `bolt` | Deferred: name |
@@ -104,7 +104,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 
 **Stage 3 — Local engine**
 - [x] 8. Repository layout in `.bolt/`; shared vs. local config; format version, feature list, upgrades → [decision 008](decisions/008-layout-and-settings.md)
-- [ ] 9. Storage engine: loose vs. packed objects, compression, deltas and full-copy cadence, chunking algorithm and thresholds, garbage collection
+- [x] 9. Storage engine: loose vs. packed objects, compression, deltas and full-copy cadence, chunking algorithm and thresholds, garbage collection → [decision 009](decisions/009-storage-engine.md)
 - [ ] 10. Operation log: undo/redo semantics per command, two commands at once, how long undo lasts
 - [ ] 11. Fast `status` and safe `goto`: file-state cache, timestamp traps, file watching, never overwriting unsaved work
 
@@ -184,6 +184,17 @@ The current design, by area. Each part links to the decision that set it.
 - **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
 - **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
 
+### 5.7 How data is stored ([decision 009](decisions/009-storage-engine.md))
+
+**In plain words.** Each command writes its new data into one big "pack" file, which only appears once it's complete, so a crash can never leave half-written data in the store. Big files are cut into chunks based on their content, so an edit in the middle of a file only adds the chunks around the change (when the file format keeps edits local).
+
+- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; small packs merged later.
+- **Chunking:** FastCDC for files of 1 MB and up; 16 KB / 64 KB / 256 KB (minimum / average / maximum) to start, tuned later with real assets.
+- **Compression:** zstd per chunk, fast on save and stronger on merge; incompressible data stored raw; sizes recorded so decompression bombs are caught.
+- **Deltas:** later, as a format feature, for small text files.
+- **Cleanup:** keeps everything reachable from lines, shelves and the undo window; a grace period protects anything recent; cheap cleanup is automatic, repacking happens on request with a space estimate.
+- **Checking:** every object is verified against its fingerprint on read.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -191,7 +202,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 1. **Scope and motivation.** The brief describes several products; the realistic failure mode is losing steam long before Bolt is usable. *Response:* a usable v0.1 early (roadmap in §1), then grow toward the full goals; design later layers only as far as the engine must respect them.
 2. **Adoption.** Every independent engine of the Git era (Mercurial, Bazaar, Fossil, Darcs, Pijul) stayed niche or faded against Git and GitHub; the newcomers gaining traction (jj, Sapling) work with Git repositories. Bolt is designed as if it would be marketed, so this matters. *Response:* a deliberate first audience (decision 001); Git import in v0.1 and export before 1.0 (decision 002).
 3. **Precise claims.** Git is heavily optimized for code repositories; big files are where Bolt can clearly win. Git LFS does have locking (`git lfs lock`), and Git has partial clone (`--filter=blob:none`), which skips old file contents. The real problem is that both are add-ons: awkward, easy to bypass, unevenly supported by hosts.
-4. **Dedup depends on file format.** Chunking saves a lot when edits leave most bytes untouched (WAV, uncompressed source assets, appended datasets) and little on already-compressed formats (PNG, JPEG, MP4, ZIP-based files) or a retrained model where every weight changed. *Response:* measure on a real-asset corpus before claiming savings (topic 9).
+4. **Dedup depends on file format.** Chunking saves a lot when edits leave most bytes untouched (WAV, uncompressed source assets, appended datasets) and little on already-compressed formats (PNG, JPEG, MP4, ZIP-based files) or a retrained model where every weight changed. *Response:* measure on a real-asset corpus before claiming savings (starting parameters in decision 009; measurement in topic 18).
 5. **Shared vs. local settings.** *Answered by decision 008:* project rules in `bolt.toml` + `.boltignore`, declarative only; personal settings are never shared and can never change project rules.
 6. **Undo has edges.** Undo can't recall what others already received, and undo history keeps old data alive. Undoing `discard`/`goto` is answered by decision 003: safety copies capture unsaved work before it is overwritten. *Response:* explicit semantics per command, an undo window and a cleanup policy (topic 10).
 7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* new files are tracked automatically and unusually large saves ask first (decision 003); preset ignore rules (topic 16); secret warnings (topic 18).
@@ -219,6 +230,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]
 - **Signed saves.** [Room reserved in the save format (decision 006).]
 - **Conflict algebra** (jj-style automatic simplification of conflicts). [Planned by the owner, after v0.2; decision 007's format already allows it.]
+- **Deltas for small text files.** [Added later as a storage feature through the `.bolt/format` feature list (decision 009).]
 - **Store on another drive, or shared between projects** (like Git LFS's `lfs.storage` setting). [Later; keep the store's location a single setting internally.]
 - **Structural diff and merge** (tree-sitter). [Later.]
 - **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Very hard and OS-specific; not before v1.]
@@ -259,6 +271,7 @@ Working names; command names can still change (topic 17).
 - **Conflict**: two lines of work changed the same thing differently. Bolt keeps every version in the save so you can fix it later.
 - **Divergent**: two saves that share one change ID, usually because two people edited the same save; Bolt shows both until you keep one.
 - **Move note**: a record inside a save that a file moved, kept only when Bolt is certain.
+- **Pack**: a file in `.bolt/store/` holding many pieces of data plus an index, written in one go so a crash can't leave half of it.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
