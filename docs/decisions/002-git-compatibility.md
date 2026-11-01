@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 2
+- **Partly superseded by:** [decision 020](020-lfs-import.md) (importing LFS files whose contents aren't on disk)
 
 ## Context
 

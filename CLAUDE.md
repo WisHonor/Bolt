@@ -25,3 +25,11 @@ A new version control system with its own engine (not a Git wrapper), written in
 3. Testability: unit, round-trip, property-based, differential vs. Git, crash, fuzz, malicious-repo corpus; CI on Windows, macOS and Linux.
 4. Provable claims: reproducible benchmarks vs. Git, `bolt verify`, a documented storage format spec.
 5. Correct first, fast second: measure before optimizing.
+
+## Engineering rules (decision 022)
+- The engine library uses `#![forbid(unsafe_code)]`. `unsafe` is allowed only in a tiny, separate platform crate, for operating-system calls; the owner reviews it line by line.
+- No panics in library code: return errors; deny clippy's `unwrap_used`, `expect_used` and `panic` outside tests.
+- Spec before code for anything stored on disk (`docs/storage-format.md`), with test vectors for every format.
+- One place per rule: name validation, path building and write-out each live in a single module that everything else uses.
+- Keep changes small; the owner reviews all code that touches disk or network before it is merged.
+- A task is done only when its tests pass on Windows, macOS and Linux.

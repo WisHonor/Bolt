@@ -286,4 +286,3 @@ Vectors are added milestone by milestone, for the records each milestone builds;
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
 - The signature format (later).
-- Importing Git LFS files whose contents aren't available locally (owner decision pending).

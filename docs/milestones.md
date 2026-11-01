@@ -9,9 +9,11 @@
 | 1 | **First save** | `bolt start`, `bolt save`, `bolt history` and `bolt show` work end to end on real projects, on the real formats, on all three systems |
 | 2 | **Coming from Git** | `bolt import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git |
 | 3 | **Working folder** | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves, safety copies, and basic lines: saving after `goto` creates one, `line` lists them, `goto <line>` switches |
-| 4 | **Undo everything** | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy` |
-| 5 | **Big files** | Chunking, streaming, parallel hashing, Git LFS import, and benchmarks against Git LFS |
+| 4 | **Undo everything** | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy`; `shelf`/`unshelf` and `save --amend` ([decision 021](decisions/021-v0.1-command-scope.md)) |
+| 5 | **Big files** | Chunking, streaming, parallel hashing, Git LFS import (contents must be on disk, [decision 020](decisions/020-lfs-import.md)), and benchmarks against Git LFS |
 | 6 | **Presets and polish → v0.1** | The `bolt start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `bolt setup`; Git-word shortcuts; `--json`; `verify`; packaging |
+
+**v0.1 ships when** every test passes on the three systems and both speed gates pass ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file uses at most about 500 MB of memory, and `status` on an unchanged 100,000-file project takes under 2 seconds on an SSD. Benchmark results against Git and Git LFS are published either way.
 
 After v0.1: v0.2 adds combining lines (plus renaming and deleting them); v0.3 adds syncing and locking ([design.md](design.md) §1).
 
@@ -23,7 +25,7 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 - Install Rust (`rustup`, stable toolchain; on Windows, the MSVC build tools).
 - Add a `.gitattributes` that turns off line-ending conversion.
 - Create a Cargo workspace with the engine library and the CLI. The command is `bolt`; package names are chosen so they can be published later, since `bolt` and `bolt-core` are taken on crates.io.
-- Turn the engineering rules in [security.md](security.md) §5 (once approved) into compiler and clippy settings.
+- Turn the engineering rules ([decision 022](decisions/022-engineering-rules.md)) into compiler and clippy settings, and create the small platform crate: the only place `unsafe` is allowed.
 - Add the GitHub Actions workflow from [testing.md](testing.md) §4.
 - *Done when:* a placeholder test passes in CI on all three systems.
 

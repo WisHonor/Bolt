@@ -51,6 +51,7 @@
 
 - **Micro:** speeds of hashing, chunking, compression, encoding and decoding (`criterion`).
 - **End to end:** `bolt` against Git and Git LFS on fixed test projects (a code project, a Unity project, folders of large binary files): first save, saving a small change, `status` on an unchanged project, `status` after touching one big file, restoring an old version (`hyperfine`). Results are published together with the machine they ran on.
+- **Release gates for v0.1** ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file uses at most about 500 MB of memory, and `status` on an unchanged 100,000-file project takes under 2 seconds on an SSD. Both run as automated benchmarks; everything else is measured and published, not gated.
 - **Dedup:** how much space chunking really saves on real assets (textures, models, audio, video, engine files), so claims stay honest (design.md risk 4).
 
 ## 6. Test data

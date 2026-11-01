@@ -1,6 +1,6 @@
 # 019 — Clarifications from the design review
 
-- **Status:** Proposed (Claude's calls; the owner confirms them while reading)
+- **Status:** Accepted (Claude's calls; the owner raised no objections)
 - **Date:** 2026-10-31
 - **Agenda topic:** 18
 

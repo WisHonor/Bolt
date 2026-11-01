@@ -52,9 +52,10 @@ Out of scope: malware already running as you on your own computer.
 | T17 | Unsafe asset previews on the website (later) | Previews made in isolated workers; scripts stripped from SVG; strict content security policy | later |
 | T18 | Malicious or vulnerable dependencies | Few dependencies; `Cargo.lock` committed; `cargo-deny` and `cargo-audit` in CI; every new dependency reviewed | testing |
 
-## 5. Engineering rules (proposed, pending the owner's approval)
+## 5. Engineering rules (approved, decision 022)
 
 - The engine forbids `unsafe` code (`#![forbid(unsafe_code)]`). Memory-mapping files is avoided in v0.1: it needs `unsafe`, and a file changed underneath can crash the process.
+- The one exception is a tiny, separate platform crate, which may use `unsafe` for operating-system calls only (for example Windows' Restart Manager, hiding `.bolt/`, file IDs). The owner reviews it line by line.
 - No panics in library code: errors are returned, and clippy's `unwrap_used`, `expect_used` and `panic` lints are denied outside tests.
 - One place per rule: name validation, path building and write-out each live in a single module that everything else must use.
 - The owner reviews anything that touches disk or network before it is merged.
