@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 6
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 7
 
 ## 1. Vision
 
@@ -56,7 +56,7 @@ What it implies for the design:
 - **v0.2:** lines and combine (branches, merging, conflicts).
 - **v0.3:** sync and locking for small teams; big files and old versions download on demand.
 - **Before 1.0:** Git export ([decision 002](decisions/002-git-compatibility.md)). Live two-way Git sync is not promised, but nothing may block it.
-- **Later:** hosting platform, GUI and editor plugins. Which presets ship in which version is decided in topic 16.
+- **Later:** conflict algebra on top of decision 007, hosting platform, GUI and editor plugins. Which presets ship in which version is decided in topic 16.
 
 **Scope of this design phase.** The brief describes several products: the engine (with a Git bridge), a sync server, and a hosting platform. This phase designs the **engine** in detail, and the server and platform only as far as the engine must respect them. Each gets its own design pass before it is built.
 
@@ -81,7 +81,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | **Confirmed** with additions by decision 006: author and saver with time zones, 128-bit random change ID, move notes, signature slot, extra fields | 6 |
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
-| T8 | Conflicts stored inside saves ("sticky notes") | Keep; the hardest feature on the list, so design the format early and build it late | 7 |
+| T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
 | T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Big files are identified by their contents (decision 005); chunking details in topic 9; dedup gains depend on file format | 5, 9, 13, 14 |
 | T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Keep the idea; rules teammates need must live in a shared, versioned, declarative file, not in `.bolt/` | 8, 16 |
 | T11 | On-disk format version number from day one | Keep; consider a feature list as well (like Mercurial's `requires` file) | 8 |
@@ -100,7 +100,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 4. What a project can contain: path rules, line endings, executable bit, symlinks, empty folders, nested projects → [decision 004](decisions/004-project-contents.md)
 - [x] 5. Object identity: what is hashed and how, ID format, canonical byte encoding, big-file identity, objects known but not downloaded → [decision 005](decisions/005-object-identity.md)
 - [x] 6. The save object: fields, change IDs (generation, display, divergence), room for signatures and move hints → [decision 006](decisions/006-save-object.md)
-- [ ] 7. Conflicts as data: how a conflict lives in a tree and in your folder, for text and binary files
+- [x] 7. Conflicts as data: how a conflict lives in a tree and in your folder, for text and binary files → [decision 007](decisions/007-conflicts.md)
 
 **Stage 3 — Local engine**
 - [ ] 8. Repository layout in `.bolt/`; shared vs. local config; format version, feature list, upgrades
@@ -166,6 +166,15 @@ The current design, by area. Each part links to the decision that set it.
 - **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one.
 - **Move notes:** recorded only when Bolt is certain (same contents moved, or a Unity `.meta` file moved with its asset); used by diffs, merges and locks; they never change the snapshot.
 
+### 5.5 Conflicts ([decision 007](decisions/007-conflicts.md))
+
+**In plain words.** When two lines of work change the same thing differently, Bolt keeps every version in the save, like a sticky note, so you can keep working and fix it later. Nothing is lost, and it works for binary files too.
+
+- **Record:** a folder-listing entry of kind "conflict" points to a record with the sides and the ancestors between them (any of which can be "absent"), plus your half-fixed version if you started fixing it.
+- **In your folder:** text files get standard markers with the ancestor section; binary files keep your version in place, with the other versions kept inside `.bolt/`. Presets decide per file type (the Unity preset treats scenes, prefabs and `.meta` files like binaries).
+- **Fixed** when the markers are gone, or when you mark the file as fixed.
+- **Planned later:** conflict algebra, jj-style automatic simplification of conflicts. The record's general form allows it without a format change.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -200,6 +209,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **GUI and editor plugins** (Unreal, Unity, Godot, Blender). [All logic stays in the engine library so a GUI can embed it.]
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]
 - **Signed saves.** [Room reserved in the save format (decision 006).]
+- **Conflict algebra** (jj-style automatic simplification of conflicts). [Planned by the owner, after v0.2; decision 007's format already allows it.]
 - **Structural diff and merge** (tree-sitter). [Later.]
 - **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Very hard and OS-specific; not before v1.]
 - **Web platform and asset previews.** [After the server.]
@@ -236,6 +246,7 @@ Working names; command names can still change (topic 17).
 - **Working folder**: the files you actually edit.
 - **Save**: one recorded version of the whole project (Git: commit). A photo of every file at one moment.
 - **Change ID**: a stable name for a save that survives edits and rewrites, written in the letters k–z (`kxqmz`). Editing a save changes its fingerprint, not its change ID.
+- **Conflict**: two lines of work changed the same thing differently. Bolt keeps every version in the save so you can fix it later.
 - **Divergent**: two saves that share one change ID, usually because two people edited the same save; Bolt shows both until you keep one.
 - **Move note**: a record inside a save that a file moved, kept only when Bolt is certain.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
