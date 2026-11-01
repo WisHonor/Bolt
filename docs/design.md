@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 15
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 16
 
 ## 1. Vision
 
@@ -52,11 +52,11 @@ What it implies for the design:
 **First audience and roadmap** ([decision 001](decisions/001-first-audience-and-v0.1.md))
 - **First audience:** game developers. The engine stays general; games set the priorities, first presets and benchmarks.
 - **Main platform:** Windows. macOS and Linux are supported and tested in CI from the start.
-- **v0.1, solo and local-only:** `start`, `save`, `status`, `changes`, `history`, `show`, `goto`, `discard`, `undo`/`redo`, Git import including Git LFS files ([decision 002](decisions/002-git-compatibility.md)), chunked big files. Big files are streamed, never loaded whole into memory.
+- **v0.1, solo and local-only:** `start`, `save`, `status`, `changes`, `history`, `show`, `goto`, `discard`, `undo`/`redo`, Git import including Git LFS files ([decision 002](decisions/002-git-compatibility.md)), chunked big files. Big files are streamed, never loaded whole into memory. Presets: Code, Game (Unity, Unreal, Godot) and Custom ([decision 016](decisions/016-presets.md)).
 - **v0.2:** lines and combine (branches, merging, conflicts).
 - **v0.3:** sync and locking for small teams; big files and old versions download on demand.
 - **Before 1.0:** Git export ([decision 002](decisions/002-git-compatibility.md)). Live two-way Git sync is not promised, but nothing may block it.
-- **Later:** conflict algebra on top of decision 007, smart locks on top of decision 014, hosting platform, GUI and editor plugins. Which presets ship in which version is decided in topic 16.
+- **Later:** conflict algebra on top of decision 007, smart locks on top of decision 014, AI/data and Design/video presets (decision 016), hosting platform, GUI and editor plugins.
 
 **Scope of this design phase.** The brief describes several products: the engine (with a Git bridge), a sync server, and a hosting platform. This phase designs the **engine** in detail, and the server and platform only as far as the engine must respect them. Each gets its own design pass before it is built.
 
@@ -83,7 +83,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T7 | Operation log; `undo`/`redo` work on any action | **Confirmed** by decision 010: one diary for the whole repository, editor-style undo/redo, 30-day undo window | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
 | T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Identity: decision 005. Chunking: FastCDC from 1 MB, 64 KB average chunks (decision 009). Dedup gains depend on file format. On-demand download: decision 013. Locking: decision 014 | 5, 9, 13, 14 |
-| T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Rules live in `bolt.toml` + `.boltignore` at the project root (decision 008); preset contents in topic 16 | 8, 16 |
+| T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | **Confirmed**: rules in `bolt.toml` + `.boltignore` (decision 008); presets written out in full (decision 016) | 8, 16 |
 | T11 | On-disk format version number from day one | **Confirmed**, with a feature list, by decision 008 | 8 |
 | T12 | Crates: `bolt-core` (engine library) + `bolt` (CLI) | Keep the split; those package names are taken on crates.io, though the command can still be `bolt` | Deferred: name |
 
@@ -115,7 +115,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 15. Sync protocol, server storage model, permissions → [decision 015](decisions/015-sync.md) (full protocol design before v0.3)
 
 **Stage 5 — Product surface and wrap-up**
-- [ ] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax
+- [x] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax → [decision 016](decisions/016-presets.md)
 - [ ] 17. Commands, names and aliases; error and output style (human-readable and `--json`)
 - [ ] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off
 
@@ -293,6 +293,16 @@ head ─► redo     main → ptvz
 - **Folder remotes:** the same layout on a USB drive or NAS, for backups (no locks).
 - **Versioned protocol** from the first release.
 
+### 5.14 Presets ([decision 016](decisions/016-presets.md))
+
+**In plain words.** A preset is a starter set of project rules. `bolt start` detects what kind of project you have, suggests a preset and writes all of its rules into `bolt.toml` and `.boltignore`, so everything Bolt does is visible and editable in your project.
+
+- **Detection:** names and sizes only; cache folders skipped; stops early on huge folders.
+- **Rules:** read top to bottom, later rules win; `.boltignore` pattern syntax; settings like `lockable` and `conflict-markers`.
+- **v0.1 presets:** Code (apps, websites, libraries, scripts), Game (Unity, Unreal, Godot), Custom. AI/data and Design/video later.
+- **Code preset:** no locks, markers for all text, ignore lists for every detected language, `.env` ignored, asks before saving more than about 100 MB at once, normal chunking for big files.
+- **Changing presets:** `bolt setup` shows the exact changes and applies them as an undoable change.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -378,6 +388,7 @@ Working names; command names can still change (topic 17).
 - **Pinning**: marking saves or folders so they stay available offline.
 - **Lock**: a "someone's working on this" claim on a file that can't be merged; while you hold it, nobody else can send changes to that file.
 - **Remote**: another copy you sync with: a server, or a plain folder such as a USB drive.
+- **Preset**: a starter set of project rules for one kind of project (Code, Game…), written into `bolt.toml` and `.boltignore` by `bolt start`.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
