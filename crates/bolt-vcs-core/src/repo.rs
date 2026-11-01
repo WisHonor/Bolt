@@ -1,17 +1,19 @@
 //! The repository: the `format` file, the head pointer, the change lock and the commit protocol
 //! (docs/storage-format.md section 10, decision 010).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::diary::DiaryEntry;
+use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::encoding::DecodeError;
 use crate::fsio::{fault_point, write_atomic};
-use crate::id::Id;
+use crate::id::{ChangeId, Id};
+use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackWriter};
+use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
 
 pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";
@@ -132,7 +134,96 @@ pub struct Repository {
     store: Store,
 }
 
+/// The `.bolt/format` file of the project whose top folder is `root`.
+fn format_path(root: &Path) -> PathBuf {
+    root.join(".bolt").join("format")
+}
+
 impl Repository {
+    /// Makes `root` a new project: the folders, then the first save (an empty listing) on line
+    /// `main`, then `.bolt/format` last. A `.bolt` folder without `format` is an interrupted
+    /// start, which this finishes.
+    pub fn init(root: &Path, who: &Person) -> Result<Repository, RepoError> {
+        let already = || RepoError::AlreadyAProject {
+            root: root.to_owned(),
+        };
+        if format_path(root).try_exists()? {
+            return Err(already());
+        }
+        if let Some(outer) = root.ancestors().skip(1).find(|a| format_path(a).is_file()) {
+            return Err(RepoError::InsideAnotherProject {
+                root: outer.to_owned(),
+            });
+        }
+        let bolt = root.join(".bolt");
+        for sub in ["store/packs", "state", "cache", "tmp"] {
+            fs::create_dir_all(bolt.join(sub))?;
+        }
+        bolt_platform::hide_path(&bolt)?;
+        let tmp = bolt.join("tmp");
+        let packs = bolt.join("store").join("packs");
+        let mut repo = Repository {
+            root: root.to_owned(),
+            store: Store::open(&packs)?,
+            bolt,
+            tmp,
+            packs,
+            format: FormatInfo {
+                features: BTreeSet::new(),
+            },
+        };
+        let lock = repo.lock_for_change("start", &mut |_| {})?;
+        // Another `bolt start` may have finished while this one waited for the lock.
+        if format_path(root).try_exists()? {
+            return Err(already());
+        }
+        let mut pack = repo.new_pack()?;
+        let listing = pack.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
+        let save = Save {
+            root: listing,
+            parents: vec![],
+            author: who.clone(),
+            saver: who.clone(),
+            message: "Start project".into(),
+            change_id: ChangeId::random().map_err(io::Error::other)?,
+            move_notes: vec![],
+            signature: vec![],
+            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
+        };
+        let encoded = save.encode();
+        // Refuse a save that would not read back (an over-long name, say) before storing it.
+        Save::decode(&encoded, false)?;
+        let save = pack.add_record(ObjectKind::Save, &encoded)?;
+        let entry = DiaryEntry {
+            parent: None,
+            action: Action::Command,
+            command: "start".into(),
+            who: who.clone(),
+            bolt_version: env!("CARGO_PKG_VERSION").into(),
+            state: State {
+                lines: BTreeMap::from([("main".to_owned(), save)]),
+                tags: BTreeMap::new(),
+                position: Position::OnLine("main".into()),
+                shelves: vec![],
+                remotes: BTreeMap::new(),
+            },
+            safety_copies: vec![],
+        };
+        repo.commit(&lock, pack, &entry)?;
+        write_atomic(&repo.tmp, &format_path(root), FORMAT_TEXT.as_bytes())?;
+        Ok(repo)
+    }
+
+    /// Opens the project that holds `start`: the nearest folder, from `start` up, with a
+    /// `.bolt/format` file.
+    pub fn discover(start: &Path) -> Result<Repository, RepoError> {
+        let root = start
+            .ancestors()
+            .find(|a| format_path(a).is_file())
+            .ok_or(RepoError::NotAProject)?;
+        Repository::open(root)
+    }
+
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
         let bolt = root.join(".bolt");
@@ -379,6 +470,32 @@ mod tests {
         let lock = repo.lock_for_change("save", &mut |_| {})?;
         let pack = repo.new_pack()?;
         repo.commit(&lock, pack, e)
+    }
+
+    #[test]
+    fn init_then_discover_from_a_subfolder() {
+        let dir = tempfile::tempdir().unwrap();
+        let who = entry(0).who;
+        let repo = Repository::init(dir.path(), &who).unwrap();
+        let (_, first) = repo.current().unwrap();
+        assert_eq!(first.command, "start");
+        let save = repo
+            .store()
+            .save(&first.state.lines["main"], false)
+            .unwrap();
+        assert_eq!(
+            (save.message.as_str(), save.line()),
+            ("Start project", Some("main"))
+        );
+        assert_eq!(repo.store().listing(&save.root).unwrap(), Listing::empty());
+        let sub = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(Repository::discover(&sub).unwrap().root(), dir.path());
+        let outside = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            Repository::discover(outside.path()),
+            Err(RepoError::NotAProject)
+        ));
     }
 
     #[test]

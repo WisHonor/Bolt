@@ -1,0 +1,28 @@
+---
+source: crates/bolt-vcs/tests/cli.rs
+expression: json
+---
+{
+  "bolt_json": 1,
+  "line": "main",
+  "root": "[redacted]",
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Start project",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  }
+}
