@@ -44,10 +44,6 @@ pub enum SaveOutcome {
 pub enum SaveError {
     #[error(transparent)]
     Repo(#[from] RepoError),
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    #[error(transparent)]
-    Pack(#[from] PackError),
     #[error("Can't read {path}: {source}.")]
     Unreadable { path: String, source: io::Error },
     #[error("{path} changed while Bolt was saving it.")]
@@ -63,6 +59,19 @@ pub enum SaveError {
     Ignore { detail: String },
     #[error("You are not on a line, so the save has nowhere to go.")]
     NotOnALine,
+}
+
+// Through `RepoError`, so a damaged pack is reported as damage.
+impl From<StoreError> for SaveError {
+    fn from(e: StoreError) -> Self {
+        SaveError::Repo(e.into())
+    }
+}
+
+impl From<PackError> for SaveError {
+    fn from(e: PackError) -> Self {
+        SaveError::Repo(e.into())
+    }
 }
 
 fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {

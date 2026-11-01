@@ -33,9 +33,9 @@ pub enum RepoError {
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
-    Store(#[from] StoreError),
+    Store(StoreError),
     #[error(transparent)]
-    Pack(#[from] PackError),
+    Pack(PackError),
     #[error(transparent)]
     Decode(#[from] DecodeError),
 }
@@ -58,6 +58,30 @@ impl RepoError {
             }
             .to_owned(),
         )
+    }
+}
+
+impl From<StoreError> for RepoError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::Pack(p) => p.into(),
+            other => RepoError::Store(other),
+        }
+    }
+}
+
+impl From<PackError> for RepoError {
+    /// A pack that fails its checks is damage, and the user must hear it as such (decision 017).
+    fn from(e: PackError) -> Self {
+        match e {
+            PackError::Corrupt { path, reason } => {
+                damaged(format!("pack {} ({reason})", path.display()))
+            }
+            PackError::FingerprintMismatch { id } => {
+                damaged(format!("object {id} does not match its fingerprint"))
+            }
+            other => RepoError::Pack(other),
+        }
     }
 }
 
@@ -543,6 +567,33 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_opened_before_a_commit_still_reads() {
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let reader = Repository::open(dir.path()).unwrap();
+        commit(&mut repo, &entry(2)).unwrap();
+        assert_eq!(reader.current().unwrap(), (a, entry(1)));
+    }
+
+    #[test]
+    fn a_damaged_pack_is_reported_as_damage() {
+        let id = Id([7; 32]);
+        for e in [
+            StoreError::Pack(PackError::FingerprintMismatch { id }),
+            StoreError::Pack(PackError::Corrupt {
+                path: "p.pack".into(),
+                reason: "bad index".into(),
+            }),
+        ] {
+            let e = RepoError::from(e);
+            assert!(matches!(e, RepoError::Damaged { .. }), "{e:?}");
+            assert!(e.hint().unwrap().contains("Nothing was changed"));
+        }
+        let e = crate::snapshot::SaveError::from(PackError::FingerprintMismatch { id });
+        assert!(e.hint().unwrap().contains("Nothing was changed"), "{e:?}");
+    }
+
+    #[test]
     fn head_rejects_garbage() {
         let (dir, repo) = project();
         let head = dir.path().join(".bolt/state/head");
@@ -573,15 +624,6 @@ mod tests {
         assert_eq!(repo.tmp_dir(), dir.path().join(".bolt/tmp"));
         assert_eq!(repo.packs_dir(), dir.path().join(".bolt/store/packs"));
         assert!(!repo.signatures_allowed());
-    }
-
-    #[test]
-    fn a_reader_opened_before_a_commit_still_reads() {
-        let (dir, mut repo) = project();
-        let a = commit(&mut repo, &entry(1)).unwrap();
-        let reader = Repository::open(dir.path()).unwrap();
-        commit(&mut repo, &entry(2)).unwrap();
-        assert_eq!(reader.current().unwrap(), (a, entry(1)));
     }
 
     #[test]
