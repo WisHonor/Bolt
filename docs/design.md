@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 5
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 6
 
 ## 1. Vision
 
@@ -78,7 +78,7 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T2 | Users see snapshots; storage may use deltas with periodic full copies | Identity **confirmed** by decision 005: IDs never depend on how data is stored; storage strategy in topic 9 | 5, 9 |
 | T3 | BLAKE3 hashing, zstd compression | BLAKE3 **confirmed** by decision 005; zstd details in topic 9 | 5, 9 |
 | T4 | Objects: blobs, trees, saves, refs, plus an operation log | Mostly keep; chunk lists added by decision 005; conflict entries in topic 7; mutable state (lines, operation log) in topics 8 and 10 | 5–7, 10 |
-| T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | Mostly keep; author and committer kept separately with time zones (required by decision 002); a long random change ID; room for extensions | 6 |
+| T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | **Confirmed** with additions by decision 006: author and saver with time zones, 128-bit random change ID, move notes, signature slot, extra fields | 6 |
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | Keep; the hardest feature on the list, so design the format early and build it late | 7 |
@@ -99,7 +99,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 3. Working-copy model: is your folder a live draft save (jj) or separate until you save (Git)? Tracking new files, partial saves, shelf → [decision 003](decisions/003-working-copy-model.md)
 - [x] 4. What a project can contain: path rules, line endings, executable bit, symlinks, empty folders, nested projects → [decision 004](decisions/004-project-contents.md)
 - [x] 5. Object identity: what is hashed and how, ID format, canonical byte encoding, big-file identity, objects known but not downloaded → [decision 005](decisions/005-object-identity.md)
-- [ ] 6. The save object: fields, change IDs (generation, display, divergence), room for signatures and move hints
+- [x] 6. The save object: fields, change IDs (generation, display, divergence), room for signatures and move hints → [decision 006](decisions/006-save-object.md)
 - [ ] 7. Conflicts as data: how a conflict lives in a tree and in your folder, for text and binary files
 
 **Stage 3 — Local engine**
@@ -158,6 +158,14 @@ The current design, by area. Each part links to the decision that set it.
 - **Encoding:** hand-written binary format, one valid encoding per object, strict readers, test vectors in the storage spec. Serde only for data that is never fingerprinted.
 - **Known but not downloaded:** a normal state everywhere; `bolt verify` tells it apart from real loss.
 
+### 5.4 What's inside a save ([decision 006](decisions/006-save-object.md))
+
+**In plain words.** A save points at the photo of your project (its top folder listing) and records who, when and why. Each save also has a short, stable change ID made of letters (`kxqmz`) that survives edits, and it can note files Bolt is sure you moved.
+
+- **Fields:** top folder listing ID; ordered parents; author and saver (name, email, time, time zone); message; change ID; optional move notes; reserved signature slot; extra fields that older versions keep but ignore.
+- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one.
+- **Move notes:** recorded only when Bolt is certain (same contents moved, or a Unity `.meta` file moved with its asset); used by diffs, merges and locks; they never change the snapshot.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -174,8 +182,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission. *Name rules and write-out safety: decision 004. Files held open and retries: topic 11.*
 11. **Big-file identity.** *Answered by decision 005:* files are identified by their contents, never by their chunk list.
 12. **Hashed objects need a hand-specified byte format.** *Answered by decision 005:* a hand-written format with exactly one valid encoding per object; serde only for data that is never fingerprinted.
-13. **Renames are guessed** when changes come from comparing snapshots. Fine for text; a moved-and-edited 2 GB texture becomes delete + add, merges can't follow it, and path-based locks lose it. Perforce and Plastic record moves; optional move hints in a save would keep the snapshot model intact (topics 6, 12).
-14. **Change IDs.** The short `bx7k2` is only a display prefix; underneath, the ID must be long and random (jj uses 128 bits) to stay unique across people. Two saves sharing one change ID after concurrent rewrites ("divergence" in jj) is a real state to design for (topic 6).
+13. **Renames are guessed** when changes come from comparing snapshots. *Answered by decision 006:* saves carry move notes for moves Bolt is certain about; how merges use them follows in topic 12.
+14. **Change IDs.** *Answered by decision 006:* 128 random bits, shown in the letters k–z, with divergence shown explicitly.
 15. **Build order.** Answered by decision 001: test infrastructure is built with the object store, a minimal Git importer follows saves and history, and chunked big files come before lines and combine. Locking waits for the server (v0.3).
 16. **A data-integrity tool written mostly by an AI while the owner learns Rust.** Subtle bugs can look fine in review. *Proposed rails, pending the owner's approval:* spec before code for anything on disk, test vectors for every format, `#![forbid(unsafe_code)]` in the engine, no panics in library code, small changes, and the owner reads every module that writes to disk.
 
@@ -191,7 +199,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Contribution licensing**: CLA or DCO. [Matters if the server is AGPL and ever dual-licensed; decide before accepting outside contributions.]
 - **GUI and editor plugins** (Unreal, Unity, Godot, Blender). [All logic stays in the engine library so a GUI can embed it.]
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]
-- **Signed saves.** [Reserve room in the save format, topic 6.]
+- **Signed saves.** [Room reserved in the save format (decision 006).]
 - **Structural diff and merge** (tree-sitter). [Later.]
 - **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Very hard and OS-specific; not before v1.]
 - **Web platform and asset previews.** [After the server.]
@@ -227,7 +235,9 @@ Working names; command names can still change (topic 17).
 - **Repository**: the history database, kept in `.bolt/`.
 - **Working folder**: the files you actually edit.
 - **Save**: one recorded version of the whole project (Git: commit). A photo of every file at one moment.
-- **Change ID**: a stable name for a save that survives edits and rewrites (`bx7k2`). Editing a save changes its hash, not its change ID.
+- **Change ID**: a stable name for a save that survives edits and rewrites, written in the letters k–z (`kxqmz`). Editing a save changes its fingerprint, not its change ID.
+- **Divergent**: two saves that share one change ID, usually because two people edited the same save; Bolt shows both until you keep one.
+- **Move note**: a record inside a save that a file moved, kept only when Bolt is certain.
 - **Hash**: a fingerprint of data. Change one byte and the fingerprint changes (BLAKE3).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
