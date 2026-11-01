@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 11
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 12
 
 ## 1. Vision
 
@@ -109,7 +109,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 11. Fast `status` and safe `goto`: file-state cache, timestamp traps, file watching, never overwriting unsaved work → [decision 011](decisions/011-status-and-write-out.md)
 
 **Stage 4 — Collaboration** (constraints only, for now)
-- [ ] 12. Lines and combining: naming, remote lines, tags, three-way merge, renames
+- [x] 12. Lines and combining: naming, remote lines, tags, three-way merge, renames → [decision 012](decisions/012-lines.md) (full combining design before v0.2)
 - [ ] 13. Partial download and offline behaviour
 - [ ] 14. Locking semantics
 - [ ] 15. Sync protocol, server storage model, permissions
@@ -248,6 +248,17 @@ head ─► redo     main → ptvz
 - **Writing files:** plan → stop if unsaved work would be overwritten → re-check each file just before replacing it → temp file + rename → the whole switch journaled.
 - **Files in use (Windows):** retry briefly, finish the rest, name the program holding the file, then finish with one more command.
 
+### 5.10 Lines ([decision 012](decisions/012-lines.md))
+
+**In plain words.** A line is a name, like `main` or `feature/double-jump`, that points at the latest save made on it and moves forward when you save. Each save also notes which line it was made on, so history keeps that information even after lines are combined or deleted.
+
+- **Stored in the diary**, not as files: renaming or deleting a line can be undone, and filesystem case rules never interfere.
+- **Names:** letters, digits, `-`, `_`, `.`, `/`; no spaces; no two names differing only by letter case; `bolt start` creates `main`.
+- **Not on a line:** after `goto` to a save, Bolt says you're looking at an older save; saving there asks for a new line name.
+- **Tags:** fixed names for important saves; they never move, and changing one asks first.
+- **Combining (v0.2):** three-way merge per file; text merged line by line; binaries never merged automatically; move notes followed.
+- **Server lines (v0.3):** shown as `main@origin`.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -331,7 +342,8 @@ Working names; command names can still change (topic 17).
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
 - **Chunk**: a piece of a big file. Identical pieces are stored once.
 - **Chunk list**: the list of pieces a big file was cut into. Stored separately, so the file's ID never depends on it.
-- **Line**: a named line of work (Git: branch).
+- **Line**: a named line of work (Git: branch); a movable name that points at the latest save made on it.
+- **Tag**: a fixed name for an important save, like `v1.0`; it never moves.
 - **Operation log**: a diary of every command that changed the repository; it is what makes undo possible.
 - **Project rules**: settings the whole team shares, kept in `bolt.toml` and `.boltignore` and saved in history like normal files.
 - **Personal settings**: your own preferences (name, editor, merge tools); never shared, and they can't change project rules.
