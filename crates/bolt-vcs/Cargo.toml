@@ -1,0 +1,19 @@
+[package]
+name = "bolt-vcs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bolt"
+path = "src/main.rs"
+
+[features]
+fault-injection = ["bolt-vcs-core/fault-injection"]
+
+[dependencies]
+bolt-vcs-core = { path = "../bolt-vcs-core" }
+bolt-vcs-platform = { path = "../bolt-vcs-platform" }
+
+[lints]
+workspace = true
