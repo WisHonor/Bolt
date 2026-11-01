@@ -2,11 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use assert_cmd::Command;
-#[cfg(unix)]
 use bolt_core::id::Id;
-#[cfg(unix)]
-use bolt_core::listing::{Entry, EntryKind, Listing};
-#[cfg(unix)]
+use bolt_core::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH};
 use bolt_core::pack::{ObjectKind, PackWriter};
 use bolt_core::repo::FORMAT_TEXT;
 use std::path::Path;
@@ -471,6 +468,36 @@ fn history_and_show_json_output() {
 }
 
 #[test]
+fn show_json_is_the_one_compact_line_serde_json_would_write() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    // `show` writes the changes one at a time as it finds them, so it must still end up with the
+    // document it wrote when it held them all: one compact line, keys in order.
+    let raw = stdout_of(&env, &["--json", "show"]);
+    let none: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(raw, format!("{none}\n"));
+    assert_eq!(none["changes"], serde_json::json!([]));
+
+    std::fs::write(env.root().join("b.txt"), "b").unwrap();
+    std::fs::write(env.root().join("c.txt"), "c").unwrap();
+    env.bolt().args(["save", "base"]).assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    std::fs::write(env.root().join("b.txt"), "bbbb").unwrap();
+    std::fs::remove_file(env.root().join("c.txt")).unwrap();
+    env.bolt().args(["save", "mix"]).assert().success();
+    let raw = stdout_of(&env, &["--json", "show"]);
+    let three: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(raw, format!("{three}\n"));
+    let paths: Vec<&str> = three["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[test]
 fn commands_outside_a_project_explain_what_to_do() {
     let env = Env::new();
     let out = env.bolt().arg("history").output().unwrap();
@@ -529,12 +556,11 @@ fn hostile_text_cannot_drive_the_terminal() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A save can have paths far too long to hold together. No real folder tree can be that long, so
-// the saves below are planted through Bolt's own library.
+// Saves that no real folder tree could be: too deep, or with paths far too long to hold together.
+// They are planted through Bolt's own library.
 // ---------------------------------------------------------------------------------------------
 
 /// A listing whose every entry has the same kind and points at the same object.
-#[cfg(unix)]
 fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id) -> Id {
     let entries = names
         .iter()
@@ -551,7 +577,6 @@ fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id)
 }
 
 /// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
-#[cfg(unix)]
 fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
     use bolt_core::diary::{Action, DiaryEntry};
     use bolt_core::id::ChangeId;
@@ -588,6 +613,52 @@ fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
         safety_copies: vec![],
     };
     repo.commit(&lock, pack, &diary).unwrap();
+}
+
+/// A started project whose newest save has one level of folders more than a save may have, and
+/// a file `mine.txt` to save next to it.
+fn project_after_a_save_too_deep_to_compare() -> Env {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    plant_save(env.root(), |pack| {
+        let empty = pack
+            .add_record(ObjectKind::FolderListing, &Listing::empty().encode())
+            .unwrap();
+        (0..=MAX_SAVE_DEPTH).fold(empty, |inner, _| {
+            add_listing(pack, &["a".to_owned()], EntryKind::Folder, inner)
+        })
+    });
+    std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
+    env
+}
+
+#[test]
+fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
+    let env = project_after_a_save_too_deep_to_compare();
+    let out = env.bolt().args(["save", "my work"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("Saved "), "{stdout:?}");
+    assert!(!stdout.contains("(0 files)"), "{stdout:?}");
+    assert!(
+        stdout.ends_with("  \"my work\"  (couldn't count the changed files)\n"),
+        "{stdout:?}"
+    );
+    assert!(stdout_of(&env, &["history"]).contains("my work"));
+}
+
+#[test]
+fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
+    let env = project_after_a_save_too_deep_to_compare();
+    let out = env
+        .bolt()
+        .args(["--json", "save", "my work"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["result"], "saved");
+    assert!(json["changed_files"].is_null(), "{json}");
 }
 
 /// Folders one inside the other, and files at the bottom. All names are 255 bytes, so each file

@@ -14,7 +14,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{Match, WalkBuilder};
 
 use crate::diary::{Action, DiaryEntry, Position};
-use crate::diff::diff_saves;
+use crate::diff::count_changes;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
@@ -38,7 +38,9 @@ pub enum SaveOutcome {
     Saved {
         save_id: Id,
         save: Save,
-        changed_files: usize,
+        /// How many files differ from the save before; `None` if that save can't be compared
+        /// with this one (it is too large to read safely, say), so the number is unknown.
+        changed_files: Option<usize>,
     },
     /// The folder matches the line's current save, which is `current`.
     NothingChanged { current: Id },
@@ -194,7 +196,7 @@ pub fn save_folder(
     };
     repo.commit(&lock, pack, &diary)?;
     // The save is committed now; failing to count its files must not make it look failed.
-    let changed_files = diff_saves(repo.store(), Some(parent.root), root).map_or(0, |c| c.len());
+    let changed_files = count_changes(repo.store(), Some(parent.root), root).ok();
     Ok(SaveOutcome::Saved {
         save_id,
         save,
@@ -851,7 +853,7 @@ mod tests {
         else {
             panic!("nothing was saved");
         };
-        assert_eq!(changed_files, 1);
+        assert_eq!(changed_files, Some(1));
         assert_eq!(save.line(), Some("main"));
         assert_eq!(save.author, who());
         let (head, entry) = repo.current().unwrap();
@@ -1394,7 +1396,8 @@ mod tests {
         /// printed reason, if the system can't make that many: even with one-letter names,
         /// 4,097 levels are an 8 KB path, too long for Linux (4,096 bytes) and macOS (1,024),
         /// where no walk can see such a tree either. Windows takes it, because Rust asks it for
-        /// the long form of any long path.
+        /// the long form of any long path. So on Windows a failure fails the test, and the real
+        /// depth tests that CI runs there can't pass without having run.
         fn make(top: &Path, levels: usize) -> Option<DeepFolders> {
             let mut deep = DeepFolders {
                 top: top.to_path_buf(),
@@ -1404,6 +1407,9 @@ mod tests {
                 deep.bottom.push("d");
                 if let Err(e) = fs::create_dir(&deep.bottom) {
                     deep.bottom.pop();
+                    if cfg!(windows) {
+                        panic!("this system can't make {levels} nested folders: {e}");
+                    }
                     eprintln!("skipped: this system can't make {levels} nested folders: {e}");
                     return None;
                 }

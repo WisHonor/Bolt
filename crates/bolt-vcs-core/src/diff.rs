@@ -1,5 +1,7 @@
 //! What changed between two saves, file by file.
 
+use std::cmp::Ordering;
+
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES, SaveLimits};
 use crate::store::{Store, StoreError};
@@ -13,9 +15,11 @@ pub enum ChangeKind {
     KindChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileChange {
-    pub path: String,
+/// A file that differs between two saves. The path is borrowed from the walk's own buffer and is
+/// only good until the callback returns: copy it to keep it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileChange<'a> {
+    pub path: &'a str,
     pub change: ChangeKind,
     /// The new kind, or the old one for a removed file.
     pub kind: EntryKind,
@@ -25,112 +29,197 @@ pub struct FileChange {
     pub new_size: Option<u64>,
 }
 
-/// Every file that differs between two saved folders, sorted by path. Folders are walked
-/// into, not listed. `old_root` is `None` when there is nothing to compare against.
+/// Hands every file that differs between two saved folders to `each`, in the order of their
+/// whole paths, byte by byte (so `a.txt` comes before `a/b`). Folders are walked into, not
+/// listed. `old_root` is `None` when there is nothing to compare against.
+///
+/// No change is kept once `each` has seen it. What the walk holds is the one path it is at, and,
+/// for each folder on the way down to it, the names in that folder that differ and have not had
+/// their turn yet. An error from `each` ends the walk and is returned.
 ///
 /// Folders the two saves share are not read. Each save is held to the limits of
 /// storage-format.md section 3 on its own (`MAX_SAVE_DEPTH` levels, `MAX_SAVE_ENTRIES` entries
-/// counted along every path); passing one gives `StoreError::SaveTooLarge`. The folders that
-/// differ are walked twice, the first time only to check the limits.
-pub fn diff_saves(
+/// counted along every path); passing one gives `StoreError::SaveTooLarge`, but only when the
+/// walk gets there, after it has handed out the changes that came before. To know the saves are
+/// within the limits first, run [`count_changes`].
+pub fn for_each_change<E: From<StoreError>>(
     store: &Store,
     old_root: Option<Id>,
     new_root: Id,
-) -> Result<Vec<FileChange>, StoreError> {
-    diff_saves_with_limit(store, old_root, new_root, MAX_SAVE_ENTRIES)
+    each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    walk(store, old_root, new_root, MAX_SAVE_ENTRIES, each)
 }
 
-pub(crate) fn diff_saves_with_limit(
+/// How many files differ between the two saves, found by the walk of [`for_each_change`] with
+/// nothing done for each change. It stops at the same limits, so it also tells whether the saves
+/// can be walked, before anything is shown.
+pub fn count_changes(
+    store: &Store,
+    old_root: Option<Id>,
+    new_root: Id,
+) -> Result<usize, StoreError> {
+    let mut count = 0;
+    for_each_change(store, old_root, new_root, |_| {
+        count += 1;
+        Ok::<(), StoreError>(())
+    })?;
+    Ok(count)
+}
+
+/// What the walk still has to do with one name in a folder.
+enum Step {
+    /// Hand out a file that differs. Its path is empty until its turn comes.
+    File(FileChange<'static>),
+    /// Compare two folders, `depth` levels below the root; a side is `None` if it has no folder
+    /// of that name.
+    Folder {
+        old: Option<Id>,
+        new: Option<Id>,
+        depth: usize,
+    },
+}
+
+struct Todo {
+    name: String,
+    /// How long the path of the folder holding the name is.
+    at: usize,
+    step: Step,
+}
+
+impl Todo {
+    /// The bytes that decide where the paths of this name come among the paths of its folder.
+    /// A file is just its name. A folder's files are all `name/…`, so the folder `a` comes
+    /// after `a.txt` (`.` is 0x2E) and before `a0` (`0` is 0x30), because `/` is 0x2F.
+    fn key(&self) -> impl Iterator<Item = u8> + '_ {
+        let slash = matches!(self.step, Step::Folder { .. }).then_some(b'/');
+        self.name.bytes().chain(slash)
+    }
+}
+
+/// The walk behind [`for_each_change`], with the entry limit of the saves as a parameter.
+fn walk<E: From<StoreError>>(
     store: &Store,
     old_root: Option<Id>,
     new_root: Id,
     max_entries: u64,
-) -> Result<Vec<FileChange>, StoreError> {
-    // The first walk only counts. Without it, the 3.6 KB tree bomb of RT-10 would have the
-    // changes of 10 million files in memory (over 1 GiB) before the entry limit refused it.
-    walk_diff(store, old_root, new_root, max_entries, None)?;
-    let mut out = Vec::new();
-    walk_diff(store, old_root, new_root, max_entries, Some(&mut out))?;
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
-}
-
-/// Compares the saves, adding what differs to `out` if there is one, and holds them to the
-/// limits either way.
-fn walk_diff(
-    store: &Store,
-    old_root: Option<Id>,
-    new_root: Id,
-    max_entries: u64,
-    mut out: Option<&mut Vec<FileChange>>,
-) -> Result<(), StoreError> {
+    mut each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    if old_root == Some(new_root) {
+        return Ok(());
+    }
     let too_large = |detail| StoreError::SaveTooLarge { detail };
     // Each save is held to the limits on its own, so two saves that pass can always be compared.
     let (mut old_seen, mut new_seen) = (
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
     );
-    // The pairs of folders still to compare, each with its name and how many levels down it is.
-    // They wait here instead of in a call per level, so a save nested thousands of levels deep
-    // cannot overflow the stack (RT-6). The roots go first.
-    let mut todo = vec![(old_root, Some(new_root), String::new(), 0)];
-    // The path of the folder being compared (`/` after every name), and `ends[k]`: how long the
-    // path was k levels down. A waiting pair carries only its own name, so a folder with many
-    // subfolders does not copy its path once for each of them.
+    // What is left to do waits here instead of in a call per folder level, so a save nested
+    // thousands of levels deep cannot overflow the stack (RT-6). Working a folder out puts its
+    // names that differ on top, the one whose paths come last first, so what is popped next is
+    // always the one whose paths come next. The roots go first.
+    let mut todo = vec![Todo {
+        name: String::new(),
+        at: 0,
+        step: Step::Folder {
+            old: old_root,
+            new: Some(new_root),
+            depth: 0,
+        },
+    }];
+    // The path of what is being worked on (`/` after every folder's name), which is the only
+    // path in memory. A waiting name carries only itself and the length of its folder's path:
+    // everything that was pushed after it is deeper, so when it is popped, the path up to that
+    // length is still its folder's.
     let mut path = String::new();
-    let mut ends: Vec<usize> = Vec::new();
-    while let Some((old, new, name, depth)) = todo.pop() {
-        if old == new {
-            continue;
-        }
-        old_seen.check_depth(depth).map_err(too_large)?; // the new save is as deep
-        // The folder compared last may be deeper than this one: back out of its folders first.
-        ends.truncate(depth);
-        path.truncate(ends.last().copied().unwrap_or(0));
-        if depth > 0 {
-            path.push_str(&name);
-            path.push('/');
-        }
-        ends.push(path.len());
-        let (old, new) = (listing_of(store, old)?, listing_of(store, new)?);
-        old_seen.add(old.entries().len()).map_err(too_large)?;
-        new_seen.add(new.entries().len()).map_err(too_large)?;
-        let mut names: Vec<&str> = old
-            .entries()
-            .iter()
-            .chain(new.entries())
-            .map(|e| e.name.as_str())
-            .collect();
-        names.sort_unstable();
-        names.dedup();
-        for name in names {
-            let (o, n) = (old.get(name), new.get(name));
-            let (of, nf) = (folder_id(o), folder_id(n));
-            if of.is_some() || nf.is_some() {
-                todo.push((of, nf, name.to_owned(), depth + 1));
-            }
-            let (fo, fnew) = (file(o), file(n));
-            let change = match (fo, fnew) {
-                (Some(_), None) => ChangeKind::Removed,
-                (None, Some(_)) => ChangeKind::Added,
-                (Some(a), Some(b)) if a.kind != b.kind => ChangeKind::KindChanged,
-                (Some(a), Some(b)) if a.id != b.id => ChangeKind::Modified,
-                _ => continue,
-            };
-            let Some(shown) = fnew.or(fo) else { continue };
-            if let Some(out) = out.as_deref_mut() {
-                out.push(FileChange {
-                    path: format!("{path}{name}"),
-                    change,
-                    kind: shown.kind,
-                    old_kind: fo.map(|e| e.kind),
-                    old_size: fo.map(|e| e.size),
-                    new_size: fnew.map(|e| e.size),
-                });
+    while let Some(Todo { name, at, step }) = todo.pop() {
+        path.truncate(at);
+        path.push_str(&name);
+        match step {
+            Step::File(change) => each(FileChange {
+                path: &path,
+                ..change
+            })?,
+            Step::Folder { old, new, depth } => {
+                old_seen.check_depth(depth).map_err(too_large)?; // the new save is as deep
+                if depth > 0 {
+                    path.push('/');
+                }
+                let (old, new) = (listing_of(store, old)?, listing_of(store, new)?);
+                old_seen.add(old.entries().len()).map_err(too_large)?;
+                new_seen.add(new.entries().len()).map_err(too_large)?;
+                let (here, first) = (path.len(), todo.len());
+                for (name, o, n) in pairs(old.entries(), new.entries()) {
+                    let (of, nf) = (folder_id(o), folder_id(n));
+                    if of != nf {
+                        todo.push(Todo {
+                            name: name.to_owned(),
+                            at: here,
+                            step: Step::Folder {
+                                old: of,
+                                new: nf,
+                                depth: depth + 1,
+                            },
+                        });
+                    }
+                    let (fo, fnew) = (file(o), file(n));
+                    let change = match (fo, fnew) {
+                        (Some(_), None) => ChangeKind::Removed,
+                        (None, Some(_)) => ChangeKind::Added,
+                        (Some(a), Some(b)) if a.kind != b.kind => ChangeKind::KindChanged,
+                        (Some(a), Some(b)) if a.id != b.id => ChangeKind::Modified,
+                        _ => continue,
+                    };
+                    let Some(shown) = fnew.or(fo) else { continue };
+                    todo.push(Todo {
+                        name: name.to_owned(),
+                        at: here,
+                        step: Step::File(FileChange {
+                            path: "",
+                            change,
+                            kind: shown.kind,
+                            old_kind: fo.map(|e| e.kind),
+                            old_size: fo.map(|e| e.size),
+                            new_size: fnew.map(|e| e.size),
+                        }),
+                    });
+                }
+                todo[first..].sort_unstable_by(|a, b| b.key().cmp(a.key()));
             }
         }
     }
     Ok(())
+}
+
+/// The entries of two listings that share a name, or have it on one side only, in the order of
+/// the names. Listings are sorted by name, so this reads each once.
+fn pairs<'a>(
+    old: &'a [Entry],
+    new: &'a [Entry],
+) -> impl Iterator<Item = (&'a str, Option<&'a Entry>, Option<&'a Entry>)> {
+    let (mut old, mut new) = (old.iter().peekable(), new.iter().peekable());
+    std::iter::from_fn(move || {
+        let order = match (old.peek(), new.peek()) {
+            (None, None) => return None,
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(o), Some(n)) => o.name.cmp(&n.name),
+        };
+        Some(match order {
+            Ordering::Less => {
+                let o = old.next()?;
+                (o.name.as_str(), Some(o), None)
+            }
+            Ordering::Greater => {
+                let n = new.next()?;
+                (n.name.as_str(), None, Some(n))
+            }
+            Ordering::Equal => {
+                let (o, n) = (old.next()?, new.next()?);
+                (o.name.as_str(), Some(o), Some(n))
+            }
+        })
+    })
 }
 
 fn listing_of(store: &Store, id: Option<Id>) -> Result<Listing, StoreError> {
@@ -151,6 +240,46 @@ mod tests {
     use super::*;
     use crate::listing::{Entry, Listing};
     use crate::pack::{ObjectKind, PackWriter};
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// A change with its path copied out of the walk's buffer.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Seen {
+        path: String,
+        change: ChangeKind,
+        kind: EntryKind,
+        old_kind: Option<EntryKind>,
+        old_size: Option<u64>,
+        new_size: Option<u64>,
+    }
+
+    /// Every change the walk hands out, in the order it hands them out, under an entry limit.
+    fn collect(
+        store: &Store,
+        old: Option<Id>,
+        new: Id,
+        max_entries: u64,
+    ) -> Result<Vec<Seen>, StoreError> {
+        let mut seen = Vec::new();
+        walk(store, old, new, max_entries, |c| {
+            seen.push(Seen {
+                path: c.path.to_owned(),
+                change: c.change,
+                kind: c.kind,
+                old_kind: c.old_kind,
+                old_size: c.old_size,
+                new_size: c.new_size,
+            });
+            Ok::<(), StoreError>(())
+        })?;
+        Ok(seen)
+    }
+
+    /// `collect` under the limits of the format, for saves that are meant to pass.
+    fn changes(store: &Store, old: Option<Id>, new: Id) -> Vec<Seen> {
+        collect(store, old, new, MAX_SAVE_ENTRIES).unwrap()
+    }
 
     fn file(name: &str, kind: EntryKind, bytes: &[u8], pack: &mut PackWriter) -> Entry {
         Entry {
@@ -205,8 +334,7 @@ mod tests {
         p.finish(&packs).unwrap();
         let store = Store::open(&packs).unwrap();
         let got: Vec<(String, ChangeKind, Option<u64>, Option<u64>)> =
-            diff_saves(&store, Some(old), new)
-                .unwrap()
+            changes(&store, Some(old), new)
                 .into_iter()
                 .map(|c| (c.path, c.change, c.old_size, c.new_size))
                 .collect();
@@ -223,8 +351,11 @@ mod tests {
             .map(|(p, c, a, b)| (p.to_owned(), c, a, b))
             .collect();
         assert_eq!(got, want);
-        assert_eq!(diff_saves(&store, None, new).unwrap().len(), 5);
-        assert!(diff_saves(&store, Some(new), new).unwrap().is_empty());
+        assert_eq!(changes(&store, None, new).len(), 5);
+        assert!(changes(&store, Some(new), new).is_empty());
+        assert_eq!(count_changes(&store, Some(old), new).unwrap(), 6);
+        assert_eq!(count_changes(&store, None, new).unwrap(), 5);
+        assert_eq!(count_changes(&store, Some(new), new).unwrap(), 0);
     }
 
     /// A store holding what `build` adds to one pack, and the IDs it hands back.
@@ -287,8 +418,7 @@ mod tests {
             let new = folder("", vec![a, file("z", EntryKind::File, b"zz", p)], p).id;
             [old, new]
         });
-        let got: Vec<(String, ChangeKind)> = diff_saves(&store, Some(old), new)
-            .unwrap()
+        let got: Vec<(String, ChangeKind)> = changes(&store, Some(old), new)
             .into_iter()
             .map(|c| (c.path, c.change))
             .collect();
@@ -306,15 +436,19 @@ mod tests {
     #[test]
     fn depth_at_the_limit_is_accepted() {
         let (_dir, store, [root]) = store_with(|p| [chain(MAX_SAVE_DEPTH, p)]);
-        let got = diff_saves(&store, None, root).unwrap();
+        let got = changes(&store, None, root);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].path, format!("{}f", "d/".repeat(MAX_SAVE_DEPTH)));
+        assert_eq!(count_changes(&store, None, root).unwrap(), 1);
     }
 
     #[test]
     fn depth_past_the_limit_is_refused() {
         let (_dir, store, [root]) = store_with(|p| [chain(MAX_SAVE_DEPTH + 1, p)]);
-        let err = diff_saves(&store, None, root).unwrap_err();
+        let err = count_changes(&store, None, root).unwrap_err();
+        assert!(matches!(err, StoreError::SaveTooLarge { .. }), "{err:?}");
+        // Walking says the same, though it has handed out changes by the time it gets there.
+        let err = collect(&store, None, root, MAX_SAVE_ENTRIES).unwrap_err();
         assert!(matches!(err, StoreError::SaveTooLarge { .. }), "{err:?}");
     }
 
@@ -324,9 +458,9 @@ mod tests {
         // walk reads once for each path to it: 3 + 3 * 2 = 9 entries, though only 5 are stored.
         const PATHS: u64 = 3 + 3 * 2;
         let (_dir, store, [root]) = store_with(|p| [three_paths_to_one_listing(b"y", p)]);
-        let got = diff_saves_with_limit(&store, None, root, PATHS).unwrap();
+        let got = collect(&store, None, root, PATHS).unwrap();
         assert_eq!(got.len(), 6);
-        let err = diff_saves_with_limit(&store, None, root, PATHS - 1).unwrap_err();
+        let err = collect(&store, None, root, PATHS - 1).unwrap_err();
         assert!(matches!(err, StoreError::SaveTooLarge { .. }), "{err:?}");
     }
 
@@ -340,10 +474,190 @@ mod tests {
             ]
         });
         // Two saves of 9 paths each, one file apart: 18 together, but the limit is per save.
-        let got = diff_saves_with_limit(&store, Some(old), new, 9).unwrap();
+        let got = collect(&store, Some(old), new, 9).unwrap();
         assert_eq!(got.len(), 3);
         // Either one alone is too big for 8, whichever side of the comparison it is on.
-        assert!(diff_saves_with_limit(&store, Some(old), small, 8).is_err());
-        assert!(diff_saves_with_limit(&store, Some(small), new, 8).is_err());
+        assert!(collect(&store, Some(old), small, 8).is_err());
+        assert!(collect(&store, Some(small), new, 8).is_err());
+    }
+
+    #[test]
+    fn changes_come_in_the_order_of_whole_paths() {
+        let (_dir, store, [old, new]) = store_with(|p| {
+            // `a` is a file here and becomes a folder.
+            let old = folder("", vec![file("a", EntryKind::File, b"a", p)], p).id;
+            // The names next to the folder `a`, whose files are `a/…`: `-` (0x2D) and `.` (0x2E)
+            // sort before `/` (0x2F), `0` and `~` after it. The same holds inside `a`, one level
+            // down, around the folder `b`.
+            let inside = vec![
+                file("b-1", EntryKind::File, b"1", p),
+                file("b.c", EntryKind::File, b"2", p),
+                folder("b", vec![file("d", EntryKind::File, b"3", p)], p),
+                file("b0", EntryKind::File, b"4", p),
+            ];
+            let new = vec![
+                file("a~", EntryKind::File, b"~", p),
+                file("a0", EntryKind::File, b"0", p),
+                folder("a", inside, p),
+                file("a.txt", EntryKind::File, b"t", p),
+                file("a-b", EntryKind::File, b"b", p),
+            ];
+            [old, folder("", new, p).id]
+        });
+        let got: Vec<String> = changes(&store, Some(old), new)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        let want = [
+            "a", "a-b", "a.txt", "a/b-1", "a/b.c", "a/b/d", "a/b0", "a0", "a~",
+        ];
+        assert_eq!(got, want);
+        // Which is what sorting the whole paths gives.
+        assert!(got.is_sorted());
+    }
+
+    /// A tree as a test describes it, before it is stored.
+    #[derive(Debug, Clone)]
+    enum Node {
+        File(EntryKind, Vec<u8>),
+        Folder(BTreeMap<String, Node>),
+    }
+
+    /// Names that sort differently as a folder (`name/`) than as a file: they differ from each
+    /// other in bytes just below and just above `/`.
+    fn name() -> impl Strategy<Value = String> {
+        let names = vec!["a", "a ", "a-", "a-b", "a.", "a.txt", "a0", "a~", "ab", "b"];
+        prop::sample::select(names).prop_map(str::to_owned)
+    }
+
+    fn tree() -> impl Strategy<Value = BTreeMap<String, Node>> {
+        let kinds = vec![EntryKind::File, EntryKind::Executable, EntryKind::Symlink];
+        let contents = vec![b"1".to_vec(), b"2".to_vec(), Vec::new()];
+        let leaf = (prop::sample::select(kinds), prop::sample::select(contents))
+            .prop_map(|(kind, bytes)| Node::File(kind, bytes));
+        let node = leaf.prop_recursive(3, 24, 4, |inner| {
+            prop::collection::btree_map(name(), inner, 0..4).prop_map(Node::Folder)
+        });
+        prop::collection::btree_map(name(), node, 0..5)
+    }
+
+    /// Stores a tree and gives its top folder.
+    fn store_tree(name: &str, tree: &BTreeMap<String, Node>, pack: &mut PackWriter) -> Entry {
+        let entries = tree
+            .iter()
+            .map(|(n, node)| match node {
+                Node::File(kind, bytes) => file(n, *kind, bytes, pack),
+                Node::Folder(inner) => store_tree(n, inner, pack),
+            })
+            .collect();
+        folder(name, entries, pack)
+    }
+
+    /// Every file of a tree by its whole path.
+    fn flatten<'a>(
+        tree: &'a BTreeMap<String, Node>,
+        prefix: &str,
+        out: &mut BTreeMap<String, (EntryKind, &'a [u8])>,
+    ) {
+        for (name, node) in tree {
+            match node {
+                Node::File(kind, bytes) => {
+                    out.insert(format!("{prefix}{name}"), (*kind, bytes));
+                }
+                Node::Folder(inner) => flatten(inner, &format!("{prefix}{name}/"), out),
+            }
+        }
+    }
+
+    /// What comparing two trees should give, worked out the other way round: compare every file
+    /// by its whole path, and put the paths in order.
+    fn by_whole_path(old: &BTreeMap<String, Node>, new: &BTreeMap<String, Node>) -> Vec<Seen> {
+        let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
+        flatten(old, "", &mut a);
+        flatten(new, "", &mut b);
+        let paths: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+        let mut out = Vec::new();
+        for path in paths {
+            let (o, n) = (a.get(path), b.get(path));
+            let change = match (o, n) {
+                (Some(_), None) => ChangeKind::Removed,
+                (None, Some(_)) => ChangeKind::Added,
+                (Some(x), Some(y)) if x.0 != y.0 => ChangeKind::KindChanged,
+                (Some(x), Some(y)) if x.1 != y.1 => ChangeKind::Modified,
+                _ => continue,
+            };
+            let Some(shown) = n.or(o) else { continue };
+            out.push(Seen {
+                path: path.clone(),
+                change,
+                kind: shown.0,
+                old_kind: o.map(|x| x.0),
+                old_size: o.map(|x| x.1.len() as u64),
+                new_size: n.map(|y| y.1.len() as u64),
+            });
+        }
+        out
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn order_is_that_of_sorting_all_the_paths(old in tree(), new in tree()) {
+            let (_dir, store, [o, n]) = store_with(|p| {
+                [store_tree("", &old, p).id, store_tree("", &new, p).id]
+            });
+            let want = by_whole_path(&old, &new);
+            prop_assert_eq!(&changes(&store, Some(o), n), &want);
+            prop_assert_eq!(count_changes(&store, Some(o), n).unwrap(), want.len());
+        }
+    }
+
+    #[test]
+    fn the_callback_can_stop_the_walk() {
+        let (_dir, store, [root]) = store_with(|p| {
+            let files = ["a", "b", "c", "d"].map(|n| file(n, EntryKind::File, n.as_bytes(), p));
+            [folder("", files.to_vec(), p).id]
+        });
+        let mut seen = Vec::new();
+        let stopped: Result<(), Box<dyn std::error::Error>> =
+            for_each_change(&store, None, root, |c| {
+                seen.push(c.path.to_owned());
+                if seen.len() == 2 {
+                    return Err("enough".into());
+                }
+                Ok(())
+            });
+        assert_eq!(stopped.unwrap_err().to_string(), "enough");
+        assert_eq!(seen, ["a", "b"]);
+    }
+
+    #[test]
+    fn folders_both_saves_share_are_never_read() {
+        // A folder both saves hold, whose listing is not in the store: reading it would fail.
+        let shared = Entry {
+            name: "shared".into(),
+            kind: EntryKind::Folder,
+            id: Id([9; 32]),
+            size: 0,
+        };
+        let (_dir, store, [old, new]) = store_with(|p| {
+            [
+                folder(
+                    "",
+                    vec![shared.clone(), file("f", EntryKind::File, b"1", p)],
+                    p,
+                )
+                .id,
+                folder(
+                    "",
+                    vec![shared.clone(), file("f", EntryKind::File, b"2", p)],
+                    p,
+                )
+                .id,
+            ]
+        });
+        let got = changes(&store, Some(old), new);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "f");
     }
 }

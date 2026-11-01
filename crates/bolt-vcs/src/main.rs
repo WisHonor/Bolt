@@ -5,7 +5,7 @@ mod output;
 use std::process::ExitCode;
 
 use bolt_core::config::{ConfigError, load_identity, now_person};
-use bolt_core::diff::{ChangeKind, diff_saves};
+use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
 use bolt_core::history::{ResolveError, line_history, resolve, short_change_ids};
 use bolt_core::id::Id;
 use bolt_core::repo::{RepoError, Repository};
@@ -170,8 +170,12 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                 );
             } else {
                 let title = output::sanitize(message.lines().next().unwrap_or_default(), false);
-                let files = if changed_files == 1 { "file" } else { "files" };
-                println!("Saved {short}  \"{title}\"  ({changed_files} {files})");
+                let counted = match changed_files {
+                    Some(1) => "(1 file)".to_owned(),
+                    Some(n) => format!("({n} files)"),
+                    None => "(couldn't count the changed files)".to_owned(),
+                };
+                println!("Saved {short}  \"{title}\"  {counted}");
             }
         }
         SaveOutcome::NothingChanged { current } => {
@@ -251,12 +255,19 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
         Some(p) => Some(store.save(p, repo.signatures_allowed())?.root),
         None => None,
     };
-    let changes = diff_saves(store, old_root, save.root)?;
+    // Counting first holds the saves to the limits and reads them for damage before anything is
+    // printed, so a save that can't be listed prints only the error. The changes are then
+    // printed as the walk finds them, and none is kept.
+    let changes = count_changes(store, old_root, save.root)?;
     let short = short_of(&repo, &id, &save)?;
     if json {
-        let list: Vec<_> = changes
-            .iter()
-            .map(|c| {
+        // The document `json!` would make, in pieces: it keeps its keys in order, so `changes`
+        // comes between `bolt_json` and `save`.
+        print!("{{\"bolt_json\":{BOLT_JSON},\"changes\":[");
+        let mut comma = "";
+        for_each_change(store, old_root, save.root, |c| {
+            print!(
+                "{comma}{}",
                 json!({
                     "path": c.path,
                     "change": match c.change {
@@ -269,12 +280,11 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
                     "old_size": c.old_size,
                     "new_size": c.new_size,
                 })
-            })
-            .collect();
-        println!(
-            "{}",
-            json!({"bolt_json": BOLT_JSON, "save": output::save_json(&id, &save, &short), "changes": list})
-        );
+            );
+            comma = ",";
+            Ok::<(), Failure>(())
+        })?;
+        println!("],\"save\":{}}}", output::save_json(&id, &save, &short));
         return Ok(());
     }
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
@@ -284,8 +294,8 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     );
     println!("{}\n", output::sanitize(save.message.trim_end(), true));
     let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
-    for c in &changes {
-        let p = &output::sanitize(&c.path, false);
+    for_each_change(store, old_root, save.root, |c| {
+        let p = &output::sanitize(c.path, false);
         match c.change {
             ChangeKind::Added => println!("  added     {p}  ({})", size(c.new_size)),
             ChangeKind::Removed => println!("  removed   {p}  ({})", size(c.old_size)),
@@ -301,8 +311,9 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
                 println!("  changed   {p}  ({old} → {})", c.kind.as_str());
             }
         }
-    }
-    if changes.is_empty() {
+        Ok::<(), Failure>(())
+    })?;
+    if changes == 0 {
         println!("  (no file changes)");
     }
     Ok(())
