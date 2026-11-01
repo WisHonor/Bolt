@@ -29,6 +29,20 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
     })
 }
 
+/// Makes repository text safe to print: control characters (a hostile repository could embed
+/// terminal escapes) become a visible `\xNN`; a newline stays when `keep_newlines`.
+pub fn sanitize(text: &str, keep_newlines: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && !(keep_newlines && c == '\n') {
+            out.push_str(&format!("\\x{:02x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A failed command's message and what to do about it.
 pub struct Failure {
     pub message: String,
@@ -46,9 +60,9 @@ pub fn print_error(json: bool, failure: &Failure) {
             })
         );
     } else {
-        eprintln!("error: {}", failure.message);
+        eprintln!("error: {}", sanitize(&failure.message, false));
         if let Some(hint) = &failure.hint {
-            eprintln!("hint: {hint}");
+            eprintln!("hint: {}", sanitize(hint, false));
         }
     }
 }
@@ -61,6 +75,7 @@ pub fn relative_time(time_ms: i64, tz_offset_min: i16, now_ms: i64) -> String {
         ..60 => "just now".into(),
         _ if hours == 0 => format!("{mins} min ago"),
         _ if days == 0 => format!("{hours} h ago"),
+        _ if days == 1 => "1 day ago".into(),
         _ if days <= 30 => format!("{days} days ago"),
         _ => date(time_ms, tz_offset_min),
     }
@@ -86,7 +101,8 @@ pub fn format_size(bytes: u64) -> String {
     for u in ["KB", "MB", "GB"] {
         value /= 1024.0;
         unit = u;
-        if value < 1024.0 {
+        // Round first: 1023.95 KB must read as 1.0 MB, not 1024.0 KB.
+        if (value * 10.0).round() < 10240.0 {
             break;
         }
     }
@@ -105,7 +121,8 @@ mod tests {
         assert_eq!(ago(60), "1 min ago");
         assert_eq!(ago(3599), "59 min ago");
         assert_eq!(ago(3600), "1 h ago");
-        assert_eq!(ago(86_400), "1 days ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(2 * 86_400), "2 days ago");
         assert_eq!(ago(30 * 86_400), "30 days ago");
         assert_eq!(ago(31 * 86_400), "1970-01-10");
         assert_eq!(relative_time(0, 120, now), "1970-01-01");
@@ -123,5 +140,8 @@ mod tests {
                 "5120.0 GB"
             ]
         );
+        assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
+        assert_eq!(sanitize("a\x1b[31m\nb", false), "a\\x1b[31m\\x0ab");
+        assert_eq!(sanitize("a\x1b]0;t\x07\nb", true), "a\\x1b]0;t\\x07\nb");
     }
 }

@@ -469,4 +469,34 @@ fn commands_work_from_a_subfolder() {
     let out = env.bolt_in(&sub).arg("history").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains("From sub"));
+    let out = stdout_of_in(&env, &sub, &["show"]);
+    assert!(out.contains("added     project/sub/f.txt"), "{out}");
+}
+
+fn stdout_of_in(env: &Env, dir: &Path, args: &[&str]) -> String {
+    let out = env.bolt_in(dir).args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    text(&out.stdout)
+}
+
+#[test]
+fn hostile_text_cannot_drive_the_terminal() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let out = env
+        .bolt()
+        .args(["save", "\u{1b}[31mred\n\n\u{1b}]0;x\u{7}body"])
+        .env("BOLT_USER_NAME", "Eve\u{1b}[2J")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    for args in [&["history"][..], &["show"]] {
+        let out = stdout_of(&env, args);
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
+        assert!(
+            out.contains("\\x1b[31mred") && out.contains("Eve\\x1b[2J"),
+            "{out}"
+        );
+    }
 }

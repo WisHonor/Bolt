@@ -169,7 +169,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                     })
                 );
             } else {
-                let title = message.lines().next().unwrap_or_default();
+                let title = output::sanitize(message.lines().next().unwrap_or_default(), false);
                 let files = if changed_files == 1 { "file" } else { "files" };
                 println!("Saved {short}  \"{title}\"  ({changed_files} {files})");
             }
@@ -222,7 +222,12 @@ fn history(json: bool) -> Result<(), Failure> {
         for (id, s) in &saves {
             let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
             let title = s.message.lines().next().unwrap_or_default();
-            println!("{}  {when}  {}  {title}", shorts[id], s.author.name);
+            println!(
+                "{}  {when}  {}  {}",
+                shorts[id],
+                output::sanitize(&s.author.name, false),
+                output::sanitize(title, false)
+            );
         }
     }
     Ok(())
@@ -273,15 +278,14 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
         return Ok(());
     }
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
-    println!("Save {short} · {} · {when}", save.author.name);
     println!(
-        "{}
-",
-        save.message.trim_end()
+        "Save {short} · {} · {when}",
+        output::sanitize(&save.author.name, false)
     );
+    println!("{}\n", output::sanitize(save.message.trim_end(), true));
     let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
     for c in &changes {
-        let p = &c.path;
+        let p = &output::sanitize(&c.path, false);
         match c.change {
             ChangeKind::Added => println!("  added     {p}  ({})", size(c.new_size)),
             ChangeKind::Removed => println!("  removed   {p}  ({})", size(c.old_size)),

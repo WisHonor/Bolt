@@ -67,16 +67,23 @@ pub fn short_change_ids(saves: &[(Id, Save)]) -> HashMap<Id, String> {
         .iter()
         .map(|(_, s)| s.change_id.to_letters())
         .collect();
-    saves
-        .iter()
-        .zip(&letters)
-        .map(|((id, _), mine)| {
-            let len = (4..mine.len())
-                .find(|&n| letters.iter().filter(|o| o.starts_with(&mine[..n])).count() == 1)
-                .unwrap_or(mine.len());
-            (*id, mine[..len].to_owned())
-        })
-        .collect()
+    let mut order: Vec<usize> = (0..saves.len()).collect();
+    order.sort_by(|&a, &b| letters[a].cmp(&letters[b]));
+    let common = |a: usize, b: usize| {
+        letters[a]
+            .bytes()
+            .zip(letters[b].bytes())
+            .take_while(|(x, y)| x == y)
+            .count()
+    };
+    let mut out = HashMap::new();
+    for (i, &k) in order.iter().enumerate() {
+        let before = i.checked_sub(1).map_or(0, |p| common(order[p], k));
+        let after = order.get(i + 1).map_or(0, |&n| common(k, n));
+        let len = (before.max(after) + 1).clamp(4, letters[k].len());
+        out.insert(saves[k].0, letters[k][..len].to_owned());
+    }
+    out
 }
 
 fn one_of(text: &str, mut found: Vec<(Id, String)>) -> Result<Id, ResolveError> {
@@ -155,6 +162,17 @@ mod tests {
             extra: Default::default(),
         };
         (save.id(), save)
+    }
+
+    #[test]
+    fn short_ids_grow_to_stay_unique() {
+        let a = saved(&format!("klmnop{}", "k".repeat(26)), 1);
+        let b = saved(&format!("klmnopq{}", "k".repeat(25)), 2);
+        let c = saved(&format!("zzzz{}", "k".repeat(28)), 3);
+        let shorts = short_change_ids(&[a.clone(), b.clone(), c.clone()]);
+        assert_eq!(shorts[&a.0], "klmnopk");
+        assert_eq!(shorts[&b.0], "klmnopq");
+        assert_eq!(shorts[&c.0], "zzzz");
     }
 
     #[test]
