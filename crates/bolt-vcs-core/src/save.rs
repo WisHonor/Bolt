@@ -12,6 +12,7 @@ pub const MAX_EXTRA_FIELDS: u64 = 64;
 pub const MAX_EXTRA_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_PERSON_FIELD_BYTES: usize = 4096;
 pub const MAX_PATH_BYTES: usize = 4096;
+pub const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 pub const MAX_EXTRA_KEY_BYTES: usize = 256;
 pub const EXTRA_LINE: &str = "line";
 
@@ -39,6 +40,7 @@ pub struct Save {
     pub saver: Person,
     pub message: String,
     pub change_id: ChangeId,
+    /// The `to` paths must be unique; a save with duplicates encodes but will not decode.
     pub move_notes: Vec<MoveNote>,
     pub signature: Vec<u8>,
     pub extra: BTreeMap<String, Vec<u8>>,
@@ -120,7 +122,7 @@ impl Save {
             }
             move_notes.push(MoveNote { from, to });
         }
-        let signature = r.bytes(MAX_EXTRA_VALUE_BYTES, "signature")?;
+        let signature = r.bytes(MAX_SIGNATURE_BYTES, "signature")?;
         if !signature.is_empty() && !signatures_allowed {
             return Err(DecodeError::Invalid(
                 "signature without the signatures feature",
@@ -231,6 +233,29 @@ mod tests {
         let mut bytes = minimal().encode();
         bytes.pop(); // drop "0 extra fields"
         bytes.extend(unhex("02016200016100")); // keys "b" then "a"
+        assert!(Save::decode(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn duplicate_move_note_targets_are_rejected_on_decode() {
+        let mut s = minimal();
+        s.move_notes = vec![
+            MoveNote {
+                from: "a".into(),
+                to: "c".into(),
+            },
+            MoveNote {
+                from: "b".into(),
+                to: "c".into(),
+            },
+        ];
+        assert!(Save::decode(&s.encode(), false).is_err());
+    }
+
+    #[test]
+    fn unknown_version_is_rejected() {
+        let mut bytes = minimal().encode();
+        bytes[0] = 2;
         assert!(Save::decode(&bytes, false).is_err());
     }
 
