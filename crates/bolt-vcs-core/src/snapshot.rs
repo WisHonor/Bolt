@@ -250,6 +250,18 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
                 detail: describe(root, err),
             });
         }
+        // `ignore` drops read errors on ignore files without a word, so check them here.
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            let file = entry.path().join(".boltignore");
+            match File::open(&file) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    return Err(SaveError::Ignore {
+                        detail: format!("{}: {e}", shown(file.strip_prefix(root).unwrap_or(&file))),
+                    });
+                }
+                _ => {}
+            }
+        }
         let path = entry.path();
         let rel_path = path.strip_prefix(root).unwrap_or(path);
         let rel = shown(rel_path);
@@ -845,24 +857,37 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
-    #[cfg(unix)]
     #[test]
     fn unreadable_boltignore_stops_the_save() {
-        use std::os::unix::fs::PermissionsExt;
         let (dir, mut repo) = project();
         let head = repo.head().unwrap();
-        write(dir.path(), "secret.key", b"x");
-        write(dir.path(), ".boltignore", b"secret.key\n");
-        let ignore = dir.path().join(".boltignore");
-        fs::set_permissions(&ignore, fs::Permissions::from_mode(0o000)).unwrap();
-        // root reads everything, so there is nothing to test.
-        if fs::read(&ignore).is_ok() {
-            return;
+        write(dir.path(), "sub/secret.key", b"x");
+        write(dir.path(), "sub/.boltignore", b"secret.key\n");
+        let ignore = dir.path().join("sub/.boltignore");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&ignore, fs::Permissions::from_mode(0o000)).unwrap();
+            // root reads everything, so there is nothing to test.
+            if fs::read(&ignore).is_ok() {
+                return;
+            }
         }
-        assert!(
-            matches!(save_now(&mut repo), Err(SaveError::Ignore { .. })),
-            "the save went ahead"
-        );
+        #[cfg(windows)]
+        let _guard = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&ignore)
+                .unwrap()
+        };
+        match save_now(&mut repo) {
+            Err(SaveError::Ignore { detail }) => {
+                assert!(detail.starts_with("sub/.boltignore: "), "{detail}");
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
         assert_eq!(repo.head().unwrap(), head);
     }
 
