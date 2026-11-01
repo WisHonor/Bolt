@@ -763,8 +763,24 @@ mod tests {
             panic!("the names were accepted");
         };
         let text: Vec<String> = problems.iter().map(|(_, p)| p.to_string()).collect();
-        assert_eq!(problems.len(), 3, "{text:?}");
-        for needle in ["readme", "a:b", "CON"] {
+        // On a case-insensitive disk (macOS by default) `readme` overwrote `README`, so the
+        // collision can't exist there.
+        let both_cases = fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .eq_ignore_ascii_case("readme")
+            })
+            .count()
+            == 2;
+        let mut needles = vec!["a:b", "CON"];
+        if both_cases {
+            needles.push("readme");
+        }
+        assert_eq!(problems.len(), needles.len(), "{text:?}");
+        for needle in needles {
             assert!(
                 text.iter().any(|t| t.contains(needle)),
                 "{needle}: {text:?}"
