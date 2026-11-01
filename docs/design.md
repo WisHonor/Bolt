@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 7
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 8
 
 ## 1. Vision
 
@@ -43,7 +43,7 @@ Change anytime with: bolt setup
 
 What it implies for the design:
 - **Presets change rules, never the engine.** They decide what's chunked, lockable and ignored, and how files merge; the storage format stays the same. That is what makes "change anytime" cheap: switching presets must not rewrite history, which requires that a file's ID never depends on how it is chunked (topic 5).
-- **Settings reach teammates.** The rules go in the shared project file, so everyone who copies the project gets the same behaviour (topics 8, 16).
+- **Settings reach teammates.** The rules go in `bolt.toml` and `.boltignore` at the project root, so everyone who copies the project gets the same behaviour (decision 008).
 - **Presets know the engine.** Unity, Unreal and Godot differ in which files must be locked (Unity: scenes and prefabs; Unreal: `.uasset`, `.umap`) and which cache folders must be ignored (Unity's `Library/`, `Temp/` and `Logs/` can hold gigabytes and must never be saved). Detection applies ignore rules before reporting sizes.
 - **Detection only reads names and sizes.** It never runs anything from the project.
 - **Locking and on-demand download need a server**, so they arrive in v0.3; until then the rules are recorded but not enforced.
@@ -83,8 +83,8 @@ None of these is final until it has a decision record. "First review" is Claude'
 | T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | **Confirmed** by decision 007: every version kept; conflict algebra planned on top later | 7 |
 | T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Big files are identified by their contents (decision 005); chunking details in topic 9; dedup gains depend on file format | 5, 9, 13, 14 |
-| T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Keep the idea; rules teammates need must live in a shared, versioned, declarative file, not in `.bolt/` | 8, 16 |
-| T11 | On-disk format version number from day one | Keep; consider a feature list as well (like Mercurial's `requires` file) | 8 |
+| T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Rules live in `bolt.toml` + `.boltignore` at the project root (decision 008); preset contents in topic 16 | 8, 16 |
+| T11 | On-disk format version number from day one | **Confirmed**, with a feature list, by decision 008 | 8 |
 | T12 | Crates: `bolt-core` (engine library) + `bolt` (CLI) | Keep the split; those package names are taken on crates.io, though the command can still be `bolt` | Deferred: name |
 
 ## 4. Design agenda
@@ -103,7 +103,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 7. Conflicts as data: how a conflict lives in a tree and in your folder, for text and binary files → [decision 007](decisions/007-conflicts.md)
 
 **Stage 3 — Local engine**
-- [ ] 8. Repository layout in `.bolt/`; shared vs. local config; format version, feature list, upgrades
+- [x] 8. Repository layout in `.bolt/`; shared vs. local config; format version, feature list, upgrades → [decision 008](decisions/008-layout-and-settings.md)
 - [ ] 9. Storage engine: loose vs. packed objects, compression, deltas and full-copy cadence, chunking algorithm and thresholds, garbage collection
 - [ ] 10. Operation log: undo/redo semantics per command, two commands at once, how long undo lasts
 - [ ] 11. Fast `status` and safe `goto`: file-state cache, timestamp traps, file watching, never overwriting unsaved work
@@ -175,6 +175,15 @@ The current design, by area. Each part links to the decision that set it.
 - **Fixed** when the markers are gone, or when you mark the file as fixed.
 - **Planned later:** conflict algebra, jj-style automatic simplification of conflicts. The record's general form allows it without a format change.
 
+### 5.6 Settings and the `.bolt/` folder ([decision 008](decisions/008-layout-and-settings.md))
+
+**In plain words.** The project's rules live in two normal files at the top of your project, so they travel with it and are part of its history. Your personal settings stay on your machine and can never change the project's rules.
+
+- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (same syntax as `.gitignore`).
+- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Anything that runs a program is personal only.
+- **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
+- **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -183,7 +192,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 2. **Adoption.** Every independent engine of the Git era (Mercurial, Bazaar, Fossil, Darcs, Pijul) stayed niche or faded against Git and GitHub; the newcomers gaining traction (jj, Sapling) work with Git repositories. Bolt is designed as if it would be marketed, so this matters. *Response:* a deliberate first audience (decision 001); Git import in v0.1 and export before 1.0 (decision 002).
 3. **Precise claims.** Git is heavily optimized for code repositories; big files are where Bolt can clearly win. Git LFS does have locking (`git lfs lock`), and Git has partial clone (`--filter=blob:none`), which skips old file contents. The real problem is that both are add-ons: awkward, easy to bypass, unevenly supported by hosts.
 4. **Dedup depends on file format.** Chunking saves a lot when edits leave most bytes untouched (WAV, uncompressed source assets, appended datasets) and little on already-compressed formats (PNG, JPEG, MP4, ZIP-based files) or a retrained model where every weight changed. *Response:* measure on a real-asset corpus before claiming savings (topic 9).
-5. **Shared vs. local settings.** `.bolt/` is private and never copied, but chunk, lock and ignore rules must reach every teammate. *Response:* a versioned, declarative project file plus private local config (topics 8, 16). The shared file comes from strangers on `copy`, so it must never run commands or point to programs; Git keeps hooks and filter commands local for this reason.
+5. **Shared vs. local settings.** *Answered by decision 008:* project rules in `bolt.toml` + `.boltignore`, declarative only; personal settings are never shared and can never change project rules.
 6. **Undo has edges.** Undo can't recall what others already received, and undo history keeps old data alive. Undoing `discard`/`goto` is answered by decision 003: safety copies capture unsaved work before it is overwritten. *Response:* explicit semantics per command, an undo window and a cleanup policy (topic 10).
 7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* new files are tracked automatically and unusually large saves ask first (decision 003); preset ignore rules (topic 16); secret warnings (topic 18).
 8. **The working-copy model drives undo, conflicts and shelving.** *Answered by decision 003:* a separate folder with automatic safety copies.
@@ -210,6 +219,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]
 - **Signed saves.** [Room reserved in the save format (decision 006).]
 - **Conflict algebra** (jj-style automatic simplification of conflicts). [Planned by the owner, after v0.2; decision 007's format already allows it.]
+- **Store on another drive, or shared between projects** (like Git LFS's `lfs.storage` setting). [Later; keep the store's location a single setting internally.]
 - **Structural diff and merge** (tree-sitter). [Later.]
 - **Virtual filesystem for on-demand files** (ProjFS on Windows, FUSE, macOS File Provider). [Very hard and OS-specific; not before v1.]
 - **Web platform and asset previews.** [After the server.]
@@ -256,6 +266,8 @@ Working names; command names can still change (topic 17).
 - **Chunk list**: the list of pieces a big file was cut into. Stored separately, so the file's ID never depends on it.
 - **Line**: a named line of work (Git: branch).
 - **Operation log**: a diary of every command that changed the repository; it is what makes undo possible.
+- **Project rules**: settings the whole team shares, kept in `bolt.toml` and `.boltignore` and saved in history like normal files.
+- **Personal settings**: your own preferences (name, editor, merge tools); never shared, and they can't change project rules.
 - **Safety copy**: a copy of unsaved work that Bolt keeps automatically before a command overwrites it, so undo can bring it back.
 - **Shelf**: a place to set unsaved changes aside and bring them back later (Git: stash).
 - **Symlink**: a file that points to another file or folder, like a shortcut.
