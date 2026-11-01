@@ -4,7 +4,8 @@ use crate::id::Id;
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackReader};
 use crate::save::Save;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 
@@ -28,27 +29,38 @@ pub struct Store {
     packs: Vec<PackReader>,
     /// Id to (pack number, entry number).
     index: HashMap<Id, (usize, usize)>,
+    /// File names of the registered packs.
+    known: HashSet<OsString>,
 }
 
 impl Store {
     /// Opens every `*.pack` file in the folder and ignores everything else.
     pub fn open(packs_dir: &Path) -> Result<Store, StoreError> {
+        let mut store = Store {
+            packs: Vec::new(),
+            index: HashMap::new(),
+            known: HashSet::new(),
+        };
+        store.refresh(packs_dir)?;
+        Ok(store)
+    }
+
+    /// Registers every `*.pack` file in the folder that is not registered yet, such as packs
+    /// another process committed since this store was opened.
+    pub fn refresh(&mut self, packs_dir: &Path) -> Result<(), StoreError> {
         let mut paths = Vec::new();
         for entry in std::fs::read_dir(packs_dir).map_err(PackError::from)? {
             let path = entry.map_err(PackError::from)?.path();
-            if path.extension().is_some_and(|e| e == "pack") {
+            let new = path.file_name().is_some_and(|n| !self.known.contains(n));
+            if new && path.extension().is_some_and(|e| e == "pack") {
                 paths.push(path);
             }
         }
         paths.sort();
-        let mut store = Store {
-            packs: Vec::new(),
-            index: HashMap::new(),
-        };
         for path in paths {
-            store.register(&path)?;
+            self.register(&path)?;
         }
-        Ok(store)
+        Ok(())
     }
 
     /// Adds a finished pack. Objects already known keep pointing at the earlier pack.
@@ -59,6 +71,9 @@ impl Store {
             self.index.entry(e.id).or_insert((n, i));
         }
         self.packs.push(reader);
+        if let Some(name) = pack_path.file_name() {
+            self.known.insert(name.to_owned());
+        }
         Ok(())
     }
 
@@ -187,6 +202,18 @@ mod tests {
         let mut out = Vec::new();
         store.copy_content(&hash_content(&a), &mut out).unwrap();
         assert_eq!(out, a);
+    }
+
+    #[test]
+    fn refresh_registers_only_new_packs() {
+        let (_root, tmp, packs) = dirs();
+        pack_of(&tmp, &packs, &[b"one".to_vec()]);
+        let mut store = Store::open(&packs).unwrap();
+        pack_of(&tmp, &packs, &[b"two".to_vec()]);
+        store.refresh(&packs).unwrap();
+        store.refresh(&packs).unwrap();
+        assert_eq!(store.pack_count(), 2);
+        assert!(store.contains(&hash_content(b"two")));
     }
 
     #[test]

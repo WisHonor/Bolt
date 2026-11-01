@@ -724,6 +724,42 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_saves_from_separate_handles_both_succeed() {
+        let (dir, _repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let open = || Repository::open(dir.path()).unwrap();
+        // All three load the store before any of them saves.
+        let (mut a, mut b, mut late) = (open(), open(), open());
+        let outcomes = std::thread::scope(|s| {
+            let ta = s.spawn(|| save_now(&mut a).unwrap());
+            let tb = s.spawn(|| save_now(&mut b).unwrap());
+            [ta.join().unwrap(), tb.join().unwrap()]
+        });
+        // Same folder: one saves it, the other then finds nothing new.
+        let saved: Vec<Id> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                SaveOutcome::Saved { save_id, .. } => Some(*save_id),
+                SaveOutcome::NothingChanged { .. } => None,
+            })
+            .collect();
+        assert_eq!(saved.len(), 1, "{outcomes:?}");
+        write(dir.path(), "b.txt", b"b");
+        let SaveOutcome::Saved {
+            save_id: second, ..
+        } = save_now(&mut late).unwrap()
+        else {
+            panic!("nothing was saved");
+        };
+        let history: Vec<Id> = crate::history::line_history(&open())
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(history[..2], [second, saved[0]]);
+    }
+
+    #[test]
     fn boltignore_git_and_bolt_folders_are_skipped() {
         let (dir, mut repo) = project();
         let root = dir.path();

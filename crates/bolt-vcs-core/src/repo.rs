@@ -120,6 +120,23 @@ pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
     })
 }
 
+fn parse_head(bytes: &[u8]) -> Result<Id, RepoError> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|t| t.strip_suffix('\n'))
+        .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h))
+        .ok_or_else(|| damaged("state/head is not a lowercase fingerprint and a newline"))
+}
+
+/// `state/head` of the `.bolt` folder `bolt`, or `None` before the first commit.
+fn read_head(bolt: &Path) -> Result<Option<Id>, RepoError> {
+    match fs::read(bolt.join("state").join("head")) {
+        Ok(bytes) => parse_head(&bytes).map(Some),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Proof that this process holds the change lock; dropping it releases the lock.
 pub struct ChangeLock {
     _file: File,
@@ -132,6 +149,9 @@ pub struct Repository {
     packs: PathBuf,
     format: FormatInfo,
     store: Store,
+    /// The head read before the store was last loaded, so every object it reaches is
+    /// registered. `None` when there was no head yet.
+    head: Option<Id>,
 }
 
 /// The `.bolt/format` file of the project whose top folder is `root`.
@@ -171,6 +191,7 @@ impl Repository {
             format: FormatInfo {
                 features: BTreeSet::new(),
             },
+            head: None,
         };
         let lock = repo.lock_for_change("start", &mut |_| {})?;
         // Another `bolt start` may have finished while this one waited for the lock.
@@ -237,6 +258,8 @@ impl Repository {
         let format = parse_format(&text)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
+        // The head first: its pack was in the store before the head pointed at it.
+        let head = read_head(&bolt)?;
         let store = Store::open(&packs)?;
         let repo = Repository {
             root: root.to_owned(),
@@ -245,6 +268,7 @@ impl Repository {
             packs,
             format,
             store,
+            head,
         };
         repo.clean_tmp()?;
         Ok(repo)
@@ -303,17 +327,16 @@ impl Repository {
 
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
     pub fn head(&self) -> Result<Id, RepoError> {
-        let bytes = fs::read(self.bolt.join("state").join("head"))?;
-        std::str::from_utf8(&bytes)
-            .ok()
-            .and_then(|t| t.strip_suffix('\n'))
-            .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h))
-            .ok_or_else(|| damaged("state/head is not a lowercase fingerprint and a newline"))
+        parse_head(&fs::read(self.bolt.join("state").join("head"))?)
     }
 
-    /// The newest diary entry, read from the store.
+    /// The newest diary entry this handle can see: the one when it was opened, or when it
+    /// last took the change lock or committed. Read from the store.
     pub fn current(&self) -> Result<(Id, DiaryEntry), RepoError> {
-        let id = self.head()?;
+        let id = match self.head {
+            Some(id) => id,
+            None => self.head()?,
+        };
         let bytes = self.store.read_record(&id, ObjectKind::DiaryEntry)?;
         Ok((id, DiaryEntry::decode(&bytes)?))
     }
@@ -322,7 +345,7 @@ impl Repository {
     /// called once, with that command's lock information, before waiting. `command` must
     /// already be redacted: it is written to `state/lock-info` as given.
     pub fn lock_for_change(
-        &self,
+        &mut self,
         command: &str,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<ChangeLock, RepoError> {
@@ -346,6 +369,9 @@ impl Repository {
             std::process::id()
         );
         write_atomic(&self.tmp, &state.join("lock-info"), info.as_bytes())?;
+        // Another command may have committed since this handle was opened.
+        self.head = read_head(&self.bolt)?;
+        self.store.refresh(&self.packs)?;
         Ok(ChangeLock { _file: file })
     }
 
@@ -374,6 +400,7 @@ impl Repository {
             &self.bolt.join("state").join("head"),
             head.as_bytes(),
         )?;
+        self.head = Some(id);
         Ok(id)
     }
 }
@@ -549,6 +576,15 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_opened_before_a_commit_still_reads() {
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let reader = Repository::open(dir.path()).unwrap();
+        commit(&mut repo, &entry(2)).unwrap();
+        assert_eq!(reader.current().unwrap(), (a, entry(1)));
+    }
+
+    #[test]
     fn errors_say_what_to_do() {
         assert_eq!(
             RepoError::NotAProject.to_string(),
@@ -601,11 +637,11 @@ mod tests {
 
     #[test]
     fn second_changer_waits_and_is_told_why() {
-        let (dir, repo) = project();
+        let (dir, mut repo) = project();
         let root = dir.path().to_owned();
         let (tx, rx) = mpsc::channel();
         let a = thread::spawn(move || {
-            let repo = Repository::open(&root).unwrap();
+            let mut repo = Repository::open(&root).unwrap();
             let lock = repo
                 .lock_for_change("save", &mut |_| panic!("A should not wait"))
                 .unwrap();
