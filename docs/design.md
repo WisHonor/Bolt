@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 4
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 5
 
 ## 1. Vision
 
@@ -75,14 +75,14 @@ None of these is final until it has a decision record. "First review" is Claude'
 | # | Tentative decision | First review | Topic |
 |---|---|---|---|
 | T1 | Rust | Keep | — |
-| T2 | Users see snapshots; storage may use deltas with periodic full copies | Keep, provided object IDs never depend on how data is stored | 5, 9 |
-| T3 | BLAKE3 hashing, zstd compression | Keep; settle details (hashing rules, skipping already-compressed data) | 5, 9 |
-| T4 | Objects: blobs, trees, saves, refs, plus an operation log | Mostly keep; likely add chunk lists and conflict entries; separate immutable objects from mutable state | 5–7, 10 |
+| T2 | Users see snapshots; storage may use deltas with periodic full copies | Identity **confirmed** by decision 005: IDs never depend on how data is stored; storage strategy in topic 9 | 5, 9 |
+| T3 | BLAKE3 hashing, zstd compression | BLAKE3 **confirmed** by decision 005; zstd details in topic 9 | 5, 9 |
+| T4 | Objects: blobs, trees, saves, refs, plus an operation log | Mostly keep; chunk lists added by decision 005; conflict entries in topic 7; mutable state (lines, operation log) in topics 8 and 10 | 5–7, 10 |
 | T5 | A save holds author, timestamp, message, parents, root tree, stable change ID | Mostly keep; author and committer kept separately with time zones (required by decision 002); a long random change ID; room for extensions | 6 |
 | T6 | No staging area; `bolt save` saves everything, `bolt save <files>` saves some | **Confirmed** by decision 003: new files tracked automatically; unusually large saves ask first | 3 |
 | T7 | Operation log; `undo`/`redo` work on any action | Keep; define the edges (data already sent, discarded files, how long undo lasts) | 10 |
 | T8 | Conflicts stored inside saves ("sticky notes") | Keep; the hardest feature on the list, so design the format early and build it late | 7 |
-| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Keep; settle big-file identity first; dedup gains depend on file format | 5, 9, 13, 14 |
+| T9 | Content-defined chunking above ~1 MB; big files and old versions on demand; full small-file history local; opt-in locking | Big files are identified by their contents (decision 005); chunking details in topic 9; dedup gains depend on file format | 5, 9, 13, 14 |
 | T10 | Presets at `bolt start`, written to `.bolt/config.toml`, changeable via `bolt setup` | Keep the idea; rules teammates need must live in a shared, versioned, declarative file, not in `.bolt/` | 8, 16 |
 | T11 | On-disk format version number from day one | Keep; consider a feature list as well (like Mercurial's `requires` file) | 8 |
 | T12 | Crates: `bolt-core` (engine library) + `bolt` (CLI) | Keep the split; those package names are taken on crates.io, though the command can still be `bolt` | Deferred: name |
@@ -98,7 +98,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Stage 2 — Core model** (baked into every repository; hardest to change)
 - [x] 3. Working-copy model: is your folder a live draft save (jj) or separate until you save (Git)? Tracking new files, partial saves, shelf → [decision 003](decisions/003-working-copy-model.md)
 - [x] 4. What a project can contain: path rules, line endings, executable bit, symlinks, empty folders, nested projects → [decision 004](decisions/004-project-contents.md)
-- [ ] 5. Object identity: what is hashed and how, ID format, canonical byte encoding, big-file identity, objects known but not downloaded
+- [x] 5. Object identity: what is hashed and how, ID format, canonical byte encoding, big-file identity, objects known but not downloaded → [decision 005](decisions/005-object-identity.md)
 - [ ] 6. The save object: fields, change IDs (generation, display, divergence), room for signatures and move hints
 - [ ] 7. Conflicts as data: how a conflict lives in a tree and in your folder, for text and binary files
 
@@ -147,6 +147,17 @@ The current design, by area. Each part links to the decision that set it.
 - **Safety on write-out:** never through a symlink, never outside the project, never to a name the OS would misread; such entries are reported instead. Symlinks that leave the project, or that the OS can't create, become placeholder files with a warning.
 - **Nested projects:** a folder with its own `.bolt/` is left alone by the outer project.
 
+### 5.3 How data is identified ([decision 005](decisions/005-object-identity.md))
+
+**In plain words.** Every stored object gets an ID that is a fingerprint of its contents. A file is identified by its contents, never by how it was cut into chunks, so the same bytes always have the same ID whatever the settings.
+
+- **Algorithm:** BLAKE3, 256-bit IDs shown as lowercase hex (short prefixes in the UI); declared once per repository, never mixed.
+- **Flavors:** file contents and chunks use plain BLAKE3 (`b3sum` prints the same ID). Each structured object type (folder listings, saves, chunk lists…) uses BLAKE3's key-derivation mode with its own context string.
+- **Big files:** a chunk list links the file's ID to its chunks; the reassembled file is checked against its ID before use.
+- **Folder listings:** one per folder; entries hold name, kind, ID and size, sorted by name in byte order.
+- **Encoding:** hand-written binary format, one valid encoding per object, strict readers, test vectors in the storage spec. Serde only for data that is never fingerprinted.
+- **Known but not downloaded:** a normal state everywhere; `bolt verify` tells it apart from real loss.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -161,8 +172,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 8. **The working-copy model drives undo, conflicts and shelving.** *Answered by decision 003:* a separate folder with automatic safety copies.
 9. **File-model basics** (line endings, executable bit, symlinks, empty folders, path encoding, case and Unicode collisions, nested projects). *Answered by decision 004.*
 10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission. *Name rules and write-out safety: decision 004. Files held open and retries: topic 11.*
-11. **Big-file identity.** A file's ID can be the hash of its bytes (same bytes always get the same ID, whatever the chunking settings) or the hash of its chunk list (a 50 GB download can be checked piece by piece, but chunking parameters freeze forever). It is the bottom brick of the format (topic 5).
-12. **Hashed objects need a hand-specified byte format.** If saves and trees are "whatever serde + bincode/postcard produce from our structs", renaming a field or upgrading a crate can silently change the bytes, which changes every hash and makes repositories look corrupt. Serde-based formats are fine for caches (topic 5).
+11. **Big-file identity.** *Answered by decision 005:* files are identified by their contents, never by their chunk list.
+12. **Hashed objects need a hand-specified byte format.** *Answered by decision 005:* a hand-written format with exactly one valid encoding per object; serde only for data that is never fingerprinted.
 13. **Renames are guessed** when changes come from comparing snapshots. Fine for text; a moved-and-edited 2 GB texture becomes delete + add, merges can't follow it, and path-based locks lose it. Perforce and Plastic record moves; optional move hints in a save would keep the snapshot model intact (topics 6, 12).
 14. **Change IDs.** The short `bx7k2` is only a display prefix; underneath, the ID must be long and random (jj uses 128 bits) to stay unique across people. Two saves sharing one change ID after concurrent rewrites ("divergence" in jj) is a real state to design for (topic 6).
 15. **Build order.** Answered by decision 001: test infrastructure is built with the object store, a minimal Git importer follows saves and history, and chunked big files come before lines and combine. Locking waits for the server (v0.3).
@@ -221,6 +232,7 @@ Working names; command names can still change (topic 17).
 - **Blob**: the contents of one file, stored under its hash.
 - **Tree**: a folder listing: names pointing to blobs or to other trees.
 - **Chunk**: a piece of a big file. Identical pieces are stored once.
+- **Chunk list**: the list of pieces a big file was cut into. Stored separately, so the file's ID never depends on it.
 - **Line**: a named line of work (Git: branch).
 - **Operation log**: a diary of every command that changed the repository; it is what makes undo possible.
 - **Safety copy**: a copy of unsaved work that Bolt keeps automatically before a command overwrites it, so undo can bring it back.
