@@ -66,6 +66,8 @@ impl From<StoreError> for RepoError {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::Pack(p) => p.into(),
+            // A save past the limits of the format is no save to trust (decision 025).
+            StoreError::SaveTooLarge { .. } => damaged(e.to_string()),
             other => RepoError::Store(other),
         }
     }
@@ -642,6 +644,14 @@ mod tests {
         }
         let e = crate::snapshot::SaveError::from(PackError::FingerprintMismatch { id });
         assert!(e.hint().unwrap().contains("Nothing was changed"), "{e:?}");
+    }
+
+    #[test]
+    fn a_save_past_the_limits_is_reported_as_damage() {
+        let e = RepoError::from(StoreError::SaveTooLarge { detail: "x".into() });
+        assert!(matches!(e, RepoError::Damaged { .. }), "{e:?}");
+        assert!(e.to_string().contains("too large to read safely: x"), "{e}");
+        assert!(e.hint().unwrap().contains("Nothing was changed"));
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub enum StoreError {
         expected: ObjectKind,
         found: ObjectKind,
     },
+    #[error("this save is too large to read safely: {detail}")]
+    SaveTooLarge { detail: String },
 }
 
 pub struct Store {

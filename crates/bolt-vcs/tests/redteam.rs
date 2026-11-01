@@ -511,7 +511,6 @@ fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
 }
 
 #[test]
-#[ignore = "RT-6: fixed by Task 5 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt6_deeply_nested_listings_do_not_crash_show() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -526,7 +525,6 @@ fn rt6_deeply_nested_listings_do_not_crash_show() {
 }
 
 #[test]
-#[ignore = "RT-6: fixed by Task 5 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt6_deeply_nested_listings_do_not_crash_the_next_save() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -548,7 +546,6 @@ fn rt6_deeply_nested_listings_do_not_crash_the_next_save() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-10: fixed by Task 5 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
     let env = Env::new();
     env.ok(&["start"]);

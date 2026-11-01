@@ -15,7 +15,7 @@ use ignore::{Match, WalkBuilder};
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::diff_saves;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
-use crate::listing::{Entry, EntryKind, Listing};
+use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
 use crate::pack::{ObjectKind, PackError, PackWriter};
 use crate::repo::{RepoError, Repository};
@@ -60,6 +60,8 @@ pub enum SaveError {
     },
     #[error("A .boltignore file has a problem: {detail}.")]
     Ignore { detail: String },
+    #[error("This project is too large to save: {detail}.")]
+    TooLarge { detail: String },
     #[error("You are not on a line, so the save has nowhere to go.")]
     NotOnALine,
 }
@@ -109,6 +111,9 @@ impl SaveError {
                     "Nothing was saved. Rename them, or list them in .boltignore."
                 }
                 SaveError::Ignore { .. } => "Nothing was saved. Fix the pattern and try again.",
+                SaveError::TooLarge { .. } => {
+                    "Nothing was saved. List the deep or huge folder in .boltignore."
+                }
                 _ => return None,
             }
             .to_owned(),
@@ -150,8 +155,8 @@ pub fn save_folder(
             detail: format!("the current line {line} has no save"),
         })?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
-    let folders = walk(repo.root())?;
-    let old = old_listings(repo.store(), parent.root, &folders)?;
+    let folders = walk(repo.root(), SaveLimits::default())?;
+    let old = old_listings(repo.store(), parent.root, &folders, SaveLimits::default())?;
     check_names(&folders, &old)?;
     let mut pack = repo.new_pack()?;
     let root = build(repo.store(), &mut pack, &folders, &old)?;
@@ -311,7 +316,10 @@ impl IgnoreRules {
     }
 }
 
-fn walk(root: &Path) -> Result<Folders, SaveError> {
+fn walk(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    // `limits` is checked while the tree is scanned, so one too deep or too big for a save is
+    // refused before it has all been read (RT-6, RT-10).
     let mut folders = Folders::from([(String::new(), Vec::new())]);
     // Bolt reads each .boltignore itself, once, and applies its rules here: `ignore` would open
     // the file again by path, following links and reading without a limit.
@@ -368,6 +376,7 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
         let kind = if t.is_symlink() {
             Kind::Symlink
         } else if t.is_dir() {
+            limits.check_depth(names.len()).map_err(too_large)?;
             folders.entry(rel.clone()).or_default();
             Kind::Folder
         } else if t.is_file() {
@@ -376,6 +385,7 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
             // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
             continue;
         };
+        limits.add(1).map_err(too_large)?;
         folders.entry(parents.join("/")).or_default().push(Child {
             name: (*name).to_owned(),
             kind,
@@ -444,10 +454,16 @@ fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
 }
 
 /// The parent save's listing of each folder, if it had that folder.
+///
+/// Walks the old save only along the folders on disk, one listing for each and without
+/// recursion, so `walk` has already held it to the depth limit. It keeps every listing it reads,
+/// a shared one once for every path, so those are counted against the entry limit like those of
+/// any other walk over a save.
 fn old_listings(
     store: &Store,
     old_root: Id,
     folders: &Folders,
+    mut limits: SaveLimits,
 ) -> Result<HashMap<String, Option<Listing>>, SaveError> {
     let mut old: HashMap<String, Option<Listing>> = HashMap::new();
     // A folder's path sorts after its parent's, so the parent is always looked up first.
@@ -465,6 +481,11 @@ fn old_listings(
                 _ => None,
             }
         };
+        if let Some(l) = &listing {
+            limits
+                .add(l.entries().len())
+                .map_err(|detail| StoreError::SaveTooLarge { detail })?;
+        }
         old.insert(rel.clone(), listing);
     }
     Ok(old)
@@ -644,7 +665,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::id::hash_content;
-    use crate::listing::EntryKind;
+    use crate::listing::{EntryKind, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES};
     use crate::names::{name_problems, validate_name};
     use crate::save::Person;
     use proptest::prelude::*;
@@ -1263,7 +1284,7 @@ mod tests {
         let (dir, repo) = project();
         let victim = dir.path().join("victim.txt");
         fs::write(&victim, b"x").unwrap();
-        let folders = walk(dir.path()).unwrap();
+        let folders = walk(dir.path(), SaveLimits::default()).unwrap();
         fs::remove_file(&victim).unwrap();
         if !make_link(&victim) {
             return;
@@ -1335,5 +1356,141 @@ mod tests {
             "{stored:?}"
         );
         assert!(pack_is_empty);
+    }
+
+    /// Nested folders made for a test, removed again from the bottom up when dropped (even if
+    /// the test fails), because `remove_dir_all` goes one call deeper for every level.
+    struct DeepFolders {
+        top: PathBuf,
+        bottom: PathBuf,
+    }
+
+    impl DeepFolders {
+        /// `levels` folders under `top`, each named `d` and inside the one before. None, with a
+        /// printed reason, if the system can't make that many: even with one-letter names,
+        /// 4,097 levels are an 8 KB path, too long for Linux (4,096 bytes) and macOS (1,024),
+        /// where no walk can see such a tree either. Windows takes it, because Rust asks it for
+        /// the long form of any long path.
+        fn make(top: &Path, levels: usize) -> Option<DeepFolders> {
+            let mut deep = DeepFolders {
+                top: top.to_path_buf(),
+                bottom: top.to_path_buf(),
+            };
+            for _ in 0..levels {
+                deep.bottom.push("d");
+                if let Err(e) = fs::create_dir(&deep.bottom) {
+                    deep.bottom.pop();
+                    eprintln!("skipped: this system can't make {levels} nested folders: {e}");
+                    return None;
+                }
+            }
+            Some(deep)
+        }
+    }
+
+    impl Drop for DeepFolders {
+        fn drop(&mut self) {
+            while self.bottom != self.top && fs::remove_dir(&self.bottom).is_ok() {
+                self.bottom.pop();
+            }
+        }
+    }
+
+    #[test]
+    fn folder_deeper_than_the_limit_is_refused() {
+        let (dir, _repo) = project();
+        // a, a/b and a/b/c are folders 1, 2 and 3 levels down; f is a file, not a level.
+        write(dir.path(), "a/b/c/f", b"x");
+        assert!(walk(dir.path(), SaveLimits::new(3, MAX_SAVE_ENTRIES)).is_ok());
+        let Err(err) = walk(dir.path(), SaveLimits::new(2, MAX_SAVE_ENTRIES)) else {
+            panic!("a folder 3 levels down was accepted under a limit of 2");
+        };
+        match &err {
+            SaveError::TooLarge { detail } => {
+                assert!(detail.contains("more than 2 levels"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(err.hint().unwrap().contains(".boltignore"));
+    }
+
+    #[test]
+    fn more_entries_than_the_limit_are_refused() {
+        let (dir, _repo) = project();
+        // a, b, c and d are 4 entries of the top folder, and d/e is a fifth.
+        for name in ["a", "b", "c", "d/e"] {
+            write(dir.path(), name, b"x");
+        }
+        assert!(walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 5)).is_ok());
+        let Err(SaveError::TooLarge { detail }) =
+            walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 4))
+        else {
+            panic!("5 entries were accepted under a limit of 4");
+        };
+        assert!(detail.contains("more than 4 "), "{detail}");
+    }
+
+    #[test]
+    fn old_listings_count_every_path_against_the_entry_limit() {
+        let (dir, mut repo) = project();
+        // Three folders with the same two files: the save holds one listing for all of them.
+        for folder in ["a", "b", "c"] {
+            write(dir.path(), &format!("{folder}/x"), b"x");
+            write(dir.path(), &format!("{folder}/y"), b"y");
+        }
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let folders = walk(dir.path(), SaveLimits::default()).unwrap();
+        // Reading the listing of every folder is 3 entries (the top listing) and, for each of
+        // the 3 folders, the 2 entries of the shared listing.
+        const PATHS: u64 = 3 + 3 * 2;
+        assert!(
+            old_listings(
+                repo.store(),
+                root,
+                &folders,
+                SaveLimits::new(MAX_SAVE_DEPTH, PATHS)
+            )
+            .is_ok()
+        );
+        let err = old_listings(
+            repo.store(),
+            root,
+            &folders,
+            SaveLimits::new(MAX_SAVE_DEPTH, PATHS - 1),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SaveError::Repo(RepoError::Damaged { .. })),
+            "{err:?}"
+        );
+    }
+
+    // The two tests below use the real limit of 4,096 levels. They take about a minute each on
+    // Windows (about 50 s of it making the folders: every operation on a path that long costs
+    // time for each level), so they run on request: `cargo test -p bolt-vcs-core -- --ignored`.
+
+    #[test]
+    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    fn real_folders_one_level_past_the_limit_are_refused() {
+        let (dir, mut repo) = project();
+        let head = repo.head().unwrap();
+        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH + 1) else {
+            return;
+        };
+        match save_now(&mut repo) {
+            Err(SaveError::TooLarge { detail }) => assert!(detail.contains("4096"), "{detail}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    fn real_folders_at_the_limit_are_saved() {
+        let (dir, mut repo) = project();
+        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH) else {
+            return;
+        };
+        assert!(matches!(save_now(&mut repo), Ok(SaveOutcome::Saved { .. })));
     }
 }
