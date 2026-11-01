@@ -8,6 +8,7 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{Match, WalkBuilder};
@@ -15,7 +16,7 @@ use ignore::{Match, WalkBuilder};
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::diff_saves;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
-use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
+use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
 use crate::pack::{ObjectKind, PackError, PackWriter};
 use crate::repo::{RepoError, Repository};
@@ -316,7 +317,30 @@ impl IgnoreRules {
     }
 }
 
-fn walk(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
+/// Stack for the thread that scans the project folder: 4 KiB for each level the depth limit
+/// allows, 16 MiB in all. Giving up a scan of a deep project frees one `ignore` matcher for each
+/// folder level, each linked to its parent's, so the chain is dropped by nested calls, one for
+/// each level. Measured on Windows, the longest chain the limit allows (4,098) needs about 2 MiB
+/// in a debug build and 0.4 MiB in a release build, and Windows gives its main thread 1 MiB: a
+/// caller's stack is not enough (RT-6, on disk). Unused stack costs address space only.
+const WALK_STACK_BYTES: usize = (MAX_SAVE_DEPTH + 2) * 4096;
+
+/// Scans the project folder (see `scan_folder`) on a thread made for the job, so that no caller
+/// needs a deep stack of its own.
+fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
+    thread::scope(|scope| {
+        let scan = thread::Builder::new()
+            .stack_size(WALK_STACK_BYTES)
+            .spawn_scoped(scope, || scan_folder(root, limits))
+            .map_err(|e| SaveError::Repo(e.into()))?;
+        scan.join().unwrap_or_else(|_| {
+            let stopped = io::Error::other("the scan of the project folder stopped unexpectedly");
+            Err(SaveError::Repo(stopped.into()))
+        })
+    })
+}
+
+fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     // `limits` is checked while the tree is scanned, so one too deep or too big for a save is
     // refused before it has all been read (RT-6, RT-10).
@@ -1465,9 +1489,41 @@ mod tests {
         );
     }
 
+    /// Runs `f` on a thread with a stack of `bytes`. Windows' main thread, where `bolt` runs a
+    /// save, has 1 MiB.
+    fn on_a_stack_of<T: Send>(bytes: usize, f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(bytes)
+                .spawn_scoped(scope, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn refusing_a_deep_tree_does_not_depend_on_the_callers_stack() {
+        let (dir, _repo) = project();
+        // The `ignore` crate links each folder's matchers to its parent's, so giving up the scan
+        // frees a chain as long as the tree is deep, one nested call for each link: about 400
+        // bytes a level in a debug build. 300 levels take about 120 KB, more than the 64 KiB
+        // the caller has here, and are few enough to make on every system.
+        let Some(_deep) = DeepFolders::make(dir.path(), 300) else {
+            return;
+        };
+        let refused = on_a_stack_of(64 * 1024, || {
+            let limits = SaveLimits::new(299, MAX_SAVE_ENTRIES);
+            matches!(walk(dir.path(), limits), Err(SaveError::TooLarge { .. }))
+        });
+        assert!(refused);
+    }
+
     // The two tests below use the real limit of 4,096 levels. They take about a minute each on
     // Windows (about 50 s of it making the folders: every operation on a path that long costs
-    // time for each level), so they run on request: `cargo test -p bolt-vcs-core -- --ignored`.
+    // time for each level), so they run on request, and in CI on Windows only:
+    // `cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders`
+    // They run the save on a 1 MiB stack, like `bolt`'s own main thread.
 
     #[test]
     #[ignore = "slow on Windows (about a minute): run with --ignored"]
@@ -1477,7 +1533,7 @@ mod tests {
         let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH + 1) else {
             return;
         };
-        match save_now(&mut repo) {
+        match on_a_stack_of(1 << 20, || save_now(&mut repo)) {
             Err(SaveError::TooLarge { detail }) => assert!(detail.contains("4096"), "{detail}"),
             other => panic!("{:?}", other.map(|_| ())),
         }
@@ -1491,6 +1547,7 @@ mod tests {
         let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH) else {
             return;
         };
-        assert!(matches!(save_now(&mut repo), Ok(SaveOutcome::Saved { .. })));
+        let saved = on_a_stack_of(1 << 20, || save_now(&mut repo));
+        assert!(matches!(saved, Ok(SaveOutcome::Saved { .. })), "{saved:?}");
     }
 }
