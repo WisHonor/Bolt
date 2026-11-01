@@ -1,6 +1,6 @@
 # Bolt Milestones
 
-> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts.
+> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. Milestone 1 is in progress; its detailed plan is [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md).
 
 ## v0.1: solo, local, games first
 

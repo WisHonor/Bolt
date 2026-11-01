@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 23
+> **Phase:** building milestone 1 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 23
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -120,7 +120,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Stage 5 — Product surface and wrap-up**
 - [x] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax → [decision 016](decisions/016-presets.md)
 - [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
-- [x] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestones in [decision 018](decisions/018-milestone-plan.md); review clarifications in [decision 019](decisions/019-review-clarifications.md); the owner's answers to the review in decisions [020](decisions/020-lfs-import.md), [021](decisions/021-v0.1-command-scope.md), [022](decisions/022-engineering-rules.md) and [023](decisions/023-v0.1-speed-bar.md). Owner sign-off pending.
+- [x] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestones in [decision 018](decisions/018-milestone-plan.md); review clarifications in [decision 019](decisions/019-review-clarifications.md); the owner's answers to the review in decisions [020](decisions/020-lfs-import.md), [021](decisions/021-v0.1-command-scope.md), [022](decisions/022-engineering-rules.md) and [023](decisions/023-v0.1-speed-bar.md). Signed off by the owner on 2026-10-31.
 
 ## 5. Design
 

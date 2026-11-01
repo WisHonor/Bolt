@@ -2,12 +2,13 @@
 
 A new version control system with its own engine (not a Git wrapper), written in Rust. One tool for code and large binary assets: friendly commands, undo for everything, great big-file handling.
 
-## Phase: DESIGN — no implementation code
-- Don't write implementation code, create Cargo projects, or add dependencies until the owner explicitly ends the design phase.
-- The design phase ends when these exist and the owner approves them: a complete `docs/design.md`, a storage format spec draft, a testing and security plan, and a milestone-1 task list of small, testable steps.
+## Phase: BUILDING — milestone 1 ("First save")
+- The owner signed off the design on 2026-10-31. Build milestone by milestone (`docs/milestones.md`), task by task from the plan in `docs/plans/`.
+- The design docs stay the source of truth. Changing a decided behaviour or format needs a new decision record that supersedes the old one, and spec edits come before code.
 
 ## Where things live
 - `docs/design.md`: the living design spec (plain language + technical detail). Read it first: it holds the agenda, risks, open questions and deferred decisions.
+- `docs/plans/`: implementation plans, one per milestone.
 - `docs/decisions/NNN-short-title.md`: one record per decision (Context, Options, Decision, Consequences), numbered from 001. Never rewrite an accepted decision; supersede it with a new record and link both ways.
 
 ## Working with the owner
