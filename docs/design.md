@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 3
+> **Phase:** design, no implementation code yet · **Started:** 2026-10-31 · **Decisions recorded:** 4
 
 ## 1. Vision
 
@@ -97,7 +97,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 
 **Stage 2 — Core model** (baked into every repository; hardest to change)
 - [x] 3. Working-copy model: is your folder a live draft save (jj) or separate until you save (Git)? Tracking new files, partial saves, shelf → [decision 003](decisions/003-working-copy-model.md)
-- [ ] 4. What a project can contain: path rules, line endings, executable bit, symlinks, empty folders, nested projects
+- [x] 4. What a project can contain: path rules, line endings, executable bit, symlinks, empty folders, nested projects → [decision 004](decisions/004-project-contents.md)
 - [ ] 5. Object identity: what is hashed and how, ID format, canonical byte encoding, big-file identity, objects known but not downloaded
 - [ ] 6. The save object: fields, change IDs (generation, display, divergence), room for signatures and move hints
 - [ ] 7. Conflicts as data: how a conflict lives in a tree and in your folder, for text and binary files
@@ -135,6 +135,18 @@ The current design, by area. Each part links to the decision that set it.
 - **Conflicts.** A save can contain unresolved conflicts, and the save records them (topic 7).
 - **`status`** only reads; it never writes to the store.
 
+### 5.2 What a project can contain ([decision 004](decisions/004-project-contents.md))
+
+**In plain words.** Bolt stores exactly what's in your project and never changes a file's bytes. It checks new names when you save, so a project that works on Linux won't break on Windows or a Mac, and it refuses to write anything dangerous when it puts files back on disk.
+
+- **Entry kinds:** regular file, executable file, symlink, folder (empty folders included), and a link to another project (from Git submodules; not fetched).
+- **Bytes in = bytes out:** no line-ending conversion or any other change to contents by default.
+- **Not stored:** timestamps, Windows attributes, other permissions. On Windows the executable flag keeps whatever history says.
+- **Names (always):** valid UTF-8, `/` between folders, no empty, `.` or `..` parts, no absolute paths, and no part that Windows or macOS would treat as `.bolt`.
+- **Portability check on save:** new names that would break on Windows or macOS are refused (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, forbidden characters), unless the project relaxes the rule. Imported histories keep their names.
+- **Safety on write-out:** never through a symlink, never outside the project, never to a name the OS would misread; such entries are reported instead. Symlinks that leave the project, or that the OS can't create, become placeholder files with a warning.
+- **Nested projects:** a folder with its own `.bolt/` is left alone by the outer project.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -147,8 +159,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 6. **Undo has edges.** Undo can't recall what others already received, and undo history keeps old data alive. Undoing `discard`/`goto` is answered by decision 003: safety copies capture unsaved work before it is overwritten. *Response:* explicit semantics per command, an undo window and a cleanup policy (topic 10).
 7. **Accidental huge or secret saves.** No staging + "save everything" + big-file support means one save can swallow a 30 GB render folder or a `.env` file. *Response:* new files are tracked automatically and unusually large saves ask first (decision 003); preset ignore rules (topic 16); secret warnings (topic 18).
 8. **The working-copy model drives undo, conflicts and shelving.** *Answered by decision 003:* a separate folder with automatic safety copies.
-9. **File-model basics are missing**: line endings, executable bit, symlinks, empty folders, path encoding, case and Unicode collisions, nested projects (topic 4).
-10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission.
+9. **File-model basics** (line endings, executable bit, symlinks, empty folders, path encoding, case and Unicode collisions, nested projects). *Answered by decision 004.*
+10. **Windows must be first-class.** Antivirus and editors hold files open, so temp-file-plus-rename fails intermittently and needs retries. Also: reserved names (`CON`, `NUL`, `AUX`, `COM1`…), trailing dots and spaces, 8.3 short names, alternate data streams, long paths, case-insensitivity, symlinks that need special permission. *Name rules and write-out safety: decision 004. Files held open and retries: topic 11.*
 11. **Big-file identity.** A file's ID can be the hash of its bytes (same bytes always get the same ID, whatever the chunking settings) or the hash of its chunk list (a 50 GB download can be checked piece by piece, but chunking parameters freeze forever). It is the bottom brick of the format (topic 5).
 12. **Hashed objects need a hand-specified byte format.** If saves and trees are "whatever serde + bincode/postcard produce from our structs", renaming a field or upgrading a crate can silently change the bytes, which changes every hash and makes repositories look corrupt. Serde-based formats are fine for caches (topic 5).
 13. **Renames are guessed** when changes come from comparing snapshots. Fine for text; a moved-and-edited 2 GB texture becomes delete + add, merges can't follow it, and path-based locks lose it. Perforce and Plastic record moves; optional move hints in a save would keep the snapshot model intact (topics 6, 12).
@@ -174,6 +186,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Web platform and asset previews.** [After the server.]
 - **Live two-way Git sync.** [Not promised (decision 002); the importer's commit-mapping table keeps the door open.]
 - **Perforce import.** Many game studios use Perforce; a natural second importer after Git. [Later.]
+- **Nested projects.** [A folder with its own `.bolt/` is left alone, and Git submodules import as project links (decision 004).]
+- **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004).]
 
 ## 8. Prior art
 
@@ -211,3 +225,4 @@ Working names; command names can still change (topic 17).
 - **Operation log**: a diary of every command that changed the repository; it is what makes undo possible.
 - **Safety copy**: a copy of unsaved work that Bolt keeps automatically before a command overwrites it, so undo can bring it back.
 - **Shelf**: a place to set unsaved changes aside and bring them back later (Git: stash).
+- **Symlink**: a file that points to another file or folder, like a shortcut.
