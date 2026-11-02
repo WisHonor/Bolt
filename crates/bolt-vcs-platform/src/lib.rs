@@ -6,13 +6,14 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
-/// Makes `options` never follow a link at the last part of the path, so the caller can refuse it.
-/// Unix: opening a link fails (`O_NOFOLLOW`); pipes don't block (`O_NONBLOCK`; files ignore it).
-/// Windows: a link, junction or other reparse point opens as itself. Replaces any custom flags.
+/// Makes `options` never follow a link at the end of the path, so callers can refuse it. Unix:
+/// opening a link fails (`O_NOFOLLOW`); opening a pipe doesn't wait for a writer (`O_NONBLOCK`).
+/// Windows: a link, junction or reparse point opens as itself. Replaces custom flags.
 pub fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        // Regular files ignore O_NONBLOCK.
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
     }
     #[cfg(windows)]
@@ -246,9 +247,9 @@ mod windows_owner {
         if end.is_none_or(|end| end > filled) {
             return Err(bad_token_information());
         }
-        // SAFETY: the `count` entries lie in the filled part of `buffer` (checked above): initialised,
-        // one allocation, aligned like its usizes. `&raw const` takes the address from `header`, which
-        // reaches the buffer, with no reference to the one declared element. `buffer` stays borrowed.
+        // SAFETY: the `count` entries lie in `buffer`'s filled part (checked above): initialised,
+        // one allocation, aligned like `buffer`'s usizes. `header` reaches the buffer, and
+        // `&raw const` makes no reference to the one declared element. `buffer` stays borrowed.
         Ok(unsafe {
             std::slice::from_raw_parts(
                 (&raw const (*header).Groups).cast::<SID_AND_ATTRIBUTES>(),
@@ -305,9 +306,9 @@ mod windows_owner {
         }
         let mut buffer = vec![0_usize; (bytes as usize).div_ceil(size_of::<usize>())];
         let mut written = 0;
-        // SAFETY: `buffer` holds at least `bytes` bytes and Windows writes at most that many;
-        // `written` is a valid place for the length; `token` is open for the call. If the information
-        // grew since the first call, this fails with ERROR_INSUFFICIENT_BUFFER, returned as an error.
+        // SAFETY: `buffer` holds at least `bytes` bytes and Windows writes at most that many.
+        // `written` is a valid place for the length. `token` is open for the call. If the size grew
+        // since the first call, this fails with ERROR_INSUFFICIENT_BUFFER, returned as an error.
         let ok = unsafe {
             GetTokenInformation(
                 token.as_raw_handle(),

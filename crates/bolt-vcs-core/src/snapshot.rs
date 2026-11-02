@@ -314,9 +314,9 @@ struct IgnoreRules {
 }
 
 impl IgnoreRules {
-    /// Whether the walk keeps `path`, with `ignore`'s precedence: the nearest folder's file wins,
-    /// and within it the last matching pattern. A folder whose `.boltignore` fails is not entered;
-    /// the problem is kept.
+    /// Whether the walk keeps `path`, as `ignore` decides: the nearest `.boltignore` with a
+    /// matching pattern wins, and within it the last matching pattern. A folder whose `.boltignore`
+    /// fails is not entered, and the problem is kept.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         // The walk is depth first, so the rules of folders `path` is not in are done with.
         while self
@@ -503,9 +503,9 @@ fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
     }
 }
 
-/// The parent save's listing of each folder, if it had that folder. Walks the old save only along
-/// the folders on disk, so `walk` has already held it to the depth limit; every listing read
-/// (a shared one once per path) counts against the entry limit.
+/// The parent save's listing of each folder, if it had that folder. It reads the old save only
+/// along the folders on disk, so `walk` has already held it to the depth limit. Every listing it
+/// reads counts against the entry limit, a shared one once per path.
 fn old_listings(
     store: &Store,
     old_root: Id,
@@ -1043,8 +1043,8 @@ mod tests {
     fn boltignore_rules_work_as_in_git() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        // A byte order mark is not part of the first pattern; the last match wins; `build/` is
-        // folders only; nothing returns from inside an ignored folder; `.git` stays out.
+        // A byte order mark is not part of the first pattern, and the last match wins. `build/` is
+        // folders only, nothing returns from inside an ignored folder, and `.git` stays out.
         let top = "\u{feff}*.log\n!keep.log\nbuild/\n!build/keep.txt\n!.git/\n";
         write(root, ".boltignore", top.as_bytes());
         write(root, "a.log", b"x");
@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     // The real limit of 4,096 levels takes about a minute per test on Windows, so these run on
-    // request (and in CI on Windows), on a 1 MiB stack like `bolt`'s main thread:
+    // request (and in CI on Windows only), on a 1 MiB stack like `bolt`'s main thread. Run with:
     // `cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders`
 
     #[test]

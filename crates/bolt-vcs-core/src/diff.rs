@@ -29,9 +29,10 @@ pub struct FileChange<'a> {
     pub new_size: Option<u64>,
 }
 
-/// Hands every file that differs between two saved folders to `each`, in whole-path byte order (so
-/// `a.txt` comes before `a/b`); `old_root` is `None` with nothing to compare. A save past the
-/// limits of storage-format.md section 3 gives `SaveTooLarge` once reached (see [`count_changes`]).
+/// Hands every file that differs between two saves to `each`, in whole-path byte order. `old_root`
+/// is `None` with nothing to compare. A save past the limits of storage-format.md section 3 gives
+/// `SaveTooLarge` when the walk reaches it, after `each` has seen earlier changes.
+/// [`count_changes`] checks first.
 pub fn for_each_change<E: From<StoreError>>(
     store: &Store,
     old_root: Option<Id>,

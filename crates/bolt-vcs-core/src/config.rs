@@ -146,9 +146,9 @@ pub fn user_config_path() -> Option<PathBuf> {
     Some(dir.join("config.toml"))
 }
 
-/// The user's name and email, from the first of these that names both (decision 025):
-/// `BOLT_USER_NAME` and `BOLT_USER_EMAIL`; the `[[project]]` entry for `project_root` in the user's
-/// own `config.toml`; its `[user]` section. The project's own `.bolt/config.toml` is never used.
+/// The user's name and email, from the first source that names both (decision 025): the environment
+/// (`BOLT_USER_NAME`, `BOLT_USER_EMAIL`), the user's own `config.toml` (the `[[project]]` entry for
+/// `project_root`, then `[user]`). The project's own `.bolt/config.toml` is never used.
 pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigError> {
     let env = |key| std::env::var(key).ok();
     identity_from(

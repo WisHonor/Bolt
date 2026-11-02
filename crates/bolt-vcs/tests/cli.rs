@@ -362,9 +362,9 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     assert!(!stderr.contains("memory"), "{stderr}");
     assert!(stdout.starts_with("Saved "), "{stdout}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    // Reaching the cap is not an abort here: reads fail with an error and unreadable settings are
-    // ignored, so a save that read the link would still end well, a gigabyte later. The peak memory
-    // shows it (without /proc, as on macOS, the peak is unknown and this passes).
+    // Reaching the cap is not an abort here: reads fail with an error when memory runs out, and
+    // unreadable settings are ignored, so a save that read the link still ends well, a gigabyte
+    // later. The peak memory shows it (no /proc on macOS: the peak is unknown and this passes).
     assert!(
         peak_kb < 200_000,
         "bolt save held {} MB: it read the link to /dev/zero",

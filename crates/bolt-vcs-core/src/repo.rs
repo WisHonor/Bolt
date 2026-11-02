@@ -226,8 +226,9 @@ fn owner_allows(
     }
 }
 
-/// Checks `root` and its `.bolt` (a real folder, allowed by `owner_check`) before anything inside
-/// is looked at, then the folders inside `.bolt`. `Ok(false)`: no `.bolt`.
+/// Checks `root` and its `.bolt` before anything inside is looked at. `owner_check` must allow
+/// both, and `.bolt`, if there, must be a real folder. The folders inside `.bolt` must be real too.
+/// `Ok(false)`: no `.bolt`.
 fn check_bolt(
     root: &Path,
     owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
@@ -615,8 +616,9 @@ impl Repository {
         Ok((id, DiaryEntry::decode(&bytes)?))
     }
 
-    /// Takes the change lock, waiting if another command holds it; `on_wait` gets that command's
-    /// lock info first. `command` must already be redacted: it goes into `state/lock-info` as is.
+    /// Takes the change lock, waiting if another command holds it. `on_wait` gets that command's
+    /// lock info before waiting. `command` must already be redacted: it goes into `state/lock-info`
+    /// as is.
     pub fn lock_for_change(
         &mut self,
         command: &str,
@@ -662,6 +664,7 @@ impl Repository {
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
         let bytes = entry.encode();
+        // Refuse an entry that would not read back before storing it.
         DiaryEntry::decode(&bytes)?;
         let id = pack.add_record(ObjectKind::DiaryEntry, &bytes)?;
         if let Some(path) = pack.finish(&self.packs)? {
