@@ -146,6 +146,8 @@ string  url
 bytes   commit ID in that system (20 or 32 bytes for Git)
 ```
 
+A Git submodule's link has an empty `url`: its address stays in `.gitmodules`, which comes in as an ordinary file (decision 036).
+
 ## 8. Conflict record (reserved for v0.2)
 
 Drafted now so the format can hold it (decision 007); finalised before v0.2.

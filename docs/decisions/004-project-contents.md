@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 4
-- **Refined by:** [decision 035](035-git-names-bolt-cant-take.md) (a Git import skips dangerous names and stops at names Bolt can't hold)
+- **Refined by:** [decision 035](035-git-names-bolt-cant-take.md) (a Git import skips dangerous names and stops at names Bolt can't hold); [decision 036](036-submodules-as-bare-links.md) (a submodule's link holds just the commit, and saves leave it alone)
 
 ## Context
 
