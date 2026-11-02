@@ -61,7 +61,7 @@ impl Env {
 
 /// How a command run under a time limit ended.
 #[derive(Debug)]
-#[cfg_attr(not(unix), allow(dead_code))]
+#[allow(dead_code)] // some fields are only read through Debug, in failure messages
 struct Ended {
     /// `None`: killed by a signal (crash, abort) or by us after the time limit.
     code: Option<i32>,
