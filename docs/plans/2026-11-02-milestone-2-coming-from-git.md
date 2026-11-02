@@ -1052,11 +1052,14 @@ Then come skipped refs, skipped tags, the first 100 skipped entries and a count,
 #[test] fn a_second_import_is_refused() {}
 #[test] fn another_tools_bolt_folder_is_refused() { /* .bolt/config.json */ }
 #[test] fn import_inside_another_project_is_refused() {}
-// in crates/bolt-vcs-core/src/import.rs's tests (in-process):
+// in its own test binary, crates/bolt-vcs-core/tests/import_interrupted.rs, because
+// set_test_pack_limit is process-wide (as crates/bolt-vcs-core/tests/pack_limit.rs does):
 #[test] fn an_interrupted_import_can_be_run_again() {
-    // set_test_pack_limit(Some(3)); fault point packs:rolled-over armed: import_git fails; no .bolt/format;
+    // set_test_pack_limit(Some(3)); stop the import at the packs:rolled-over fault point (sweep the fault
+    // positions as pack_limit.rs does, or add a small arm_at(label, nth) to fsio::fault); no .bolt/format;
     // import_git again succeeds; its save IDs equal those of a clean import in another folder
 }
+// in crates/bolt-vcs-core/src/import.rs's tests (in-process):
 #[test] fn import_stops_cleanly_when_git_removes_a_pack() {
     // the progress callback deletes objects/pack/*.pack after the first commit:
     // Err(ImportError::Git(GitError::Changed { .. })); no .bolt/format
