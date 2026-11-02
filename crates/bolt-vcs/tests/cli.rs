@@ -575,9 +575,9 @@ fn show_lists_what_a_save_changed() {
     assert_eq!(
         &lines[1..],
         [
-            "mix",
+            "    mix",
             "",
-            "more",
+            "    more",
             "",
             "  added     a.txt  (1 B)",
             "  modified  b.txt  (1 B → 4 B)",
@@ -585,6 +585,42 @@ fn show_lists_what_a_save_changed() {
         ],
         "{out}"
     );
+}
+
+/// A message is the author's to write, so `show` indents every line of it by four spaces, as Git
+/// does: none of its lines can start with the two spaces and the word of a change line.
+#[test]
+fn show_indents_the_message_so_it_cannot_fake_a_change() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("invoice.pdf"), "pdf").unwrap();
+    let message = "add the invoice\n\n  removed   payroll.xlsx  (12 KB)";
+    env.bolt().args(["save", message]).assert().success();
+    let out = stdout_of(&env, &["show"]);
+    // The only line that can pass for a change is the one real change.
+    let like_changes: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .collect();
+    assert_eq!(like_changes, ["  added     invoice.pdf  (3 B)"], "{out}");
+    // Every line of the message is there: indented, its own spaces kept, blank lines blank.
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        &lines[1..],
+        [
+            "    add the invoice",
+            "",
+            "      removed   payroll.xlsx  (12 KB)",
+            "",
+            "  added     invoice.pdf  (3 B)"
+        ],
+        "{out}"
+    );
+    assert!(out.lines().all(|l| l.trim_end() == l), "{out}");
+    // `--json` is the message as it was written.
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout_of(&env, &["--json", "show"])).unwrap();
+    assert_eq!(json["save"]["message"], message);
 }
 
 #[test]

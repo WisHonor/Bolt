@@ -309,7 +309,15 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
         "Save {short} · {} · {when}",
         escape(&save.author.name, false)
     );
-    println!("{}\n", escape(save.message.trim_end(), true));
+    // Indented, as Git does, so that no line of the message can pass for a change below it.
+    for line in escape(save.message.trim_end(), true).lines() {
+        if line.trim().is_empty() {
+            println!();
+        } else {
+            println!("    {line}");
+        }
+    }
+    println!();
     let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
     for_each_change(store, old_root, save.root, |c| {
         let p = &escape(c.path, false);
