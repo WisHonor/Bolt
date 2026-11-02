@@ -616,7 +616,9 @@ fn read_index(
     let lines = len - r.read;
     if lines < count.saturating_mul(MIN_INDEX_LINE) || lines > count.saturating_mul(MAX_INDEX_LINE)
     {
-        return Err(r.corrupt(format!("its length doesn't fit {count} lines")));
+        return Err(r.corrupt(format!(
+            "its {lines} bytes don't fit its entry count of {count}"
+        )));
     }
     let mut entries: Vec<IndexEntry> = Vec::new();
     for _ in 0..count {
@@ -1023,15 +1025,13 @@ mod tests {
     #[test]
     fn an_index_whose_length_does_not_fit_its_count_is_refused_before_its_lines_are_read() {
         let (_root, tmp, _packs) = dirs();
-        // A line is 43 to 61 bytes, so no line fits in 1 byte, one doesn't need 62, two need 86.
+        // A line is 43 to 61 bytes: no lines take 0 bytes, one at most 61, two at least 86.
         for (count, len) in [(0, 1), (1, 62), (2, 85)] {
             let mut index = varint(count);
             index.resize(index.len() + len, 0);
             let reason = refusal(&tmp, &pack_with_index(&index));
-            assert!(
-                reason.contains("length"),
-                "{count} in {len} bytes: {reason}"
-            );
+            let want = format!("its {len} bytes don't fit its entry count of {count}");
+            assert!(reason.contains(&want), "{reason}");
         }
     }
 
@@ -1042,7 +1042,10 @@ mod tests {
         let mut zeros = pack_with_index(&vec![0; 1 << 20]);
         zero_the_checksum(&mut zeros);
         let reason = refusal(&tmp, &zeros);
-        assert!(reason.contains("length"), "{reason}");
+        assert!(
+            reason.contains("don't fit its entry count of 0"),
+            "{reason}"
+        );
         // With a count that fits the length, zeros fail at the first line.
         let mut index = varint(1000);
         index.resize(index.len() + 1000 * 43, 0);
