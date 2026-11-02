@@ -70,3 +70,10 @@ path = "fuzz_targets/format_file.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ignore_rules"
+path = "fuzz_targets/ignore_rules.rs"
+test = false
+doc = false
+bench = false

@@ -9,6 +9,7 @@ pub mod encoding;
 pub mod fsio;
 pub mod history;
 pub mod id;
+pub mod ignore;
 pub mod listing;
 pub mod names;
 pub mod pack;
