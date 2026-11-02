@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01; its red-team fixes ([decisions 024](decisions/024-red-team-gate.md) and [025](decisions/025-red-team-m1-rulings.md)), then milestone 2 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 25
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions ([decisions 024](decisions/024-red-team-gate.md) to [028](decisions/028-red-team-m1-session-2-rulings.md)); milestone 2 next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 28
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -349,6 +349,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
+- **Objects per pack vs. one pack per command.** A pack holds at most 2^24 objects ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)), and each command that stores data writes one pack ([decision 009](decisions/009-storage-engine.md)). A file of millions of chunks (milestone 5), or a very large Git import (milestone 2), could need more. Decide while planning milestone 2: several packs per command (a change to decision 009), or another way.
 - ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository is public, so Actions minutes aren't a constraint.
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
 - **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before format 1 freezes at the v0.1 release: the name is built into `.bolt/`, `bolt.toml`, `.boltignore` and the pack files' magic bytes. Until then, renaming only means changing constants (decision 019).]
