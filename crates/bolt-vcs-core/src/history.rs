@@ -6,12 +6,18 @@ use crate::diary::Position;
 use crate::id::Id;
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
+use crate::text::escape;
 
+/// What the user typed comes back in the message, escaped. The candidates are IDs Bolt made.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
-    #[error("No save, line or ID matches \"{0}\".")]
+    #[error("No save, line or ID matches \"{}\".", escape(.0, false))]
     NotFound(String),
-    #[error("\"{text}\" matches more than one save: {}.", candidates.join(", "))]
+    #[error(
+        "\"{}\" matches more than one save: {}.",
+        escape(text, false),
+        candidates.join(", ")
+    )]
     Ambiguous {
         text: String,
         candidates: Vec<String>,
@@ -173,6 +179,18 @@ mod tests {
         assert_eq!(shorts[&a.0], "klmnopk");
         assert_eq!(shorts[&b.0], "klmnopq");
         assert_eq!(shorts[&c.0], "zzzz");
+    }
+
+    #[test]
+    fn what_the_user_typed_is_shown_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let typed = ResolveError::NotFound(HOSTILE.into());
+        assert_hostile_text_escaped(&typed.to_string());
+        let ambiguous = ResolveError::Ambiguous {
+            text: HOSTILE.into(),
+            candidates: vec!["klmn".into(), "klmo".into()],
+        };
+        assert_hostile_text_escaped(&ambiguous.to_string());
     }
 
     #[test]

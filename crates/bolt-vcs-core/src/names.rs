@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::text::escape;
+
 /// Longest allowed name, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
 
@@ -27,20 +29,33 @@ pub enum NameError {
     BoltSpelling,
 }
 
-/// A name that is stored fine here but would break on another system.
+/// A name that is stored fine here but would break on another system. The names in the messages
+/// came from outside Bolt and are shown escaped.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PortabilityProblem {
     #[error(
-        "\"{a}\" and \"{b}\" differ only in upper/lower case, so they clash on Windows and macOS"
+        "\"{}\" and \"{}\" differ only in upper/lower case, so they clash on Windows and macOS",
+        escape(a, false),
+        escape(b, false)
     )]
     CaseCollision { a: String, b: String },
-    #[error("\"{a}\" and \"{b}\" are the same name written two ways, so they clash on macOS")]
+    #[error(
+        "\"{}\" and \"{}\" are the same name written two ways, so they clash on macOS",
+        escape(a, false),
+        escape(b, false)
+    )]
     NormalizationCollision { a: String, b: String },
-    #[error("\"{0}\" is a reserved device name on Windows")]
+    #[error("\"{}\" is a reserved device name on Windows", escape(.0, false))]
     ReservedName(String),
-    #[error("\"{0}\" ends with a dot or a space, which Windows does not allow")]
+    #[error(
+        "\"{}\" ends with a dot or a space, which Windows does not allow",
+        escape(.0, false)
+    )]
     TrailingDotOrSpace(String),
-    #[error("\"{name}\" contains {ch:?}, which Windows does not allow in names")]
+    #[error(
+        "\"{}\" contains {ch:?}, which Windows does not allow in names",
+        escape(name, false)
+    )]
     ForbiddenCharacter { name: String, ch: char },
 }
 
@@ -301,5 +316,29 @@ mod tests {
         );
         assert!(folder_problems(&["a", "b", "A.txt"]).is_empty());
         assert!(!folder_problems(&["CON", "a"]).is_empty());
+    }
+
+    #[test]
+    fn problems_show_the_names_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let name = || HOSTILE.to_owned();
+        for problem in [
+            PortabilityProblem::CaseCollision {
+                a: name(),
+                b: name(),
+            },
+            PortabilityProblem::NormalizationCollision {
+                a: name(),
+                b: name(),
+            },
+            PortabilityProblem::ReservedName(name()),
+            PortabilityProblem::TrailingDotOrSpace(name()),
+            PortabilityProblem::ForbiddenCharacter {
+                name: name(),
+                ch: '*',
+            },
+        ] {
+            assert_hostile_text_escaped(&problem.to_string());
+        }
     }
 }

@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::safe_fs;
 use crate::save::Person;
+use crate::text::escape;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -13,11 +14,17 @@ pub struct Identity {
     pub email: String,
 }
 
+/// A settings file's path and what is wrong with it can hold text from outside Bolt (a project's
+/// `.bolt/config.toml` sits in a folder with any name), so they are shown escaped.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("Bolt needs your name and email to record who made each save.")]
     MissingIdentity { path: Option<PathBuf> },
-    #[error("{} is not a valid Bolt settings file: {detail}", path.display())]
+    #[error(
+        "{} is not a valid Bolt settings file: {}",
+        escape(&path.display().to_string(), false),
+        escape(detail, false)
+    )]
     Invalid { path: PathBuf, detail: String },
 }
 
@@ -28,9 +35,10 @@ impl ConfigError {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
-            ConfigError::MissingIdentity { path: Some(path) } => {
-                Some(format!("Add this to {}:\n{SNIPPET}", path.display()))
-            }
+            ConfigError::MissingIdentity { path: Some(path) } => Some(format!(
+                "Add this to {}:\n{SNIPPET}",
+                escape(&path.display().to_string(), false)
+            )),
             ConfigError::MissingIdentity { path: None } => Some(format!(
                 "Set BOLT_CONFIG_DIR to a folder and add this to config.toml there:\n{SNIPPET}"
             )),
@@ -164,6 +172,26 @@ mod tests {
             hint.contains("cfg.toml") && hint.contains(SNIPPET),
             "{hint}"
         );
+    }
+
+    #[test]
+    fn untrusted_text_in_errors_is_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        // The path (a project's folder is in it) and what the file said, both shown.
+        let invalid = ConfigError::Invalid {
+            path: PathBuf::from(HOSTILE),
+            detail: HOSTILE.into(),
+        };
+        let shown = invalid.to_string();
+        assert_hostile_text_escaped(&shown);
+        assert_eq!(shown.matches("b\\u{202e}c").count(), 2, "{shown}");
+        let missing = ConfigError::MissingIdentity {
+            path: Some(PathBuf::from(HOSTILE)),
+        };
+        let hint = missing.hint().unwrap();
+        assert_hostile_text_escaped(&hint);
+        // Bolt's own line breaks in the hint stay.
+        assert!(hint.contains(":\n[user]\nname"), "{hint}");
     }
 
     #[test]

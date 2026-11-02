@@ -106,6 +106,8 @@ fn start_without_a_name_explains_how_to_set_it() {
     assert_eq!(out.status.code(), Some(1));
     let err = text(&out.stderr);
     assert!(err.contains("[user]") && err.contains("name ="), "{err}");
+    // The snippet to add is lines of its own, not one line with `\x0a` between them.
+    assert!(err.contains(":\n[user]\nname = "), "{err}");
     assert!(!env.root().join(".bolt").exists());
 }
 
@@ -553,6 +555,116 @@ fn hostile_text_cannot_drive_the_terminal() {
             "{out}"
         );
     }
+}
+
+/// RT-8 (`rt8_…` in redteam.rs uses an escape sequence, which only unix lets a folder be named
+/// with): the project folder's name, in what `start` prints and in a message that names it.
+#[test]
+fn folder_names_are_shown_escaped() {
+    let env = Env::new();
+    let folder = env.root().join("proj\u{202e}gnp.exe");
+    std::fs::create_dir(&folder).unwrap();
+    let out = env.bolt_in(&folder).arg("start").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    assert!(shown.contains("proj\\u{202e}gnp.exe"), "{shown:?}");
+
+    let sub = folder.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let out = env.bolt_in(&sub).arg("start").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let shown = text(&out.stderr);
+    assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    assert!(shown.contains("proj\\u{202e}gnp.exe"), "{shown:?}");
+}
+
+#[test]
+fn text_quoted_in_an_error_is_shown_escaped() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    // The error quotes the pattern, and a right-to-left override must not reach the terminal.
+    std::fs::write(env.root().join(".boltignore"), "[z-a]\u{202e}\n").unwrap();
+    let out = env.bolt().args(["save", "x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let shown = text(&out.stderr);
+    assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    assert!(shown.contains("'[z-a]\\u{202e}'"), "{shown:?}");
+    // The message is for people in JSON too, so it is just as safe to print.
+    let out = env.bolt().args(["--json", "save", "x"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(!message.contains('\u{202e}'), "{message:?}");
+    assert!(message.contains("'[z-a]\\u{202e}'"), "{message:?}");
+}
+
+/// Two names that would not work on every system, so that the error has two lines of problems.
+/// Where any name is allowed, a device name and a name with a trailing dot. Windows allows
+/// neither (and macOS folds the same name written two ways into one), so there it is the same
+/// name written two ways, in the top folder and in a folder below it.
+fn plant_two_non_portable_names(root: &Path) {
+    #[cfg(not(windows))]
+    for name in ["CON", "name."] {
+        std::fs::write(root.join(name), "x").unwrap();
+    }
+    #[cfg(windows)]
+    for folder in [root.to_owned(), root.join("sub")] {
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in ["caf\u{e9}.txt", "cafe\u{301}.txt"] {
+            std::fs::write(folder.join(name), "x").unwrap();
+        }
+    }
+}
+
+/// RT-11: the problems of a save that is refused are on lines of their own.
+#[test]
+fn multi_line_error_prints_lines() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    plant_two_non_portable_names(env.root());
+    let out = env.bolt().args(["save", "x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert!(!err.contains("\\x0a"), "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 4, "{err}");
+    assert_eq!(
+        lines[0],
+        "error: Some new names would not work on every system:"
+    );
+    assert!(
+        lines[1].starts_with("  ") && lines[2].starts_with("  "),
+        "{err}"
+    );
+    assert!(lines[3].starts_with("hint: "), "{err}");
+}
+
+/// RT-11: a folder that can't be entered is an unreadable folder, not a problem with a
+/// `.boltignore` that can't be reached in it. (On Windows it never was one: only unix refuses to
+/// look inside a folder for a name.)
+#[cfg(unix)]
+#[test]
+fn unreadable_folder_is_reported_as_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let locked = env.root().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f.txt"), "secret").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // root reads everything, so there is nothing to test.
+    let root_user = std::fs::read_dir(&locked).is_ok();
+    let out = env.bolt().args(["save", "x"]).output().unwrap();
+    // Back to normal first, so that the temporary folder can be removed whatever happens.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if root_user {
+        return;
+    }
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    let message = err.lines().next().unwrap();
+    assert!(message.starts_with("error: Can't read locked: "), "{err}");
+    assert!(!err.contains("A .boltignore file has a problem"), "{err}");
 }
 
 // ---------------------------------------------------------------------------------------------

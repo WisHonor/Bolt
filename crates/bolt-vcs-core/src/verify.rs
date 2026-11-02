@@ -1,5 +1,6 @@
 //! Integrity check: reads every object of every pack. The core of the later `bolt verify`.
 use crate::pack::{ObjectKind, PackReader};
+use crate::text::escape;
 use std::io;
 use std::path::Path;
 
@@ -16,12 +17,15 @@ impl VerifyReport {
 }
 
 /// Opens each pack on its own, so a broken pack becomes a listed problem instead of stopping the check.
+/// The problems are lines for a person to read, so the folder and pack names in them, which came
+/// from outside Bolt, are escaped.
 #[must_use]
 pub fn verify_store(packs_dir: &Path) -> VerifyReport {
     let mut report = VerifyReport {
         objects_checked: 0,
         problems: Vec::new(),
     };
+    let folder = escape(&packs_dir.display().to_string(), false);
     let mut paths = Vec::new();
     match std::fs::read_dir(packs_dir) {
         Ok(rd) => {
@@ -31,21 +35,17 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
                         paths.push(e.path());
                     }
                     Ok(_) => {}
-                    Err(err) => report
-                        .problems
-                        .push(format!("{}: {err}", packs_dir.display())),
+                    Err(err) => report.problems.push(format!("{folder}: {err}")),
                 }
             }
         }
-        Err(err) => report
-            .problems
-            .push(format!("{}: {err}", packs_dir.display())),
+        Err(err) => report.problems.push(format!("{folder}: {err}")),
     }
     paths.sort();
     for path in paths {
         let name = path
             .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            .map_or_else(String::new, |n| escape(&n.to_string_lossy(), false));
         let reader = match PackReader::open(&path) {
             Ok(r) => r,
             Err(err) => {
@@ -121,6 +121,17 @@ mod tests {
         let name = paths[1].file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         assert!(report.problems[0].contains(&name));
+    }
+
+    #[test]
+    fn problems_show_pack_names_escaped() {
+        let (_root, packs, _paths) = make(0);
+        std::fs::write(packs.join("a\u{202e}b.pack"), b"short").unwrap();
+        let report = verify_store(&packs);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        let problem = &report.problems[0];
+        assert!(!problem.contains('\u{202e}'), "{problem}");
+        assert!(problem.starts_with("a\\u{202e}b.pack: "), "{problem}");
     }
 
     #[test]

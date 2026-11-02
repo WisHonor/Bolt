@@ -575,7 +575,6 @@ fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "RT-7: fixed by Task 6 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt7_bidi_override_in_a_file_name_is_not_printed_raw() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -598,7 +597,6 @@ fn rt7_bidi_override_in_a_file_name_is_not_printed_raw() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT-8: fixed by Task 6 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt8_start_does_not_print_escape_sequences_from_the_folder_name() {
     let env = Env::new();
     let dir: std::path::PathBuf = env.root().join("proj\u{1b}]0;pwned\u{7}\u{1b}[2J");

@@ -1,6 +1,20 @@
-//! Helpers shared by unit tests: hex, and making links.
+//! Helpers shared by unit tests: hex, making links, and hostile text.
 
 use std::path::Path;
+
+/// Text no terminal may be shown as it is: an escape sequence, a right-to-left override and a
+/// line separator.
+pub(crate) const HOSTILE: &str = "a\u{1b}[2Jb\u{202e}c\u{2028}d";
+
+/// Fails unless `message` holds [`HOSTILE`] escaped, and none of its characters as they are.
+pub(crate) fn assert_hostile_text_escaped(message: &str) {
+    let escaped = "a\\x1b[2Jb\\u{202e}c\\u{2028}d";
+    assert!(message.contains(escaped), "{message:?}");
+    assert!(
+        !message.contains(['\u{1b}', '\u{202e}', '\u{2028}']),
+        "{message:?}"
+    );
+}
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

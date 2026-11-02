@@ -23,6 +23,7 @@ use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
+use crate::text::escape;
 
 pub struct SaveRequest<'a> {
     pub message: &'a str,
@@ -46,22 +47,29 @@ pub enum SaveOutcome {
     NothingChanged { current: Id },
 }
 
+/// Why a save was refused. The paths and details in the messages name things from the project
+/// folder, which came from outside Bolt, so they are shown escaped.
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
     #[error(transparent)]
     Repo(#[from] RepoError),
-    #[error("Can't read {path}: {source}.")]
+    #[error(
+        "Can't read {}: {}.",
+        escape(path, false),
+        escape(&source.to_string(), false)
+    )]
     Unreadable { path: String, source: io::Error },
-    #[error("{path} changed while Bolt was saving it.")]
+    #[error("{} changed while Bolt was saving it.", escape(path, false))]
     ChangedDuringSave { path: String },
-    #[error("Bolt can't save {path}: {reason}.")]
+    // `reason` is Bolt's own wording.
+    #[error("Bolt can't save {}: {reason}.", escape(path, false))]
     InvalidName { path: String, reason: String },
     #[error("{}", not_portable(problems))]
     NotPortable {
         /// The folder (empty for the project's top folder) and the problem found in it.
         problems: Vec<(String, PortabilityProblem)>,
     },
-    #[error("A .boltignore file has a problem: {detail}.")]
+    #[error("A .boltignore file has a problem: {}.", escape(detail, false))]
     Ignore { detail: String },
     #[error("This project is too large to save: {detail}.")]
     TooLarge { detail: String },
@@ -82,13 +90,14 @@ impl From<PackError> for SaveError {
     }
 }
 
+/// One line for each problem; the names in the problems are escaped by their own messages.
 fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     let mut text = "Some new names would not work on every system:".to_owned();
     for (folder, problem) in problems {
         if folder.is_empty() {
             let _ = write!(text, "\n  {problem}");
         } else {
-            let _ = write!(text, "\n  in {folder}/: {problem}");
+            let _ = write!(text, "\n  in {}/: {problem}", escape(folder, false));
         }
     }
     text
@@ -102,7 +111,7 @@ impl SaveError {
             match self {
                 SaveError::Repo(e) => return e.hint(),
                 SaveError::Unreadable { .. } => {
-                    "Nothing was saved. Let Bolt read the file, or list it in .boltignore."
+                    "Nothing was saved. Let Bolt read it, or list it in .boltignore."
                 }
                 SaveError::ChangedDuringSave { .. } => {
                     "Nothing was saved. Try again when the file stops changing, or list it in .boltignore."
@@ -113,7 +122,10 @@ impl SaveError {
                 SaveError::NotPortable { .. } => {
                     "Nothing was saved. Rename them, or list them in .boltignore."
                 }
-                SaveError::Ignore { .. } => "Nothing was saved. Fix the pattern and try again.",
+                SaveError::Ignore { .. } => {
+                    // Not only for a pattern: the file may be a link, a pipe, huge or not text.
+                    "Nothing was saved. Fix that .boltignore file and try again."
+                }
                 SaveError::TooLarge { .. } => {
                     "Nothing was saved. List the deep or huge folder in .boltignore."
                 }
@@ -247,16 +259,40 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
 
 /// The rules of the `.boltignore` in `dir`, read once through `safe_fs` (storage-format.md §12:
 /// a regular UTF-8 file of at most 1 MiB) and parsed line by line as `ignore` would; none if
-/// it is missing. A problem names the file by its project path.
-fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, String> {
+/// it is missing. A problem with the file names it by its project path, once. A folder Bolt
+/// may not look into can't show whether it holds the file: that is the folder's trouble, and
+/// is reported as `Unreadable` (RT-11).
+fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
     let file = dir.join(".boltignore");
     let rel = shown(file.strip_prefix(root).unwrap_or(&file));
+    let ignore = |detail| SaveError::Ignore { detail };
     let bytes = match safe_fs::read_capped(&file, safe_fs::MAX_BOLTIGNORE_BYTES) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Gitignore::empty()),
-        Err(e) => return Err(format!("{rel}: {e}")),
+        Err(e) => {
+            if let Err(source) = fs::symlink_metadata(&file)
+                && source.kind() != io::ErrorKind::NotFound
+            {
+                let folder = shown(dir.strip_prefix(root).unwrap_or(dir));
+                let path = if folder.is_empty() {
+                    "the project folder".to_owned()
+                } else {
+                    folder
+                };
+                return Err(SaveError::Unreadable { path, source });
+            }
+            // `safe_fs` starts its refusals with the file's whole path, which the project path
+            // stands in for, so that the file is named once.
+            let why = e.to_string();
+            return Err(ignore(
+                match why.strip_prefix(&file.display().to_string()) {
+                    Some(rest) => format!("{rel}{rest}"),
+                    None => format!("{rel}: {why}"),
+                },
+            ));
+        }
     };
-    let text = std::str::from_utf8(&bytes).map_err(|e| format!("{rel}: {e}"))?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| ignore(format!("{rel}: {e}")))?;
     let mut builder = GitignoreBuilder::new(dir);
     let mut bad = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -271,17 +307,17 @@ fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, String> {
         }
     }
     if !bad.is_empty() {
-        return Err(bad.join("; "));
+        return Err(ignore(bad.join("; ")));
     }
-    builder.build().map_err(|e| format!("{rel}: {e}"))
+    builder.build().map_err(|e| ignore(format!("{rel}: {e}")))
 }
 
 /// The `.boltignore` rules of the folders a walk is inside, nearest last, and the first problem
-/// found with one of those files.
+/// found in a folder the walk was to enter: with its `.boltignore`, or in looking for one.
 struct IgnoreRules {
     root: PathBuf,
     stack: Vec<(PathBuf, Gitignore)>,
-    problem: Option<String>,
+    problem: Option<SaveError>,
 }
 
 impl IgnoreRules {
@@ -309,8 +345,8 @@ impl IgnoreRules {
             match boltignore_rules(&self.root, path) {
                 Ok(rules) if rules.is_empty() => {}
                 Ok(rules) => self.stack.push((path.to_owned(), rules)),
-                Err(detail) => {
-                    self.problem.get_or_insert(detail);
+                Err(problem) => {
+                    self.problem.get_or_insert(problem);
                     return false;
                 }
             }
@@ -349,7 +385,7 @@ fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError
     let mut folders = Folders::from([(String::new(), Vec::new())]);
     // Bolt reads each .boltignore itself, once, and applies its rules here: `ignore` would open
     // the file again by path, following links and reading without a limit.
-    let top = boltignore_rules(root, root).map_err(|detail| SaveError::Ignore { detail })?;
+    let top = boltignore_rules(root, root)?;
     let rules = Arc::new(Mutex::new(IgnoreRules {
         root: root.to_owned(),
         stack: vec![(root.to_owned(), top)],
@@ -426,8 +462,8 @@ fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError
         .unwrap_or_else(PoisonError::into_inner)
         .problem
         .take();
-    if let Some(detail) = problem {
-        return Err(SaveError::Ignore { detail });
+    if let Some(problem) = problem {
+        return Err(problem);
     }
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1097,15 +1133,16 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
-    /// The save must stop with `Ignore` naming `.boltignore`, and change nothing. Returns the
-    /// problem's text.
+    /// The save must stop with `Ignore` naming `.boltignore` by its project path, once, and
+    /// change nothing. Returns the problem's text.
     fn assert_ignore_problem(repo: &mut Repository) -> String {
         let head = repo.head().unwrap();
         let detail = match save_now(repo) {
             Err(SaveError::Ignore { detail }) => detail,
             other => panic!("{:?}", other.map(|_| ())),
         };
-        assert!(detail.starts_with(".boltignore: "), "{detail}");
+        assert!(detail.starts_with(".boltignore"), "{detail}");
+        assert_eq!(detail.matches(".boltignore").count(), 1, "{detail}");
         assert_eq!(repo.head().unwrap(), head);
         detail
     }
@@ -1122,6 +1159,7 @@ mod tests {
         }
         let detail = assert_ignore_problem(&mut repo);
         assert!(detail.contains("regular file"), "{detail}");
+        assert!(!detail.contains(dir.path().to_str().unwrap()), "{detail}");
     }
 
     #[test]
@@ -1133,6 +1171,7 @@ mod tests {
         write(dir.path(), ".boltignore", &big);
         let detail = assert_ignore_problem(&mut repo);
         assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
+        assert!(!detail.contains(dir.path().to_str().unwrap()), "{detail}");
     }
 
     #[cfg(unix)]
@@ -1156,7 +1195,7 @@ mod tests {
             .expect("the save hung on a named pipe");
         match result {
             Err(SaveError::Ignore { detail }) => assert!(
-                detail.starts_with("sub/.boltignore: ") && detail.contains("regular file"),
+                detail.starts_with("sub/.boltignore is not a regular file"),
                 "{detail}"
             ),
             other => panic!("{other:?}"),
@@ -1283,6 +1322,82 @@ mod tests {
             other => panic!("{:?}", other.err()),
         }
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// RT-11: a folder Bolt may not enter is an unreadable folder, not a `.boltignore` problem.
+    #[cfg(unix)]
+    #[test]
+    fn save_names_an_unreadable_folder_as_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = project();
+        let head = repo.head().unwrap();
+        write(dir.path(), "sub/locked/f.txt", b"secret");
+        let locked = dir.path().join("sub/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads everything, so there is nothing to test.
+        let root_user = fs::read_dir(&locked).is_ok();
+        let saved = save_now(&mut repo);
+        // Back to normal first, so that the temporary folder can be removed whatever happens.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            return;
+        }
+        match saved {
+            Err(SaveError::Unreadable { path, source }) => {
+                assert_eq!(path, "sub/locked");
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn errors_show_untrusted_text_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let hostile = || HOSTILE.to_owned();
+        for e in [
+            SaveError::Unreadable {
+                path: hostile(),
+                source: io::Error::other("fine"),
+            },
+            SaveError::Unreadable {
+                path: "fine".into(),
+                source: io::Error::other(HOSTILE),
+            },
+            SaveError::ChangedDuringSave { path: hostile() },
+            SaveError::InvalidName {
+                path: hostile(),
+                reason: "fine".into(),
+            },
+            SaveError::Ignore { detail: hostile() },
+        ] {
+            assert_hostile_text_escaped(&e.to_string());
+        }
+        // The lines Bolt writes itself stay lines; the folders and names in them are escaped.
+        let e = SaveError::NotPortable {
+            problems: vec![
+                (String::new(), PortabilityProblem::ReservedName(hostile())),
+                (
+                    hostile(),
+                    PortabilityProblem::TrailingDotOrSpace("a.".into()),
+                ),
+            ],
+        };
+        let shown = e.to_string();
+        assert_hostile_text_escaped(&shown);
+        assert_eq!(shown.lines().count(), 3, "{shown}");
+        assert!(
+            shown.lines().skip(1).all(|l| l.starts_with("  ")),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_boltignore_hint_does_not_blame_a_pattern() {
+        // A link, a pipe, a huge file or a file that isn't text has no pattern to fix.
+        let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
+        assert!(!hint.contains("pattern"), "{hint}");
     }
 
     #[test]

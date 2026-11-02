@@ -12,6 +12,7 @@ use bolt_core::repo::{RepoError, Repository};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
+use bolt_core::text::escape;
 use clap::{Parser, Subcommand};
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
@@ -126,7 +127,9 @@ fn start(json: bool) -> Result<(), Failure> {
             })
         );
     } else {
-        println!("Started a Bolt project in {}.", root.display());
+        // The folder's name came from outside Bolt, like any name in a project (RT-8).
+        let shown = escape(&root.display().to_string(), false);
+        println!("Started a Bolt project in {shown}.");
         println!("Your first save is {short}, on line main.");
         println!("Next: change some files, then run: bolt save \"describe your change\"");
     }
@@ -169,7 +172,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                     })
                 );
             } else {
-                let title = output::sanitize(message.lines().next().unwrap_or_default(), false);
+                let title = escape(message.lines().next().unwrap_or_default(), false);
                 let counted = match changed_files {
                     Some(1) => "(1 file)".to_owned(),
                     Some(n) => format!("({n} files)"),
@@ -229,8 +232,8 @@ fn history(json: bool) -> Result<(), Failure> {
             println!(
                 "{}  {when}  {}  {}",
                 shorts[id],
-                output::sanitize(&s.author.name, false),
-                output::sanitize(title, false)
+                escape(&s.author.name, false),
+                escape(title, false)
             );
         }
     }
@@ -290,12 +293,12 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
     println!(
         "Save {short} · {} · {when}",
-        output::sanitize(&save.author.name, false)
+        escape(&save.author.name, false)
     );
-    println!("{}\n", output::sanitize(save.message.trim_end(), true));
+    println!("{}\n", escape(save.message.trim_end(), true));
     let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
     for_each_change(store, old_root, save.root, |c| {
-        let p = &output::sanitize(c.path, false);
+        let p = &escape(c.path, false);
         match c.change {
             ChangeKind::Added => println!("  added     {p}  ({})", size(c.new_size)),
             ChangeKind::Removed => println!("  removed   {p}  ({})", size(c.old_size)),

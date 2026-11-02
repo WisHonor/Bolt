@@ -16,20 +16,29 @@ use crate::pack::{ObjectKind, PackError, PackWriter};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
+use crate::text::escape;
 
 pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";
 
+/// What went wrong with a project. A path or detail in a message may hold text from outside Bolt
+/// (the project folder's name, a hostile `.bolt/format`), so it is shown escaped.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoError {
     #[error("Not inside a Bolt project.")]
     NotAProject,
     #[error("This folder is already a Bolt project.")]
     AlreadyAProject { root: PathBuf },
-    #[error("This folder is inside a Bolt project at {}.", root.display())]
+    #[error(
+        "This folder is inside a Bolt project at {}.",
+        escape(&root.display().to_string(), false)
+    )]
     InsideAnotherProject { root: PathBuf },
-    #[error("This project uses {detail}, which this version of Bolt doesn't understand.")]
+    #[error(
+        "This project uses {}, which this version of Bolt doesn't understand.",
+        escape(detail, false)
+    )]
     NewerFormat { detail: String },
-    #[error("This project's Bolt data looks damaged: {detail}.")]
+    #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -784,6 +793,34 @@ mod tests {
         let e = RepoError::Damaged { detail: "x".into() };
         assert_eq!(e.to_string(), "This project's Bolt data looks damaged: x.");
         assert!(e.hint().unwrap().contains("Nothing was changed"));
+    }
+
+    #[test]
+    fn untrusted_text_in_errors_is_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        for e in [
+            RepoError::NewerFormat {
+                detail: HOSTILE.into(),
+            },
+            RepoError::Damaged {
+                detail: HOSTILE.into(),
+            },
+            RepoError::InsideAnotherProject {
+                root: PathBuf::from(HOSTILE),
+            },
+            // The path of a damaged pack has the project folder's name in it.
+            PackError::Corrupt {
+                path: PathBuf::from(HOSTILE),
+                reason: "x".into(),
+            }
+            .into(),
+        ] {
+            assert_hostile_text_escaped(&e.to_string());
+        }
+        // The hash named by a hostile `.bolt/format` is quoted in the message.
+        let e = parse_format("bolt-repository 1\nhash \u{202e}evil\n").unwrap_err();
+        assert!(matches!(e, RepoError::NewerFormat { .. }), "{e:?}");
+        assert!(e.to_string().contains("\"\\u{202e}evil\""), "{e}");
     }
 
     #[cfg(feature = "fault-injection")]

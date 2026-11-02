@@ -4,6 +4,7 @@ use crate::encoding::{Reader, Writer};
 use crate::fsio;
 use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
 use crate::safe_fs;
+use crate::text::escape;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -98,7 +99,11 @@ pub struct IndexEntry {
 pub enum PackError {
     #[error(transparent)]
     Io(#[from] io::Error),
-    #[error("pack {} is damaged: {reason}", path.display())]
+    // The path has the project folder's name in it, which came from outside Bolt.
+    #[error(
+        "pack {} is damaged: {reason}",
+        escape(&path.display().to_string(), false)
+    )]
     Corrupt { path: PathBuf, reason: String },
     #[error("object {id} does not match its fingerprint")]
     FingerprintMismatch { id: Id },
@@ -848,6 +853,17 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
         assert!(PackReader::open(&path).is_err());
+    }
+
+    #[test]
+    fn a_damaged_packs_path_is_shown_escaped() {
+        let (_root, _tmp, packs) = dirs();
+        // A name no terminal may be shown as it is; the project folder's name is in the path too.
+        let path = packs.join("a\u{202e}b.pack");
+        std::fs::write(&path, b"short").unwrap();
+        let shown = PackReader::open(&path).err().unwrap().to_string();
+        assert!(!shown.contains('\u{202e}'), "{shown}");
+        assert!(shown.contains("a\\u{202e}b.pack is damaged"), "{shown}");
     }
 
     /// A pack with one content entry whose header and index claim `claimed` uncompressed bytes.
