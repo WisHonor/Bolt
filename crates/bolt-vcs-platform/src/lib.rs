@@ -77,30 +77,42 @@ pub fn is_hidden(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Whether the file or folder at `path` belongs to the user running Bolt, so that a `.bolt`
-/// folder another user account planted above the user's work is refused (decision 025, T23). A
-/// link or junction at the last part of `path` is not followed: its own owner is the answer. A
-/// missing `path` gives `NotFound`.
-///
-/// Unix: the owner is the effective user. Windows: the owner is the user's own account, or the
-/// Administrators group when the user is an administrator, elevated or not.
-pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
+/// Who owns a file or folder, as far as Bolt can tell (decisions 025 and 026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// The user running Bolt. Unix: the effective user. Windows: the user's own account, or the
+    /// Administrators group when the user is an administrator, elevated or not.
+    User,
+    /// Another user account.
+    Other,
+    /// Can't tell: the drive records no owner (FAT, exFAT, some network shares), records
+    /// "Everyone", or records something that isn't a well-formed account ID. Windows only: on
+    /// Unix every file has an owner.
+    Unknown,
+}
+
+/// Who owns the file or folder at `path`, so that a `.bolt` folder another user account planted
+/// above the user's work is refused (decisions 025 and 026, T23). A link or junction at the last
+/// part of `path` is not followed: its own owner is the answer. A missing `path` gives `NotFound`.
+pub fn owner_of(path: &Path) -> io::Result<Owner> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let owner = std::fs::symlink_metadata(path)?.uid();
         // SAFETY: geteuid takes no arguments, cannot fail, and only returns a number.
-        Ok(owner == unsafe { libc::geteuid() })
+        let is_user = owner == unsafe { libc::geteuid() };
+        Ok(if is_user { Owner::User } else { Owner::Other })
     }
     #[cfg(windows)]
     {
-        windows_owner::is_owned_by_current_user(path)
+        windows_owner::owner_of(path)
     }
 }
 
-/// The Windows half of `is_owned_by_current_user`.
+/// The Windows half of `owner_of`.
 #[cfg(windows)]
 mod windows_owner {
+    use super::Owner;
     use std::fs::OpenOptions;
     use std::io;
     use std::mem::offset_of;
@@ -116,14 +128,14 @@ mod windows_owner {
     use windows_sys::Win32::Security::{
         EqualSid, GetTokenInformation, IsValidSid, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
         PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
-        TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenUser, WinBuiltinAdministratorsSid,
+        TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenUser, WinBuiltinAdministratorsSid, WinWorldSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
+    pub fn owner_of(path: &Path) -> io::Result<Owner> {
         // Opened only to read its security information (READ_CONTROL). BACKUP_SEMANTICS lets a
         // folder open; OPEN_REPARSE_POINT opens a link or junction itself, not what it points
         // to. std adds the `\\?\` prefix, so long paths work.
@@ -152,25 +164,30 @@ mod windows_owner {
         match status {
             ERROR_SUCCESS => {}
             // Windows can't tell the owner here (a file system or network share that records
-            // none). Not shown to be the user's, so it isn't: Bolt refuses the folder, and the
-            // user can list it in safe-folders.
-            ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION => return Ok(false),
+            // none). Not shown to be the user's, so Bolt refuses the folder unless the user lists
+            // it in safe-folders.
+            ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION => return Ok(Owner::Unknown),
             _ => return Err(io::Error::from_raw_os_error(status as i32)),
         }
         // Frees the descriptor when this function returns, on every path. `owner` points into
         // it, so it must not be used after that.
         let _descriptor = SecurityDescriptor(descriptor);
-        // No owner recorded: refused the same way. (FAT and exFAT report "Everyone" as the
-        // owner, which is neither the user nor Administrators, so the checks below refuse it.)
+        // No owner recorded: can't tell either.
         if owner.is_null() {
-            return Ok(false);
+            return Ok(Owner::Unknown);
         }
-        // An owner that is not a well-formed SID can't be shown to be the user's: refused, as
-        // Git does.
+        // An owner that is not a well-formed SID names nobody: can't tell (Git refuses it too).
         // SAFETY: `owner` is not null (checked just above) and points into the descriptor, which
         // stays allocated until this function returns; IsValidSid only reads it.
         if unsafe { IsValidSid(owner) } == 0 {
-            return Ok(false);
+            return Ok(Owner::Unknown);
+        }
+        // FAT and exFAT record no owner, and Windows reports "Everyone" for them: can't tell
+        // (Git reads it the same way).
+        // SAFETY: `owner` is a valid SID in the descriptor (checked above); IsWellKnownSid only
+        // reads it.
+        if unsafe { IsWellKnownSid(owner, WinWorldSid) } != 0 {
+            return Ok(Owner::Unknown);
         }
 
         let token = process_token()?;
@@ -180,7 +197,7 @@ mod windows_owner {
         // to the user's SID in `user`, which Windows filled; both stay allocated until this
         // function returns, and EqualSid only reads them.
         if unsafe { EqualSid(owner, user_sid) } != 0 {
-            return Ok(true);
+            return Ok(Owner::User);
         }
 
         // The Administrators group counts as the user when the user is an administrator: the
@@ -190,16 +207,17 @@ mod windows_owner {
         // SAFETY: `owner` is a valid SID in the descriptor (checked above); IsWellKnownSid only
         // reads it.
         if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } == 0 {
-            return Ok(false);
+            return Ok(Owner::Other);
         }
         let (group_buffer, groups_filled) = token_information(&token, TokenGroups)?;
         let groups = groups_in(&group_buffer, groups_filled)?;
-        Ok(groups.iter().any(|group| {
+        let in_group = groups.iter().any(|group| {
             // SAFETY: the group's SID points into `group_buffer`, which Windows filled and
             // `groups` borrows, and `owner` is a valid SID in the descriptor; both stay
             // allocated for the call, and EqualSid only reads them.
             unsafe { EqualSid(group.Sid, owner) != 0 }
-        }))
+        });
+        Ok(if in_group { Owner::User } else { Owner::Other })
     }
 
     /// The user's SID in a TOKEN_USER that Windows wrote into the first `filled` bytes of
@@ -372,7 +390,7 @@ mod tests {
     #[test]
     fn own_temp_folder_is_owned() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(is_owned_by_current_user(dir.path()).unwrap());
+        assert_eq!(owner_of(dir.path()).unwrap(), Owner::User);
     }
 
     #[test]
@@ -388,19 +406,43 @@ mod tests {
             if std::fs::metadata("/").unwrap().uid() == me {
                 return;
             }
-            assert!(!is_owned_by_current_user(Path::new("/")).unwrap());
+            assert_eq!(owner_of(Path::new("/")).unwrap(), Owner::Other);
         }
         #[cfg(windows)]
         {
             let windows = std::env::var_os("SystemRoot").unwrap();
-            assert!(!is_owned_by_current_user(Path::new(&windows)).unwrap());
+            assert_eq!(owner_of(Path::new(&windows)).unwrap(), Owner::Other);
         }
+    }
+
+    /// A link's own owner is the answer, never its target's: following a planted `.bolt` link
+    /// could reach another computer (decision 026).
+    #[test]
+    fn a_link_is_judged_by_its_own_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link");
+        // Followed, these would give NotFound (Unix: nothing there) or Other (Windows: a junction
+        // to the Windows folder, which TrustedInstaller owns).
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(std::env::var_os("SystemRoot").unwrap())
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(made.success());
+        }
+        assert_eq!(owner_of(&link).unwrap(), Owner::User);
     }
 
     #[test]
     fn missing_path_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let err = is_owned_by_current_user(&dir.path().join("missing")).unwrap_err();
+        let err = owner_of(&dir.path().join("missing")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 

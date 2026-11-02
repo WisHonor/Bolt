@@ -91,6 +91,12 @@ pub fn check_real_dir(path: &Path) -> io::Result<()> {
     ))
 }
 
+/// Whether `meta`, from `symlink_metadata`, is a link, junction or other reparse point: what Bolt
+/// never follows.
+pub fn is_link(meta: &Metadata) -> bool {
+    meta.is_symlink() || is_reparse_point(meta)
+}
+
 /// A plain file: not a link, folder, pipe or device, and on Windows no reparse point at all.
 fn is_regular(meta: &Metadata) -> bool {
     meta.is_file() && !is_reparse_point(meta)
