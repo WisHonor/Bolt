@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 3
+- **Refined by:** [decision 038](038-gitignore-and-saved-files.md) (ignore rules keep out only files that aren't saved yet)
 
 ## Context
 

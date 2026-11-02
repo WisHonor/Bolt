@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 37
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 38
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -130,7 +130,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] Names in Git trees that Bolt can't store as they are → [decision 035](decisions/035-git-names-bolt-cant-take.md)
 - [x] Submodules → [decision 036](decisions/036-submodules-as-bare-links.md)
 - [x] Git LFS before milestone 5 → [decision 037](decisions/037-lfs-waits-for-milestone-5.md)
-- [ ] Ignore rules after an import
+- [x] Ignore rules after an import → [decision 038](decisions/038-gitignore-and-saved-files.md)
 - [ ] The first save after an import
 - [ ] Re-importing
 - [ ] More objects than one pack may hold (decision 028's open question)
@@ -144,7 +144,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** Your project folder is separate from history: nothing enters history until you run `bolt save`. But Bolt never destroys unsaved work without keeping a copy first, so `undo` can always bring it back. It works like an IDE's local history, built into the version control system.
 
 - **Saving.** `bolt save "msg"` records every change in the folder; `bolt save <files or folders> "msg"` records only those. Choosing parts of a file comes later.
-- **Tracking.** New files are tracked automatically (there is no `add` step) unless ignore rules exclude them. A save that adds unusually much at once asks for confirmation first; the threshold is set per preset (topic 16), and a flag skips the question for scripts.
+- **Tracking.** New files are tracked automatically (there is no `add` step) unless ignore rules exclude them. Rules keep out only files that aren't saved yet: a saved file stays saved until it is deleted, as in Git ([decision 038](decisions/038-gitignore-and-saved-files.md)). A save that adds unusually much at once asks for confirmation first; the threshold is set per preset (topic 16), and a flag skips the question for scripts.
 - **Safety copies.** Before any command overwrites or removes unsaved work (`discard`, `goto`, `combine`, `undo`, `redo`, `shelf`), Bolt stores the current content of the affected files and records it in the operation log. Only files about to be touched are copied. Safety copies live in the normal object store, so content that is already stored costs nothing extra.
 - **Shelf.** `bolt shelf` sets unsaved changes aside as a hidden save and restores the folder; shelving is undoable.
 - **`goto` with unsaved changes.** Changes come along when nothing collides; otherwise Bolt stops and offers to shelve, save or discard them.
@@ -196,7 +196,7 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** The project's rules live in two normal files at the top of your project, so they travel with it and are part of its history. Your personal settings stay on your machine and can never change the project's rules.
 
-- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (the `.gitignore` syntax; [storage-format.md](storage-format.md) §12 gives its limits and the few forms Bolt refuses until milestone 2, because it can't yet read them exactly as Git does).
+- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (the `.gitignore` syntax; [storage-format.md](storage-format.md) §12 gives its limits and the few forms Bolt refuses until milestone 2, because it can't yet read them exactly as Git does). Bolt reads a folder's `.gitignore` too, before its `.boltignore` ([decision 038](decisions/038-gitignore-and-saved-files.md)).
 - **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from you: `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, else a `[[project]]` entry in your own settings for this exact folder (written as a full path), else `[user]`; a project's own settings are ignored, with a note ([decision 025](decisions/025-red-team-m1-rulings.md)). Bolt uses a project only when both its folder and its `.bolt/` belong to you, as Git requires ([decisions 025](decisions/025-red-team-m1-rulings.md), [026](decisions/026-ownership-check-details.md) and [027](decisions/027-project-folder-must-be-yours.md)). On Windows, folders the Administrators group owns count as yours only in an elevated terminal, as in Git ([decision 030](decisions/030-administrators-only-when-elevated.md)). To trust a folder anyway (a shared folder, a drive that records no owner, or your Windows home folder itself, which Windows gives to SYSTEM), list that exact folder in the top-level `safe-folders` list of your own settings. Anything that runs a program is personal only.
 - **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
 - **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
@@ -359,6 +359,7 @@ head ─► redo     main → ptvz
   - The stash, notes, replace refs and other refs aren't imported; the summary lists them. A repository with no commits, or a current branch with none yet, stops the import.
 - **Names Bolt can't take as they are** ([decision 035](decisions/035-git-names-bolt-cant-take.md)). Dangerous names are skipped with a warning, with everything under them: any spelling a system would treat as `.git` (Git's own list, on every system), `.`, `..`, empty names and names holding `/`. Names over 255 bytes and broken folders (duplicate names, wrong order, unknown modes, contents that don't match their ID, missing objects) stop the import. Commits with skipped entries are counted, since export can't recreate them exactly.
 - **Submodules become bare links** ([decision 036](decisions/036-submodules-as-bare-links.md)): a project link holding only the commit. `.gitmodules` comes in as an ordinary file and is never read. A later save keeps every link as it is and never looks inside its folder; moving, adding or removing a submodule is done in Git.
+- **Ignore rules carry over by themselves** ([decision 038](decisions/038-gitignore-and-saved-files.md)): Bolt reads `.gitignore` files as well as `.boltignore`, so an import copies nothing, and files Git tracks despite a rule stay saved.
 - **Git LFS waits for milestone 5** ([decision 037](decisions/037-lfs-waits-for-milestone-5.md)): until then the import stops at the first LFS pointer (found with Git LFS's own test), naming it, and commits nothing.
 - **Tags come in exactly** ([decision 034](decisions/034-tags-kept-and-shared.md)). An annotated tag keeps its Git bytes, signature included, beside its Bolt message. A tag of something other than a commit (a folder snapshot, a single file) is skipped and listed.
 
