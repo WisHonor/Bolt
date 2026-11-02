@@ -3,6 +3,7 @@
 - **Status:** Accepted (Claude's calls; the owner raised no objections)
 - **Date:** 2026-10-31
 - **Agenda topic:** 18
+- **Refined by:** [decision 031](031-own-git-reader.md) (#6: how import reads Git); [decision 032](032-exact-repeatable-commit-import.md) (#6–7: imported commits are kept exactly, with change IDs from the commit)
 
 ## Context
 

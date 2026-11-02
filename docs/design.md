@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 31
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 32
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -124,7 +124,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 
 **Milestone 2 planning** (from 2026-11-02; each question is decided before the milestone's plan is written)
 - [x] Reading Git repositories → [decision 031](decisions/031-own-git-reader.md)
-- [ ] How a Git commit becomes a save
+- [x] How a Git commit becomes a save → [decision 032](decisions/032-exact-repeatable-commit-import.md)
 - [ ] How branches and tags become lines and tags
 - [ ] Names in Git trees that Bolt can't store as they are
 - [ ] Submodules
@@ -179,7 +179,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** A save points at the photo of your project (its top folder listing) and records who, when and why. Each save also has a short, stable change ID made of letters (`kxqmz`) that survives edits, and it can note files Bolt is sure you moved.
 
 - **Fields:** top folder listing ID; ordered parents; author and saver (name, email, time, time zone); message; change ID; optional move notes; reserved signature slot; extra fields that older versions keep but ignore.
-- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one.
+- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one. A save imported from Git takes its change ID from its commit instead ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
 - **Move notes:** recorded only when Bolt is certain (same contents moved, or a Unity `.meta` file moved with its asset); used by diffs, merges and locks; they never change the snapshot.
 
 ### 5.5 Conflicts ([decision 007](decisions/007-conflicts.md))
@@ -345,6 +345,11 @@ head ─► redo     main → ptvz
   - A deltified object and its base may each be at most 512 MiB, which Git never exceeds by default.
   - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files.
   - It refuses, before writing anything and saying what to do: unknown formats or extensions, reftable, partial and shallow clones, alternates, a `.git` that is a file, and a `.git` another account owns.
+- **Commits become saves exactly** ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
+  - Tree, parents (in Git's order), author, committer (as the saver) and message carry over; imported saves get no `line` note, since Git never recorded where a commit was made.
+  - Whatever the save's own fields can't rebuild (a signature, a signed merge, extra or unusual header lines) stays in the extra field `git-header`. Import checks that every commit rebuilds to its own Git ID, so a later export can give back the same IDs.
+  - A save's change ID comes from its commit (Jujutsu's rule, or the `change-id` header Jujutsu writes), so importing the same repository again, on any computer, gives identical saves.
+  - A commit with a message over 1 MiB or a header over 64 KiB stops the import; commits whose trees an old tool wrote in a non-standard form are counted, since export can't recreate their IDs.
 
 ## 6. Risks and watch-outs
 
@@ -400,6 +405,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Nested projects.** [A folder with its own `.bolt/` is left alone, and Git submodules import as project links (decision 004).]
 - **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004).]
 - **Importing reftable repositories.** [The reader refuses them, saying how to make a copy it can read; teach it the format before Git 3.0 makes reftable common (decision 031).]
+- **Change-ID letters like Jujutsu's.** Bolt writes 0 as `k` and 15 as `z`; Jujutsu, whose change IDs imported saves share, writes them the other way round. [Display only, no stored data changes; decide before v0.1 (decision 032).]
 
 ## 8. Prior art
 
