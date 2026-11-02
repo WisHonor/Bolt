@@ -13,6 +13,8 @@ pub const CHANGE_ID_NOT_SHORTENED: &str = "change_id_not_shortened";
 pub const CHANGED_FILES_NOT_COUNTED: &str = "changed_files_not_counted";
 /// A `.gitignore` that isn't a regular file was skipped, so its rules didn't apply.
 pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
+/// Entries this computer doesn't hold as they are were kept as the last save has them.
+pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
 /// The project opens only from an administrator terminal.
 pub const ELEVATED_ONLY: &str = "elevated_only";
 

@@ -108,6 +108,7 @@ Folders are not listed; the files in them are.
 | `change_id_not_shortened` | `save`, `show` | Bolt couldn't read the line's older saves to work out the short form of a change ID, so the whole ID is given as `change_id_short`. |
 | `changed_files_not_counted` | `save` | The save was made, but `changed_files` is `null`. The message says why. |
 | `gitignore_skipped` | `save`, unless the save stops | A `.gitignore` isn't a regular file (it is a link, folder or special file), so Bolt skipped it and its rules didn't apply, as Git skips a linked one. The message names the file. |
+| `kept_as_they_were` | `save`, unless the save stops | The save kept entries of the last save exactly as they were, whatever the folder holds there, because this computer doesn't hold them as they are: project links, names this system can't create, names that are one file on this drive, and links Git wrote as files holding their targets. The message counts them. |
 | `elevated_only` | `start`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
 
 ## 5. Errors

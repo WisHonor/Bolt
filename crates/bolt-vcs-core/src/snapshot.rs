@@ -18,7 +18,7 @@ use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::ignore::{Decision, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
-use crate::names::{PortabilityProblem, folder_problems, validate_name};
+use crate::names::{PortabilityProblem, folder_problems, holdable_here, validate_name};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
@@ -204,7 +204,10 @@ pub fn save_folder(
     } = walk(repo.root(), base, SaveLimits::default(), drive)?;
     check_names(&folders, &old)?;
     let mut packs = repo.new_packs()?;
-    let root = build(repo.store(), &mut packs, &folders, &old)?;
+    let (root, kept) = build(repo.store(), &mut packs, &folders, &old)?;
+    if kept > 0 {
+        warnings.push(kept_warning(kept));
+    }
     if root == parent.root {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
         if !packs.is_empty() {
@@ -279,11 +282,34 @@ pub fn save_folder(
     })
 }
 
+/// Says how many entries a save kept as they were, and why.
+fn kept_warning(count: usize) -> Warning {
+    let message = if count == 1 {
+        "Kept 1 entry as it was in the last save, because this computer doesn't hold it as it \
+         is, like a project link or a name it can't create. A later version's `bolt status` will \
+         list it."
+            .to_owned()
+    } else {
+        format!(
+            "Kept {count} entries as they were in the last save, because this computer doesn't \
+             hold them as they are, like project links or names it can't create. A later \
+             version's `bolt status` will list them."
+        )
+    };
+    Warning::new(warning::KEPT_AS_THEY_WERE, message)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     File,
     Symlink,
     Folder,
+    /// An entry of the last save, kept as it was whatever the folder holds there.
+    Kept {
+        kind: EntryKind,
+        id: Id,
+        size: u64,
+    },
 }
 
 struct Child {
@@ -376,6 +402,10 @@ struct IgnoreRules {
     old: HashMap<String, Option<Listing>>,
     /// Ignored folders the walk goes into only for the base save's entries in them.
     held: HashSet<String>,
+    drive: Drive,
+    /// The base save's entries the walk leaves untouched, by project path: the new save keeps
+    /// them as they were, whatever the folder holds there.
+    untouched: HashMap<String, Child>,
 }
 
 impl IgnoreRules {
@@ -388,9 +418,13 @@ impl IgnoreRules {
             read: 0,
             problem: None,
             warnings: Vec::new(),
-            old: HashMap::from([(String::new(), Some(top))]),
+            old: HashMap::new(),
             held: HashSet::new(),
+            drive,
+            untouched: HashMap::new(),
         };
+        rules.note_untouched("", &top);
+        rules.old.insert(String::new(), Some(top));
         rules.enter(root)?;
         Ok(rules)
     }
@@ -404,8 +438,49 @@ impl IgnoreRules {
             Some(e) if e.kind == EntryKind::Folder => Some(base.listing(e.id)?),
             _ => None,
         };
+        if let Some(listing) = &listing {
+            self.note_untouched(rel, listing);
+        }
         self.old.insert(rel.to_owned(), listing);
         Ok(())
+    }
+
+    /// Notes the entries of `listing`, the base save's listing of the folder `rel`, that this
+    /// computer doesn't hold as they are: project links, names this system can't hold, and
+    /// names that are one file on this drive (decisions 036 and 039). A link Git wrote as a file
+    /// is `build`'s to spot, from the file it reads anyway.
+    fn note_untouched(&mut self, rel: &str, listing: &Listing) {
+        let compared: Vec<String> = listing
+            .entries()
+            .iter()
+            .map(|e| self.drive.compared(&e.name))
+            .collect();
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for name in &compared {
+            *seen.entry(name).or_default() += 1;
+        }
+        for (e, name) in listing.entries().iter().zip(&compared) {
+            let one_file = seen.get(name.as_str()).is_some_and(|&n| n > 1);
+            if e.kind == EntryKind::ProjectLink || !holdable_here(&e.name) || one_file {
+                let path = if rel.is_empty() {
+                    e.name.clone()
+                } else {
+                    format!("{rel}/{}", e.name)
+                };
+                let kept = Child {
+                    name: e.name.clone(),
+                    kind: Kind::Kept {
+                        kind: e.kind,
+                        id: e.id,
+                        size: e.size,
+                    },
+                    path: self.root.join(&path),
+                    rel: path.clone(),
+                    executable: None,
+                };
+                self.untouched.insert(path, kept);
+            }
+        }
     }
 
     /// Puts the rules of the ignore files in `dir` in force: its `.gitignore`, then its
@@ -498,14 +573,18 @@ impl IgnoreRules {
         Ok(Some(Rules::parse(&bytes, folder)))
     }
 
-    /// Whether the walk keeps `path`: what Git would ignore stays out, unless the base save has
-    /// it. After a problem, such as an ignore file that fails, the problem is kept and nothing
-    /// more is: the save will stop anyway.
+    /// Whether the walk keeps `path`: never what it leaves untouched, and what Git would ignore
+    /// stays out, unless the base save has it. After a problem, such as an ignore file that
+    /// fails, the problem is kept and nothing more is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         if self.problem.is_some() {
             return false;
         }
         let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        // Before any rule: nothing at an untouched entry's path is read, a link's folder included.
+        if self.untouched.contains_key(&shown(rel)) {
+            return false;
+        }
         let folder = shown(rel.parent().unwrap_or(rel));
         // The walk is depth first, so the rules of folders `path` is not in are done with.
         self.matcher.leave_to(&folder);
@@ -662,6 +741,13 @@ fn scan_folder(
     if let Some(problem) = rules.problem.take() {
         return Err(problem);
     }
+    // shortcut: a kept folder counts as one entry, not with what it holds; count that too if
+    // saves come near the limit.
+    for (_, kept) in rules.untouched.drain() {
+        limits.add(1).map_err(too_large)?;
+        let up = kept.rel.rsplit_once('/').map_or("", |(up, _)| up);
+        folders.entry(up.to_owned()).or_default().push(kept);
+    }
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
     }
@@ -744,13 +830,14 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
     }
 }
 
-/// Stores every file and listing, deepest folders first, and returns the top listing's ID.
+/// Stores every file and listing, deepest folders first. Returns the top listing's ID and how
+/// many entries were kept as they were.
 fn build(
     store: &Store,
     packs: &mut PackSet,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
-) -> Result<Id, SaveError> {
+) -> Result<(Id, usize), SaveError> {
     let mut order: Vec<&String> = folders.keys().collect();
     order.sort_by_key(|rel| {
         Reverse(if rel.is_empty() {
@@ -761,6 +848,7 @@ fn build(
     });
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
+    let mut kept = 0;
     for rel in order {
         let before = old.get(rel).and_then(Option::as_ref);
         let mut entries = Vec::new();
@@ -773,22 +861,34 @@ fn build(
                 Kind::File => {
                     let (id, size) =
                         store_file(packs, store, &c.path, &mut || {}).map_err(|e| e.at(&c.rel))?;
-                    // Without `x` bits, a file stays executable if it was (decision 004).
-                    let executable = c.executable.unwrap_or_else(|| {
-                        before
-                            .and_then(|l| l.get(&c.name))
-                            .is_some_and(|e| e.kind == EntryKind::Executable)
-                    });
-                    let kind = if executable {
-                        EntryKind::Executable
+                    let was = before.and_then(|l| l.get(&c.name));
+                    // Git writes a link it can't make as a file holding its target: the link
+                    // stays (decision 039).
+                    let links_target =
+                        |e: &Entry| e.kind == EntryKind::Symlink && (e.id, e.size) == (id, size);
+                    if was.is_some_and(links_target) {
+                        kept += 1;
+                        (EntryKind::Symlink, id, size)
                     } else {
-                        EntryKind::File
-                    };
-                    (kind, id, size)
+                        // Without `x` bits, a file stays executable if it was (decision 004).
+                        let executable = c.executable.unwrap_or_else(|| {
+                            was.is_some_and(|e| e.kind == EntryKind::Executable)
+                        });
+                        let kind = if executable {
+                            EntryKind::Executable
+                        } else {
+                            EntryKind::File
+                        };
+                        (kind, id, size)
+                    }
                 }
                 Kind::Symlink => {
                     let (id, size) = store_link(packs, store, &c.path).map_err(|e| e.at(&c.rel))?;
                     (EntryKind::Symlink, id, size)
+                }
+                Kind::Kept { kind, id, size } => {
+                    kept += 1;
+                    (kind, id, size)
                 }
             };
             entries.push(Entry {
@@ -806,7 +906,8 @@ fn build(
         }
         built.insert(rel, id);
     }
-    built.remove("").ok_or_else(missing).map_err(Into::into)
+    let root = built.remove("").ok_or_else(missing)?;
+    Ok((root, kept))
 }
 
 /// Stores a symlink's target as content; the link itself is never followed.
@@ -898,7 +999,7 @@ mod tests {
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
-    use crate::test_support::{commit_records, plant_damaged_copies, sample_records};
+    use crate::test_support::{commit_records, plant_damaged_copies, plant_save, sample_records};
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -2061,6 +2162,176 @@ mod tests {
         write(root, ".gitignore", b"*.dll\n");
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
+    }
+
+    /// Saves the project, which must make a save, and returns that save's top listing.
+    fn saved_top(repo: &mut Repository) -> Listing {
+        let root = saved_root(save_now(repo).unwrap());
+        repo.store().listing(&root).unwrap()
+    }
+
+    /// The commit of a planted project link.
+    const COMMIT: &[u8] = &[0x5a; 20];
+
+    #[cfg(windows)]
+    #[test]
+    fn a_name_this_system_cant_hold_is_kept() {
+        let (dir, mut repo) = project();
+        let base = plant_save(&mut repo, &[("aux.txt", EntryKind::File, b"x")]);
+        write(dir.path(), "new.txt", b"y");
+        let saved = saved_top(&mut repo);
+        assert!(base.get("aux.txt").is_some());
+        assert_eq!(saved.get("aux.txt"), base.get("aux.txt"));
+    }
+
+    #[test]
+    fn names_that_are_one_file_on_this_drive_are_kept() {
+        let (dir, mut repo) = project();
+        let (nfc, nfd) = ("caf\u{e9}.txt", "cafe\u{301}.txt");
+        // Two names, and what each holds on disk.
+        let pairs = [
+            (["README", "readme"], ["upper", "lower"]),
+            ([nfc, nfd], ["nfc", "nfd"]),
+        ];
+        let planted: Vec<(&str, EntryKind, &[u8])> = pairs
+            .iter()
+            .flat_map(|(names, _)| names.map(|n| (n, EntryKind::File, n.as_bytes())))
+            .collect();
+        let base = plant_save(&mut repo, &planted);
+        for (names, texts) in &pairs {
+            for (name, text) in names.iter().zip(texts) {
+                write(dir.path(), name, text.as_bytes());
+            }
+        }
+        write(dir.path(), "new.txt", b"x");
+        let drive = this_drive();
+        let saved = saved_top(&mut repo);
+        // Where the drive takes the two names for one file, both stay as they were; elsewhere
+        // each is saved from its own file.
+        for ((names, texts), one_file) in pairs
+            .iter()
+            .zip([drive.ignores_case, drive.composes_unicode])
+        {
+            for (name, text) in names.iter().zip(texts) {
+                if one_file {
+                    assert_eq!(saved.get(name), base.get(name), "{name}");
+                } else {
+                    let id = saved.get(name).map(|e| e.id);
+                    assert_eq!(id, Some(hash_content(text.as_bytes())), "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_git_wrote_as_a_file_stays_a_link() {
+        let (dir, mut repo) = project();
+        let base = plant_save(&mut repo, &[("l", EntryKind::Symlink, b"target")]);
+        write(dir.path(), "l", b"target");
+        write(dir.path(), "new.txt", b"x");
+        let saved = saved_top(&mut repo);
+        assert_eq!(saved.get("l").map(|e| e.kind), Some(EntryKind::Symlink));
+        assert_eq!(saved.get("l"), base.get("l"));
+    }
+
+    #[test]
+    fn a_file_that_isnt_the_links_target_replaces_the_link() {
+        // Only the exact bytes count: a newline more is another file.
+        for bytes in [b"other".as_slice(), b"target\n"] {
+            let (dir, mut repo) = project();
+            plant_save(&mut repo, &[("l", EntryKind::Symlink, b"target")]);
+            write(dir.path(), "l", bytes);
+            let saved = saved_top(&mut repo);
+            let l = saved.get("l").map(|e| (e.kind, e.id));
+            assert_eq!(l, Some((EntryKind::File, hash_content(bytes))));
+        }
+    }
+
+    #[test]
+    fn a_project_link_is_kept_and_its_folder_never_read() {
+        let (dir, mut repo) = project();
+        let base = plant_save(&mut repo, &[("sub", EntryKind::ProjectLink, COMMIT)]);
+        write(dir.path(), "sub/.git", b"gitdir: /etc");
+        write(dir.path(), "sub/a.txt", b"x");
+        // Read, it would stop the save for its size.
+        let too_big = comment_of(safe_fs::MAX_IGNORE_FILE_BYTES + 1);
+        write(dir.path(), "sub/.boltignore", &too_big);
+        write(dir.path(), "new.txt", b"x");
+        let saved = saved_top(&mut repo);
+        let names: Vec<&str> = saved.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["new.txt", "sub"]);
+        assert_eq!(saved.get("sub"), base.get("sub"));
+    }
+
+    #[test]
+    fn a_project_link_is_kept_whatever_the_ignore_rules_say() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let base = plant_save(
+            &mut repo,
+            &[
+                ("sub", EntryKind::ProjectLink, COMMIT),
+                ("Library/keep.txt", EntryKind::File, b"x"),
+                ("Library/sub", EntryKind::ProjectLink, COMMIT),
+            ],
+        );
+        // A rule matches both links, and `Library` is entered only for what the last save holds.
+        write(root, ".gitignore", b"sub\nLibrary/\n");
+        write(root, "Library/keep.txt", b"x");
+        write(root, "Library/sub/a.txt", b"x");
+        write(root, "sub/a.txt", b"x");
+        let saved = saved_top(&mut repo);
+        let names: Vec<&str> = saved.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, [".gitignore", "Library", "sub"]);
+        assert_eq!(saved.get("sub"), base.get("sub"));
+        assert_eq!(saved.get("Library"), base.get("Library"));
+    }
+
+    #[test]
+    fn a_new_name_that_clashes_with_a_kept_one_is_refused() {
+        // A new name is judged against every name of its folder, the kept ones too.
+        let (dir, mut repo) = project();
+        plant_save(&mut repo, &[("sub", EntryKind::ProjectLink, COMMIT)]);
+        let head = repo.head().unwrap();
+        write(dir.path(), "SUB", b"x");
+        let Err(SaveError::NotPortable { problems }) = save_now(&mut repo) else {
+            panic!("the clashing name was accepted");
+        };
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].1.to_string().contains("SUB"), "{problems:?}");
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn kept_entries_are_counted_in_one_warning() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[
+                ("a", EntryKind::ProjectLink, COMMIT),
+                ("b", EntryKind::ProjectLink, COMMIT),
+                ("l", EntryKind::Symlink, b"target"),
+            ],
+        );
+        write(dir.path(), "l", b"target");
+        write(dir.path(), "new.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "kept_as_they_were");
+        assert!(
+            warnings[0]
+                .message
+                .starts_with("Kept 3 entries as they were"),
+            "{warnings:?}"
+        );
+        // Said again when nothing changed, since they are still kept.
+        let again = save_now(&mut repo).unwrap();
+        assert!(
+            matches!(again, SaveOutcome::NothingChanged { .. }),
+            "{again:?}"
+        );
+        assert_eq!(warnings_of(&again), warnings);
     }
 
     #[cfg(unix)]

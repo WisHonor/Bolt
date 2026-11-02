@@ -1,10 +1,13 @@
-//! Helpers shared by unit tests: hex, making links, hostile text, damaged packs and the shared
-//! tag and server-line records.
+//! Helpers shared by unit tests: hex, making links, hostile text, damaged packs, planted saves and
+//! the shared tag and server-line records.
 
-use crate::diary::{ServerLines, Tag, TagList};
-use crate::id::Id;
+use crate::diary::{Position, ServerLines, Tag, TagList};
+use crate::encoding::Writer;
+use crate::id::{ChangeId, Id};
+use crate::listing::{Entry, EntryKind, Listing};
 use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackWriter};
 use crate::repo::Repository;
+use crate::save::Save;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -50,6 +53,88 @@ pub(crate) fn commit_records(
     entry.state.server_lines = Some(servers);
     repo.commit(&lock, packs, &entry).expect("commit");
     (tags, servers)
+}
+
+/// Commits a save on the current line that holds `entries` and the folders above them, whatever
+/// the project folder holds, and returns its top listing. Each entry is a path with `/` between
+/// names, a kind, and bytes: a file's contents, a link's target, or a Git submodule's commit ID.
+pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u8])]) -> Listing {
+    let lock = repo.lock_for_change("save", &mut |_| {}).expect("the lock");
+    let (head, mut diary) = repo.current().expect("a current entry");
+    let Position::OnLine(line) = diary.state.position.clone() else {
+        panic!("the project is not on a line");
+    };
+    let parent_id = diary.state.lines[&line];
+    let parent = repo
+        .store()
+        .save(&parent_id, false)
+        .expect("the line's save");
+    let mut packs = repo.new_packs().expect("a pack set");
+    let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
+    for &(path, kind, bytes) in entries {
+        let (id, size) = if kind == EntryKind::ProjectLink {
+            // As an import makes it (storage-format.md §7).
+            let mut link = Writer::new();
+            link.u8(1);
+            link.string("git");
+            link.string("");
+            link.bytes(bytes);
+            (
+                packs.add_record(ObjectKind::ProjectLink, &link.into_bytes()),
+                0,
+            )
+        } else {
+            (packs.add_content(bytes), bytes.len() as u64)
+        };
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind,
+            id: id.expect("store an entry"),
+            size,
+        });
+    }
+    // Longest path first, so a folder's listing is stored before the folder that holds it.
+    let (root, top) = loop {
+        let path = folders
+            .keys()
+            .max_by_key(|p| p.len())
+            .cloned()
+            .expect("a folder");
+        let listing = Listing::new(folders.remove(&path).expect("its entries")).expect("a listing");
+        let id = packs
+            .add_record(ObjectKind::FolderListing, &listing.encode())
+            .expect("store a listing");
+        if path.is_empty() {
+            break (id, listing);
+        }
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind: EntryKind::Folder,
+            id,
+            size: 0,
+        });
+    };
+    let save = Save {
+        root,
+        parents: vec![parent_id],
+        author: parent.author,
+        saver: parent.saver,
+        message: "Planted".into(),
+        change_id: ChangeId::random().expect("a change ID"),
+        move_notes: vec![],
+        signature: vec![],
+        extra: parent.extra,
+    };
+    let save_id = packs
+        .add_record(ObjectKind::Save, &save.encode())
+        .expect("store the save");
+    diary.parent = Some(head);
+    diary.command = "save".into();
+    diary.state.lines.insert(line, save_id);
+    repo.commit(&lock, packs, &diary).expect("commit");
+    top
 }
 
 /// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte

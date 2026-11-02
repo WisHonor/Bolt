@@ -4,6 +4,8 @@
 use std::io;
 use std::path::Path;
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::fsio;
 
 /// Which names the drive takes to be one file.
@@ -13,6 +15,24 @@ pub struct Drive {
     pub ignores_case: bool,
     /// `é` as one character, and as `e` followed by a separate accent.
     pub composes_unicode: bool,
+}
+
+impl Drive {
+    /// `name` as this drive compares it: names that come out the same are one file here.
+    #[must_use]
+    pub fn compared(self, name: &str) -> String {
+        let name: String = if self.composes_unicode {
+            name.nfc().collect()
+        } else {
+            name.to_owned()
+        };
+        // shortcut: Unicode lowercase stands in for the drive's case table; upgrade if it matters.
+        if self.ignores_case {
+            name.to_lowercase()
+        } else {
+            name
+        }
+    }
 }
 
 /// Tests the drive that holds `tmp_dir` with a throwaway file there, which it removes again. Call
@@ -51,6 +71,24 @@ mod tests {
         let d = probe(tmp.path()).unwrap();
         assert_eq!(d.ignores_case, cfg!(any(windows, target_os = "macos")));
         assert_eq!(d.composes_unicode, cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn names_are_one_file_where_the_drive_takes_them_for_one() {
+        let drive = |ignores_case, composes_unicode| Drive {
+            ignores_case,
+            composes_unicode,
+        };
+        let one_file = |d: Drive, a, b| d.compared(a) == d.compared(b);
+        let (upper, lower) = ("README", "readme");
+        let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
+        assert!(one_file(drive(true, false), upper, lower));
+        assert!(!one_file(drive(true, false), nfc, nfd));
+        assert!(one_file(drive(false, true), nfc, nfd));
+        assert!(!one_file(drive(false, true), upper, lower));
+        assert!(!one_file(drive(false, false), upper, lower));
+        // Both at once, as on macOS.
+        assert!(one_file(drive(true, true), "CAF\u{c9}", nfd));
     }
 
     #[test]
