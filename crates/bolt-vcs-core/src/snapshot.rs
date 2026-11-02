@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(line[..2], [second, saved[0]]);
     }
 
-    /// Bit rot in the only copy of a save.
+    /// Bit rot in the only copy of an object: its first stored byte is flipped.
     fn damage_the_only_copy_of(repo: &Repository, id: &Id) {
         for e in fs::read_dir(repo.packs_dir()).unwrap() {
             let path = e.unwrap().path();

@@ -246,7 +246,7 @@ fn history(json: bool) -> Result<(), Failure> {
             bolt_core::diary::Position::AtSave(_) => json!(null),
         };
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
-        // The start goes out with the first save, so a line that can't be read prints no half.
+        // Its opening goes out with the first save, so a line that can't be read prints no half.
         let mut before = format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":[");
         for_each_on_line(&repo, |id, save, short| {
             print!("{before}{}", output::save_json(id, save, short));

@@ -1419,13 +1419,15 @@ fn history_show_and_save_hold_one_save_at_a_time() {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
     let message = format!("Looks harmless\n{}", "A".repeat((1 << 20) - 15));
-    plant_history(env.root(), 150, |save| save.message.clone_from(&message));
+    let planted = plant_history(env.root(), 150, |save| save.message.clone_from(&message));
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
-    let commands: [&[&str]; 5] = [
+    let oldest = planted[0].to_letters();
+    let commands: [&[&str]; 6] = [
         &["history"],
         &["--json", "history"],
         &["show"],
         &["--json", "show"],
+        &["show", &oldest[..8]],
         &["save", "my work"],
     ];
     for args in commands {
