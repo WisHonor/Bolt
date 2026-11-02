@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 32
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 33
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -125,7 +125,8 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 **Milestone 2 planning** (from 2026-11-02; each question is decided before the milestone's plan is written)
 - [x] Reading Git repositories → [decision 031](decisions/031-own-git-reader.md)
 - [x] How a Git commit becomes a save → [decision 032](decisions/032-exact-repeatable-commit-import.md)
-- [ ] How branches and tags become lines and tags
+- [x] How branches become lines, and where you stand after an import → [decision 033](decisions/033-git-branches-to-lines.md)
+- [ ] How tags come in, and keeping big lists of tags and server lines out of every diary entry
 - [ ] Names in Git trees that Bolt can't store as they are
 - [ ] Submodules
 - [ ] Git LFS before milestone 5
@@ -274,7 +275,7 @@ head ─► redo     main → ptvz
 - **Tags:** fixed names for important saves; they never move, and changing one asks first.
 - **In v0.1:** lines can be created (by saving away from a line), listed and switched; combining, renaming and deleting come in v0.2.
 - **Combining (v0.2):** three-way merge per file; text merged line by line; binaries never merged automatically; move notes followed.
-- **Server lines (v0.3):** shown as `main@origin`.
+- **Server lines (v0.3):** shown as `main@origin`. Until then the only ones are the server branches a Git import brought in ([decision 033](decisions/033-git-branches-to-lines.md)).
 
 ### 5.11 What's on your computer ([decision 013](decisions/013-local-data-and-offline.md))
 
@@ -350,6 +351,12 @@ head ─► redo     main → ptvz
   - Whatever the save's own fields can't rebuild (a signature, a signed merge, extra or unusual header lines) stays in the extra field `git-header`. Import checks that every commit rebuilds to its own Git ID, so a later export can give back the same IDs.
   - A save's change ID comes from its commit (Jujutsu's rule, or the `change-id` header Jujutsu writes), so importing the same repository again, on any computer, gives identical saves.
   - A commit with a message over 1 MiB or a header over 64 KiB stops the import; commits whose trees an old tool wrote in a non-standard form are counted, since export can't recreate their IDs.
+- **Branches become lines** ([decision 033](decisions/033-git-branches-to-lines.md)).
+  - Your own branches become lines.
+  - Each server's branches, as Git last saw them, become server lines (`feature-x@origin`); they move only with another import.
+  - Names Bolt's rules refuse are renamed by a fixed rule, which the summary lists: each character Bolt doesn't allow becomes `-`, a name over 255 bytes is shortened, and a clash gets `-2`, `-3` and so on. The same repository always gets the same names.
+  - You stand where Git did: on its current branch's line, or at the save of a detached `HEAD`.
+  - The stash, notes, replace refs and other refs aren't imported; the summary lists them. A repository with no commits, or a current branch with none yet, stops the import.
 
 ## 6. Risks and watch-outs
 

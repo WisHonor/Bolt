@@ -193,7 +193,7 @@ safety copies, sorted by path:
   varint  size
 ```
 
-Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique. The remote list stays empty until v0.3.
+Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique. The remote list holds each server's lines as last seen; until v0.3 these are only the server branches a Git import brought in (decision 033). Server names follow the line-name rules too.
 
 - **Limits:** line, tag and shelf names at most 255 bytes (remote names too); tag messages at most 64 KiB; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines (in the state and per remote), 100,000 tags, 10,000 shelves, 64 remotes and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
 
