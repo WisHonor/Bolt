@@ -46,8 +46,10 @@ pub struct Store {
 /// What reading copies has shown so far.
 #[derive(Default)]
 struct Checked {
-    /// Each copy read so far, and whether it passed every check.
-    copies: HashMap<At, bool>,
+    /// Copies that were read whole and passed every check.
+    good: HashSet<At>,
+    /// Copies that failed, each with its problem. They are never read again.
+    bad: HashMap<At, String>,
     /// Each pack that held a bad copy, with the first problem found in it.
     damaged: BTreeMap<PathBuf, String>,
 }
@@ -169,8 +171,7 @@ impl Store {
         let known_good = {
             let checked = self.checked();
             self.copies(id).any(|at| {
-                checked.copies.get(&at) == Some(&true)
-                    && self.entry(at).is_some_and(|(_, e)| e.kind == kind)
+                checked.good.contains(&at) && self.entry(at).is_some_and(|(_, e)| e.kind == kind)
             })
         };
         if known_good {
@@ -182,9 +183,9 @@ impl Store {
         })
     }
 
-    /// Reads the copies of `id` of `kind` with `read`, in the packs' order, until one passes. A
-    /// bad copy is noted and never read again, so a damaged pack can't hide a good copy in
-    /// another. With `once`, the first copy read is the last.
+    /// Reads the copies of `id` of `kind` with `read`, in the packs' order, until one passes. A bad
+    /// copy is never read again but still counts, so no damaged pack hides a good copy, and an
+    /// object with no good copy is damage on every read. With `once`, the first copy read is last.
     fn first_good<T>(
         &self,
         id: &Id,
@@ -192,14 +193,12 @@ impl Store {
         once: bool,
         mut read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
+        // The first bad copy's problem is returned; a wrong kind only if no copy was bad.
         let mut problem = StoreError::Missing(*id);
         for at in self.copies(id) {
             let Some((pack, entry)) = self.entry(at) else {
                 continue;
             };
-            if self.checked().copies.get(&at) == Some(&false) {
-                continue;
-            }
             if entry.kind != kind {
                 if matches!(problem, StoreError::Missing(_)) {
                     problem = StoreError::WrongKind {
@@ -210,19 +209,27 @@ impl Store {
                 }
                 continue;
             }
-            match read(pack, entry) {
-                Ok(value) => {
-                    self.checked().copies.insert(at, true);
-                    return Ok(value);
-                }
-                Err(e) if is_damage(&e) => {
-                    self.note_damage(at, pack, &e);
-                    problem = e.into();
-                    if once {
-                        break;
+            let known_bad = self.checked().bad.get(&at).cloned();
+            let read_now = known_bad.is_none();
+            let reason = match known_bad {
+                Some(reason) => reason,
+                None => match read(pack, entry) {
+                    Ok(value) => {
+                        self.checked().good.insert(at);
+                        return Ok(value);
                     }
-                }
-                Err(e) => return Err(e.into()),
+                    Err(e) if is_damage(&e) => self.note_damage(at, pack, &e),
+                    Err(e) => return Err(e.into()),
+                },
+            };
+            if !matches!(problem, StoreError::Pack(_)) {
+                problem = StoreError::Pack(PackError::Corrupt {
+                    path: pack.path().to_owned(),
+                    reason,
+                });
+            }
+            if once && read_now {
+                break;
             }
         }
         Err(problem)
@@ -238,17 +245,19 @@ impl Store {
         Some((pack, pack.entries().get(e)?))
     }
 
-    fn note_damage(&self, at: At, pack: &PackReader, e: &PackError) {
+    /// Marks a copy bad and its pack damaged, and returns the problem found.
+    fn note_damage(&self, at: At, pack: &PackReader, e: &PackError) -> String {
         let reason = match e {
             PackError::Corrupt { reason, .. } => reason.clone(),
             other => other.to_string(),
         };
         let mut checked = self.checked();
-        checked.copies.insert(at, false);
+        checked.bad.insert(at, reason.clone());
         checked
             .damaged
             .entry(pack.path().to_owned())
-            .or_insert(reason);
+            .or_insert_with(|| reason.clone());
+        reason
     }
 
     fn checked(&self) -> MutexGuard<'_, Checked> {
@@ -271,6 +280,7 @@ mod tests {
     use super::*;
     use crate::id::hash_content;
     use crate::pack::PackWriter;
+    use crate::repo::RepoError;
     use crate::test_support::plant_damaged_copies;
     use proptest::prelude::*;
 
@@ -392,6 +402,45 @@ mod tests {
         store.refresh(&packs).unwrap();
         assert!(store.has_good_copy(&id, ObjectKind::Content).unwrap());
         assert!(!store.has_good_copy(&id, ObjectKind::FolderListing).unwrap());
+    }
+
+    #[test]
+    fn an_object_with_no_good_copy_is_damage_on_every_read() {
+        let (_root, _tmp, packs) = dirs();
+        let content = b"bytes with no good copy anywhere".to_vec();
+        let listing = Listing::empty().encode();
+        let objects = [
+            (ObjectKind::Content, &content[..]),
+            (ObjectKind::FolderListing, &listing[..]),
+        ];
+        // A bad copy in each of two packs; `00.pack` is read first, so its copy is the one named.
+        plant_damaged_copies(&packs, &objects);
+        std::fs::rename(packs.join("00.pack"), packs.join("01.pack")).unwrap();
+        plant_damaged_copies(&packs, &objects);
+        let store = Store::open(&packs).unwrap();
+        let content_id = hash_content(&content);
+        assert!(
+            !store
+                .has_good_copy(&content_id, ObjectKind::Content)
+                .unwrap()
+        );
+        for _ in 0..2 {
+            let failed = [
+                store
+                    .copy_content(&content_id, &mut Vec::new())
+                    .unwrap_err(),
+                store
+                    .read_record(&Listing::empty().id(), ObjectKind::FolderListing)
+                    .unwrap_err(),
+            ];
+            for e in failed {
+                let StoreError::Pack(PackError::Corrupt { path, .. }) = &e else {
+                    panic!("{e:?}");
+                };
+                assert!(path.ends_with("00.pack"), "{e:?}");
+                assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
+            }
+        }
     }
 
     #[test]
