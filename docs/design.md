@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 30
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 31
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -121,6 +121,18 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 16. Presets and the shared project file: detection, preset contents, per-file rule syntax → [decision 016](decisions/016-presets.md)
 - [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
 - [x] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestones in [decision 018](decisions/018-milestone-plan.md); review clarifications in [decision 019](decisions/019-review-clarifications.md); the owner's answers to the review in decisions [020](decisions/020-lfs-import.md), [021](decisions/021-v0.1-command-scope.md), [022](decisions/022-engineering-rules.md) and [023](decisions/023-v0.1-speed-bar.md). Signed off by the owner on 2026-10-31.
+
+**Milestone 2 planning** (from 2026-11-02; each question is decided before the milestone's plan is written)
+- [x] Reading Git repositories → [decision 031](decisions/031-own-git-reader.md)
+- [ ] How a Git commit becomes a save
+- [ ] How branches and tags become lines and tags
+- [ ] Names in Git trees that Bolt can't store as they are
+- [ ] Submodules
+- [ ] Git LFS before milestone 5
+- [ ] Ignore rules after an import
+- [ ] The first save after an import
+- [ ] Re-importing
+- [ ] More objects than one pack may hold (decision 028's open question)
 
 ## 5. Design
 
@@ -323,6 +335,17 @@ head ─► redo     main → ptvz
 
 - **Output:** `--json` on every command; colors and progress only in a terminal; no questions without a terminal; examples first in help.
 
+### 5.16 Importing from Git (milestone 2)
+
+**In plain words.** `bolt import` turns a Git repository's whole history into Bolt saves, in place next to `.git/`, without changing the Git repository. Bolt reads Git's files itself, with the same care it takes with its own: nothing in them is trusted, every read is bounded, and big files flow straight through.
+
+- **Already decided:** every branch becomes a line and every tag a tag; each save records its Git commit in the extra field `git-commit`; paths that aren't valid UTF-8 stop the import with a list of where they occur; messages in other encodings are converted to UTF-8, keeping the original bytes; `.bolt` entries in Git trees are skipped with a warning; up to 1,024 parents ([decision 019](decisions/019-review-clarifications.md)). Submodules become project links ([decision 004](decisions/004-project-contents.md)); LFS contents must be on disk ([decision 020](decisions/020-lfs-import.md), milestone 5).
+- **Reading Git** ([decision 031](decisions/031-own-git-reader.md)): Bolt's own read-only reader, for loose objects, packs and their deltas, refs, and only the format lines of `.git/config`; SHA-1 and SHA-256 repositories.
+  - No memory-mapping, and every read is bounded. Files in `.git` are opened without following links, objects Git stored whole stream straight into Bolt's pack, and every Git object's ID is checked as it is read (SHA-1 with collision detection).
+  - A deltified object and its base may each be at most 512 MiB, which Git never exceeds by default.
+  - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files.
+  - It refuses, before writing anything and saying what to do: unknown formats or extensions, reftable, partial and shallow clones, alternates, a `.git` that is a file, and a `.git` another account owns.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -344,6 +367,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 15. **Build order.** Answered by decision 001: test infrastructure is built with the object store, a minimal Git importer follows saves and history, and chunked big files come before lines and combine. Locking waits for the server (v0.3).
 16. **A data-integrity tool written mostly by an AI while the owner learns Rust.** Subtle bugs can look fine in review. *Answered by decision 022:* the rules are approved and copied into CLAUDE.md, with `unsafe` allowed only in a tiny platform crate for operating-system calls. *Decision 024* adds an attacker's view: a red-team session from an isolated sandbox at the end of every milestone.
 17. **Too many open packs.** Every save adds a pack and the store keeps every pack open, so a long-lived project will hit the operating system's open-file limit. *Response:* merge small packs and open packs lazily before real use (milestone 3).
+18. **Our own Git reader meets hostile repositories first.** Readers of Git's formats keep having crash and memory bugs on crafted packs (gitoxide, go-git, libgit2 and dulwich all published some in 2026). *Response:* decision 031's bounds; fuzzing; malicious-repository cases drawn from Git's published vulnerabilities (reviewed 2026-11-02); differential tests against Git; milestone 2's red-team session.
 
 ## 7. Open questions and deferred decisions
 
@@ -375,6 +399,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Perforce import.** Many game studios use Perforce; a natural second importer after Git. [Later.]
 - **Nested projects.** [A folder with its own `.bolt/` is left alone, and Git submodules import as project links (decision 004).]
 - **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004).]
+- **Importing reftable repositories.** [The reader refuses them, saying how to make a copy it can read; teach it the format before Git 3.0 makes reftable common (decision 031).]
 
 ## 8. Prior art
 
