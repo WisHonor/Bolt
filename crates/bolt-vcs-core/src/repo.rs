@@ -839,6 +839,24 @@ mod tests {
         assert!(!owner_allows(false, &root, &[sibling]));
     }
 
+    /// Names that only look alike are different folders on NTFS, side by side: trusting one
+    /// never trusts the other. (A KELVIN SIGN lowercases to `k`, and an ANGSTROM SIGN to `å`.)
+    #[cfg(windows)]
+    #[test]
+    fn look_alike_folders_are_different_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        for (a, b) in [("Kit", "\u{212A}it"), ("\u{C5}ngstrom", "\u{212B}ngstrom")] {
+            let (a, b) = (dir.path().join(a), dir.path().join(b));
+            for folder in [&a, &b] {
+                std::fs::create_dir(folder).unwrap();
+            }
+            assert!(!config::same_folder(&a, &b), "{a:?} {b:?}");
+            assert!(!owner_allows(false, &a, std::slice::from_ref(&b)), "{a:?}");
+            assert!(!owner_allows(false, &b, std::slice::from_ref(&a)), "{b:?}");
+            assert!(owner_allows(false, &a, std::slice::from_ref(&a)), "{a:?}");
+        }
+    }
+
     #[test]
     fn hidden_bolt_folder_is_a_real_folder() {
         let dir = tempfile::tempdir().unwrap();

@@ -85,20 +85,18 @@ fn both(name: Option<String>, email: Option<String>) -> Option<Identity> {
     }
 }
 
-/// Whether `a` and `b` are one and the same folder. Each is resolved first (links, `.` and `..`,
-/// short names), and on Windows capital letters don't tell folders apart. A folder that can't be
-/// resolved (it doesn't exist, say) is never the same as anything: callers trust or customise a
-/// folder only when it matches, so no match is the safe answer.
+/// Whether `a` and `b` are one and the same folder: each is resolved (links, `.` and `..`, short
+/// names), and the results must be exactly equal. On Windows the resolved path spells every name
+/// as it is stored on disk, so `C:\WORK` and `C:\Work` still match. Nothing else is folded: two
+/// different folders can have names that only look alike (a KELVIN SIGN and a `K`), or that
+/// differ only in case inside a case-sensitive folder. A folder that can't be resolved (it doesn't
+/// exist, say) is never the same as anything: callers trust or customise a folder only when it
+/// matches, so no match is the safe answer.
 pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     let (Ok(a), Ok(b)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) else {
         return false;
     };
     a == b
-        || (cfg!(windows)
-            && matches!(
-                (a.to_str(), b.to_str()),
-                (Some(a), Some(b)) if a.to_lowercase() == b.to_lowercase()
-            ))
 }
 
 /// The `config.toml` file at `path`, or `None` if there is none. `read` is `safe_fs::read_capped`
@@ -542,6 +540,7 @@ mod tests {
     fn same_folder_ignores_case_on_windows() {
         let dir = tempfile::tempdir().unwrap();
         let work = folder(dir.path(), "Work");
+        // Resolving gives back each name as stored on disk, so no folding is needed for these.
         let shouted = work.to_string_lossy().to_uppercase();
         let whispered = work.to_string_lossy().to_lowercase();
         assert!(same_folder(&work, Path::new(&shouted)));
