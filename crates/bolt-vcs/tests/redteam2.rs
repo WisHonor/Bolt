@@ -376,7 +376,6 @@ fn plant_sparse_pack(root: &Path, size: u64) {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT2-5: fixed by Task 14 of the red-team fix branch"]
 fn rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -459,7 +458,6 @@ fn plant_lying_pack(root: &Path, kind: ObjectKind, id: &bolt_core::id::Id, data:
 }
 
 #[test]
-#[ignore = "RT2-7: fixed by Task 14 of the red-team fix branch"]
 fn rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id() {
     let env = Env::new();
     env.ok(&["start"]);

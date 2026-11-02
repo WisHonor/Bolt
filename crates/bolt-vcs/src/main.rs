@@ -201,7 +201,22 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
     if !json && let Some(ignored) = &ignored {
         println!("{}", ignored_identity_note(ignored, repo.root()));
     }
+    warn_about_damage(&repo);
     Ok(())
+}
+
+/// Names each pack that held a damaged copy of an object the command needed. The command went on
+/// without that copy, so it still succeeded.
+fn warn_about_damage(repo: &Repository) {
+    let damaged = repo.store().damaged_packs();
+    for pack in &damaged {
+        eprintln!("warning: {}.", escape(&pack.to_string(), true));
+    }
+    if !damaged.is_empty() {
+        eprintln!(
+            "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
+        );
+    }
 }
 
 /// `document`, plus the identity a project's settings named and Bolt ignored, if there was one.
@@ -251,6 +266,7 @@ fn history(json: bool) -> Result<(), Failure> {
             );
         }
     }
+    warn_about_damage(&repo);
     Ok(())
 }
 
@@ -302,6 +318,7 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
             Ok::<(), Failure>(())
         })?;
         println!("],\"save\":{}}}", output::save_json(&id, &save, &short));
+        warn_about_damage(&repo);
         return Ok(());
     }
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
@@ -341,6 +358,7 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     if count == 0 {
         println!("  (no file changes)");
     }
+    warn_about_damage(&repo);
     Ok(())
 }
 

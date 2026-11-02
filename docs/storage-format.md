@@ -264,14 +264,19 @@ trailer:
 
 A reader must:
 - check both magic values, the index checksum, and that every offset and size stays inside the file;
+- read the index a piece at a time, never whole: refuse an entry count above the limit below, or an index whose length doesn't fit its count, before reading any line, then check each line as it is read (a known kind, IDs strictly ascending, its entry inside the entry area);
 - check that each entry's header matches its index line;
 - decompress zstd data without ever producing more than the recorded uncompressed size, and require the zstd frame's own content size, if present, to match;
 - check the fingerprint of every object it reads: plain BLAKE3 for content, the record's context string otherwise;
-- treat the same ID found in two packs as the same object (packs can overlap while being merged).
+- treat the same ID found in two packs as the same object (packs can overlap while being merged), and when one pack's copy fails a check, try the other packs' copies before giving up, so a damaged or planted pack never hides a good copy; a pack that held a bad copy is reported as damaged.
+
+Before skipping an object because the store already holds it, a writer must read a stored copy in full and check its fingerprint (once per process is enough). If no copy passes, it stores its own.
 
 Each entry's header is a fixed 50 bytes, so a writer that streams an object can fill the header in after writing its data.
 
 Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
+
+**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack. An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line. How the limit was chosen: a save describes at most 10,000,000 entries (§3), so the pack a save writes holds at most 10,000,003 objects (one per entry, plus the root listing, the save and its diary entry), and 2^24 is the smallest power of two above that.
 
 ## 12. Project files (outside `.bolt/`)
 

@@ -1,6 +1,28 @@
-//! Helpers shared by unit tests: hex, making links, and hostile text.
+//! Helpers shared by unit tests: hex, making links, hostile text and damaged packs.
 
+use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackWriter};
 use std::path::Path;
+
+/// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte
+/// flipped so it fails its fingerprint. The name sorts before every pack Bolt names.
+pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]) {
+    let made = tempfile::tempdir().expect("a temporary folder");
+    let mut w = PackWriter::create(made.path()).expect("a pack writer");
+    for (kind, bytes) in objects {
+        match kind {
+            ObjectKind::Content => w.add_content(bytes),
+            _ => w.add_record(*kind, bytes),
+        }
+        .expect("add an object");
+    }
+    let path = w.finish(made.path()).expect("finish").expect("a pack");
+    let mut pack = std::fs::read(&path).expect("read the pack");
+    for e in PackReader::open(&path).expect("open the pack").entries() {
+        assert!(e.stored_size > 0, "an empty object has no byte to flip");
+        pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).expect("an offset")] ^= 1;
+    }
+    std::fs::write(packs.join("00.pack"), pack).expect("write the pack");
+}
 
 /// Text no terminal may be shown as it is: an escape sequence, a right-to-left override and a
 /// line separator.

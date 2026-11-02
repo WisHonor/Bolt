@@ -847,6 +847,14 @@ mod tests {
     }
 
     #[test]
+    fn running_out_of_memory_is_not_reported_as_damage() {
+        let e = RepoError::from(StoreError::Pack(PackError::OutOfMemory));
+        assert!(!matches!(e, RepoError::Damaged { .. }), "{e:?}");
+        assert!(e.to_string().contains("ran out of memory"), "{e}");
+        assert!(e.hint().is_none(), "{e:?}");
+    }
+
+    #[test]
     fn a_save_past_the_limits_is_reported_as_damage() {
         let e = RepoError::from(StoreError::SaveTooLarge { detail: "x".into() });
         assert!(matches!(e, RepoError::Damaged { .. }), "{e:?}");

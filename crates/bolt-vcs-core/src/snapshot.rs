@@ -173,6 +173,10 @@ pub fn save_folder(
     let mut pack = repo.new_pack()?;
     let root = build(repo.store(), &mut pack, &folders, &old)?;
     if root == parent.root {
+        // Anything stored here replaces a damaged copy the last save needs, so it is kept.
+        if !pack.is_empty() {
+            pack.finish(repo.packs_dir())?;
+        }
         return Ok(SaveOutcome::NothingChanged { current: parent_id });
     }
     let save = Save {
@@ -622,7 +626,7 @@ fn build(
         }
         let listing = Listing::new(entries).map_err(StoreError::from)?;
         let id = listing.id();
-        if !store.contains(&id) {
+        if !store.has_good_copy(&id, ObjectKind::FolderListing)? {
             pack.add_record(ObjectKind::FolderListing, &listing.encode())?;
         }
         built.insert(rel, id);
@@ -644,7 +648,7 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
         ))
     })?;
     let id = hash_content(target.as_bytes());
-    if !store.contains(&id) {
+    if !store.has_good_copy(&id, ObjectKind::Content)? {
         pack.add_content(target.as_bytes())?;
     }
     Ok((id, target.len() as u64))
@@ -694,7 +698,7 @@ pub(crate) fn store_file(
     if size != before.0 || stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }
-    if store.contains(&id) || pack.contains(&id) {
+    if pack.contains(&id) || store.has_good_copy(&id, ObjectKind::Content)? {
         return Ok((id, size));
     }
     file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
@@ -712,7 +716,9 @@ mod tests {
     use crate::id::hash_content;
     use crate::listing::{EntryKind, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES};
     use crate::names::{name_problems, validate_name};
+    use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
+    use crate::test_support::plant_damaged_copies;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -886,6 +892,80 @@ mod tests {
             SaveOutcome::Saved { .. } => panic!("saved again"),
         }
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn save_stores_a_file_even_when_a_damaged_copy_claims_its_id() {
+        let (dir, _repo) = project();
+        // Content anyone can predict, like a licence, in a pack that came with the project.
+        let licence = b"Permission is hereby granted, free of charge, to any person\n";
+        plant_damaged_copies(
+            &dir.path().join(".bolt/store/packs"),
+            &[(ObjectKind::Content, licence)],
+        );
+        write(dir.path(), "LICENSE", licence);
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let damaged = repo.store().damaged_packs();
+        assert_eq!(damaged.len(), 1, "{damaged:?}");
+        assert!(damaged[0].to_string().contains("00.pack"), "{damaged:?}");
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
+    }
+
+    #[test]
+    fn save_stores_listings_even_when_damaged_copies_claim_their_ids() {
+        let (dir, _repo) = project();
+        fs::create_dir(dir.path().join("empty")).unwrap();
+        write(dir.path(), "sub/a.txt", b"x");
+        let sub = Listing::new(vec![Entry {
+            name: "a.txt".into(),
+            kind: EntryKind::File,
+            id: hash_content(b"x"),
+            size: 1,
+        }])
+        .unwrap();
+        // The empty listing has the same ID in every project.
+        plant_damaged_copies(
+            &dir.path().join(".bolt/store/packs"),
+            &[
+                (ObjectKind::FolderListing, &Listing::empty().encode()),
+                (ObjectKind::FolderListing, &sub.encode()),
+            ],
+        );
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let root = saved_root(save_now(&mut repo).unwrap());
+        assert_eq!(repo.store().damaged_packs().len(), 1);
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
+    }
+
+    #[test]
+    fn a_save_with_no_changes_keeps_the_copy_it_stored_in_place_of_a_damaged_one() {
+        let (dir, mut repo) = project();
+        let licence = b"Permission is hereby granted, free of charge, to any person\n";
+        let id = hash_content(licence);
+        write(dir.path(), "LICENSE", licence);
+        save_now(&mut repo).unwrap();
+        // Bit rot in Bolt's own pack: the only copy of the licence no longer matches.
+        for e in fs::read_dir(repo.packs_dir()).unwrap() {
+            let path = e.unwrap().path();
+            let found = PackReader::open(&path).unwrap().find(&id).copied();
+            if let Some(entry) = found {
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+                fs::write(&path, bytes).unwrap();
+            }
+        }
+        let mut repo = Repository::open(dir.path()).unwrap();
+        assert!(matches!(
+            save_now(&mut repo).unwrap(),
+            SaveOutcome::NothingChanged { .. }
+        ));
+        let mut back = Vec::new();
+        let fresh = Repository::open(dir.path()).unwrap();
+        fresh.store().copy_content(&id, &mut back).unwrap();
+        assert_eq!(back, licence);
     }
 
     #[test]

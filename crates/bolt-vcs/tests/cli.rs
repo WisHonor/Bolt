@@ -512,6 +512,37 @@ fn save_requires_a_message() {
     }
 }
 
+/// A pack holding a damaged copy of a file's content doesn't stop the save, and is named.
+#[test]
+fn save_warns_about_a_pack_holding_a_damaged_copy() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let licence = b"Permission is hereby granted, free of charge, to any person\n";
+    // The licence with one bit flipped, in a pack whose name sorts before Bolt's own.
+    let made = tempfile::tempdir().unwrap();
+    let mut w = PackWriter::create(made.path()).unwrap();
+    w.add_content(licence).unwrap();
+    let mut pack = std::fs::read(w.finish(made.path()).unwrap().unwrap()).unwrap();
+    pack[16 + 50] ^= 1; // the first byte after the pack header and the entry header
+    std::fs::write(env.root().join(".bolt/store/packs/00.pack"), pack).unwrap();
+    std::fs::write(env.root().join("LICENSE"), licence).unwrap();
+
+    let out = env.bolt().args(["save", "Add licence"]).output().unwrap();
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        text(&out.stdout).starts_with("Saved "),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        stderr.contains("warning: pack ")
+            && stderr.contains("00.pack is damaged: object ")
+            && stderr.contains("hint: Bolt didn't use the damaged copy."),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn save_json_output() {
     let env = Env::new();
