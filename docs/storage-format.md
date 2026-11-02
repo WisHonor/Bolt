@@ -270,13 +270,13 @@ A reader must:
 - check the fingerprint of every object it reads: plain BLAKE3 for content, the record's context string otherwise;
 - treat the same ID found in two packs as the same object (packs can overlap while being merged), and when one pack's copy fails a check, try the other packs' copies before giving up, so a damaged or planted pack never hides a good copy; a pack that held a bad copy is reported as damaged.
 
-Before skipping an object because the store already holds it, a writer must read a stored copy in full and check its fingerprint (once per process is enough). If no copy passes, it stores its own.
+Before skipping an object because the store already holds it, a writer must read a stored copy of the same kind in full and check its fingerprint (once per process is enough). If no copy passes, it stores its own.
 
 Each entry's header is a fixed 50 bytes, so a writer that streams an object can fill the header in after writing its data.
 
 Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
 
-**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack. An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line. How the limit was chosen: a save describes at most 10,000,000 entries (§3), so the pack a save writes holds at most 10,000,003 objects (one per entry, plus the root listing, the save and its diary entry), and 2^24 is the smallest power of two above that.
+**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack; what a command does when it needs more objects than one pack may hold is open, to be decided while planning milestone 2 ([decision 028](decisions/028-red-team-m1-session-2-rulings.md), [design.md §7](design.md#7-open-questions-and-deferred-decisions)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
 

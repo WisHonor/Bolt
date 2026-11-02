@@ -19,7 +19,8 @@ pub const MAX_OBJECT_SIZE: u64 = 1 << 40;
 pub const MAX_RECORD_SIZE: u64 = 512 << 20;
 /// Most objects one pack may hold (storage-format.md section 11).
 pub const MAX_PACK_OBJECTS: u64 = 1 << 24;
-// A save's pack holds at most an object per entry, its root listing, the save and its diary entry.
+// While files are stored whole, a save's pack holds at most an object per entry plus its root
+// listing, the save and its diary entry. Chunked files can need more (decision 028).
 const _: () = assert!(crate::listing::MAX_SAVE_ENTRIES + 3 <= MAX_PACK_OBJECTS);
 /// kind, id, uncompressed size, stored size, compression.
 pub const ENTRY_HEADER_LEN: u64 = 50;
@@ -1038,7 +1039,7 @@ mod tests {
     #[test]
     fn an_index_of_zeros_is_refused_long_before_its_checksum() {
         let (_root, tmp, _packs) = dirs();
-        // The red team's sparse pack, smaller: zeros, and a checksum of zeros.
+        // A sparse pack in small: zeros, and a checksum of zeros.
         let mut zeros = pack_with_index(&vec![0; 1 << 20]);
         zero_the_checksum(&mut zeros);
         let reason = refusal(&tmp, &zeros);
@@ -1072,7 +1073,7 @@ mod tests {
 
     #[test]
     fn zstd_running_out_of_memory_is_told_apart_from_bad_data() {
-        // The text zstd gave when the red team ran it out of memory.
+        // The text zstd gives when memory runs out.
         let oom = io::Error::other("Allocation error : not enough memory");
         assert!(zstd_ran_out_of_memory(&oom));
         assert!(!zstd_ran_out_of_memory(&io::Error::other(
