@@ -115,14 +115,18 @@ fn is_ntfs_dotgit(name: &str) -> bool {
 }
 
 /// HFS+ skips the ignorable characters wherever they are and folds the case of ASCII letters only.
-/// Git's UTF-8 reader refuses U+FFFE and U+FFFF, and it takes such a character for the name's end.
+/// The name ends at `/`, and at `\` as it does in Git for Windows. Git's UTF-8 reader refuses
+/// U+FFFE and U+FFFF, and it takes such a character for the name's end too.
 fn is_hfs_dotgit(name: &str) -> bool {
     let mut chars = name.chars().filter(|&c| !is_ignorable(c));
     chars.next() == Some('.')
         && ['g', 'i', 't']
             .into_iter()
             .all(|g| chars.next().is_some_and(|c| c.eq_ignore_ascii_case(&g)))
-        && matches!(chars.next(), None | Some('/' | '\u{fffe}' | '\u{ffff}'))
+        && matches!(
+            chars.next(),
+            None | Some('/' | '\\' | '\u{fffe}' | '\u{ffff}')
+        )
 }
 
 fn is_reserved(name: &str) -> bool {
@@ -379,6 +383,11 @@ mod tests {
         ] {
             assert!(is_git_alias(name), "{name:?}");
         }
+        // Git for Windows ends the HFS+ spelling at a backslash as well as at a slash, which only
+        // shows once an ignorable character hides the spelling from the NTFS check.
+        for name in [".git\u{200c}\\", "\u{200c}.git\\x", ".g\u{feff}it\\"] {
+            assert!(is_git_alias(name), "{name:?}");
+        }
         // The trailing dots and spaces that Git's t0060-path-utils.sh allows after `.gitmodules`.
         for base in [".git", ".Git", "git~1", "GIT~1"] {
             for tail in [
@@ -428,6 +437,7 @@ mod tests {
             "git~10",
             "a\\b",
             "x\\.gitx",
+            ".git\u{200c}x\\",
             ".",
             "..",
             "",
