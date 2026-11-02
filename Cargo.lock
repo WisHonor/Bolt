@@ -142,8 +142,10 @@ dependencies = [
  "clap",
  "insta",
  "jiff",
+ "proptest",
  "serde_json",
  "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]

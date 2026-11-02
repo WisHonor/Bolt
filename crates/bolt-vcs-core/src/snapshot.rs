@@ -9,13 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use ignore::{Match, WalkBuilder};
+use ignore::WalkBuilder;
 
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
+use crate::drive::{self, Drive};
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
+use crate::ignore::{Decision, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
 use crate::pack::{ObjectKind, PackError, PackSet};
@@ -184,7 +185,9 @@ pub fn save_folder(
             detail: format!("the current line {line} has no save"),
         })?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
-    let folders = walk(repo.root(), SaveLimits::default())?;
+    // Probed under the lock: the probe's file sits in `tmp/`, which is cleared when it is free.
+    let drive = drive::probe(repo.tmp_dir()).map_err(RepoError::from)?;
+    let folders = walk(repo.root(), SaveLimits::default(), drive)?;
     let old = old_listings(repo.store(), parent.root, &folders, SaveLimits::default())?;
     check_names(&folders, &old)?;
     let mut packs = repo.new_packs()?;
@@ -300,171 +303,29 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
-/// Windows and macOS don't tell letter case apart in names: Git ignores it in patterns
-/// (`core.ignorecase`), and its folder may be spelled `.GIT`.
-const IGNORE_CASE: bool = cfg!(any(windows, target_os = "macos"));
-
-/// Whether a folder of this name is Bolt's or Git's, which a save never enters.
-fn is_internal_folder(name: &str) -> bool {
-    name == ".bolt" || name == ".git" || (IGNORE_CASE && name.eq_ignore_ascii_case(".git"))
+/// Whether a folder of this name is Bolt's or Git's, which a save never enters. Where the drive
+/// ignores letter case, Git's folder may be spelled `.GIT`.
+fn is_internal_folder(name: &str, ignores_case: bool) -> bool {
+    name == ".bolt" || name == ".git" || (ignores_case && name.eq_ignore_ascii_case(".git"))
 }
 
-/// The lines of a `.boltignore` as Git splits them: without a byte order mark at the start, at
-/// each LF, with one CR before it dropped.
-fn git_lines(text: &str) -> impl Iterator<Item = &str> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    text.split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+/// A project path as Git matches it: the bytes of its names, with `/` between them.
+fn path_bytes(rel: &Path) -> Vec<u8> {
+    let names: Vec<&[u8]> = rel.iter().map(|c| c.as_encoded_bytes()).collect();
+    names.join(&b'/')
 }
 
-/// `line` without the spaces at its end that no `\` escapes, trimmed as Git trims it.
-fn trim_trailing_spaces(line: &str) -> &str {
-    let (mut cut, mut escaped) = (None, false);
-    for (i, c) in line.char_indices() {
-        if c == ' ' && !escaped {
-            cut.get_or_insert(i);
-        } else {
-            cut = None;
-        }
-        escaped = !escaped && c == '\\';
-    }
-    &line[..cut.unwrap_or(line.len())]
-}
-
-// What to change in a pattern Bolt can't yet read the way Git does (storage-format.md §12).
-const CONTROL: &str = "Remove the tab or other control character from it";
-const BLANK_AT_END: &str = "Remove the no-break space or other blank at its end";
-const BACKSLASH_AT_END: &str = "Remove the \\ at its end (or before its final /)";
-const STARS_BY_BACKSLASH: &str = "Use / to separate folders, never a \\ next to **";
-const NOT_NFC: &str = "Retype it with each accented letter as one character (Unicode NFC)";
-const NEVER_CLOSED: &str = "Close the [ with a ], or write \\[ for a plain [";
-const NEGATED: &str = "Rewrite it without [!…] or [^…], or list the names one per line";
-const NOT_SIMPLE: &str = "Inside [ ], use only letters, digits, . and _, and ranges from low to \
-                          high such as a-z or 0-9; or list the names one per line";
-const CAPITAL_ESCAPED: &str =
-    "Here Git ignores letter case, but not after a \\: remove the \\ before the capital letter";
-const CAPITAL_IN_CLASS: &str = "Here Git ignores letter case, but not for a capital letter in [ ] \
-                                without its small letter: add the small letter, as in [Bb]";
-
-/// Whether Bolt's matcher reads `pattern` (a line already trimmed) exactly as Git does; if not,
-/// what to change. Only forms where the two agree are allowed (storage-format.md §12).
-fn like_git(pattern: &str) -> Result<(), &'static str> {
-    // Git ends a pattern at a NUL.
-    if pattern.contains(|c: char| c.is_ascii_control()) {
-        return Err(CONTROL);
-    }
-    if pattern.ends_with(|c: char| c.is_whitespace() && c != ' ') {
-        return Err(BLANK_AT_END);
-    }
-    // Git drops a final `/` before it matches, so `foo\/` ends in a `\` that escapes nothing.
-    if pattern.ends_with("\\/") {
-        return Err(BACKSLASH_AT_END);
-    }
-    // On Windows the matcher takes a `\` beside `**` for a folder separator.
-    if pattern.contains("**\\") || pattern.contains("\\**") {
-        return Err(STARS_BY_BACKSLASH);
-    }
-    // Git on macOS compares names in composed form.
-    if !unicode_normalization::is_nfc(pattern) {
-        return Err(NOT_NFC);
-    }
-    let mut rest = pattern;
-    while let Some(c) = rest.chars().next() {
-        rest = &rest[c.len_utf8()..];
-        match c {
-            '\\' => {
-                let escaped = rest.chars().next().ok_or(BACKSLASH_AT_END)?;
-                if IGNORE_CASE && escaped.is_ascii_uppercase() {
-                    return Err(CAPITAL_ESCAPED);
-                }
-                rest = &rest[escaped.len_utf8()..];
-            }
-            '[' => rest = &rest[simple_class(rest)?..],
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// The length of a simple class after its `[`, through its `]`: letters, digits, `.` and `_`,
-/// and ranges between two digits, two small letters or two capitals, lower end first.
-fn simple_class(after: &str) -> Result<usize, &'static str> {
-    let close = after.find(']').ok_or(NEVER_CLOSED)?;
-    let members = &after.as_bytes()[..close];
-    if members.starts_with(b"!") || members.starts_with(b"^") {
-        return Err(NEGATED);
-    }
-    if members.is_empty() {
-        return Err(NOT_SIMPLE);
-    }
-    let same_kind = |a: u8, b: u8| {
-        a <= b
-            && (a.is_ascii_digit() && b.is_ascii_digit()
-                || a.is_ascii_lowercase() && b.is_ascii_lowercase()
-                || a.is_ascii_uppercase() && b.is_ascii_uppercase())
-    };
-    // Tables, not lists, so a class of a million members is checked in one pass.
-    let (mut in_class, mut alone) = ([false; 128], [false; 128]);
-    let mut rest = members;
-    while let Some((&lo, after_lo)) = rest.split_first() {
-        if !(lo.is_ascii_alphanumeric() || lo == b'.' || lo == b'_') {
-            return Err(NOT_SIMPLE);
-        }
-        match after_lo {
-            [b'-', hi, more @ ..] if same_kind(lo, *hi) => {
-                for c in lo..=*hi {
-                    in_class[usize::from(c)] = true;
-                }
-                rest = more;
-            }
-            [b'-', ..] => return Err(NOT_SIMPLE),
-            _ => {
-                in_class[usize::from(lo)] = true;
-                alone[usize::from(lo)] = true;
-                rest = after_lo;
-            }
-        }
-    }
-    // Git folds the name's letter case but not the class's: a capital alone matches nothing.
-    let unmatched = |c: u8| alone[usize::from(c)] && !in_class[usize::from(c.to_ascii_lowercase())];
-    if IGNORE_CASE && (b'A'..=b'Z').any(unmatched) {
-        return Err(CAPITAL_IN_CLASS);
-    }
-    Ok(close + 1)
-}
-
-/// `pattern` with its braces escaped: Git reads `{a,b}` as plain characters, and `ignore` would
-/// take it for a choice. Classes hold no braces (`like_git` sees to that).
-fn literal_braces(pattern: &str) -> String {
-    let mut out = String::with_capacity(pattern.len());
-    let mut escaped = false;
-    for c in pattern.chars() {
-        if !escaped && matches!(c, '{' | '}') {
-            out.push('\\');
-        }
-        escaped = !escaped && c == '\\';
-        out.push(c);
-    }
-    out
-}
-
-/// The bytes of `.boltignore` a walk has taken (storage-format.md §12).
-#[derive(Default)]
-struct Spent {
-    /// In the files of the folders the walk is inside.
-    in_force: u64,
-    /// In every file the walk has read, including those that then failed.
-    read: u64,
-}
-
-/// The rules of the `.boltignore` in `dir` and its size, or none if there isn't one. Read through
-/// `safe_fs` and held to the limits (storage-format.md §12) before any rule is built, which costs
-/// far more memory than the file. A folder Bolt may not look into is `Unreadable`.
+/// The rules of the `.boltignore` in `dir`, the project's `folder`, or none if there isn't one.
+/// Read through `safe_fs` and held to the limits (storage-format.md §12) before a rule is read
+/// from it: `in_force` is the size of the files above it, and `read` that of every file the walk
+/// has read. A folder Bolt may not look into is `Unreadable`.
 fn boltignore_rules(
     root: &Path,
     dir: &Path,
-    spent: &mut Spent,
-) -> Result<Option<(Gitignore, u64)>, SaveError> {
+    folder: &str,
+    in_force: u64,
+    read: &mut u64,
+) -> Result<Option<Rules>, SaveError> {
     let file = dir.join(".boltignore");
     let rel = shown(file.strip_prefix(root).unwrap_or(&file));
     let ignore = |detail| SaveError::Ignore { detail };
@@ -475,11 +336,10 @@ fn boltignore_rules(
             if let Err(source) = fs::symlink_metadata(&file)
                 && source.kind() != io::ErrorKind::NotFound
             {
-                let folder = shown(dir.strip_prefix(root).unwrap_or(dir));
                 let path = if folder.is_empty() {
                     "the project folder".to_owned()
                 } else {
-                    folder
+                    folder.to_owned()
                 };
                 return Err(SaveError::Unreadable { path, source });
             }
@@ -495,112 +355,66 @@ fn boltignore_rules(
         }
     };
     let size = bytes.len() as u64;
-    if spent.in_force + size > safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES {
+    if in_force + size > safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES {
         return Err(ignore(format!(
             "{rel}: with the .boltignore files above it, it is larger than {} bytes",
             safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES
         )));
     }
-    if spent.read + size > safe_fs::MAX_BOLTIGNORE_SAVE_BYTES {
+    if *read + size > safe_fs::MAX_BOLTIGNORE_SAVE_BYTES {
         return Err(ignore(format!(
             "{rel}: with the other .boltignore files this save reads, it is larger than {} bytes",
             safe_fs::MAX_BOLTIGNORE_SAVE_BYTES
         )));
     }
-    // Counted before anything can fail, so that files which fail use up the save's share too.
-    spent.read += size;
-    let text = std::str::from_utf8(&bytes).map_err(|e| ignore(format!("{rel}: {e}")))?;
-    let mut builder = GitignoreBuilder::new(dir);
-    builder
-        .case_insensitive(IGNORE_CASE)
-        .map_err(|e| ignore(format!("{rel}: {e}")))?;
-    for (i, line) in git_lines(text).enumerate() {
-        let pattern = trim_trailing_spaces(line);
-        if line.starts_with('#') || pattern.is_empty() {
-            continue;
-        }
-        let at = format!("{rel}, line {}", i + 1);
-        like_git(pattern).map_err(|change| {
-            let mut quoted: String = line.chars().take(80).collect();
-            if quoted.len() < line.len() {
-                quoted.push('…');
-            }
-            ignore(format!(
-                "{at}: Bolt can't yet read \"{quoted}\" the way Git does. {change}"
-            ))
-        })?;
-        builder
-            .add_line(Some(file.clone()), &literal_braces(pattern))
-            .map_err(|e| ignore(format!("{at}: {e}")))?;
-    }
-    let rules = builder.build().map_err(|_| {
-        ignore(format!(
-            "{rel} has too many or too complex patterns for Bolt to use; split it or simplify it"
-        ))
-    })?;
-    Ok(Some((rules, size)))
+    *read += size;
+    Ok(Some(Rules::parse(&bytes, folder)))
 }
 
-/// A folder's `.boltignore`, for as long as the walk is inside that folder.
-struct Level {
-    dir: PathBuf,
-    rules: Gitignore,
-    /// The file's size, which counts against the limits meanwhile.
-    bytes: u64,
-}
-
-/// The `.boltignore` rules of the folders a walk is inside (nearest last), and the first problem
-/// found on entering a folder.
+/// The `.boltignore` rules of the folders a walk is inside, and the first problem found on
+/// entering a folder.
 struct IgnoreRules {
     root: PathBuf,
-    stack: Vec<Level>,
-    spent: Spent,
+    matcher: Matcher,
+    /// The bytes of every `.boltignore` the walk has read (storage-format.md §12).
+    read: u64,
     problem: Option<SaveError>,
 }
 
 impl IgnoreRules {
-    /// The rules for a walk of `root`, beginning with its own `.boltignore`.
-    fn new(root: &Path) -> Result<IgnoreRules, SaveError> {
+    /// The rules for a walk of `root` on `drive`, beginning with its own `.boltignore`.
+    fn new(root: &Path, drive: Drive) -> Result<IgnoreRules, SaveError> {
         let mut rules = IgnoreRules {
             root: root.to_owned(),
-            stack: Vec::new(),
-            spent: Spent::default(),
+            matcher: Matcher::new(drive),
+            read: 0,
             problem: None,
         };
         rules.enter(root)?;
         Ok(rules)
     }
 
-    /// Puts the rules of the `.boltignore` in `dir`, if it has one, on the stack.
+    /// Puts the rules of the `.boltignore` in `dir`, if it has one, in force.
     fn enter(&mut self, dir: &Path) -> Result<(), SaveError> {
-        if let Some((rules, bytes)) = boltignore_rules(&self.root, dir, &mut self.spent)? {
-            self.spent.in_force += bytes;
-            self.stack.push(Level {
-                dir: dir.to_owned(),
-                rules,
-                bytes,
-            });
+        let folder = shown(dir.strip_prefix(&self.root).unwrap_or(dir));
+        let in_force = self.matcher.in_force_bytes();
+        if let Some(rules) = boltignore_rules(&self.root, dir, &folder, in_force, &mut self.read)? {
+            self.matcher.enter(&folder, vec![rules]);
         }
         Ok(())
     }
 
-    /// Whether the walk keeps `path`, as `ignore` decides: the nearest `.boltignore` with a
-    /// matching pattern wins, and within it the last matching pattern. After a `.boltignore`
+    /// Whether the walk keeps `path`: what Git would ignore stays out. After a `.boltignore`
     /// fails, the problem is kept and nothing more is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         if self.problem.is_some() {
             return false;
         }
+        let rel = path.strip_prefix(&self.root).unwrap_or(path);
         // The walk is depth first, so the rules of folders `path` is not in are done with.
-        while let Some(level) = self.stack.pop_if(|level| !path.starts_with(&level.dir)) {
-            self.spent.in_force -= level.bytes;
-        }
-        for level in self.stack.iter().rev() {
-            match level.rules.matched(path, is_dir) {
-                Match::Ignore(_) => return false,
-                Match::Whitelist(_) => break,
-                Match::None => {}
-            }
+        self.matcher.leave_to(&shown(rel.parent().unwrap_or(rel)));
+        if self.matcher.decide(path_bytes(rel), is_dir) == Decision::Ignored {
+            return false;
         }
         if is_dir && let Err(problem) = self.enter(path) {
             self.problem.get_or_insert(problem);
@@ -615,12 +429,13 @@ impl IgnoreRules {
 /// debug build, more than the main thread's 1 MiB. Unused stack costs address space only.
 const WALK_STACK_BYTES: usize = (MAX_SAVE_DEPTH + 2) * 4096;
 
-/// Scans the project folder on a thread of its own, so callers don't need a deep stack.
-fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
+/// Scans the project folder on a thread of its own, so callers don't need a deep stack. `drive`
+/// is what `drive::probe` found there.
+fn walk(root: &Path, limits: SaveLimits, drive: Drive) -> Result<Folders, SaveError> {
     thread::scope(|scope| {
         let scan = thread::Builder::new()
             .stack_size(WALK_STACK_BYTES)
-            .spawn_scoped(scope, || scan_folder(root, limits))
+            .spawn_scoped(scope, || scan_folder(root, limits, drive))
             .map_err(|e| SaveError::Repo(e.into()))?;
         scan.join().unwrap_or_else(|_| {
             let stopped = io::Error::other("the scan of the project folder stopped unexpectedly");
@@ -629,14 +444,14 @@ fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
     })
 }
 
-fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
+fn scan_folder(root: &Path, mut limits: SaveLimits, drive: Drive) -> Result<Folders, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
     // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
     // Bolt reads each .boltignore itself: `ignore` would reopen it by path, following links and
     // reading without a limit.
-    let rules = Arc::new(Mutex::new(IgnoreRules::new(root)?));
+    let rules = Arc::new(Mutex::new(IgnoreRules::new(root, drive)?));
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -649,7 +464,8 @@ fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError
             let rules = Arc::clone(&rules);
             move |e| {
                 let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-                if is_dir && e.file_name().to_str().is_some_and(is_internal_folder) {
+                let internal = |name: &str| is_internal_folder(name, drive.ignores_case);
+                if is_dir && e.file_name().to_str().is_some_and(internal) {
                     return false;
                 }
                 let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1066,6 +882,11 @@ mod tests {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    /// The drive the tests run on, as `save` probes it.
+    fn this_drive() -> Drive {
+        drive::probe(tempfile::tempdir().unwrap().path()).unwrap()
     }
 
     #[test]
@@ -1492,8 +1313,9 @@ mod tests {
         write(root, "debug.LOG", b"x");
         write(root, "keep.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
-        // Git sets core.ignorecase on Windows and macOS; on Linux a pattern matches exactly.
-        let want: &[&str] = if IGNORE_CASE {
+        // Git sets core.ignorecase where the drive ignores letter case, as Windows' and macOS's
+        // do; elsewhere a pattern matches exactly.
+        let want: &[&str] = if this_drive().ignores_case {
             &[".boltignore", "keep.txt"]
         } else {
             &[
@@ -1516,7 +1338,7 @@ mod tests {
         write(root, "OTHER.ENV", b"x");
         write(root, "plain.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
-        let want: &[&str] = if IGNORE_CASE {
+        let want: &[&str] = if this_drive().ignores_case {
             &[".boltignore", "KEEP.ENV", "plain.txt"]
         } else {
             &[".boltignore", "KEEP.ENV", "OTHER.ENV", "plain.txt"]
@@ -1532,8 +1354,9 @@ mod tests {
         write(root, ".GIT/config", b"x");
         write(root, "sub/.Git/HEAD", b"x");
         let saved = save_now(&mut repo).unwrap();
-        // Only on Windows and macOS is `.GIT` Git's folder; elsewhere it is an ordinary one.
-        let want: &[&str] = if IGNORE_CASE {
+        // Only where the drive ignores letter case is `.GIT` Git's folder; elsewhere it is an
+        // ordinary one.
+        let want: &[&str] = if this_drive().ignores_case {
             &["keep.txt", "sub"]
         } else {
             &[
@@ -1573,153 +1396,64 @@ mod tests {
     }
 
     #[test]
-    fn braces_are_made_literal_except_where_they_already_are() {
-        for (line, want) in [
-            ("{a,b}.env", "\\{a,b\\}.env"),
-            ("*.{png,jpg}", "*.\\{png,jpg\\}"),
-            ("!{a}", "!\\{a\\}"),
-            ("[ab]{", "[ab]\\{"),
-            ("no braces at all", "no braces at all"),
-            // Already escaped: left alone. After an escaped backslash (`\\`) a brace is bare.
-            ("\\{a\\}", "\\{a\\}"),
-            ("\\\\{a", "\\\\\\{a"),
-        ] {
-            assert_eq!(literal_braces(line), want, "{line}");
-        }
-    }
-
-    #[test]
-    fn boltignore_lines_are_split_and_trimmed_as_git_does() {
-        let lines: Vec<&str> = git_lines("\u{feff}\u{feff}a\r\nb\r\r\n\nc\r").collect();
-        assert_eq!(lines, ["\u{feff}a", "b\r", "", "c"]);
-        for (line, want) in [
-            ("foo  ", "foo"),
-            ("foo\\ ", "foo\\ "),
-            ("foo\\\\ ", "foo\\\\"),
-            ("foo\\  ", "foo\\ "),
-            ("foo \\ ", "foo \\ "),
-            ("trail\\", "trail\\"),
-            ("foo\t ", "foo\t"),
-            ("   ", ""),
-        ] {
-            assert_eq!(trim_trailing_spaces(line), want, "{line:?}");
-        }
-    }
-
-    #[test]
-    fn patterns_bolt_cant_yet_read_like_git_are_refused() {
-        for (pattern, why) in [
-            ("secret.txt\t", CONTROL),
-            ("foo\\\t", CONTROL),
-            ("a\tb", CONTROL),
-            ("!keep.log\0", CONTROL),
-            ("x\r", CONTROL),
-            ("x\u{7f}", CONTROL),
-            ("a\u{a0}", BLANK_AT_END),
-            ("**\\*.md", STARS_BY_BACKSLASH),
-            ("x/**\\y", STARS_BY_BACKSLASH),
-            ("a\\\\**", STARS_BY_BACKSLASH),
-            ("cafe\u{301}.txt", NOT_NFC),
-            ("trail\\", BACKSLASH_AT_END),
-            ("foo\\/", BACKSLASH_AT_END),
-            ("foo\\\\/", BACKSLASH_AT_END),
-            ("bar[", NEVER_CLOSED),
-            ("[a-{b}", NEVER_CLOSED),
-            ("*.py[!c]", NEGATED),
-            ("[^a]x", NEGATED),
-            ("[]", NOT_SIMPLE),
-            ("[]a]", NOT_SIMPLE),
-            ("a[/]b", NOT_SIMPLE),
-            ("[\\]]", NOT_SIMPLE),
-            ("[[]", NOT_SIMPLE),
-            ("[[:alpha:]]", NOT_SIMPLE),
-            ("[{a}]", NOT_SIMPLE),
-            ("[a,b]", NOT_SIMPLE),
-            ("[a-]", NOT_SIMPLE),
-            ("[-a]", NOT_SIMPLE),
-            ("[ä]", NOT_SIMPLE),
-            ("x[z-a]", NOT_SIMPLE),
-            ("[a-Z]", NOT_SIMPLE),
-            ("[0-9a-c-e]", NOT_SIMPLE),
-            ("ok[ab]then[!c]", NEGATED),
-        ] {
-            assert_eq!(like_git(pattern), Err(why), "{pattern:?}");
-        }
-        // Where letter case is ignored, Git leaves these capitals alone, so they match nothing.
-        for (pattern, why) in [
-            ("\\B.txt", CAPITAL_ESCAPED),
-            ("[B].txt", CAPITAL_IN_CLASS),
-            ("[Ab]", CAPITAL_IN_CLASS),
-        ] {
-            let want = if IGNORE_CASE { Err(why) } else { Ok(()) };
-            assert_eq!(like_git(pattern), want, "{pattern:?}");
-        }
-    }
-
-    #[test]
-    fn common_patterns_are_read_like_git() {
-        for pattern in [
-            "*.py[cod]",
-            "[Bb]in/",
-            "[Dd]ebug/",
-            "*.sw[a-p]",
-            "[._]*.s[a-v][a-z]",
-            "*.[oa]",
-            "[0-9]*.log",
-            "foo\\ ",
-            "\\#notes",
-            "!keep.txt",
-            "[A-Z]*.md",
-            "[Ba-z]x",
-            "\\[x]",
-            "{a,b}",
-            "x\\b",
-            "café.txt",
-            "**/*.md",
-            "x/**/y",
-        ] {
-            assert_eq!(like_git(pattern), Ok(()), "{pattern:?}");
-        }
-    }
-
-    #[test]
-    fn long_lines_are_checked_in_linear_time() {
-        let started = std::time::Instant::now();
-        assert_eq!(like_git(&"[".repeat(1 << 20)), Err(NEVER_CLOSED));
-        assert_eq!(like_git(&"[a]".repeat(1 << 18)), Ok(()));
-        // Every capital is checked for its small letter, and there is one.
-        assert_eq!(like_git(&format!("[{}a]", "A".repeat(1 << 20))), Ok(()));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    }
-
-    #[test]
-    fn a_pattern_bolt_cant_yet_read_like_git_stops_the_save_at_the_first_such_line() {
+    fn lines_bolt_used_to_refuse_work_as_in_git() {
         let (dir, mut repo) = project();
-        write(dir.path(), "keep.txt", b"x");
-        write(dir.path(), ".boltignore", b"keep.txt\n*.py[!c]\nbar[\n");
-        let detail = assert_ignore_problem(&mut repo);
-        assert_eq!(
-            detail,
-            ".boltignore, line 2: Bolt can't yet read \"*.py[!c]\" the way Git does. Rewrite it \
-             without [!…] or [^…], or list the names one per line"
-        );
-        // A long line is quoted only in part.
-        let long = format!("{}[!c]\n", "x".repeat(200));
-        write(dir.path(), ".boltignore", long.as_bytes());
-        let detail = assert_ignore_problem(&mut repo);
-        assert!(
-            detail.contains(&format!("\"{}…\"", "x".repeat(80))),
-            "{detail}"
-        );
+        let root = dir.path();
+        let lines = [
+            "*.py[!c]",         // every .py? but .pyc
+            "[[:digit:]]*.log", // logs whose names start with a digit
+            "a[/]b",            // a class never takes `/`, so this matches nothing
+            "trail\\",          // nor does a `\` that escapes nothing
+            "bar[",             // nor a `[` that never closes
+            "tab\there",        // a tab is a character like any other
+            "**\\*.tmp",        // `\` escapes the `*`, even beside `**`
+            "cafe\u{301}.txt",  // decomposed, and used as written
+            "\\B.md",           // where letter case is ignored, Git leaves this capital alone
+        ];
+        write(root, ".boltignore", lines.join("\n").as_bytes());
+        for name in [
+            "x.pyc", "x.pyo", "1.log", "a.log", "a/b", "trail", "bar[", "x.tmp", "B.md",
+        ] {
+            write(root, name, b"x");
+        }
+        let decomposed = "cafe\u{301}.txt";
+        write(root, decomposed, b"x");
+        let drive = this_drive();
+        let saved = save_now(&mut repo).unwrap();
+        let mut want = vec![
+            ".boltignore",
+            "a",
+            "a.log",
+            "a/b",
+            "bar[",
+            "trail",
+            "x.pyc",
+            "x.tmp",
+        ];
+        // Git reads names composed where the drive composes them, and never takes `B` for `b`.
+        if drive.composes_unicode {
+            want.push(decomposed);
+        }
+        if drive.ignores_case {
+            want.push("B.md");
+        }
+        want.sort_unstable();
+        assert_eq!(saved_paths(&repo, saved), want);
     }
 
     #[test]
     fn the_scan_stops_at_the_first_boltignore_problem() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write(root, "a/.boltignore", b"[!x]\n");
-        write(root, "b/.boltignore", b"\xff\n");
-        let mut rules = IgnoreRules::new(root).unwrap();
+        // The top file leaves no room for another below it.
+        write(
+            root,
+            ".boltignore",
+            &comment_of(safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES),
+        );
+        write(root, "a/.boltignore", b"#\n");
+        write(root, "b/.boltignore", b"#\n");
+        let mut rules = IgnoreRules::new(root, this_drive()).unwrap();
         assert!(!rules.keeps(&root.join("a"), true));
         // Past the first problem nothing is kept, and no other .boltignore is read.
         assert!(!rules.keeps(&root.join("b"), true));
@@ -1727,8 +1461,8 @@ mod tests {
         let Some(SaveError::Ignore { detail }) = rules.problem else {
             panic!("no problem kept");
         };
-        assert!(detail.starts_with("a/.boltignore, line 1: "), "{detail}");
-        assert_eq!(rules.spent.read, 5);
+        assert!(detail.starts_with("a/.boltignore: "), "{detail}");
+        assert_eq!(rules.read, safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES);
     }
 
     #[test]
@@ -1755,7 +1489,7 @@ mod tests {
         write(root, ".boltignore", b"*.log\n");
         write(root, "a/.boltignore", b"!x.log\n");
         fs::create_dir(root.join("b")).unwrap();
-        let mut rules = IgnoreRules::new(root).unwrap();
+        let mut rules = IgnoreRules::new(root, this_drive()).unwrap();
         // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach.
         assert!(rules.keeps(&root.join("a"), true));
         assert!(rules.keeps(&root.join("a").join("x.log"), false));
@@ -1764,21 +1498,13 @@ mod tests {
     }
 
     #[test]
-    fn broken_boltignore_stops_the_save() {
+    fn a_range_that_runs_backwards_matches_nothing_as_in_git() {
         let (dir, mut repo) = project();
-        let head = repo.head().unwrap();
         write(dir.path(), "secret.key", b"x");
+        write(dir.path(), "m", b"x");
         write(dir.path(), ".boltignore", b"secret.key\n[z-a]\n");
-        match save_now(&mut repo) {
-            Err(SaveError::Ignore { detail }) => {
-                assert!(
-                    detail.contains(".boltignore") && detail.contains("[z-a]"),
-                    "{detail}"
-                );
-            }
-            other => panic!("{:?}", other.map(|_| ())),
-        }
-        assert_eq!(repo.head().unwrap(), head);
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(saved_paths(&repo, saved), [".boltignore", "m"]);
     }
 
     /// The save must stop with `Ignore` naming `.boltignore` by its project path, once, and
@@ -1829,7 +1555,7 @@ mod tests {
 
     /// What `walk` makes of the `.boltignore` files under `root`, which must be a problem.
     fn walk_problem(root: &Path) -> String {
-        match walk(root, SaveLimits::default()) {
+        match walk(root, SaveLimits::default(), this_drive()) {
             Err(SaveError::Ignore { detail }) => detail,
             other => panic!("{:?}", other.map(|_| ())),
         }
@@ -1844,8 +1570,8 @@ mod tests {
         write(root, "a/.boltignore", &comment_of(half));
         // `a`'s file is not in force at `b`, so the two folders do not add up.
         write(root, "b/.boltignore", &comment_of(half));
-        assert!(walk(root, SaveLimits::default()).is_ok());
-        // Six bytes more below `a` put it past the limit; its bad pattern is never reached.
+        assert!(walk(root, SaveLimits::default(), this_drive()).is_ok());
+        // Six bytes more below `a` put it past the limit; its pattern is never read.
         write(root, "a/x/.boltignore", b"[z-a]\n");
         let detail = walk_problem(root);
         assert!(detail.starts_with("a/x/.boltignore: "), "{detail}");
@@ -1861,7 +1587,7 @@ mod tests {
         for i in 0..safe_fs::MAX_BOLTIGNORE_SAVE_BYTES / each {
             write(root, &format!("d{i}/.boltignore"), &comment_of(each));
         }
-        assert!(walk(root, SaveLimits::default()).is_ok());
+        assert!(walk(root, SaveLimits::default(), this_drive()).is_ok());
         write(root, "e/.boltignore", &comment_of(1));
         // Whichever file the walk reaches last is the one that goes over.
         let detail = walk_problem(root);
@@ -1870,60 +1596,47 @@ mod tests {
     }
 
     #[test]
-    fn boltignore_files_that_fail_still_count_toward_the_save_limit() {
+    fn boltignore_files_count_toward_the_save_limit_whatever_bytes_they_hold() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        // As big as a file may be and not UTF-8, so each one fails on its own.
-        let mut bad = comment_of(safe_fs::MAX_BOLTIGNORE_BYTES - 1);
-        bad.push(0xff);
+        // As big as a file may be, and not UTF-8: Git reads such a file all the same.
+        let mut odd = comment_of(safe_fs::MAX_BOLTIGNORE_BYTES - 1);
+        odd.push(0xff);
         let share = safe_fs::MAX_BOLTIGNORE_SAVE_BYTES / safe_fs::MAX_BOLTIGNORE_BYTES;
-        for i in 0..=share {
-            write(root, &format!("d{i}/.boltignore"), &bad);
+        for i in 0..share {
+            write(root, &format!("d{i}/.boltignore"), &odd);
         }
-        let mut rules = IgnoreRules::new(root).unwrap();
-        for i in 0..=share {
-            let Err(SaveError::Ignore { detail }) = rules.enter(&root.join(format!("d{i}"))) else {
-                panic!("d{i} was accepted");
-            };
-            let want = if i < share {
-                "invalid utf-8"
-            } else {
-                "larger than 16777216 bytes"
-            };
-            assert!(detail.contains(want), "d{i}: {detail}");
-        }
-        // The walk still reports the first failure, as before.
+        assert!(walk(root, SaveLimits::default(), this_drive()).is_ok());
+        write(root, &format!("d{share}/.boltignore"), &odd);
         let detail = walk_problem(root);
-        assert!(detail.contains("invalid utf-8"), "{detail}");
-    }
-
-    const TOO_COMPLEX: &str =
-        ".boltignore has too many or too complex patterns for Bolt to use; split it or simplify it";
-
-    #[test]
-    fn a_boltignore_the_matcher_cannot_build_is_refused_in_plain_words() {
-        // The matcher builds about 130,000 `?` in one pattern; this is more than twice that.
-        let (dir, mut repo) = project();
-        write(dir.path(), ".boltignore", "?".repeat(300_000).as_bytes());
-        match save_now(&mut repo) {
-            Err(SaveError::Ignore { detail }) => assert_eq!(detail, TOO_COMPLEX),
-            other => panic!("{:?}", other.map(|_| ())),
-        }
+        assert!(detail.contains("larger than 16777216 bytes"), "{detail}");
     }
 
     #[test]
-    fn ignoring_letter_case_limits_how_many_paths_one_boltignore_can_hold() {
-        // Windows and macOS: a few thousand paths are too many. Elsewhere they are cheap.
+    fn large_rule_files_work_whatever_the_drive() {
+        // Thousands of paths, and a line of 300,000 `?`: Git reads both, and Bolt keeps no
+        // compiled form whose size could grow past a limit.
         let (dir, mut repo) = project();
-        let paths: String = (0..6000)
+        let mut text: String = (0..6000)
             .map(|i| format!("Assets/Textures/Characters/Hero/diffuse_{i:05}.png\n"))
             .collect();
-        write(dir.path(), ".boltignore", paths.as_bytes());
-        match (IGNORE_CASE, save_now(&mut repo)) {
-            (false, Ok(_)) => {}
-            (true, Err(SaveError::Ignore { detail })) => assert_eq!(detail, TOO_COMPLEX),
-            (_, other) => panic!("{:?}", other.map(|_| ())),
-        }
+        text.push_str(&"?".repeat(300_000));
+        write(dir.path(), ".boltignore", text.as_bytes());
+        let hero = "Assets/Textures/Characters/Hero";
+        write(dir.path(), &format!("{hero}/diffuse_00042.png"), b"x");
+        write(dir.path(), &format!("{hero}/normal_00042.png"), b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [
+                ".boltignore",
+                "Assets",
+                "Assets/Textures",
+                "Assets/Textures/Characters",
+                hero,
+                &format!("{hero}/normal_00042.png"),
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -1955,12 +1668,14 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_boltignore_stops_the_save() {
+    fn a_boltignore_that_isnt_utf8_is_read_as_git_reads_it() {
         let (dir, mut repo) = project();
         write(dir.path(), "secret.key", b"x");
-        // A byte that is not UTF-8: `ignore` would stop reading there and drop `secret.key`.
-        write(dir.path(), ".boltignore", b"# \xff\nsecret.key\n");
-        assert_ignore_problem(&mut repo);
+        write(dir.path(), "keep.txt", b"x");
+        // Git reads bytes: a line that isn't UTF-8 stops nothing, and those after it apply.
+        write(dir.path(), ".boltignore", b"# \xff\n\xff*\nsecret.key\n");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(saved_paths(&repo, saved), [".boltignore", "keep.txt"]);
     }
 
     #[cfg(unix)]
@@ -2178,7 +1893,7 @@ mod tests {
         let (dir, repo) = project();
         let victim = dir.path().join("victim.txt");
         fs::write(&victim, b"x").unwrap();
-        let folders = walk(dir.path(), SaveLimits::default()).unwrap();
+        let folders = walk(dir.path(), SaveLimits::default(), this_drive()).unwrap();
         fs::remove_file(&victim).unwrap();
         if !make_link(&victim) {
             return;
@@ -2296,8 +2011,19 @@ mod tests {
         let (dir, _repo) = project();
         // a, a/b and a/b/c are folders 1, 2 and 3 levels down; f is a file, not a level.
         write(dir.path(), "a/b/c/f", b"x");
-        assert!(walk(dir.path(), SaveLimits::new(3, MAX_SAVE_ENTRIES)).is_ok());
-        let Err(err) = walk(dir.path(), SaveLimits::new(2, MAX_SAVE_ENTRIES)) else {
+        assert!(
+            walk(
+                dir.path(),
+                SaveLimits::new(3, MAX_SAVE_ENTRIES),
+                this_drive()
+            )
+            .is_ok()
+        );
+        let Err(err) = walk(
+            dir.path(),
+            SaveLimits::new(2, MAX_SAVE_ENTRIES),
+            this_drive(),
+        ) else {
             panic!("a folder 3 levels down was accepted under a limit of 2");
         };
         match &err {
@@ -2316,9 +2042,9 @@ mod tests {
         for name in ["a", "b", "c", "d/e"] {
             write(dir.path(), name, b"x");
         }
-        assert!(walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 5)).is_ok());
+        assert!(walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 5), this_drive()).is_ok());
         let Err(SaveError::TooLarge { detail }) =
-            walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 4))
+            walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 4), this_drive())
         else {
             panic!("5 entries were accepted under a limit of 4");
         };
@@ -2334,7 +2060,7 @@ mod tests {
             write(dir.path(), &format!("{folder}/y"), b"y");
         }
         let root = saved_root(save_now(&mut repo).unwrap());
-        let folders = walk(dir.path(), SaveLimits::default()).unwrap();
+        let folders = walk(dir.path(), SaveLimits::default(), this_drive()).unwrap();
         // Reading the listing of every folder is 3 entries (the top listing) and, for each of
         // the 3 folders, the 2 entries of the shared listing.
         const PATHS: u64 = 3 + 3 * 2;
@@ -2382,9 +2108,13 @@ mod tests {
         let Some(_deep) = DeepFolders::make(dir.path(), 300) else {
             return;
         };
+        let drive = this_drive();
         let refused = on_a_stack_of(64 * 1024, || {
             let limits = SaveLimits::new(299, MAX_SAVE_ENTRIES);
-            matches!(walk(dir.path(), limits), Err(SaveError::TooLarge { .. }))
+            matches!(
+                walk(dir.path(), limits, drive),
+                Err(SaveError::TooLarge { .. })
+            )
         });
         assert!(refused);
     }

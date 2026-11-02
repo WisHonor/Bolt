@@ -1263,19 +1263,22 @@ fn boltignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
 fn text_quoted_in_an_error_is_shown_escaped() {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
-    // The error quotes the pattern, and a right-to-left override must not reach the terminal.
-    std::fs::write(env.root().join(".boltignore"), "[z-a]\u{202e}\n").unwrap();
+    // The error names a folder, and a right-to-left override in its name must not reach the
+    // terminal.
+    let folder = env.root().join("x\u{202e}");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join(".boltignore"), vec![b'#'; (1 << 20) + 1]).unwrap();
     let out = env.bolt().args(["save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(!shown.contains('\u{202e}'), "{shown:?}");
-    assert!(shown.contains("\"[z-a]\\u{202e}\""), "{shown:?}");
+    assert!(shown.contains("x\\u{202e}/.boltignore"), "{shown:?}");
     // The message is for people in JSON too, so it is just as safe to print.
     let out = env.bolt().args(["--json", "save", "x"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let message = json["error"]["message"].as_str().unwrap();
     assert!(!message.contains('\u{202e}'), "{message:?}");
-    assert!(message.contains("\"[z-a]\\u{202e}\""), "{message:?}");
+    assert!(message.contains("x\\u{202e}/.boltignore"), "{message:?}");
 }
 
 /// Two names that would not work on every system, so the error has two lines of problems. Where

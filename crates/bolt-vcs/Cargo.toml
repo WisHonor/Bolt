@@ -24,4 +24,6 @@ workspace = true
 assert_cmd = "2.2.2"
 bolt-vcs-platform = { path = "../bolt-vcs-platform" }
 insta = { version = "1.49.0", features = ["json", "filters"] }
+proptest = "1.12.0"
 tempfile = "3.27.0"
+unicode-normalization = "0.1.26"
