@@ -46,9 +46,13 @@ pub enum RepoError {
         escape(&path.display().to_string(), false)
     )]
     OwnerUnknown { path: PathBuf },
-    /// `bolt start` made `.bolt` (or found one made just before it), then found it may not use it
-    /// (decision 026): `refusal` is the `NotYours` or `OwnerUnknown` that every later command
-    /// would give. Nothing was deleted, so running `bolt start` again once the folder is trusted
+    #[error(
+        "Bolt couldn't find out who owns the project at {}: {}",
+        escape(&path.display().to_string(), false),
+        escape(&source.to_string(), false)
+    )]
+    OwnerLookupFailed { path: PathBuf, source: io::Error },
+    /// `bolt start` made `.bolt` but may not use it. Once the folder is trusted, running it again
     /// finishes the project.
     #[error("The .bolt folder was made, but the project isn't finished. {refusal}")]
     StartStopped { refusal: Box<RepoError> },
@@ -81,7 +85,9 @@ impl RepoError {
                 RepoError::InsideAnotherProject { .. } => {
                     "Run Bolt commands there, or pick a folder outside it."
                 }
-                RepoError::NotYours { path } | RepoError::OwnerUnknown { path } => {
+                RepoError::NotYours { path }
+                | RepoError::OwnerUnknown { path }
+                | RepoError::OwnerLookupFailed { path, .. } => {
                     return Some(config::trust_hint(path));
                 }
                 RepoError::StartStopped { refusal } => {
@@ -168,67 +174,76 @@ fn check_shape(bolt: &Path) -> Result<(), RepoError> {
     Ok(())
 }
 
-/// Refuses the project at `root` unless its `.bolt` folder is the user's own or the user listed
-/// `root` in their safe-folders: a `.bolt` planted above the user's work (`C:\.bolt`,
-/// `/tmp/.bolt`) must not capture their commands (decisions 025 and 026, T23). With no `.bolt`
-/// there is no project.
+/// Refuses the project at `root` unless the folder and its `.bolt` are the user's, or the user
+/// listed `root` in safe-folders, as Git does (T23).
 fn check_owner(root: &Path) -> Result<(), RepoError> {
-    let owner = match bolt_platform::owner_of(&root.join(".bolt")) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RepoError::NotAProject),
-        owner => owner,
-    };
-    // The user's settings are read only for a folder that isn't shown to be theirs, so a mistake
-    // in them never stops the user's own projects.
-    let safe = if matches!(owner, Ok(Owner::User)) {
-        Vec::new()
-    } else {
-        config::safe_folders()?
-    };
-    owner_allows(owner, root, &safe)
+    check_owner_with(root, &bolt_platform::owner_of, &config::safe_folders)
 }
 
-/// Whether Bolt may use the project at `root`, given who owns its `.bolt` folder (`owner`, or the
-/// error that stopped Bolt finding out): the user's own is used. Another account's, one whose
-/// owner can't be told, or one whose owner couldn't be looked up, only when the user's
-/// safe-folders (`safe`) list this very folder, as Git's safe.directory does. A folder listed
-/// above it trusts nothing below.
-fn owner_allows(owner: io::Result<Owner>, root: &Path, safe: &[PathBuf]) -> Result<(), RepoError> {
-    let refusal = match owner {
-        Ok(Owner::User) => return Ok(()),
-        Ok(Owner::Other) => RepoError::NotYours {
-            path: root.to_owned(),
-        },
-        Ok(Owner::Unknown) => RepoError::OwnerUnknown {
-            path: root.to_owned(),
-        },
-        Err(e) => RepoError::Io(e),
-    };
-    if safe.iter().any(|folder| config::same_folder(folder, root)) {
-        Ok(())
+/// `check_owner`, given how to learn who owns a path and how to read safe-folders.
+fn check_owner_with(
+    root: &Path,
+    owner_of: &dyn Fn(&Path) -> io::Result<Owner>,
+    safe_folders: &dyn Fn() -> Result<Vec<PathBuf>, ConfigError>,
+) -> Result<(), RepoError> {
+    let mut owners = vec![owner_of(root)];
+    match owner_of(&root.join(".bolt")) {
+        // Before `bolt start` makes `.bolt`, the folder alone decides.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        owner => owners.push(owner),
+    }
+    // Read only when needed, so a mistake in them never stops the user's own projects.
+    let safe = if owners.iter().all(|owner| matches!(owner, Ok(Owner::User))) {
+        Vec::new()
     } else {
-        Err(refusal)
+        safe_folders()?
+    };
+    owner_allows(owners, root, &safe)
+}
+
+/// Whether Bolt may use the project at `root`, given who owns the folder and its `.bolt` (or why
+/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself.
+fn owner_allows(
+    owners: impl IntoIterator<Item = io::Result<Owner>>,
+    root: &Path,
+    safe: &[PathBuf],
+) -> Result<(), RepoError> {
+    let path = || root.to_owned();
+    let refusal = owners.into_iter().find_map(|owner| match owner {
+        Ok(Owner::User) => None,
+        Ok(Owner::Other) => Some(RepoError::NotYours { path: path() }),
+        Ok(Owner::Unknown) => Some(RepoError::OwnerUnknown { path: path() }),
+        Err(source) => Some(RepoError::OwnerLookupFailed {
+            path: path(),
+            source,
+        }),
+    });
+    match refusal {
+        Some(refusal) if !safe.iter().any(|folder| config::same_folder(folder, root)) => {
+            Err(refusal)
+        }
+        _ => Ok(()),
     }
 }
 
-/// Checks the `.bolt` folder of the project at `root`, owner first (decisions 025 and 026):
-/// `.bolt` itself must be a real folder (a link, junction or file is damage); then Bolt must be
-/// allowed to use it (`owner_check`); only then is anything inside it looked at: its fixed
-/// folders must be real folders too. `Ok(false)`: there is no `.bolt`.
+/// Checks the project folder `root` before anything inside its `.bolt` is looked at: `.bolt`, if
+/// there, must be a real folder, and `owner_check` must allow the folder and `.bolt`. Then the
+/// folders inside `.bolt` must be real too. `Ok(false)`: no `.bolt`.
 fn check_bolt(
     root: &Path,
     owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
 ) -> Result<bool, RepoError> {
     let bolt = root.join(".bolt");
-    match safe_fs::check_real_dir(&bolt) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(refused(e)),
-    }
-    match owner_check(root) {
-        Ok(()) => {}
-        // Gone since it was looked at.
-        Err(RepoError::NotAProject) => return Ok(false),
-        Err(e) => return Err(e),
+    let is_there = || match safe_fs::check_real_dir(&bolt) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(refused(e)),
+    };
+    let found = is_there()?;
+    owner_check(root)?;
+    // Looked at again: it may have gone, or become a link, while its owner was asked.
+    if !found || !is_there()? {
+        return Ok(false);
     }
     check_shape(&bolt)?;
     Ok(true)
@@ -326,17 +341,9 @@ fn format_path(root: &Path) -> PathBuf {
     root.join(".bolt").join("format")
 }
 
-/// Whether `folder` holds a project, for the searches up from a folder (decision 026). A planted
-/// `.bolt` (or a link in it) could point at another computer, which Windows would contact,
-/// offering the user's network credentials. So nothing is followed, and nothing inside a `.bolt`
-/// is looked at before Bolt is allowed to use it (`owner_check`, asked of `.bolt` itself):
-/// - a real `.bolt` folder, or a link, junction or other reparse point named `.bolt`, has its
-///   owner asked first. If Bolt may not use it, its refusal is the answer: `discover` refuses
-///   it, `start` looks past it.
-/// - one Bolt may use counts if it is a link (`open` reports it as damaged; nothing behind it is
-///   touched), or holds an entry named `format`, of any kind (`open` checks it). Without one, it
-///   is an interrupted start, not a project.
-/// - anything else, a file named `.bolt` included, is no project.
+/// Whether `folder` holds a project, for the searches up from a folder. A refusal from
+/// `owner_check` is the error. Nothing is followed, and nothing in `.bolt` is looked at before
+/// `owner_check` allows it: a planted `.bolt` could point at another computer.
 fn has_project(
     folder: &Path,
     owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
@@ -346,16 +353,13 @@ fn has_project(
         Ok(meta) if meta.is_dir() => false,
         _ => return Ok(false),
     };
-    match owner_check(folder) {
-        Ok(()) => Ok(is_link || has_format(folder).unwrap_or(false)),
-        // Gone since it was looked at.
-        Err(RepoError::NotAProject) => Ok(false),
-        Err(refusal) => Err(refusal),
-    }
+    owner_check(folder)?;
+    // A link counts, so that `open` refuses it; a real `.bolt` needs a `format`.
+    Ok(is_link || has_format(folder).unwrap_or(false))
 }
 
-/// Whether `root/.bolt` holds an entry named `format`, of any kind (`open` checks it). A link
-/// there is not followed. Callers make sure `.bolt` itself is a real folder Bolt may use.
+/// Whether `root/.bolt` holds an entry named `format`, of any kind (`open` checks it), without
+/// following a link there.
 fn has_format(root: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(format_path(root)) {
         Ok(_) => Ok(true),
@@ -364,10 +368,8 @@ fn has_format(root: &Path) -> io::Result<bool> {
     }
 }
 
-/// The nearest folder above `root` holding a project Bolt may use (`owner_check` passes it).
-/// One it may not use (another account's, or one whose owner can't be told, not listed in
-/// safe-folders) is looked past: a `.bolt` planted above the user's work must not stop them
-/// starting a project of their own (decision 026). Only a broken settings file stops the search.
+/// The nearest folder above `root` holding a project Bolt may use. One it may not use is looked
+/// past, so that a `.bolt` planted above the user's work can't stop them starting their own.
 fn enclosing_project<'a>(
     root: &'a Path,
     owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
@@ -376,9 +378,8 @@ fn enclosing_project<'a>(
         match has_project(outer, owner_check) {
             Ok(true) => return Ok(Some(outer)),
             Ok(false) => {}
+            // The user's own settings are broken: worth saying.
             Err(e @ RepoError::Config(_)) => return Err(e),
-            // Another account's, can't tell, or its owner couldn't be looked up: not shown to be
-            // the user's, so looked past, never entered.
             Err(_) => {}
         }
     }
@@ -387,15 +388,13 @@ fn enclosing_project<'a>(
 
 impl Repository {
     /// Makes `root` a new project: the folders, then the first save (an empty listing) on line
-    /// `main`, then `.bolt/format` last. A `.bolt` folder without `format` is an interrupted
-    /// start, which this finishes. Refused inside a project the user may use; one above that
-    /// they may not use is looked past (decision 026).
+    /// `main`, then `.bolt/format` last. A `.bolt` without `format` is an interrupted start,
+    /// which this finishes.
     pub fn init(root: &Path, who: &Person) -> Result<Repository, RepoError> {
         Repository::init_with(root, who, &check_owner)
     }
 
-    /// `init`, with the check of whether Bolt may use a `.bolt` folder given: `check_owner`, or
-    /// a stand-in in tests.
+    /// `init`, with the owner check given (a stand-in in tests).
     fn init_with(
         root: &Path,
         who: &Person,
@@ -405,9 +404,7 @@ impl Repository {
             root: root.to_owned(),
         };
         let bolt = root.join(".bolt");
-        // A `.bolt` already here is an interrupted start, which this finishes. Like any `.bolt`,
-        // nothing in it is looked at before it is known to be a real folder Bolt may use (T23):
-        // creating a folder through a planted link would write outside the project.
+        // Before anything is made: a folder that isn't the user's is refused at once.
         let found = check_bolt(root, owner_check)?;
         if found && has_format(root)? {
             return Err(already());
@@ -419,22 +416,27 @@ impl Repository {
         }
         if !found {
             fsio::create_dir_durable(&bolt)?;
-            // The drive may record no owner, or another account, for the `.bolt` just made, and
-            // every later command would refuse it: said now, before anything is made inside it
-            // (decision 026). Nothing is deleted, so running `start` again once the folder is
-            // trusted finishes the project. This also refuses a `.bolt` another account made
-            // here just before.
-            check_bolt(root, owner_check).map_err(|e| match e {
-                e @ (RepoError::NotYours { .. } | RepoError::OwnerUnknown { .. }) => {
-                    RepoError::StartStopped {
-                        refusal: Box::new(e),
-                    }
-                }
+            // Some drives give a new folder another owner, or none, and every later command
+            // would refuse it.
+            let made = check_bolt(root, owner_check).map_err(|e| match e {
+                e @ (RepoError::NotYours { .. }
+                | RepoError::OwnerUnknown { .. }
+                | RepoError::OwnerLookupFailed { .. }) => RepoError::StartStopped {
+                    refusal: Box::new(e),
+                },
                 other => other,
             })?;
+            if !made {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "The .bolt folder disappeared while the project was being started.",
+                )
+                .into());
+            }
         }
-        for dir in fixed_folders(&bolt) {
-            fsio::create_dir_durable(&dir)?;
+        // Not `.bolt` itself: one gone since its check must not be made again unchecked.
+        for dir in fixed_folders(&bolt).iter().skip(1) {
+            fsio::create_dir_durable(dir)?;
         }
         check_shape(&bolt)?;
         bolt_platform::hide_path(&bolt)?;
@@ -493,15 +495,13 @@ impl Repository {
         Ok(repo)
     }
 
-    /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one
-    /// (see `has_project`). A `.bolt` on the way that Bolt may not use is refused.
+    /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one.
+    /// A `.bolt` on the way that Bolt may not use is refused.
     pub fn discover(start: &Path) -> Result<Repository, RepoError> {
         Repository::discover_with(start, &check_owner)
     }
 
-    /// `discover`, with the check of whether Bolt may use a `.bolt` folder in the search given:
-    /// `check_owner`, or a stand-in in tests. A `.bolt` it may not use stops the search with its
-    /// refusal, unentered (decision 026); `open` checks the one found again.
+    /// `discover`, with the search's owner check given (a stand-in in tests).
     fn discover_with(
         start: &Path,
         owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
@@ -517,8 +517,6 @@ impl Repository {
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
         let bolt = root.join(".bolt");
-        // Nothing in `.bolt` is looked at before `.bolt` is known to be a real folder Bolt may
-        // use (T23), and nothing is read before its folders are known to be real folders.
         if !check_bolt(root, &check_owner)? {
             return Err(RepoError::NotAProject);
         }
@@ -972,36 +970,47 @@ mod tests {
         for folder in [&root, &sibling] {
             std::fs::create_dir(folder).unwrap();
         }
-        // The user's own `.bolt`: used, whatever the list says.
-        assert!(owner_allows(Ok(Owner::User), &root, &[]).is_ok());
-        // Another account's, one whose owner can't be told, or one whose owner couldn't be
-        // looked up: refused, each saying which.
-        match owner_allows(Ok(Owner::Other), &root, &[]) {
+        // Who owns the project folder, then its `.bolt`.
+        let allows =
+            |owners: [io::Result<Owner>; 2], safe: &[PathBuf]| owner_allows(owners, &root, safe);
+        let failed = || Err(io::Error::other("Access is denied."));
+        assert!(allows([Ok(Owner::User), Ok(Owner::User)], &[]).is_ok());
+        // A `.bolt` of the user's in a folder that isn't theirs is refused too.
+        match allows([Ok(Owner::Other), Ok(Owner::User)], &[]) {
             Err(RepoError::NotYours { path }) => assert_eq!(path, root),
             other => panic!("{other:?}"),
         }
-        match owner_allows(Ok(Owner::Unknown), &root, &[]) {
+        match allows([Ok(Owner::User), Ok(Owner::Unknown)], &[]) {
             Err(RepoError::OwnerUnknown { path }) => assert_eq!(path, root),
             other => panic!("{other:?}"),
         }
-        let failed = || Err(io::Error::other("the owner couldn't be looked up"));
-        match owner_allows(failed(), &root, &[]) {
-            Err(RepoError::Io(e)) => assert_eq!(e.to_string(), "the owner couldn't be looked up"),
+        match allows([Ok(Owner::User), failed()], &[]) {
+            Err(RepoError::OwnerLookupFailed { path, source }) => {
+                assert_eq!(
+                    (path, source.to_string()),
+                    (root.clone(), "Access is denied.".into())
+                );
+            }
             other => panic!("{other:?}"),
         }
-        let answers = || [Ok(Owner::Other), Ok(Owner::Unknown), failed()];
-        let allowed = |answer, safe: &[PathBuf]| owner_allows(answer, &root, safe).is_ok();
-        for answer in answers() {
-            // Used once the user lists this very folder (as Git's safe.directory does).
-            assert!(allowed(answer, std::slice::from_ref(&root)));
+        let refused = || {
+            [
+                [Ok(Owner::Other), Ok(Owner::User)],
+                [Ok(Owner::User), Ok(Owner::Other)],
+                [Ok(Owner::Unknown), Ok(Owner::User)],
+                [Ok(Owner::User), failed()],
+            ]
+        };
+        // Listing the project folder trusts both, as Git's safe.directory does, however it is
+        // written; a folder above it or beside it trusts nothing.
+        for owners in refused() {
+            assert!(allows(owners, std::slice::from_ref(&root)).is_ok());
         }
-        for answer in answers() {
-            // The same folder written another way still counts.
-            assert!(allowed(answer, &[sibling.join("..").join("project")]));
+        for owners in refused() {
+            assert!(allows(owners, &[sibling.join("..").join("project")]).is_ok());
         }
-        for answer in answers() {
-            // A folder above it, or beside it, trusts nothing else.
-            assert!(!allowed(answer, &[dir.path().to_owned(), sibling.clone()]));
+        for owners in refused() {
+            assert!(allows(owners, &[dir.path().to_owned(), sibling.clone()]).is_err());
         }
     }
 
@@ -1018,7 +1027,7 @@ mod tests {
             }
             assert!(!config::same_folder(&a, &b), "{a:?} {b:?}");
             let trusts = |root: &Path, listed: &Path| {
-                owner_allows(Ok(Owner::Other), root, &[listed.to_owned()]).is_ok()
+                owner_allows([Ok(Owner::Other)], root, &[listed.to_owned()]).is_ok()
             };
             assert!(!trusts(&a, &b), "{a:?}");
             assert!(!trusts(&b, &a), "{b:?}");
@@ -1026,27 +1035,33 @@ mod tests {
         }
     }
 
-    /// `bolt start` in `root`, where the drive says `owner(folder)` owns the `.bolt` in `folder`
-    /// and the user's safe-folders are `safe`: the real rule, with a stand-in for the answers no
-    /// test machine can give (another account, a drive that records no owner).
+    /// The real owner check, with the answers no test machine can give: `owner(path)` owns each
+    /// path that exists, and the user's safe-folders are `safe`.
+    fn checked_by(
+        owner: impl Fn(&Path) -> Owner,
+        safe: &[PathBuf],
+    ) -> impl Fn(&Path) -> Result<(), RepoError> {
+        move |root| {
+            let owner_of = |path: &Path| std::fs::symlink_metadata(path).map(|_| owner(path));
+            check_owner_with(root, &owner_of, &|| Ok(safe.to_vec()))
+        }
+    }
+
     fn start_where(
         root: &Path,
         owner: impl Fn(&Path) -> Owner,
         safe: &[PathBuf],
     ) -> Result<Repository, RepoError> {
-        let check = |folder: &Path| owner_allows(Ok(owner(folder)), folder, safe);
-        Repository::init_with(root, &entry(0).who, &check)
+        Repository::init_with(root, &entry(0).who, &checked_by(owner, safe))
     }
 
-    /// A stand-in owner check: the drive says `owner` owns every `.bolt`, and the user's
-    /// safe-folders list nothing.
-    fn every_bolt(owner: Owner) -> impl Fn(&Path) -> Result<(), RepoError> {
-        move |folder| owner_allows(Ok(owner), folder, &[])
+    /// The owner check where `owner` owns everything, and nothing is listed.
+    fn all_owned_by(owner: Owner) -> impl Fn(&Path) -> Result<(), RepoError> {
+        checked_by(move |_| owner, &[])
     }
 
-    /// Below a `.bolt` it may not use (another account's, or one whose owner can't be told, and
-    /// not in safe-folders), `bolt start` looks further up, and makes the project if no `.bolt`
-    /// above is one the user may use (decision 026).
+    /// Below a project it may not use, `bolt start` looks further up, and makes the project if
+    /// none above is one the user may use.
     #[test]
     fn start_looks_past_an_enclosing_project_it_may_not_use() {
         for drive_says in [Owner::Other, Owner::Unknown] {
@@ -1059,9 +1074,8 @@ mod tests {
                 std::fs::create_dir(outer.join(".bolt")).unwrap();
                 std::fs::write(format_path(outer), FORMAT_TEXT).unwrap();
             }
-            // Every `.bolt` above `root` is one the drive says isn't the user's.
-            let owner = |folder: &Path| {
-                if folder == root {
+            let owner = |path: &Path| {
+                if path.starts_with(&root) {
                     Owner::User
                 } else {
                     drive_says
@@ -1082,15 +1096,21 @@ mod tests {
         }
     }
 
-    /// `bolt start` checks the `.bolt` it made the way `open` will. On a drive that records no
-    /// owner, or another account, it stops at once and deletes nothing; once the user trusts the
-    /// folder, running it again finishes the project (decision 026).
+    /// Some drives give a new folder another owner, or none. `bolt start` checks the `.bolt` it
+    /// made the way every command will, stops before making anything in it, and finishes when
+    /// run again once the folder is trusted.
     #[test]
     fn start_stops_when_it_may_not_use_the_bolt_folder_it_made() {
         for drive_says in [Owner::Unknown, Owner::Other] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
-            let owner = |_: &Path| drive_says;
+            let owner = |path: &Path| {
+                if path == root {
+                    Owner::User
+                } else {
+                    drive_says
+                }
+            };
             let refusal = match start_where(root, owner, &[]) {
                 Err(RepoError::StartStopped { refusal }) => *refusal,
                 other => panic!("{drive_says:?}: {:?}", other.map(|_| ())),
@@ -1100,12 +1120,10 @@ mod tests {
                 | (Owner::Other, RepoError::NotYours { path }) => assert_eq!(path, root),
                 other => panic!("{other:?}"),
             }
-            // Nothing was deleted, nothing was made inside `.bolt` before its owner was known,
-            // and the project isn't finished.
+            // Nothing deleted, nothing made inside.
             assert!(root.join(".bolt").is_dir(), "{drive_says:?}");
             let inside = std::fs::read_dir(root.join(".bolt")).unwrap().count();
             assert_eq!(inside, 0, "{drive_says:?}");
-            // Run again before the folder is trusted: refused, as every command would be.
             let again = start_where(root, owner, &[]);
             assert!(
                 matches!(
@@ -1114,7 +1132,6 @@ mod tests {
                 ),
                 "{drive_says:?}"
             );
-            // Trusted: running `bolt start` again finishes the project.
             let repo = start_where(root, owner, &[root.to_owned()]).unwrap();
             assert_eq!(repo.current().unwrap().1.command, "start");
             assert!(Repository::open(root).is_ok(), "{drive_says:?}");
@@ -1126,7 +1143,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path();
         let bolt = folder.join(".bolt");
-        let (mine, theirs) = (every_bolt(Owner::User), every_bolt(Owner::Other));
+        let (mine, theirs) = (all_owned_by(Owner::User), all_owned_by(Owner::Other));
         assert!(!has_project(folder, &theirs).unwrap(), "nothing there");
         std::fs::write(&bolt, b"").unwrap();
         assert!(!has_project(folder, &theirs).unwrap(), "a file named .bolt");
@@ -1134,7 +1151,7 @@ mod tests {
         std::fs::create_dir(&bolt).unwrap();
         // The user's own interrupted start (no `format` yet) is no project.
         assert!(!has_project(folder, &mine).unwrap(), "an interrupted start");
-        // Another account's `.bolt` is found, empty or not, and refused (decision 026).
+        // Another account's is found, empty or not, and refused.
         let found = has_project(folder, &theirs);
         assert!(
             matches!(found, Err(RepoError::NotYours { .. })),
@@ -1145,9 +1162,7 @@ mod tests {
         assert!(has_project(folder, &mine).unwrap(), "a folder named format");
     }
 
-    /// Commands below a `.bolt` the user may not use refuse it, a link or an empty folder too:
-    /// its owner is asked before anything in it is looked at, so what is inside can't matter
-    /// (decision 026).
+    /// Its owner is asked before anything in it is looked at, so what is inside can't matter.
     #[test]
     fn commands_refuse_a_foreign_bolt_above_even_an_empty_one() {
         for drive_says in [Owner::Other, Owner::Unknown] {
@@ -1169,7 +1184,7 @@ mod tests {
                 }
                 match (
                     drive_says,
-                    Repository::discover_with(&root, &every_bolt(drive_says)),
+                    Repository::discover_with(&root, &all_owned_by(drive_says)),
                 ) {
                     (Owner::Other, Err(RepoError::NotYours { path }))
                     | (Owner::Unknown, Err(RepoError::OwnerUnknown { path })) => {
@@ -1181,9 +1196,8 @@ mod tests {
         }
     }
 
-    /// `open`, and `bolt start` for its own folder, ask who owns `.bolt` before looking at
-    /// anything inside it: one the user may not use is refused as such, even with a link inside,
-    /// which a look would have reported as damage (decision 026).
+    /// A link inside would be damage, but a `.bolt` the user may not use is refused before it is
+    /// looked at.
     #[test]
     fn the_owner_of_bolt_is_asked_before_anything_inside_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1196,24 +1210,155 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &store).unwrap();
         #[cfg(windows)]
         crate::test_support::junction(&store, &elsewhere);
-        let other = check_bolt(&root, &every_bolt(Owner::Other));
+        let other = check_bolt(&root, &all_owned_by(Owner::Other));
         assert!(
             matches!(other, Err(RepoError::NotYours { .. })),
             "{other:?}"
         );
-        let unknown = check_bolt(&root, &every_bolt(Owner::Unknown));
+        let unknown = check_bolt(&root, &all_owned_by(Owner::Unknown));
         assert!(
             matches!(unknown, Err(RepoError::OwnerUnknown { .. })),
             "{unknown:?}"
         );
-        // Once the owner is allowed, the inside is looked at, and the link is damage.
-        let mine = check_bolt(&root, &every_bolt(Owner::User));
+        let mine = check_bolt(&root, &all_owned_by(Owner::User));
         assert!(matches!(mine, Err(RepoError::Damaged { .. })), "{mine:?}");
     }
 
-    /// Nothing inside a `.bolt` the user may not use is ever looked at (decision 026). With its
-    /// inside unreadable, any look would fail and change the answer: commands must give the
-    /// owner's refusal, and `bolt start` must ask the owner, then look past it.
+    /// Any signed-in Windows user can rename a folder the user made into `C:\.bolt`. `C:\`
+    /// belongs to the system, so that project is refused whoever owns its `.bolt`, as Git does.
+    #[test]
+    fn a_bolt_of_the_users_in_a_folder_that_isnt_theirs_is_refused() {
+        for drive_says in [Owner::Other, Owner::Unknown] {
+            let dir = tempfile::tempdir().unwrap();
+            let system = dir.path().join("system");
+            let work = system.join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            Repository::init(&system, &entry(0).who).unwrap();
+            // The folder isn't the user's; its `.bolt`, and everything in `work`, is.
+            let owner = |path: &Path| {
+                if path == system {
+                    drive_says
+                } else if path.starts_with(&system) {
+                    Owner::User
+                } else {
+                    drive_says
+                }
+            };
+            let check = checked_by(owner, &[]);
+            let refused = |result: Result<(), RepoError>| match (drive_says, result) {
+                (Owner::Other, Err(RepoError::NotYours { path }))
+                | (Owner::Unknown, Err(RepoError::OwnerUnknown { path })) => path == system,
+                _ => false,
+            };
+            let found = Repository::discover_with(&work, &check).map(|_| ());
+            assert!(refused(found), "{drive_says:?}");
+            assert!(
+                refused(check_bolt(&system, &check).map(|_| ())),
+                "{drive_says:?}"
+            );
+            // `bolt start` below it looks past it.
+            let started = Repository::init_with(&work, &entry(0).who, &check).unwrap();
+            assert_eq!(started.root(), work);
+            // Listed in safe-folders, it is used.
+            let listed = checked_by(owner, std::slice::from_ref(&system));
+            let opened = Repository::discover_with(&system, &listed).unwrap();
+            assert_eq!(opened.root(), system);
+        }
+    }
+
+    #[test]
+    fn start_refuses_a_folder_that_isnt_the_users_before_making_anything() {
+        for drive_says in [Owner::Other, Owner::Unknown] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("root");
+            std::fs::create_dir(&root).unwrap();
+            let owner = |path: &Path| {
+                if path == root {
+                    drive_says
+                } else if path.starts_with(&root) {
+                    Owner::User
+                } else {
+                    drive_says
+                }
+            };
+            match (drive_says, start_where(&root, owner, &[])) {
+                (Owner::Other, Err(RepoError::NotYours { path }))
+                | (Owner::Unknown, Err(RepoError::OwnerUnknown { path })) => {
+                    assert_eq!(path, root);
+                }
+                (_, other) => panic!("{drive_says:?}: {:?}", other.map(|_| ())),
+            }
+            assert!(!root.join(".bolt").exists(), "{drive_says:?}");
+            start_where(&root, owner, std::slice::from_ref(&root)).unwrap();
+        }
+    }
+
+    /// Fails closed rather than make the project in a `.bolt` nobody checked.
+    #[test]
+    fn start_stops_if_the_bolt_it_made_vanishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let bolt = root.join(".bolt");
+        let rule = checked_by(
+            |path| {
+                if path.starts_with(&root) {
+                    Owner::User
+                } else {
+                    Owner::Other
+                }
+            },
+            &[],
+        );
+        let check = |folder: &Path| {
+            // Someone removes the new `.bolt` while its owner is asked.
+            if folder == root && bolt.is_dir() {
+                std::fs::remove_dir(&bolt).unwrap();
+            }
+            rule(folder)
+        };
+        let started = Repository::init_with(&root, &entry(0).who, &check);
+        assert!(started.is_err(), "{:?}", started.map(|_| ()));
+        assert!(!bolt.exists() && !format_path(&root).exists());
+    }
+
+    /// A link that appears where `bolt start` is about to make `.bolt` is never followed.
+    #[test]
+    fn start_refuses_a_bolt_link_that_appears_while_it_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let (bolt, target) = (root.join(".bolt"), dir.path().join("target"));
+        let rule = checked_by(
+            |path| {
+                if path.starts_with(&root) {
+                    Owner::User
+                } else {
+                    Owner::Other
+                }
+            },
+            &[],
+        );
+        let check = |folder: &Path| {
+            if folder == root && std::fs::symlink_metadata(&bolt).is_err() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &bolt).unwrap();
+                #[cfg(windows)]
+                crate::test_support::junction(&bolt, &target);
+            }
+            rule(folder)
+        };
+        let started = Repository::init_with(&root, &entry(0).who, &check);
+        assert!(
+            matches!(started, Err(RepoError::Damaged { .. })),
+            "{:?}",
+            started.map(|_| ())
+        );
+        assert!(!target.exists());
+    }
+
+    /// With the inside unreadable, any look inside a `.bolt` the user may not use would fail and
+    /// change the answer.
     #[cfg(unix)]
     #[test]
     fn a_foreign_bolt_is_never_looked_inside() {
@@ -1236,14 +1381,19 @@ mod tests {
             return;
         }
         let asked = RefCell::new(Vec::new());
+        let rule = checked_by(
+            |path| {
+                if path.starts_with(&root) {
+                    Owner::User
+                } else {
+                    Owner::Other
+                }
+            },
+            &[],
+        );
         let theirs = |folder: &Path| {
             asked.borrow_mut().push(folder.to_owned());
-            let owner = if folder == root {
-                Owner::User
-            } else {
-                Owner::Other
-            };
-            owner_allows(Ok(owner), folder, &[])
+            rule(folder)
         };
         let found = Repository::discover_with(&root, &theirs).map(|_| ());
         let opened = check_bolt(&outer, &theirs).map(|_| ());
@@ -1256,8 +1406,8 @@ mod tests {
         assert!(asked.borrow().contains(&outer), "{:?}", asked.borrow());
     }
 
-    /// `bolt start` in a folder whose `.bolt/format` is a link (a shared project can bring one)
-    /// never follows it: the folder is already a project, which `open` reports as damaged.
+    /// A shared project can bring a `.bolt/format` link; following it could reach another
+    /// computer.
     #[test]
     fn start_never_follows_a_format_link() {
         let dir = tempfile::tempdir().unwrap();
@@ -1283,9 +1433,7 @@ mod tests {
         );
     }
 
-    /// A `.bolt` link or junction in a folder above is found, never followed (decision 026's
-    /// hardening): a planted one could point at another computer, which Windows would contact.
-    /// What is behind it changes nothing, and nothing there is touched.
+    /// A planted `.bolt` link could point at another computer, which Windows would contact.
     #[test]
     fn a_bolt_link_above_is_found_but_never_followed() {
         for with_format in [true, false] {
@@ -1304,7 +1452,6 @@ mod tests {
             #[cfg(windows)]
             crate::test_support::junction(&link, &target);
 
-            // Commands below it: found, and `open` refuses it as damaged.
             match Repository::discover(&root) {
                 Err(RepoError::Damaged { detail }) => assert!(
                     detail.starts_with(&link.display().to_string()),
@@ -1312,15 +1459,14 @@ mod tests {
                 ),
                 other => panic!("{with_format}: {:?}", other.map(|_| ())),
             }
-            // `bolt start` below it: the user's own link stops it, like their own project...
+            // The user's own link stops `bolt start` like their own project would; another
+            // account's is looked past, and the new project is then found first.
             match Repository::init(&root, &entry(0).who) {
                 Err(RepoError::InsideAnotherProject { root }) => assert_eq!(root, outer),
                 other => panic!("{with_format}: {:?}", other.map(|_| ())),
             }
-            // ...another account's is looked past, like any `.bolt` that isn't the user's. Inside
-            // the new project, its own `.bolt` is then found first.
-            let theirs = |folder: &Path| {
-                if folder == root {
+            let theirs = |path: &Path| {
+                if path.starts_with(&root) {
                     Owner::User
                 } else {
                     Owner::Other
@@ -1328,14 +1474,12 @@ mod tests {
             };
             start_where(&root, theirs, &[]).unwrap();
             assert_eq!(Repository::discover(&root).unwrap().root(), root);
-            // Nothing behind the link was made or changed.
             let behind = std::fs::read_dir(&target).unwrap().count();
             assert_eq!(behind, usize::from(with_format));
         }
     }
 
-    /// A real `.bolt` whose `format` is a link to `/dev/zero`: the search never reads through it
-    /// (a read would never end), and `open` refuses it.
+    /// Reading through the link would never end.
     #[cfg(unix)]
     #[test]
     fn a_format_link_to_dev_zero_is_refused_without_hanging() {
@@ -1397,7 +1541,18 @@ mod tests {
         let hint = e.hint().unwrap();
         assert!(hint.ends_with("\nsafe-folders = [\"/srv/work\"]"), "{hint}");
 
-        // A drive that records no owner is named as such, with the same way to trust the folder.
+        // A failed look-up names the folder, with the same way to trust it.
+        let e = RepoError::OwnerLookupFailed {
+            path: PathBuf::from("/srv/work"),
+            source: io::Error::other("Access is denied. (os error 5)"),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Bolt couldn't find out who owns the project at /srv/work: Access is denied. \
+             (os error 5)"
+        );
+        assert_eq!(e.hint(), Some(hint));
+
         let e = RepoError::OwnerUnknown {
             path: PathBuf::from("/media/usb/work"),
         };
@@ -1446,6 +1601,10 @@ mod tests {
             RepoError::OwnerUnknown {
                 path: PathBuf::from(HOSTILE),
             },
+            RepoError::OwnerLookupFailed {
+                path: PathBuf::from(HOSTILE),
+                source: io::Error::other(HOSTILE),
+            },
             RepoError::StartStopped {
                 refusal: Box::new(RepoError::NotYours {
                     path: PathBuf::from(HOSTILE),
@@ -1464,6 +1623,7 @@ mod tests {
                 e,
                 RepoError::NotYours { .. }
                     | RepoError::OwnerUnknown { .. }
+                    | RepoError::OwnerLookupFailed { .. }
                     | RepoError::StartStopped { .. }
             ) {
                 assert_hostile_text_escaped(&e.hint().unwrap());

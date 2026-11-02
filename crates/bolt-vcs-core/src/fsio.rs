@@ -74,22 +74,15 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Creates `dir` and any missing folders above it, flushing each new folder's parent so the
-/// folders survive a crash.
+/// Creates the folder `dir` in its existing parent, flushing the parent so it survives a crash.
+/// Whatever is already at `dir`, a link included, is left alone, unfollowed, for the caller to
+/// check.
 pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
-    if dir.is_dir() {
-        return Ok(());
-    }
-    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-        create_dir_durable(parent)?;
-    }
     match fs::create_dir(dir) {
-        Ok(()) => {}
-        // Another process made it first.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
-        Err(e) => return Err(e),
+        Ok(()) => sync_parent(dir),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
     }
-    sync_parent(dir)
 }
 
 /// Deletes a file. Not flushed: only used for leftovers, which may as well come back.
@@ -200,12 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn create_dir_durable_makes_every_missing_folder() {
+    fn create_dir_durable_never_follows_what_is_already_there() {
         let root = tempfile::tempdir().unwrap();
-        let deep = root.path().join("a").join("b").join("c");
-        create_dir_durable(&deep).unwrap();
-        create_dir_durable(&deep).unwrap();
-        assert!(deep.is_dir());
+        let dir = root.path().join("a");
+        create_dir_durable(&dir).unwrap();
+        create_dir_durable(&dir).unwrap();
+        assert!(dir.is_dir());
+        // A link already there, to nothing: following it would look in its target.
+        let (link, target) = (root.path().join("link"), root.path().join("target"));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&link, &target);
+        create_dir_durable(&link).unwrap();
+        assert!(!target.exists());
     }
 
     #[cfg(feature = "fault-injection")]
