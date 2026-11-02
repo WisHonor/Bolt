@@ -83,7 +83,7 @@ See [testing.md](testing.md) §3: fuzz targets for every decoder and parser, a m
   - dependency graph;
   - Dependabot alerts, malware alerts and grouped security updates;
   - Dependabot version updates, configured in `.github/dependabot.yml`;
-  - CodeQL code scanning (default setup) with Copilot Autofix suggestions;
+  - CodeQL code scanning (default setup, which scans the Rust code, the workflows and the red-team Python scripts) with Copilot Autofix suggestions;
   - AI scans of the repository and of pull requests;
   - secret scanning with push protection;
   - private vulnerability reporting.
