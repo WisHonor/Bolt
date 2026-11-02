@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 33
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 34
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -126,7 +126,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] Reading Git repositories → [decision 031](decisions/031-own-git-reader.md)
 - [x] How a Git commit becomes a save → [decision 032](decisions/032-exact-repeatable-commit-import.md)
 - [x] How branches become lines, and where you stand after an import → [decision 033](decisions/033-git-branches-to-lines.md)
-- [ ] How tags come in, and keeping big lists of tags and server lines out of every diary entry
+- [x] How tags come in, and keeping big lists of tags and server lines out of every diary entry → [decision 034](decisions/034-tags-kept-and-shared.md)
 - [ ] Names in Git trees that Bolt can't store as they are
 - [ ] Submodules
 - [ ] Git LFS before milestone 5
@@ -216,7 +216,7 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** Bolt keeps a diary of every command that changed something. Each entry records the whole state of the repository afterwards, so `undo` simply goes back to an earlier entry, like Ctrl+Z in an editor. Changing commands take turns, and a crash can never leave a command half-done.
 
-- **Entries:** objects in the store; each holds the full state (every line, where you are, shelves), the safety copies made, its parent, and metadata.
+- **Entries:** objects in the store; each holds the full state (every line, where you are, shelves), the safety copies made, its parent, and metadata. Tags and server lines, which change rarely, sit in records of their own that entries point to and share while unchanged ([decision 034](decisions/034-tags-kept-and-shared.md)).
 - **Committing:** one pack (new data + entry), then `.bolt/state/head` is replaced atomically. Folder rewrites are journaled first, so an interrupted command is finished or rolled back on the next run.
 - **Undo/redo:** new entries that copy an earlier state and restore files from safety copies; nothing is erased, and undo can jump to any entry.
 - **Other people:** undo changes only your repository; for sent saves and locks, Bolt offers the opposite action (v0.3).
@@ -357,6 +357,7 @@ head ─► redo     main → ptvz
   - Names Bolt's rules refuse are renamed by a fixed rule, which the summary lists: each character Bolt doesn't allow becomes `-`, a name over 255 bytes is shortened, and a clash gets `-2`, `-3` and so on. The same repository always gets the same names.
   - You stand where Git did: on its current branch's line, or at the save of a detached `HEAD`.
   - The stash, notes, replace refs and other refs aren't imported; the summary lists them. A repository with no commits, or a current branch with none yet, stops the import.
+- **Tags come in exactly** ([decision 034](decisions/034-tags-kept-and-shared.md)). An annotated tag keeps its Git bytes, signature included, beside its Bolt message. A tag of something other than a commit (a folder snapshot, a single file) is skipped and listed.
 
 ## 6. Risks and watch-outs
 

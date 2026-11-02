@@ -38,6 +38,8 @@ Sorted lists are sorted by the raw UTF-8 bytes of their key, strictly ascending,
 | Project link | `bolt-vcs 2026-10-31 project-link v1` |
 | Conflict record | `bolt-vcs 2026-10-31 conflict v1` |
 | Diary entry | `bolt-vcs 2026-10-31 diary-entry v1` |
+| Tag list | `bolt-vcs 2026-11-02 tag-list v1` |
+| Server lines | `bolt-vcs 2026-11-02 server-lines v1` |
 
 Context strings are constants forever, even if the product is renamed.
 
@@ -167,7 +169,7 @@ A repository that contains any conflict record lists the `conflicts` feature in 
 
 ## 9. Diary entry
 
-One per changing command (decision 010). Each entry records the complete state after the command.
+One per changing command (decision 010). Each entry records the complete state after the command. Tags and server lines change rarely, so they live in records of their own that the entry points to (decision 034); an entry that changes neither points to the same records as its parent, and they are stored once.
 
 ```text
 u8      version = 1
@@ -180,11 +182,10 @@ person  who and when (as in §4)
 string  Bolt version
 state:
   varint  line count;    lines, sorted by name:   string name, id save
-  varint  tag count;     tags, sorted by name:    string name, id save, string message
+  bool    has tags;      if true: id of the tag list
   u8      position (1 = on a line, 2 = at a save), then string line name or id save
   varint  shelf count;   shelves, newest first:   string label (unique), id save
-  varint  remote count;  remotes, sorted by name: string remote name,
-                           varint line count, lines sorted by name: string name, id save
+  bool    has server lines; if true: id of the server-lines list
 varint  safety-copy count
 safety copies, sorted by path:
   string  path
@@ -193,9 +194,37 @@ safety copies, sorted by path:
   varint  size
 ```
 
-Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique. The remote list holds each server's lines as last seen; until v0.3 these are only the server branches a Git import brought in (decision 033). Server names follow the line-name rules too.
+Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique.
 
-- **Limits:** line, tag and shelf names at most 255 bytes (remote names too); tag messages at most 64 KiB; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines (in the state and per remote), 100,000 tags, 10,000 shelves, 64 remotes and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
+- **Limits:** line and shelf names at most 255 bytes; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines, 10,000 shelves and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
+
+**Tag list** (decision 034). Never empty: an entry without tags has none.
+
+```text
+u8      version = 1
+varint  tag count (1 to 100,000)
+tags, sorted by name:
+  string  name (1 to 255 bytes)
+  id      save
+  string  message (at most 64 KiB)
+  varint  Git tag object count (0 to 16)
+  bytes × n  the original bytes of each Git tag object, from the tag's ref to the commit (each at most 1 MiB)
+```
+
+A tag made in Bolt, or imported from a lightweight Git tag, has no Git tag objects. An imported annotated tag keeps every tag object on its way to the commit, signature included, so export can recreate them exactly. Like every record, a tag list is at most 512 MiB (§11).
+
+**Server lines** (decision 033, 034). Each server's lines as last seen; until v0.3 these are only the server branches a Git import brought in. Never empty: a server without lines is left out, and an entry without servers has no list.
+
+```text
+u8      version = 1
+varint  server count (1 to 64)
+servers, sorted by name:
+  string  server name
+  varint  line count (1 to 100,000)
+  lines, sorted by name: string name, id save
+```
+
+Server names and their line names follow the line-name rules, and no two server names, nor two line names of one server, differ only by letter case.
 
 ## 10. Repository files in `.bolt/`
 
@@ -267,6 +296,8 @@ trailer:
 | Conflict record | 19 |
 | Diary entry | 20 |
 | Project link | 21 |
+| Tag list | 22 |
+| Server lines | 23 |
 
 A reader must:
 - check both magic values, the index checksum, and that every offset and size stays inside the file;
