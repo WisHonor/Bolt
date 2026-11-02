@@ -341,12 +341,10 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     env.bolt().arg("start").assert().success();
     std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    // The address space is capped at about 1.5 GB (as in redteam.rs), so a read of the link
-    // that did not stop would end in an abort instead of taking the machine down.
-    let out = Command::from_std(bolt_capped_at(&env, 1_500_000, &["save", "my work"]))
-        .timeout(std::time::Duration::from_secs(30))
-        .output()
-        .unwrap();
+    // The address space is capped at about 1.5 GB (as in redteam.rs), so a read of the link that
+    // did not stop could not take the machine down.
+    let cmd = bolt_capped_at(&env, 1_500_000, &["save", "my work"]);
+    let (out, peak_kb) = run_noting_peak_memory(cmd, 30);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(
         out.status.code(),
@@ -357,6 +355,15 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     assert!(!stderr.contains("memory"), "{stderr}");
     assert!(stdout.starts_with("Saved "), "{stdout}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    // Reaching the cap is not an abort here: the standard library's reads give up with an error
+    // when memory runs out, and a project's settings that can't be read are ignored, so a save
+    // that read the link would still end well, a gigabyte later. What shows it is the memory.
+    // (Where the system has no /proc, as on macOS, the peak is not known and this passes.)
+    assert!(
+        peak_kb < 200_000,
+        "bolt save held {} MB: it read the link to /dev/zero",
+        peak_kb / 1024
+    );
 }
 
 #[test]
@@ -1099,6 +1106,46 @@ fn plant_long_paths(root: &Path) {
 #[cfg(unix)]
 fn bolt_capped(env: &Env, args: &[&str]) -> std::process::Command {
     bolt_capped_at(env, CAP_KB, args)
+}
+
+/// Runs `cmd` for at most `secs` seconds, then kills it, and reports with its output the most
+/// memory it was seen to hold: its peak resident set in KB, read from `/proc` (Linux has it; 0
+/// where the system has none).
+#[cfg(unix)]
+fn run_noting_peak_memory(
+    mut cmd: std::process::Command,
+    secs: u64,
+) -> (std::process::Output, u64) {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut peak_kb = 0;
+    // What `bolt` prints is a few lines, which wait in the pipes until it has ended.
+    while child.try_wait().unwrap().is_none() && started.elapsed().as_secs() < secs {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()));
+        let held = status
+            .as_deref()
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("VmHWM:")?
+                    .trim()
+                    .strip_suffix("kB")?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            });
+        peak_kb = peak_kb.max(held.unwrap_or(0));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Does something only after the time limit; the output is then of a killed process.
+    let _ = child.kill();
+    (child.wait_with_output().unwrap(), peak_kb)
 }
 
 /// `bolt_capped`, with the address space given in KB.
