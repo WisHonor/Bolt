@@ -73,6 +73,7 @@ See [testing.md](testing.md) §3: fuzz targets for every decoder and parser, a m
 **Red-team sessions** ([decision 024](decisions/024-red-team-gate.md)). Every milestone ends with a time-boxed session in which a fresh agent attacks Bolt from an isolated sandbox and must prove each finding with a failing test. Findings are fixed before the milestone counts as done; their tests join the corpus, and new threats are added to §4.
 
 **Session reports.** Milestone 1, session 1 (2026-11-01): [findings](redteam/2026-11-01-milestone-1.md); proof tests in `crates/bolt-vcs/tests/redteam.rs`.
+Milestone 1 fixes, session 2 (2026-11-02): [findings](redteam/2026-11-02-milestone-1-session-2.md); proof tests in `crates/bolt-vcs/tests/redteam2.rs`.
 
 **Windows name rules.** Checked on 2026-11-01 against Microsoft's "Naming Files, Paths, and Namespaces" page (dated 2024-08-28): Bolt refuses everything on that list, plus the console devices `CONIN$` and `CONOUT$`, while `COM0` and `LPT0`, which are not on it, stay ordinary names. Bolt also refuses `.bolt`'s short names (`bolt~1` to `bolt~4`) and its stream syntax (`.bolt::$INDEX_ALLOCATION`), because Windows treats both as `.bolt`.
 

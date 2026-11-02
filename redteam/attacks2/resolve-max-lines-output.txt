@@ -1,0 +1,6 @@
+packs: 135622 bytes
+on disk: 172 KB
+/tmp/t/release/bolt history: exit 0, 0.1 s, peak 29 MB
+show 0123abcd: exit 1, 319.1 s, peak 29 MB
+  stderr: error: No save, line or ID matches "0123abcd".
+hint: See your saves with: bolt history
