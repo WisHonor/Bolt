@@ -103,6 +103,7 @@ pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
 mod windows_owner {
     use std::fs::OpenOptions;
     use std::io;
+    use std::mem::offset_of;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::Path;
@@ -113,7 +114,7 @@ mod windows_owner {
     };
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        EqualSid, GetTokenInformation, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
+        EqualSid, GetTokenInformation, IsValidSid, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
         PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
         TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenUser, WinBuiltinAdministratorsSid,
     };
@@ -164,16 +165,20 @@ mod windows_owner {
         if owner.is_null() {
             return Ok(false);
         }
+        // An owner that is not a well-formed SID can't be shown to be the user's: refused, as
+        // Git does.
+        // SAFETY: `owner` is not null (checked just above) and points into the descriptor, which
+        // stays allocated until this function returns; IsValidSid only reads it.
+        if unsafe { IsValidSid(owner) } == 0 {
+            return Ok(false);
+        }
 
         let token = process_token()?;
-        let user = token_information(&token, TokenUser)?;
-        // SAFETY: GetTokenInformation(TokenUser) filled `user` with a TOKEN_USER. The buffer is
-        // aligned for the pointer in it (it is a Vec<usize>), and is not written again. This
-        // copies out the SID pointer, which points into `user`; `user` lives until the function
-        // returns.
-        let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-        // SAFETY: `owner` points to a valid SID in the descriptor and `user_sid` to one in
-        // `user`; both stay allocated for the call, and EqualSid only reads them.
+        let (user, user_filled) = token_information(&token, TokenUser)?;
+        let user_sid = user_sid_in(&user, user_filled)?;
+        // SAFETY: `owner` is a valid SID in the descriptor (checked above), and `user_sid` points
+        // to the user's SID in `user`, which Windows filled; both stay allocated until this
+        // function returns, and EqualSid only reads them.
         if unsafe { EqualSid(owner, user_sid) } != 0 {
             return Ok(true);
         }
@@ -182,28 +187,71 @@ mod windows_owner {
         // group is in their token, enabled when elevated, "for deny only" when not. The brief's
         // CheckTokenMembership counts enabled groups only, which would lock an administrator out
         // of a project they started in an elevated terminal (review focus 5).
-        // SAFETY: `owner` points to a valid SID in the descriptor; IsWellKnownSid only reads it.
+        // SAFETY: `owner` is a valid SID in the descriptor (checked above); IsWellKnownSid only
+        // reads it.
         if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } == 0 {
             return Ok(false);
         }
-        let group_buffer = token_information(&token, TokenGroups)?;
-        let header = group_buffer.as_ptr().cast::<TOKEN_GROUPS>();
-        // SAFETY: GetTokenInformation(TokenGroups) filled `group_buffer` with a TOKEN_GROUPS: a
-        // count, then that many SID_AND_ATTRIBUTES (the declared one-element array runs on past
-        // its end), all inside the buffer. The buffer is aligned for their pointers (it is a
-        // Vec<usize>), and is neither written nor freed while `groups` is used. `&raw const`
-        // takes the array's address without making a reference to its declared one element.
-        let groups: &[SID_AND_ATTRIBUTES] = unsafe {
-            std::slice::from_raw_parts(
-                (&raw const (*header).Groups).cast::<SID_AND_ATTRIBUTES>(),
-                (*header).GroupCount as usize,
-            )
-        };
+        let (group_buffer, groups_filled) = token_information(&token, TokenGroups)?;
+        let groups = groups_in(&group_buffer, groups_filled)?;
         Ok(groups.iter().any(|group| {
-            // SAFETY: the group's SID points to a valid SID in `group_buffer`, and `owner` to one
-            // in the descriptor; both stay allocated for the call, and EqualSid only reads them.
+            // SAFETY: the group's SID points into `group_buffer`, which Windows filled and
+            // `groups` borrows, and `owner` is a valid SID in the descriptor; both stay
+            // allocated for the call, and EqualSid only reads them.
             unsafe { EqualSid(group.Sid, owner) != 0 }
         }))
+    }
+
+    /// The user's SID in a TOKEN_USER that Windows wrote into the first `filled` bytes of
+    /// `buffer`. The SID is inside `buffer`, so it must not be used once `buffer` is gone.
+    fn user_sid_in(buffer: &[usize], filled: usize) -> io::Result<PSID> {
+        if filled < size_of::<TOKEN_USER>() || filled > size_of_val(buffer) {
+            return Err(bad_token_information());
+        }
+        // SAFETY: a whole TOKEN_USER lies in the filled part of `buffer` (checked just above),
+        // and `buffer` is aligned for it (a TOKEN_USER holds a pointer; `buffer` is made of
+        // usizes). This copies out the SID pointer and reads nothing through it.
+        Ok(unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid })
+    }
+
+    /// The groups in a TOKEN_GROUPS that Windows wrote into the first `filled` bytes of
+    /// `buffer`: a count, then that many SID_AND_ATTRIBUTES (the one-element array the type
+    /// declares runs on past its end). The slice borrows `buffer`, so the compiler keeps it from
+    /// outliving it.
+    fn groups_in(buffer: &[usize], filled: usize) -> io::Result<&[SID_AND_ATTRIBUTES]> {
+        let first = offset_of!(TOKEN_GROUPS, Groups);
+        if filled < first || filled > size_of_val(buffer) {
+            return Err(bad_token_information());
+        }
+        let header = buffer.as_ptr().cast::<TOKEN_GROUPS>();
+        // SAFETY: the count is the first field, and it lies in the filled part of `buffer`
+        // (checked just above), which is aligned for TOKEN_GROUPS (a TOKEN_GROUPS holds
+        // pointers; `buffer` is made of usizes). This reads the count alone.
+        let count = unsafe { (*header).GroupCount } as usize;
+        // Where the list ends: past what Windows filled (or past any size at all) is refused.
+        let end = count
+            .checked_mul(size_of::<SID_AND_ATTRIBUTES>())
+            .and_then(|list| list.checked_add(first));
+        if end.is_none_or(|end| end > filled) {
+            return Err(bad_token_information());
+        }
+        // SAFETY: the `count` entries start at `first` and end within the filled part of
+        // `buffer` (checked just above), so they are in one allocation, initialised, and aligned
+        // for SID_AND_ATTRIBUTES (pointer-aligned, like `buffer`'s usizes). `&raw const` takes
+        // the list's address from `header`, which may reach the whole buffer, without making a
+        // reference to the one element the type declares. `buffer` is borrowed and can't change
+        // while the slice is alive.
+        Ok(unsafe {
+            std::slice::from_raw_parts(
+                (&raw const (*header).Groups).cast::<SID_AND_ATTRIBUTES>(),
+                count,
+            )
+        })
+    }
+
+    /// Token information that is not the size Windows said it is.
+    fn bad_token_information() -> io::Error {
+        io::Error::other("Windows gave Bolt token information of an unexpected size")
     }
 
     /// A security descriptor that Windows allocated for Bolt (with LocalAlloc). Dropping it frees
@@ -232,13 +280,13 @@ mod windows_owner {
         Ok(unsafe { OwnedHandle::from_raw_handle(token) })
     }
 
-    /// The `class` information of `token` (a TOKEN_USER or TOKEN_GROUPS), in a buffer aligned
-    /// for the pointers it holds: these structures hold pointers, so the buffer is made of
-    /// `usize`s, never bytes.
+    /// The `class` information of `token` (a TOKEN_USER or TOKEN_GROUPS): a buffer, and how many
+    /// bytes at its start Windows filled. These structures hold pointers, so the buffer is made
+    /// of `usize`s, never bytes, to be aligned for them.
     fn token_information(
         token: &OwnedHandle,
         class: TOKEN_INFORMATION_CLASS,
-    ) -> io::Result<Vec<usize>> {
+    ) -> io::Result<(Vec<usize>, usize)> {
         // First ask for the size alone: with no buffer, the call fails with
         // ERROR_INSUFFICIENT_BUFFER and writes the size it needs to `bytes`.
         let mut bytes = 0;
@@ -266,7 +314,53 @@ mod windows_owner {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(buffer)
+        // It shrank since the first call: refused rather than read in part.
+        if written != bytes {
+            return Err(bad_token_information());
+        }
+        Ok((buffer, bytes as usize))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(clippy::unwrap_used)]
+        use super::*;
+
+        #[test]
+        fn the_process_token_reads_whole() {
+            let token = process_token().unwrap();
+            let (user, filled) = token_information(&token, TokenUser).unwrap();
+            assert!(!user_sid_in(&user, filled).unwrap().is_null());
+            let (groups, filled) = token_information(&token, TokenGroups).unwrap();
+            // Every token is in some groups, Everyone among them.
+            assert!(!groups_in(&groups, filled).unwrap().is_empty());
+        }
+
+        #[test]
+        fn token_information_too_short_for_its_contents_is_refused() {
+            let mut buffer = [0_usize; 5];
+            let whole = size_of_val(&buffer);
+            // A TOKEN_USER: all of it filled, and inside the buffer.
+            let user = size_of::<TOKEN_USER>();
+            assert!(user_sid_in(&buffer, user - 1).is_err());
+            assert!(user_sid_in(&buffer, whole + 1).is_err());
+            assert!(user_sid_in(&buffer, user).is_ok());
+
+            // A TOKEN_GROUPS: its count, then that many entries, all inside what was filled.
+            let first = offset_of!(TOKEN_GROUPS, Groups);
+            let entry = size_of::<SID_AND_ATTRIBUTES>();
+            assert!(groups_in(&buffer, first - 1).is_err());
+            assert!(groups_in(&buffer, first).unwrap().is_empty());
+            // The count is the first field: all of `buffer[0]` on 32-bit Windows, and its low
+            // half on 64-bit (Windows is little-endian).
+            buffer[0] = 2;
+            assert!(groups_in(&buffer, first + entry).is_err());
+            assert_eq!(groups_in(&buffer, first + 2 * entry).unwrap().len(), 2);
+            assert!(groups_in(&buffer, whole + 1).is_err());
+            // A count whose list runs far past the buffer, or overflows on 32-bit.
+            buffer[0] = u32::MAX as usize;
+            assert!(groups_in(&buffer, whole).is_err());
+        }
     }
 }
 
@@ -297,7 +391,10 @@ mod tests {
             assert!(!is_owned_by_current_user(Path::new("/")).unwrap());
         }
         #[cfg(windows)]
-        assert!(!is_owned_by_current_user(Path::new(r"C:\Windows")).unwrap());
+        {
+            let windows = std::env::var_os("SystemRoot").unwrap();
+            assert!(!is_owned_by_current_user(Path::new(&windows)).unwrap());
+        }
     }
 
     #[test]
