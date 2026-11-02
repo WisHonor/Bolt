@@ -66,7 +66,7 @@ entries, sorted by name:
 | Project link | 5 | a project link record (§7) | 0 |
 | Conflict | 6 | a conflict record (§8) | 0 |
 
-- `name` must follow decision 004's always-on rules: valid UTF-8, not empty, not `.` or `..`, no `/`, no NUL, at most 255 bytes, and not `.bolt` under any spelling Windows or macOS would treat as `.bolt` (any letter case, trailing dots or spaces, the short name `BOLT~1`, a `:stream` suffix).
+- `name` must follow decision 004's always-on rules: valid UTF-8, not empty, not `.` or `..`, no `/`, no NUL, at most 255 bytes, and not `.bolt` under any spelling Windows or macOS would treat as `.bolt` (any letter case, trailing dots or spaces, the short names `BOLT~1` to `BOLT~4`, a `:stream` suffix).
 - The portability rules (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, characters Windows forbids) are checked when saving, not when reading: imported histories may contain such names (decision 004).
 - **Limits for a whole save** ([decision 025](decisions/025-red-team-m1-rulings.md)): the folders reachable from a save's root listing may nest at most **4,096** levels below the root, and describe at most **10,000,000** entries in total, counting every path (a listing reached through two paths counts twice). A reader walking a save must stop with an error as soon as either limit is passed, and must not recurse once per folder level. A reader that compares two saves counts each of them against the limits on its own, not the two together.
 
@@ -205,7 +205,7 @@ Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
-**Shape of `.bolt/` itself** ([decision 025](decisions/025-red-team-m1-rulings.md)). A shared project can arrive with links planted inside `.bolt/`, so a reader must refuse a repository unless `.bolt/`, `store/`, `store/packs/`, `state/`, `cache/` and `tmp/` are real folders (never symbolic links or Windows junctions), and report a repository whose `store/packs/`, `state/` or `tmp/` is missing as damaged. Every file Bolt reads or writes in `.bolt/` is opened without following links and must be a regular file (never a pipe, device or folder), and reads are capped: `format` at most 4 KiB, `state/head` at most 65 bytes, `state/lock-info` and `config.toml` at most 4 KiB and 1 MiB. Clearing `tmp/` removes only Bolt's own temporary names (`tmp-` followed by 16 lowercase hex digits).
+**Shape of `.bolt/` itself** ([decision 025](decisions/025-red-team-m1-rulings.md)). A shared project can arrive with links planted inside `.bolt/`, so a reader must refuse a repository unless `.bolt/`, `store/`, `store/packs/`, `state/`, `cache/` and `tmp/` are real folders (never symbolic links, Windows junctions or any other Windows reparse point), and report a repository whose `store/packs/`, `state/` or `tmp/` is missing as damaged. Every file Bolt reads or writes in `.bolt/` is opened without following links and must be a regular file (never a pipe, device, folder or Windows reparse point), and reads are capped: `format` at most 4 KiB, `state/head` at most 65 bytes, `state/lock-info` and `config.toml` at most 4 KiB and 1 MiB. Clearing `tmp/` removes only Bolt's own temporary names (`tmp-` followed by 16 lowercase hex digits).
 
 **`format`** is UTF-8 text, one item per line:
 
@@ -296,7 +296,7 @@ Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at mos
 
 ## 13. Test vectors
 
-The first implementation generates, and the owner reviews, vectors in `tests/vectors/`:
+The first implementation generates, and the owner reviews, vectors in `crates/bolt-vcs-core/tests/vectors/`:
 - for each record type, a few hand-checkable inputs with their exact encoded bytes (hex) and their IDs;
 - plain BLAKE3 checked against the official BLAKE3 test vectors;
 - a small reference pack and a `.bolt/format` file;
@@ -311,3 +311,5 @@ Vectors are added milestone by milestone, for the records each milestone builds;
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
 - The signature format (later).
+- What a command does when it needs more objects than one pack may hold (§11; decided while planning milestone 2).
+- A limit on path length (decided with milestone 3's write-out, before format 1 freezes; decision 026).

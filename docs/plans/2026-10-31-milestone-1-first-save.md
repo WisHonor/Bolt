@@ -395,7 +395,7 @@ fn sibling_collisions() {
 
 - [ ] **Step 4: Implement `names.rs`.**
   - **`.bolt` spellings:** remove the characters macOS ignores (U+200C–U+200F, U+202A–U+202E, U+206A–U+206F, U+FEFF), cut at the first `:`, trim trailing dots and spaces, lowercase the ASCII letters, then compare with `.bolt` and `bolt~1`.
-  - **Reserved names:** take the text before the first `.`, trim trailing spaces, uppercase the ASCII letters, and compare with CON, PRN, AUX, NUL, COM0–COM9, LPT0–LPT9, COM¹, COM², COM³, LPT¹, LPT², LPT³, CONIN$ and CONOUT$, as corrected by Step 1.
+  - **Reserved names:** take the text before the first `.`, trim trailing spaces, uppercase the ASCII letters, and compare with CON, PRN, AUX, NUL, COM0–COM9, LPT0–LPT9, COM¹, COM², COM³, LPT¹, LPT², LPT³, CONIN$ and CONOUT$, as corrected by Step 1. *(Since 2026-11-01, `COM0` and `LPT0` are ordinary names, as on Microsoft's list; see security.md §6.)*
   - **Case collisions:** compare the lowercase form of each NFC-normalized name. This is an approximation; NTFS uses its own uppercase table.
   - **Normalization collisions:** names that are equal after NFC but different as written.
 
@@ -694,7 +694,7 @@ Also add a proptest, `saves_round_trip`, with random parents (distinct), message
   - `pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";`
   - `pub struct FormatInfo { pub features: BTreeSet<String> }`; `pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError>`. The first line must be `bolt-repository 1` and the second `hash blake3`; after that only `feature <name>` lines may follow, each ending in `\n`. This milestone knows no features, so any `feature` line gives `NewerFormat`; anything else malformed gives `Damaged`.
   - `pub struct Repository`:
-    - Opening: `open(root: &Path) -> Result<Repository, RepoError>`. It reads and parses `format`, opens the store and deletes leftover files in `tmp/`.
+    - Opening: `open(root: &Path) -> Result<Repository, RepoError>`. It reads and parses `format`, opens the store and deletes leftover files in `tmp/`. *(Since RT-1: `open` first checks who owns the folder and `.bolt`, and that `.bolt`'s fixed folders are real folders, with the ones it needs present; it deletes only Bolt's own temporary files, `tmp-` plus 16 hex digits.)*
     - Paths: `root(&self) -> &Path`; `tmp_dir(&self) -> &Path`; `packs_dir(&self) -> &Path`.
     - Store access: `store(&self) -> &Store`; `signatures_allowed(&self) -> bool`; `new_pack(&self) -> Result<PackWriter, RepoError>`.
     - Current state: `head(&self) -> Result<Id, RepoError>` (`state/head` must be exactly 64 lowercase hex characters and `\n`); `current(&self) -> Result<(Id, DiaryEntry), RepoError>`.
@@ -779,7 +779,7 @@ Also write:
   - `pub struct Identity { pub name: String, pub email: String }`
   - `pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigError>`. It tries these in order:
     1. the environment variables `BOLT_USER_NAME` and `BOLT_USER_EMAIL`;
-    2. `<root>/.bolt/config.toml`;
+    2. ~~`<root>/.bolt/config.toml`~~ *(dropped by decision 025, RT-9: a project's settings never say who the user is; instead the user's own `config.toml` is asked for a `[[project]]` entry for this exact folder, then for `[user]`)*;
     3. `<user config dir>/config.toml`, where the user config dir is `BOLT_CONFIG_DIR` if set, else `directories::ProjectDirs::from("", "", "bolt")`.
 
     Each file holds `[user]` with `name` and `email`.
@@ -797,7 +797,7 @@ Also write:
       - message `Start project`, a random change ID, extra `line` = `main`.
     - **Diary entry:** `Command`, command `start`, `who`, `env!("CARGO_PKG_VERSION")`, lines `{main → save}`, `OnLine("main")`.
     - **Finish:** commit, then write `.bolt/format` last with `write_atomic`.
-  - `Repository::discover(start: &Path) -> Result<Repository, RepoError>`: walks up from `start` to the first folder with `.bolt/format`; else `NotAProject`.
+  - `Repository::discover(start: &Path) -> Result<Repository, RepoError>`: walks up from `start` to the first folder with `.bolt/format`; else `NotAProject`. *(Since the red-team fixes: the search never follows a link, asks who owns the folder and `.bolt` before looking inside, and refuses a `.bolt` on the way that isn't the user's.)*
 - Produces (CLI):
   - Usage: `bolt [--json] <command>`.
   - Exit codes: 0 on success; 1 on a Bolt error; 2 on a usage error (clap's default).
@@ -850,7 +850,7 @@ Also write:
     `between_passes` runs between the two passes; production passes a no-op. If the size or modification time differs before and after, or pass 2 gets `ContentChanged`, the result is `ChangedDuringSave`.
 
 How saving works:
-- **Walking the folder:** `ignore::WalkBuilder` with `hidden(false)`, `git_ignore(false)`, `git_exclude(false)`, `git_global(false)`, `ignore(false)`, `parents(false)`, `follow_links(false)` and `add_custom_ignore_filename(".boltignore")`, plus a filter that drops `.bolt` and `.git` folders at any depth. Listings are built bottom-up, deepest folders first.
+- **Walking the folder:** `ignore::WalkBuilder` with `hidden(false)`, `git_ignore(false)`, `git_exclude(false)`, `git_global(false)`, `ignore(false)`, `parents(false)`, `follow_links(false)` and `add_custom_ignore_filename(".boltignore")`, plus a filter that drops `.bolt` and `.git` folders at any depth. Listings are built bottom-up, deepest folders first. *(Since the red-team fixes, Bolt reads each `.boltignore` itself through `safe_fs`, with the limits in storage-format.md §12, instead of `add_custom_ignore_filename`; and on Windows and macOS it skips `.git` in any letter case.)*
 - **Entry kinds:**
   - On Unix, a file is executable if it has any `x` bit. On Windows, it is executable only if the parent save had that path as executable (decision 004).
   - Symlinks are detected with `symlink_metadata` and read with `read_link`. The target must be valid UTF-8 and is stored as content.
@@ -867,7 +867,7 @@ How saving works:
   - On success it prints `Saved <short>  "<first line of message>"  (<n> files)`.
   - With nothing changed, it prints `Nothing to save: no changes since your last save (<short>).`
   - Errors list one path per line.
-  - JSON output is `{"bolt_json":1,"result":"saved","save":<save_json>,"changed_files":n}` or `{"bolt_json":1,"result":"nothing-changed"}`.
+  - JSON output is `{"bolt_json":1,"result":"saved","save":<save_json>,"changed_files":n}` or `{"bolt_json":1,"result":"nothing-changed"}`. *(Since the red-team fixes: `changed_files` is `null` when Bolt couldn't count the changes, the save being made all the same, and both documents gain `"ignored_project_identity": {"name": …, "email": …}` when a project's settings named an identity Bolt ignored, decision 025.)*
 
 - [ ] **Step 1: Edit the spec.** storage-format.md §12: `.boltignore` files work like `.gitignore` files: one at the project root, and optionally more in subfolders.
 
@@ -903,7 +903,7 @@ How saving works:
 **Interfaces:**
 - Consumes: `Repository`, `Store`, `Save`, `diff_saves`, `FileChange`.
 - Produces:
-  - `pub fn line_history(repo: &Repository) -> Result<Vec<(Id, Save)>, RepoError>`: follows first parents from the current line's save, newest first.
+  - `pub fn line_history(repo: &Repository) -> Result<Vec<(Id, Save)>, RepoError>`: follows first parents from the current line's save, newest first. *(Replaced in the red-team fixes: history is read one save at a time and never held whole, and short change IDs come from a pass that keeps only IDs, decision 028; see `history::for_each_on_line`.)*
   - `pub fn short_change_ids(saves: &[(Id, Save)]) -> HashMap<Id, String>`: the shortest unique prefix among these saves, at least 4 letters.
   - `pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError>`: tried in this order:
     1. a line name gives that line's save;

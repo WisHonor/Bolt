@@ -1,11 +1,11 @@
 # Red-team report: milestone 1 fixes (session 2, decision 024, 2026-11-02)
 
-Proof tests: `crates/bolt-vcs/tests/redteam2.rs`. 9 Linux tests, all fail as claimed in the no-network sandbox; 1 Windows/macOS test, UNVERIFIED. Each asserts the SAFE behaviour.
+Proof tests: `crates/bolt-vcs/tests/redteam2.rs`. 9 Linux tests, all fail as claimed in the no-network sandbox; 1 Windows/macOS test, not run in the session; on 2026-11-02 it failed as claimed on GitHub's Windows and macOS machines, run on the unfixed code from a throwaway branch (commit 34ce08e). That run also showed that the two RT2-1 tests and the RT2-6 test can't fail on macOS, which doesn't enforce their `ulimit -v` memory cap; their proof is the Linux run. Each asserts the SAFE behaviour.
 Scripts: `redteam/attacks2/`. Every command below runs in the sandbox (`bash redteam/sandbox.sh run …`, working dir `/work` = this copy), except `planted-root.sh`, which drives the container from the host through `docker exec` (root's steps use `-u root`).
-Run all tests: `cargo test -p bolt-vcs --test redteam2`. In the sandbox, on the unfixed code, it ended `test result: FAILED. 0 passed; 9 failed; 1 ignored` (full output: `redteam/attacks2/redteam2-test-output.txt`; the ignored one is a planting helper for the scripts).
+Run all tests: `cargo test -p bolt-vcs --test redteam2`. In the sandbox, on the unfixed code, it ended `test result: FAILED. 0 passed; 9 failed; 1 ignored` (full output: `redteam/attacks2/redteam2-test-output.txt`; the ignored one is a planting helper for the scripts). The line numbers in that file (`redteam2.rs:229` and so on) are those of the attacker's copy; the test file was formatted and marked ignored when it was added to the repository (369c891) and has changed since, so only the test names still match.
 Release timings come from `/tmp/t/release/bolt` (`cargo build --release -p bolt-vcs`). The sandbox's 4 GB memory limit stands in for "the machine ran out of memory".
 
-Counts: Critical 0, High 3, Medium 4 (one UNVERIFIED), Low 2.
+Counts: Critical 0, High 3, Medium 4 (RT2-9 confirmed after the session, on Windows and macOS), Low 2.
 
 The fixes for RT-1–RT-11 held: no `.bolt` link, special file, oversized file, planted parent repository or TOML trick got through (see "Held up"). The findings below are in code the fixes did not touch, or in what the new `.boltignore` reader keeps in memory.
 
@@ -77,7 +77,7 @@ The fixes for RT-1–RT-11 held: no `.bolt` link, special file, oversized file, 
 
 - **RT2-6 Medium (T11/T7: memory in the new `.boltignore` reader).**
   - **What.** The scan keeps the compiled rules of every folder on its way down (`IgnoreRules::stack`). One 1 MiB `.boltignore` of character-class patterns compiles to ~17 MB retained (145 MB peak while compiling). Nested ones add up, and 4,096 levels are allowed (~70 GB). The victim only runs `bolt save` in a project they unpacked.
-  - **Proof (test).** `rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save`: 100 nested folders, each with a 1 MiB `.boltignore`, 1.5 GB cap. Result: `code: None … stderr: "memory allocation of 8388608 bytes failed"` (abort).
+  - **Proof (test).** `rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save`: 100 nested folders, each with a 1 MiB `.boltignore`, 1.5 GB cap. Result: `code: None … stderr: "memory allocation of 8388608 bytes failed"` (abort). *(After the fix, this test expects a clean refusal that names `d/.boltignore`: decision 028's 1 MiB limit along a path makes this layout's save fail by design. It still fails on the unfixed code.)*
   - **Proof (script).** `sh redteam/attacks2/boltignore-nested.sh`, then `DEPTHS=256 sh …`:
     ```
     depth  1 (13 KB as .tar.gz): save x: exit 0, 0.5 s, peak 145 MB
@@ -103,9 +103,9 @@ The fixes for RT-1–RT-11 held: no `.bolt` link, special file, oversized file, 
     - After a commit, never return an error that claims nothing changed; print "Saved …" and a separate warning.
     - Map zstd's allocation errors to "not enough memory", not to damage.
 
-- **RT2-9 Medium, UNVERIFIED (T12, new: `.boltignore` is case-sensitive where Git is not).**
+- **RT2-9 Medium, confirmed after the session (T12, new: `.boltignore` is case-sensitive where Git is not).**
   - **What.** On Windows and macOS, Git sets `core.ignorecase=true`, and `.gitignore` patterns then match case-insensitively (`*.env` ignores `PROD.ENV`, `secrets/` ignores `Secrets/`). `boltignore_rules` builds a `GitignoreBuilder` without `.case_insensitive(true)`, so Bolt stores those files: secrets the user meant to keep out.
-  - **Proof.** Test `win_rt2_9_boltignore_ignores_case_like_git_on_case_insensitive_systems` (`#[cfg(any(windows, target_os = "macos"))]`, not run here). It expects only `.boltignore` and `readme.txt` saved; on those systems Bolt should also save `PROD.ENV` and `Secrets/key.pem`, which fails it.
+  - **Proof.** Test `win_rt2_9_boltignore_ignores_case_like_git_on_case_insensitive_systems` (`#[cfg(any(windows, target_os = "macos"))]`, not run in the sandbox; it failed as claimed on GitHub's Windows and macOS machines on 2026-11-02, commit 34ce08e). It expects only `.boltignore` and `readme.txt` saved; on those systems Bolt should also save `PROD.ENV` and `Secrets/key.pem`, which fails it.
   - **Fix.** On case-insensitive systems, or always on Windows and macOS, build the matcher case-insensitively, and spec it in storage-format.md §12.
 
 - **RT2-3 Low (T21: invisible format characters pass `text::escape`).**
