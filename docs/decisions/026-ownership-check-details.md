@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (refines [decision 025](025-red-team-m1-rulings.md))
+- **Refined by:** [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too)
 
 ## Context
 

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md))
-- **Refined by:** [decision 026](026-ownership-check-details.md) (details of the ownership check, and limits left for later)
+- **Refined by:** [decision 026](026-ownership-check-details.md) (details of the ownership check, and limits left for later); [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too)
 
 ## Context
 
