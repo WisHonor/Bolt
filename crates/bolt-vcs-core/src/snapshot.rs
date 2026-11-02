@@ -978,7 +978,7 @@ mod tests {
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
-    use crate::test_support::plant_damaged_copies;
+    use crate::test_support::{commit_records, plant_damaged_copies, sample_records};
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1261,6 +1261,19 @@ mod tests {
         })
         .unwrap();
         assert_eq!(line[..2], [second, saved[0]]);
+    }
+
+    #[test]
+    fn a_save_keeps_the_records_of_the_entry_before_it() {
+        let (dir, mut repo) = project();
+        let (tags, servers) = sample_records();
+        let (t, r) = commit_records(&mut repo, &tags, &servers);
+        write(dir.path(), "a.txt", b"a");
+        saved_root(save_now(&mut repo).unwrap());
+        let after = repo.current().unwrap().1.state;
+        assert_eq!((after.tags, after.server_lines), (Some(t), Some(r)));
+        assert_eq!(repo.tag_list(&after).unwrap(), tags);
+        assert_eq!(repo.server_lines(&after).unwrap(), servers);
     }
 
     /// Bit rot in the only copy of an object: its first stored byte is flipped.

@@ -44,6 +44,8 @@ pub enum Flavor {
     ProjectLink,
     Conflict,
     DiaryEntry,
+    TagList,
+    ServerLines,
 }
 
 impl Flavor {
@@ -56,6 +58,8 @@ impl Flavor {
             Flavor::ProjectLink => "bolt-vcs 2026-10-31 project-link v1",
             Flavor::Conflict => "bolt-vcs 2026-10-31 conflict v1",
             Flavor::DiaryEntry => "bolt-vcs 2026-10-31 diary-entry v1",
+            Flavor::TagList => "bolt-vcs 2026-11-02 tag-list v1",
+            Flavor::ServerLines => "bolt-vcs 2026-11-02 server-lines v1",
         }
     }
 }
@@ -174,6 +178,11 @@ mod tests {
             Flavor::DiaryEntry.context(),
             "bolt-vcs 2026-10-31 diary-entry v1"
         );
+        assert_eq!(Flavor::TagList.context(), "bolt-vcs 2026-11-02 tag-list v1");
+        assert_eq!(
+            Flavor::ServerLines.context(),
+            "bolt-vcs 2026-11-02 server-lines v1"
+        );
     }
 
     #[test]
@@ -184,6 +193,8 @@ mod tests {
             hash_record(Flavor::FolderListing, b),
             hash_record(Flavor::Save, b),
             hash_record(Flavor::DiaryEntry, b),
+            hash_record(Flavor::TagList, b),
+            hash_record(Flavor::ServerLines, b),
         ];
         for i in 0..all.len() {
             for j in i + 1..all.len() {

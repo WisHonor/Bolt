@@ -51,6 +51,8 @@ pub enum ObjectKind {
     Conflict = 19,
     DiaryEntry = 20,
     ProjectLink = 21,
+    TagList = 22,
+    ServerLines = 23,
 }
 
 impl ObjectKind {
@@ -64,6 +66,8 @@ impl ObjectKind {
             19 => ObjectKind::Conflict,
             20 => ObjectKind::DiaryEntry,
             21 => ObjectKind::ProjectLink,
+            22 => ObjectKind::TagList,
+            23 => ObjectKind::ServerLines,
             _ => return None,
         })
     }
@@ -79,6 +83,8 @@ impl ObjectKind {
             ObjectKind::Conflict => Flavor::Conflict,
             ObjectKind::DiaryEntry => Flavor::DiaryEntry,
             ObjectKind::ProjectLink => Flavor::ProjectLink,
+            ObjectKind::TagList => Flavor::TagList,
+            ObjectKind::ServerLines => Flavor::ServerLines,
         })
     }
 
@@ -891,6 +897,21 @@ mod tests {
             assert_eq!(r.find(&e.id).unwrap().offset, e.offset);
         }
         assert!(is_empty_dir(&tmp));
+    }
+
+    #[test]
+    fn tag_lists_and_server_lines_are_kinds_of_their_own() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let tags = w.add_record(ObjectKind::TagList, b"tags").unwrap();
+        let servers = w.add_record(ObjectKind::ServerLines, b"servers").unwrap();
+        assert_eq!(tags, hash_record(Flavor::TagList, b"tags"));
+        assert_eq!(servers, hash_record(Flavor::ServerLines, b"servers"));
+        let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
+        let (tags, servers) = (*r.find(&tags).unwrap(), *r.find(&servers).unwrap());
+        assert_eq!((tags.kind as u8, servers.kind as u8), (22, 23));
+        assert_eq!(r.read_record(&tags).unwrap(), b"tags");
+        assert_eq!(r.read_record(&servers).unwrap(), b"servers");
     }
 
     #[test]

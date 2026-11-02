@@ -37,6 +37,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "decode_tag_list"
+path = "fuzz_targets/decode_tag_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_server_lines"
+path = "fuzz_targets/decode_server_lines.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "open_pack"
 path = "fuzz_targets/open_pack.rs"
 test = false

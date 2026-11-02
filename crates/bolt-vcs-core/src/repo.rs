@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bolt_platform::Owner;
 
 use crate::config::{self, ConfigError};
-use crate::diary::{Action, DiaryEntry, Position, State};
+use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
@@ -530,10 +530,10 @@ impl Repository {
             bolt_version: env!("CARGO_PKG_VERSION").into(),
             state: State {
                 lines: BTreeMap::from([("main".to_owned(), save)]),
-                tags: BTreeMap::new(),
+                tags: None,
                 position: Position::OnLine("main".into()),
                 shelves: vec![],
-                remotes: BTreeMap::new(),
+                server_lines: None,
             },
             safety_copies: vec![],
         };
@@ -676,6 +676,26 @@ impl Repository {
         Ok((id, DiaryEntry::decode(&bytes)?))
     }
 
+    /// The tags of `state`; empty if it has none.
+    pub fn tag_list(&self, state: &State) -> Result<TagList, RepoError> {
+        let Some(id) = state.tags else {
+            return Ok(TagList::default());
+        };
+        Ok(TagList::decode(
+            &self.store.read_record(&id, ObjectKind::TagList)?,
+        )?)
+    }
+
+    /// The server lines of `state`; empty if it has none.
+    pub fn server_lines(&self, state: &State) -> Result<ServerLines, RepoError> {
+        let Some(id) = state.server_lines else {
+            return Ok(ServerLines::default());
+        };
+        Ok(ServerLines::decode(
+            &self.store.read_record(&id, ObjectKind::ServerLines)?,
+        )?)
+    }
+
     /// Takes the change lock, waiting if another command holds it. `on_wait` gets that command's
     /// lock info before waiting. `command` must already be redacted: it goes into `state/lock-info`
     /// as is.
@@ -745,8 +765,10 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diary::{Action, Position, State};
+    use crate::diary::{Action, Position, ServerLines, State, TagList};
+    use crate::pack::PackReader;
     use crate::save::Person;
+    use crate::test_support::{commit_records, sample_records};
     use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::thread;
@@ -834,10 +856,10 @@ mod tests {
             bolt_version: "0.1.0".into(),
             state: State {
                 lines: BTreeMap::from([("main".to_owned(), Id([save; 32]))]),
-                tags: BTreeMap::new(),
+                tags: None,
                 position: Position::OnLine("main".into()),
                 shelves: vec![],
-                remotes: BTreeMap::new(),
+                server_lines: None,
             },
             safety_copies: vec![],
         }
@@ -872,6 +894,76 @@ mod tests {
         assert!(matches!(
             Repository::discover(outside.path()),
             Err(RepoError::NotAProject)
+        ));
+    }
+
+    #[test]
+    fn start_writes_neither_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path(), &entry(0).who).unwrap();
+        let state = repo.current().unwrap().1.state;
+        assert!(state.tags.is_none() && state.server_lines.is_none());
+        assert!(repo.tag_list(&state).unwrap().tags.is_empty());
+        assert!(repo.server_lines(&state).unwrap().servers.is_empty());
+        for pack in std::fs::read_dir(repo.packs_dir()).unwrap() {
+            for e in PackReader::open(&pack.unwrap().path()).unwrap().entries() {
+                assert!(!matches!(
+                    e.kind,
+                    ObjectKind::TagList | ObjectKind::ServerLines
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn the_records_a_state_points_to_are_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repo = Repository::init(dir.path(), &entry(0).who).unwrap();
+        let (tags, servers) = sample_records();
+        let (t, r) = commit_records(&mut repo, &tags, &servers);
+        let reopened = Repository::open(dir.path()).unwrap();
+        for repo in [&repo, &reopened] {
+            let state = repo.current().unwrap().1.state;
+            assert_eq!((state.tags, state.server_lines), (Some(t), Some(r)));
+            assert_eq!(repo.tag_list(&state).unwrap(), tags);
+            assert_eq!(repo.server_lines(&state).unwrap(), servers);
+        }
+    }
+
+    #[test]
+    fn a_pointer_that_leads_nowhere_good_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repo = Repository::init(dir.path(), &entry(0).who).unwrap();
+        let (tags, servers) = sample_records();
+        let (t, r) = commit_records(&mut repo, &tags, &servers);
+        let mut state = repo.current().unwrap().1.state;
+        // Each pointer at the other record.
+        (state.tags, state.server_lines) = (Some(r), Some(t));
+        assert!(matches!(
+            repo.tag_list(&state),
+            Err(RepoError::Store(StoreError::WrongKind { .. }))
+        ));
+        assert!(matches!(
+            repo.server_lines(&state),
+            Err(RepoError::Store(StoreError::WrongKind { .. }))
+        ));
+        // A record that was never stored.
+        (state.tags, state.server_lines) = (Some(Id([9; 32])), Some(Id([9; 32])));
+        assert!(matches!(
+            repo.tag_list(&state),
+            Err(RepoError::Store(StoreError::Missing(_)))
+        ));
+        assert!(matches!(
+            repo.server_lines(&state),
+            Err(RepoError::Store(StoreError::Missing(_)))
+        ));
+        // Records with the right fingerprints that break the format: neither may be empty.
+        commit_records(&mut repo, &TagList::default(), &ServerLines::default());
+        let state = repo.current().unwrap().1.state;
+        assert!(matches!(repo.tag_list(&state), Err(RepoError::Decode(_))));
+        assert!(matches!(
+            repo.server_lines(&state),
+            Err(RepoError::Decode(_))
         ));
     }
 

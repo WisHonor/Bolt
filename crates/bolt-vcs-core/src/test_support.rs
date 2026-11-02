@@ -1,7 +1,56 @@
-//! Helpers shared by unit tests: hex, making links, hostile text and damaged packs.
+//! Helpers shared by unit tests: hex, making links, hostile text, damaged packs and the shared
+//! tag and server-line records.
 
+use crate::diary::{ServerLines, Tag, TagList};
+use crate::id::Id;
 use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackWriter};
+use crate::repo::Repository;
+use std::collections::BTreeMap;
 use std::path::Path;
+
+/// One tag and one server line, both at a made-up save.
+pub(crate) fn sample_records() -> (TagList, ServerLines) {
+    let save = Id([0x5a; 32]);
+    let tag = Tag {
+        save,
+        message: "First playable".into(),
+        git_tags: vec![],
+    };
+    let tags = TagList {
+        tags: BTreeMap::from([("v1".to_owned(), tag)]),
+    };
+    let servers = ServerLines {
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([("main".to_owned(), save)]),
+        )]),
+    };
+    (tags, servers)
+}
+
+/// Commits an entry like the current one that points at `tags` and `servers`, stored with it.
+/// Returns the IDs of the two records.
+pub(crate) fn commit_records(
+    repo: &mut Repository,
+    tags: &TagList,
+    servers: &ServerLines,
+) -> (Id, Id) {
+    let lock = repo.lock_for_change("tag", &mut |_| {}).expect("the lock");
+    let (head, mut entry) = repo.current().expect("a current entry");
+    let mut pack = repo.new_pack().expect("a pack");
+    let tags = pack
+        .add_record(ObjectKind::TagList, &tags.encode())
+        .expect("store the tag list");
+    let servers = pack
+        .add_record(ObjectKind::ServerLines, &servers.encode())
+        .expect("store the server lines");
+    entry.parent = Some(head);
+    entry.command = "tag".into();
+    entry.state.tags = Some(tags);
+    entry.state.server_lines = Some(servers);
+    repo.commit(&lock, pack, &entry).expect("commit");
+    (tags, servers)
+}
 
 /// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte
 /// flipped so it fails its fingerprint. The name sorts before every pack Bolt names.

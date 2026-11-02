@@ -1,4 +1,5 @@
-//! Diary entries (docs/storage-format.md section 9): one per changing command.
+//! Diary entries (docs/storage-format.md section 9): one per changing command, and the tag list
+//! and server lines that entries share.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,8 +15,10 @@ pub const MAX_VERSION_BYTES: usize = 256;
 pub const MAX_LINES: u64 = 100_000;
 pub const MAX_TAGS: u64 = 100_000;
 pub const MAX_SHELVES: u64 = 10_000;
-pub const MAX_REMOTES: u64 = 64;
+pub const MAX_SERVERS: u64 = 64;
 pub const MAX_SAFETY_COPIES: u64 = 1_000_000;
+pub const MAX_GIT_TAG_OBJECTS: u64 = 16;
+pub const MAX_GIT_TAG_OBJECT_BYTES: usize = 1 << 20;
 
 /// What kind of command an entry records.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,17 +41,36 @@ pub enum Position {
 pub struct Tag {
     pub save: Id,
     pub message: String,
+    /// The original bytes of each Git tag object from the tag's ref to the commit, so a Git export
+    /// can recreate them. Empty for a tag made in Bolt or a lightweight Git tag.
+    pub git_tags: Vec<Vec<u8>>,
 }
 
-/// The complete repository state after a command.
+/// Every tag by name. A stored list is never empty: an entry without tags has no list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagList {
+    pub tags: BTreeMap<String, Tag>,
+}
+
+/// Each server's lines as last seen, by server name. A stored list is never empty, and no server
+/// in it is without lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerLines {
+    pub servers: BTreeMap<String, BTreeMap<String, Id>>,
+}
+
+/// The complete repository state after a command. Tags and server lines change rarely and can be
+/// big, so entries share them as records of their own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub lines: BTreeMap<String, Id>,
-    pub tags: BTreeMap<String, Tag>,
+    /// The tag list, if there are tags.
+    pub tags: Option<Id>,
     pub position: Position,
     /// Newest first; labels are unique.
     pub shelves: Vec<(String, Id)>,
-    pub remotes: BTreeMap<String, BTreeMap<String, Id>>,
+    /// The server-lines list, if there are servers.
+    pub server_lines: Option<Id>,
 }
 
 /// A file Bolt kept before overwriting it, so the command can be undone.
@@ -109,23 +131,48 @@ fn write_lines(w: &mut Writer, lines: &BTreeMap<String, Id>) {
     }
 }
 
+/// Reads the next name of a sorted list of line names: valid, and not the same as an earlier one
+/// but for letter case.
+fn read_line_name(
+    r: &mut Reader,
+    prev: &mut Option<String>,
+    folded: &mut BTreeSet<String>,
+    field: &'static str,
+) -> Result<String, DecodeError> {
+    let name = read_sorted_name(r, prev, field)?;
+    validate_line_name(&name)?;
+    if !folded.insert(name.to_lowercase()) {
+        return Err(DecodeError::Invalid("two names differ only by letter case"));
+    }
+    Ok(name)
+}
+
 /// Reads a sorted list of valid, case-insensitively unique line names.
 fn read_lines(r: &mut Reader) -> Result<BTreeMap<String, Id>, DecodeError> {
     let n = r.count(MAX_LINES, "line count")?;
     let mut lines = BTreeMap::new();
     let mut folded = BTreeSet::new();
-    let mut prev: Option<String> = None;
+    let mut prev = None;
     for _ in 0..n {
-        let name = read_sorted_name(r, &mut prev, "line name")?;
-        validate_line_name(&name)?;
-        if !folded.insert(name.to_lowercase()) {
-            return Err(DecodeError::Invalid(
-                "two line names differ only by letter case",
-            ));
-        }
+        let name = read_line_name(r, &mut prev, &mut folded, "line name")?;
         lines.insert(name, r.id()?);
     }
     Ok(lines)
+}
+
+fn write_optional_id(w: &mut Writer, id: Option<Id>) {
+    w.bool(id.is_some());
+    if let Some(id) = id {
+        w.id(&id);
+    }
+}
+
+fn read_optional_id(r: &mut Reader) -> Result<Option<Id>, DecodeError> {
+    if r.bool()? {
+        Ok(Some(r.id()?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Reads a name that must sort strictly after `prev`.
@@ -170,12 +217,7 @@ impl DiaryEntry {
         w.string(&self.bolt_version);
         let s = &self.state;
         write_lines(&mut w, &s.lines);
-        w.varint(s.tags.len() as u64);
-        for (name, tag) in &s.tags {
-            w.string(name);
-            w.id(&tag.save);
-            w.string(&tag.message);
-        }
+        write_optional_id(&mut w, s.tags);
         match &s.position {
             Position::OnLine(line) => {
                 w.u8(1);
@@ -191,11 +233,7 @@ impl DiaryEntry {
             w.string(label);
             w.id(save);
         }
-        w.varint(s.remotes.len() as u64);
-        for (name, lines) in &s.remotes {
-            w.string(name);
-            write_lines(&mut w, lines);
-        }
+        write_optional_id(&mut w, s.server_lines);
         let mut copies: Vec<&SafetyCopy> = self.safety_copies.iter().collect();
         copies.sort_by(|a, b| a.path.cmp(&b.path));
         w.varint(copies.len() as u64);
@@ -227,15 +265,7 @@ impl DiaryEntry {
         let who = read_person(&mut r)?;
         let bolt_version = r.string(MAX_VERSION_BYTES, "Bolt version")?.to_owned();
         let lines = read_lines(&mut r)?;
-        let n = r.count(MAX_TAGS, "tag count")?;
-        let mut tags = BTreeMap::new();
-        let mut prev = None;
-        for _ in 0..n {
-            let name = read_sorted_name(&mut r, &mut prev, "tag name")?;
-            let save = r.id()?;
-            let message = r.string(MAX_TAG_MESSAGE_BYTES, "tag message")?.to_owned();
-            tags.insert(name, Tag { save, message });
-        }
+        let tags = read_optional_id(&mut r)?;
         let position = match r.u8()? {
             1 => {
                 let line = r.string(MAX_NAME_BYTES, "line name")?.to_owned();
@@ -257,13 +287,7 @@ impl DiaryEntry {
             }
             shelves.push((label, r.id()?));
         }
-        let n = r.count(MAX_REMOTES, "remote count")?;
-        let mut remotes = BTreeMap::new();
-        let mut prev = None;
-        for _ in 0..n {
-            let name = read_sorted_name(&mut r, &mut prev, "remote name")?;
-            remotes.insert(name, read_lines(&mut r)?);
-        }
+        let server_lines = read_optional_id(&mut r)?;
         let n = r.count(MAX_SAFETY_COPIES, "safety-copy count")?;
         let mut safety_copies: Vec<SafetyCopy> = Vec::new();
         for _ in 0..n {
@@ -296,7 +320,7 @@ impl DiaryEntry {
                 tags,
                 position,
                 shelves,
-                remotes,
+                server_lines,
             },
             safety_copies,
         })
@@ -305,6 +329,110 @@ impl DiaryEntry {
     #[must_use]
     pub fn id(&self) -> Id {
         hash_record(Flavor::DiaryEntry, &self.encode())
+    }
+}
+
+impl TagList {
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1);
+        w.varint(self.tags.len() as u64);
+        for (name, tag) in &self.tags {
+            w.string(name);
+            w.id(&tag.save);
+            w.string(&tag.message);
+            w.varint(tag.git_tags.len() as u64);
+            for object in &tag.git_tags {
+                w.bytes(object);
+            }
+        }
+        w.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<TagList, DecodeError> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err(DecodeError::Invalid("unknown tag list version"));
+        }
+        let n = r.count(MAX_TAGS, "tag count")?;
+        if n == 0 {
+            return Err(DecodeError::Invalid("a tag list cannot be empty"));
+        }
+        let mut tags = BTreeMap::new();
+        let mut prev = None;
+        for _ in 0..n {
+            let name = read_sorted_name(&mut r, &mut prev, "tag name")?;
+            if name.is_empty() {
+                return Err(DecodeError::Invalid("a tag name cannot be empty"));
+            }
+            let save = r.id()?;
+            let message = r.string(MAX_TAG_MESSAGE_BYTES, "tag message")?.to_owned();
+            let objects = r.count(MAX_GIT_TAG_OBJECTS, "Git tag object count")?;
+            let mut git_tags = Vec::new();
+            for _ in 0..objects {
+                let object = r.bytes(MAX_GIT_TAG_OBJECT_BYTES, "Git tag object")?;
+                git_tags.push(object.to_vec());
+            }
+            tags.insert(
+                name,
+                Tag {
+                    save,
+                    message,
+                    git_tags,
+                },
+            );
+        }
+        r.finish()?;
+        Ok(TagList { tags })
+    }
+
+    #[must_use]
+    pub fn id(&self) -> Id {
+        hash_record(Flavor::TagList, &self.encode())
+    }
+}
+
+impl ServerLines {
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1);
+        w.varint(self.servers.len() as u64);
+        for (name, lines) in &self.servers {
+            w.string(name);
+            write_lines(&mut w, lines);
+        }
+        w.into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<ServerLines, DecodeError> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err(DecodeError::Invalid("unknown server lines version"));
+        }
+        let n = r.count(MAX_SERVERS, "server count")?;
+        if n == 0 {
+            return Err(DecodeError::Invalid("a server-lines list cannot be empty"));
+        }
+        let mut servers = BTreeMap::new();
+        let mut folded = BTreeSet::new();
+        let mut prev = None;
+        for _ in 0..n {
+            let name = read_line_name(&mut r, &mut prev, &mut folded, "server name")?;
+            let lines = read_lines(&mut r)?;
+            if lines.is_empty() {
+                return Err(DecodeError::Invalid("a server cannot be without lines"));
+            }
+            servers.insert(name, lines);
+        }
+        r.finish()?;
+        Ok(ServerLines { servers })
+    }
+
+    #[must_use]
+    pub fn id(&self) -> Id {
+        hash_record(Flavor::ServerLines, &self.encode())
     }
 }
 
@@ -332,37 +460,72 @@ mod tests {
             bolt_version: "0.1.0".into(),
             state: State {
                 lines: BTreeMap::from([("main".to_owned(), Id([0; 32]))]),
-                tags: BTreeMap::new(),
+                tags: None,
                 position: Position::OnLine("main".into()),
                 shelves: vec![],
-                remotes: BTreeMap::new(),
+                server_lines: None,
             },
             safety_copies: vec![],
         }
     }
 
+    /// `person()` as written: name, email, time and zone.
+    fn person_hex() -> String {
+        format!("0141{}{}{}", "03614062", "00".repeat(8), "0000")
+    }
+
     #[test]
     fn minimal_entry_bytes() {
-        let person = format!("0141{}{}{}", "03614062", "00".repeat(8), "0000");
         let expected = [
             "01",           // version
             "00",           // no parent
             "01",           // action: command
             "057374617274", // "start"
-            &person,
+            &person_hex(),
             "05302e312e30", // "0.1.0"
             "01046d61696e", // one line: "main"
             &"00".repeat(32),
             "00",           // no tags
             "01046d61696e", // on line "main"
             "00",           // no shelves
-            "00",           // no remotes
+            "00",           // no server lines
             "00",           // no safety copies
         ]
         .concat();
         let bytes = minimal().encode();
         assert_eq!(hex(&bytes), expected);
         assert_eq!(DiaryEntry::decode(&bytes).unwrap(), minimal());
+    }
+
+    #[test]
+    fn the_shared_records_are_a_flag_and_an_id() {
+        let mut e = minimal();
+        e.state.tags = Some(Id([0x11; 32]));
+        e.state.shelves = vec![("s".into(), Id([0x33; 32]))];
+        e.state.server_lines = Some(Id([0x22; 32]));
+        let expected = [
+            "01",             // version
+            "00",             // no parent
+            "01",             // action: command
+            "057374617274",   // "start"
+            &person_hex(),    // who and when
+            "05302e312e30",   // "0.1.0"
+            "01046d61696e",   // one line: "main"
+            &"00".repeat(32), // its save
+            "01",             // tags: the tag list's ID follows
+            &"11".repeat(32), // the tag list
+            "01046d61696e",   // on line "main"
+            "01",             // one shelf
+            "0173",           // "s"
+            &"33".repeat(32), // its save
+            "01",             // server lines: the list's ID follows
+            &"22".repeat(32), // the server-lines list
+            "00",             // no safety copies
+        ]
+        .concat();
+        let bytes = e.encode();
+        assert_eq!(hex(&bytes), expected);
+        assert_eq!(DiaryEntry::decode(&bytes).unwrap(), e);
     }
 
     #[test]
@@ -392,6 +555,17 @@ mod tests {
             DiaryEntry::decode(&bytes),
             Err(DecodeError::LimitExceeded { .. })
         ));
+        // A has-tags byte and a has-server-lines byte of 2: the 10th and the 2nd from the end.
+        for from_end in [10, 2] {
+            let mut bytes = good.clone();
+            let at = bytes.len() - from_end;
+            bytes[at] = 2;
+            assert_eq!(
+                DiaryEntry::decode(&bytes),
+                Err(DecodeError::InvalidBool(2)),
+                "{from_end}"
+            );
+        }
         // Trailing bytes.
         let mut bytes = good;
         bytes.push(0);
@@ -444,22 +618,303 @@ mod tests {
         assert!(DiaryEntry::decode(&bad).is_err());
     }
 
+    /// A tag list written by hand, so that it can break rules a `BTreeMap` keeps.
+    fn raw_tag_list(tags: &[(&str, &str, Vec<Vec<u8>>)]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1);
+        w.varint(tags.len() as u64);
+        for (name, message, git_tags) in tags {
+            w.string(name);
+            w.id(&Id([1; 32]));
+            w.string(message);
+            w.varint(git_tags.len() as u64);
+            for object in git_tags {
+                w.bytes(object);
+            }
+        }
+        w.into_bytes()
+    }
+
+    /// A tag with no message and no Git tag objects.
+    fn lightweight(name: &str) -> (&str, &str, Vec<Vec<u8>>) {
+        (name, "", vec![])
+    }
+
+    /// A server-lines list written by hand; every line points at the same save.
+    fn raw_server_lines(servers: &[(&str, Vec<&str>)]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(1);
+        w.varint(servers.len() as u64);
+        for (name, lines) in servers {
+            w.string(name);
+            w.varint(lines.len() as u64);
+            for line in lines {
+                w.string(line);
+                w.id(&Id([2; 32]));
+            }
+        }
+        w.into_bytes()
+    }
+
+    #[test]
+    fn tag_list_bytes() {
+        let tag = |fill, message: &str, git_tags| Tag {
+            save: Id([fill; 32]),
+            message: message.into(),
+            git_tags,
+        };
+        let list = TagList {
+            tags: BTreeMap::from([
+                ("v1".to_owned(), tag(0x11, "", vec![])),
+                (
+                    "v2".to_owned(),
+                    tag(0x22, "ok", vec![b"tag".to_vec(), vec![]]),
+                ),
+            ]),
+        };
+        let expected = [
+            "01",             // version
+            "02",             // two tags
+            "027631",         // "v1"
+            &"11".repeat(32), // its save
+            "00",             // no message
+            "00",             // no Git tag objects
+            "027632",         // "v2"
+            &"22".repeat(32), // its save
+            "026f6b",         // "ok"
+            "02",             // two Git tag objects
+            "03746167",       // "tag"
+            "00",             // and an empty one
+        ]
+        .concat();
+        let bytes = list.encode();
+        assert_eq!(hex(&bytes), expected);
+        assert_eq!(TagList::decode(&bytes).unwrap(), list);
+    }
+
+    #[test]
+    fn server_lines_bytes() {
+        let list = ServerLines {
+            servers: BTreeMap::from([(
+                "origin".to_owned(),
+                BTreeMap::from([
+                    ("dev".to_owned(), Id([0x11; 32])),
+                    ("main".to_owned(), Id([0x22; 32])),
+                ]),
+            )]),
+        };
+        let expected = [
+            "01",             // version
+            "01",             // one server
+            "066f726967696e", // "origin"
+            "02",             // two lines
+            "03646576",       // "dev"
+            &"11".repeat(32), // its save
+            "046d61696e",     // "main"
+            &"22".repeat(32), // its save
+        ]
+        .concat();
+        let bytes = list.encode();
+        assert_eq!(hex(&bytes), expected);
+        assert_eq!(ServerLines::decode(&bytes).unwrap(), list);
+    }
+
+    #[test]
+    fn tag_list_rejections() {
+        let mut other_version = raw_tag_list(&[lightweight("a")]);
+        other_version[0] = 2;
+        let mut extra_byte = raw_tag_list(&[lightweight("a")]);
+        extra_byte.push(0);
+        let long_message = "m".repeat(MAX_TAG_MESSAGE_BYTES + 1);
+        let bad = [
+            ("no tags", raw_tag_list(&[])),
+            (
+                "tags out of order",
+                raw_tag_list(&[lightweight("b"), lightweight("a")]),
+            ),
+            (
+                "a tag twice",
+                raw_tag_list(&[lightweight("a"), lightweight("a")]),
+            ),
+            ("an empty name", raw_tag_list(&[lightweight("")])),
+            (
+                "a name of 256 bytes",
+                raw_tag_list(&[lightweight(&"a".repeat(256))]),
+            ),
+            (
+                "a message over 64 KiB",
+                raw_tag_list(&[("a", &long_message, vec![])]),
+            ),
+            (
+                "17 Git tag objects",
+                raw_tag_list(&[("a", "", vec![vec![]; 17])]),
+            ),
+            (
+                "a Git tag object over 1 MiB",
+                raw_tag_list(&[("a", "", vec![vec![0; MAX_GIT_TAG_OBJECT_BYTES + 1]])]),
+            ),
+            ("another version", other_version),
+            ("a byte after the list", extra_byte),
+        ];
+        for (what, bytes) in bad {
+            assert!(TagList::decode(&bytes).is_err(), "{what}");
+        }
+        // Just inside each limit, the same lists are fine.
+        let message = "m".repeat(MAX_TAG_MESSAGE_BYTES);
+        let good = [
+            raw_tag_list(&[lightweight("a"), lightweight("b")]),
+            raw_tag_list(&[lightweight(&"a".repeat(255))]),
+            raw_tag_list(&[("a", &message, vec![])]),
+            raw_tag_list(&[("a", "", vec![vec![]; 16])]),
+            raw_tag_list(&[("a", "", vec![vec![0; MAX_GIT_TAG_OBJECT_BYTES]])]),
+        ];
+        for bytes in good {
+            TagList::decode(&bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_tag_list_holds_at_most_100000_tags() {
+        let list = |count: u32| {
+            let names: Vec<String> = (0..count).map(|i| format!("{i:06}")).collect();
+            raw_tag_list(&names.iter().map(|n| lightweight(n)).collect::<Vec<_>>())
+        };
+        assert_eq!(TagList::decode(&list(100_000)).unwrap().tags.len(), 100_000);
+        assert!(TagList::decode(&list(100_001)).is_err());
+    }
+
+    #[test]
+    fn server_lines_rejections() {
+        let mut other_version = raw_server_lines(&[("a", vec!["main"])]);
+        other_version[0] = 2;
+        let mut extra_byte = raw_server_lines(&[("a", vec!["main"])]);
+        extra_byte.push(0);
+        let bad = [
+            ("no servers", raw_server_lines(&[])),
+            (
+                "a server name with a space",
+                raw_server_lines(&[("a b", vec!["main"])]),
+            ),
+            (
+                "servers out of order",
+                raw_server_lines(&[("b", vec!["main"]), ("a", vec!["main"])]),
+            ),
+            (
+                "a server twice",
+                raw_server_lines(&[("a", vec!["main"]), ("a", vec!["main"])]),
+            ),
+            (
+                "servers that differ only by letter case",
+                raw_server_lines(&[("Origin", vec!["main"]), ("origin", vec!["main"])]),
+            ),
+            (
+                "a server without lines",
+                raw_server_lines(&[("origin", vec![])]),
+            ),
+            (
+                "a line name with a space",
+                raw_server_lines(&[("origin", vec!["a b"])]),
+            ),
+            (
+                "lines out of order",
+                raw_server_lines(&[("origin", vec!["b", "a"])]),
+            ),
+            (
+                "a line twice",
+                raw_server_lines(&[("origin", vec!["a", "a"])]),
+            ),
+            (
+                "lines that differ only by letter case",
+                raw_server_lines(&[("origin", vec!["Main", "main"])]),
+            ),
+            ("another version", other_version),
+            ("a byte after the list", extra_byte),
+        ];
+        for (what, bytes) in bad {
+            assert!(ServerLines::decode(&bytes).is_err(), "{what}");
+        }
+        // Letter case matters only inside one list of names.
+        let same_line_on_two_servers =
+            raw_server_lines(&[("a", vec!["Main"]), ("b", vec!["main"])]);
+        ServerLines::decode(&same_line_on_two_servers).unwrap();
+    }
+
+    #[test]
+    fn server_lines_hold_at_most_64_servers_and_100000_lines_each() {
+        let servers = |count: u32| {
+            let names: Vec<String> = (0..count).map(|i| format!("s{i:02}")).collect();
+            raw_server_lines(
+                &names
+                    .iter()
+                    .map(|n| (n.as_str(), vec!["main"]))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(ServerLines::decode(&servers(64)).unwrap().servers.len(), 64);
+        assert!(ServerLines::decode(&servers(65)).is_err());
+        let lines = |count: u32| {
+            let names: Vec<String> = (0..count).map(|i| format!("l{i:06}")).collect();
+            raw_server_lines(&[("origin", names.iter().map(String::as_str).collect())])
+        };
+        let list = ServerLines::decode(&lines(100_000)).unwrap();
+        assert_eq!(list.servers["origin"].len(), 100_000);
+        assert!(ServerLines::decode(&lines(100_001)).is_err());
+    }
+
     fn id_strategy() -> impl Strategy<Value = Id> {
         any::<[u8; 32]>().prop_map(Id)
     }
 
+    /// Lowercase, so that no two names differ only by letter case.
+    const LINE_NAME: &str = "[a-z][a-z0-9_.-]{0,8}(/[a-z0-9_-]{1,8}){0,2}";
+
+    fn tag_strategy() -> impl Strategy<Value = Tag> {
+        (
+            id_strategy(),
+            ".{0,20}",
+            prop::collection::vec(prop::collection::vec(any::<u8>(), 0..40), 0..4),
+        )
+            .prop_map(|(save, message, git_tags)| Tag {
+                save,
+                message,
+                git_tags,
+            })
+    }
+
     proptest! {
+        #[test]
+        fn tag_lists_round_trip(tags in prop::collection::btree_map(".{1,10}", tag_strategy(), 1..5)) {
+            let list = TagList { tags };
+            let bytes = list.encode();
+            prop_assert_eq!(TagList::decode(&bytes).unwrap(), list.clone());
+            prop_assert_eq!(list.id(), hash_record(Flavor::TagList, &bytes));
+        }
+
+        #[test]
+        fn server_lines_round_trip(
+            servers in prop::collection::btree_map(
+                LINE_NAME,
+                prop::collection::btree_map(LINE_NAME, id_strategy(), 1..4),
+                1..4,
+            ),
+        ) {
+            let list = ServerLines { servers };
+            let bytes = list.encode();
+            prop_assert_eq!(ServerLines::decode(&bytes).unwrap(), list.clone());
+            prop_assert_eq!(list.id(), hash_record(Flavor::ServerLines, &bytes));
+        }
+
         #[test]
         fn entries_round_trip(
             parent in prop::option::of(id_strategy()),
             action in 0u8..3,
             target in id_strategy(),
             command in ".{0,40}",
-            lines in prop::collection::btree_map("[a-z][a-z0-9_.-]{0,8}(/[a-z0-9_-]{1,8}){0,2}", id_strategy(), 1..6),
-            tags in prop::collection::btree_map(".{1,10}", (id_strategy(), ".{0,20}"), 0..4),
+            lines in prop::collection::btree_map(LINE_NAME, id_strategy(), 1..6),
+            tags in prop::option::of(id_strategy()),
             at_save in prop::option::of(id_strategy()),
             shelves in prop::collection::btree_map(".{1,10}", id_strategy(), 0..4),
-            remotes in prop::collection::btree_map(".{1,10}", prop::collection::btree_map("[a-z]{1,8}", id_strategy(), 0..3), 0..3),
+            server_lines in prop::option::of(id_strategy()),
             copies in prop::collection::btree_map(".{1,20}", (1u8..=6, id_strategy(), any::<u64>()), 0..4),
             time in any::<i64>(),
         ) {
@@ -475,9 +930,9 @@ mod tests {
             // Keep line names unique ignoring case.
             let mut seen = std::collections::BTreeSet::new();
             e.state.lines = lines.into_iter().filter(|(k, _)| seen.insert(k.to_lowercase())).collect();
-            e.state.tags = tags.into_iter().map(|(k, (save, message))| (k, Tag { save, message })).collect();
+            e.state.tags = tags;
             e.state.shelves = shelves.into_iter().collect();
-            e.state.remotes = remotes;
+            e.state.server_lines = server_lines;
             e.safety_copies = copies.into_iter().map(|(path, (k, id, size))| SafetyCopy {
                 path, kind: EntryKind::from_u8(k).unwrap(), id, size,
             }).collect();
