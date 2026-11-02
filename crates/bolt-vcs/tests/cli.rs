@@ -297,6 +297,68 @@ fn start_uses_the_project_entry_for_its_folder() {
     assert_eq!(history["saves"][0]["author"]["name"], "Work Name");
 }
 
+// A project's own settings are read only to see whether there is something to say about them,
+// after the user's identity is known. A file there that can't be read the ordinary way (a pipe
+// that waits for a writer, a link to a file that never ends) must not stop the save of a user who
+// has an identity. `rt3_…` and `rt4_…` in redteam.rs run without one, so they stop at the missing
+// identity before the file is looked at; these two reach it.
+
+#[cfg(unix)]
+#[test]
+fn save_with_an_identity_ignores_a_fifo_project_config() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let made = std::process::Command::new("mkfifo")
+        .arg(env.root().join(".bolt/config.toml"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    // Opening a pipe to read waits for someone to write to it, so a save that did would never end.
+    let out = env
+        .bolt()
+        .args(["save", "my work"])
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    let stdout = text(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "bolt save hung on a pipe at .bolt/config.toml, or failed: {:?}\n{}",
+        out.status,
+        text(&out.stderr)
+    );
+    // Saved, and nothing said about the pipe: it names nobody.
+    assert!(stdout.starts_with("Saved "), "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_with_an_identity_ignores_a_dev_zero_project_config() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    // The address space is capped at about 1.5 GB (as in redteam.rs), so a read of the link
+    // that did not stop would end in an abort instead of taking the machine down.
+    let out = Command::from_std(bolt_capped_at(&env, 1_500_000, &["save", "my work"]))
+        .timeout(std::time::Duration::from_secs(30))
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "bolt save read a link to /dev/zero, or failed: {:?}\n{stderr}",
+        out.status
+    );
+    assert!(!stderr.contains("memory"), "{stderr}");
+    assert!(stdout.starts_with("Saved "), "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+}
+
 #[test]
 fn start_json_output() {
     let env = Env::new();
@@ -1036,10 +1098,16 @@ fn plant_long_paths(root: &Path) {
 /// passes there without proving anything.
 #[cfg(unix)]
 fn bolt_capped(env: &Env, args: &[&str]) -> std::process::Command {
+    bolt_capped_at(env, CAP_KB, args)
+}
+
+/// `bolt_capped`, with the address space given in KB.
+#[cfg(unix)]
+fn bolt_capped_at(env: &Env, cap_kb: u32, args: &[&str]) -> std::process::Command {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
         .arg(format!(
-            "ulimit -v {CAP_KB} 2>/dev/null; exec \"$0\" \"$@\""
+            "ulimit -v {cap_kb} 2>/dev/null; exec \"$0\" \"$@\""
         ))
         .arg(assert_cmd::cargo::cargo_bin("bolt"))
         .args(args)
