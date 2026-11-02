@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 38
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 41
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -131,9 +131,9 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] Submodules → [decision 036](decisions/036-submodules-as-bare-links.md)
 - [x] Git LFS before milestone 5 → [decision 037](decisions/037-lfs-waits-for-milestone-5.md)
 - [x] Ignore rules after an import → [decision 038](decisions/038-gitignore-and-saved-files.md)
-- [ ] The first save after an import
-- [ ] Re-importing
-- [ ] More objects than one pack may hold (decision 028's open question)
+- [x] The first save after an import → [decision 039](decisions/039-first-save-after-import.md)
+- [x] Re-importing → [decision 040](decisions/040-import-once-catch-up-later.md)
+- [x] More objects than one pack may hold (decision 028's open question) → [decision 041](decisions/041-several-packs-per-command.md)
 
 ## 5. Design
 
@@ -162,7 +162,7 @@ The current design, by area. Each part links to the decision that set it.
 - **Portability check on save:** new names that would break on Windows or macOS are refused (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, forbidden characters), unless the project relaxes the rule. Imported histories keep their names.
 - **Safety on write-out:** never through a symlink, never outside the project, never to a name the OS would misread; such entries are reported instead. Symlinks that leave the project, or that the OS can't create, become placeholder files with a warning.
 - **Nested projects:** a folder with its own `.bolt/` is left alone by the outer project.
-- **Entries this computer can't hold** (names Windows can't create, names that collide here, symlinks written as placeholders) stay in history untouched: `status` lists them as not written on this computer, and saves never record them as deleted or changed (decision 019).
+- **Entries this computer can't hold** (names Windows can't create, names that collide here, symlinks written as placeholders) stay in history untouched: `status` lists them as not written on this computer, and saves never record them as deleted or changed (decision 019). Saves keep them from milestone 2, when imports first bring them, and also keep a symlink that Git wrote as a plain file holding its target ([decision 039](decisions/039-first-save-after-import.md)).
 
 ### 5.3 How data is identified ([decision 005](decisions/005-object-identity.md))
 
@@ -205,7 +205,7 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** Each command writes its new data into one big "pack" file, which only appears once it's complete, so a crash can never leave half-written data in the store. Big files are cut into chunks based on their content, so an edit in the middle of a file only adds the chunks around the change (when the file format keeps edits local).
 
-- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; at most 2^24 objects each ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)); small packs merged later.
+- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; at most 2^24 objects each ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)); a command that needs more writes several, and only its last holds the diary entry ([decision 041](decisions/041-several-packs-per-command.md)); small packs merged later.
 - **Chunking:** FastCDC for files of 1 MB and up; 16 KB / 64 KB / 256 KB (minimum / average / maximum) to start, tuned later with real assets.
 - **Compression:** zstd per chunk, fast on save and stronger on merge; incompressible data stored raw; sizes recorded so decompression bombs are caught.
 - **Deltas:** later, as a format feature, for small text files.
@@ -341,7 +341,7 @@ head ─► redo     main → ptvz
 **In plain words.** `bolt import` turns a Git repository's whole history into Bolt saves, in place next to `.git/`, without changing the Git repository. Bolt reads Git's files itself, with the same care it takes with its own: nothing in them is trusted, every read is bounded, and big files flow straight through.
 
 - **Already decided:** every branch becomes a line and every tag a tag; each save records its Git commit in the extra field `git-commit`; paths that aren't valid UTF-8 stop the import with a list of where they occur; messages in other encodings are converted to UTF-8, keeping the original bytes; `.bolt` entries in Git trees are skipped with a warning; up to 1,024 parents ([decision 019](decisions/019-review-clarifications.md)). Submodules become project links ([decision 004](decisions/004-project-contents.md)); LFS contents must be on disk ([decision 020](decisions/020-lfs-import.md), milestone 5).
-- **Reading Git** ([decision 031](decisions/031-own-git-reader.md)): Bolt's own read-only reader, for loose objects, packs and their deltas, refs, and only the format lines of `.git/config`; SHA-1 and SHA-256 repositories.
+- **Reading Git** ([decision 031](decisions/031-own-git-reader.md)): Bolt's own read-only reader, for loose objects, packs and their deltas, refs, and from `.git/config` only the format lines (plus `core.sparseCheckout`, only to refuse); SHA-1 and SHA-256 repositories.
   - No memory-mapping, and every read is bounded. Files in `.git` are opened without following links, objects Git stored whole stream straight into Bolt's pack, and every Git object's ID is checked as it is read (SHA-1 with collision detection).
   - A deltified object and its base may each be at most 512 MiB, which Git never exceeds by default.
   - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files.
@@ -359,6 +359,8 @@ head ─► redo     main → ptvz
   - The stash, notes, replace refs and other refs aren't imported; the summary lists them. A repository with no commits, or a current branch with none yet, stops the import.
 - **Names Bolt can't take as they are** ([decision 035](decisions/035-git-names-bolt-cant-take.md)). Dangerous names are skipped with a warning, with everything under them: any spelling a system would treat as `.git` (Git's own list, on every system), `.`, `..`, empty names and names holding `/`. Names over 255 bytes and broken folders (duplicate names, wrong order, unknown modes, contents that don't match their ID, missing objects) stop the import. Commits with skipped entries are counted, since export can't recreate them exactly.
 - **Submodules become bare links** ([decision 036](decisions/036-submodules-as-bare-links.md)): a project link holding only the commit. `.gitmodules` comes in as an ordinary file and is never read. A later save keeps every link as it is and never looks inside its folder; moving, adding or removing a submodule is done in Git.
+- **The first save after an import** ([decision 039](decisions/039-first-save-after-import.md)) keeps what this computer can't hold exactly as it was, and stops when files differ from the imported version only by line endings Git converted, offering to have Git write them back or to save them as they are. Sparse checkouts are refused by the import. Uncommitted work in Git becomes part of the next save.
+- **Import is one-time for now** ([decision 040](decisions/040-import-once-catch-up-later.md)): a second `bolt import` refuses; catching up with Git's new commits comes later.
 - **Ignore rules carry over by themselves** ([decision 038](decisions/038-gitignore-and-saved-files.md)): Bolt reads `.gitignore` files as well as `.boltignore`, so an import copies nothing, and files Git tracks despite a rule stay saved.
 - **Git LFS waits for milestone 5** ([decision 037](decisions/037-lfs-waits-for-milestone-5.md)): until then the import stops at the first LFS pointer (found with Git LFS's own test), naming it, and commits nothing.
 - **Tags come in exactly** ([decision 034](decisions/034-tags-kept-and-shared.md)). An annotated tag keeps its Git bytes, signature included, beside its Bolt message. A tag of something other than a commit (a folder snapshot, a single file) is skipped and listed.
@@ -390,7 +392,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
-- **Objects per pack vs. one pack per command.** A pack holds at most 2^24 objects ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)), and each command that stores data writes one pack ([decision 009](decisions/009-storage-engine.md)). A file of millions of chunks (milestone 5), or a very large Git import (milestone 2), could need more. Decide while planning milestone 2: several packs per command (a change to decision 009), or another way.
+- ~~**Objects per pack vs. one pack per command.**~~ *Decided while planning milestone 2* ([decision 041](decisions/041-several-packs-per-command.md)): a command writes several packs when it needs more than one may hold.
 - ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository is public, so Actions minutes aren't a constraint.
 
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
@@ -415,7 +417,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Live two-way Git sync.** [Not promised (decision 002); the importer's commit-mapping table keeps the door open.]
 - **Perforce import.** Many game studios use Perforce; a natural second importer after Git. [Later.]
 - **Nested projects.** [A folder with its own `.bolt/` is left alone, and Git submodules import as project links (decision 004).]
-- **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004).]
+- **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004). Until then the first save after an import stops at files Git converted (decision 039).]
+- **Catching up with Git.** A second import that adds new commits and moves lines that haven't moved in Bolt since the last import. [Imports are repeatable, so it is small (decision 032); before v0.1 if the milestones leave room, otherwise after (decision 040).]
 - **Importing reftable repositories.** [The reader refuses them, saying how to make a copy it can read; teach it the format before Git 3.0 makes reftable common (decision 031).]
 - **Change-ID letters like Jujutsu's.** Bolt writes 0 as `k` and 15 as `z`; Jujutsu, whose change IDs imported saves share, writes them the other way round. [Display only, no stored data changes; decide before v0.1 (decision 032).]
 

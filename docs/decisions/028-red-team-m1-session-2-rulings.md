@@ -5,7 +5,7 @@
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md); report: [redteam/2026-11-02-milestone-1-session-2.md](../redteam/2026-11-02-milestone-1-session-2.md))
 - **Decided by:** Claude, while the owner was away, under the owner's instruction of 2026-11-01 to finish the milestone and merge. The owner can reverse any part.
 - **Reviewed:** 2026-11-02 with the owner, who left the call to Claude; kept whole.
-- **Refined by:** [decision 029](029-red-team-m1-final-review-rulings.md) (stored copies are tried cheapest first; a `.boltignore` line Bolt can't yet read like Git stops the save)
+- **Refined by:** [decision 029](029-red-team-m1-final-review-rulings.md) (stored copies are tried cheapest first; a `.boltignore` line Bolt can't yet read like Git stops the save); [decision 041](041-several-packs-per-command.md) (#2's open question: a command writes several packs)
 
 ## Context
 

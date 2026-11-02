@@ -261,7 +261,7 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 
 ## 11. Pack files
 
-Each command that stores data writes one pack (decision 009): it is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`.
+Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
 
 ```text
 header:
@@ -316,7 +316,7 @@ Each entry's header is a fixed 50 bytes, so a writer that streams an object can 
 
 Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
 
-**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack; what a command does when it needs more objects than one pack may hold is open, to be decided while planning milestone 2 ([decision 028](decisions/028-red-team-m1-session-2-rulings.md), [design.md §7](design.md#7-open-questions-and-deferred-decisions)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
+**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
 
@@ -354,5 +354,4 @@ Vectors are added milestone by milestone, for the records each milestone builds;
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
 - The signature format (later).
-- What a command does when it needs more objects than one pack may hold (§11; decided while planning milestone 2).
 - A limit on path length (decided with milestone 3's write-out, before format 1 freezes; decision 026).

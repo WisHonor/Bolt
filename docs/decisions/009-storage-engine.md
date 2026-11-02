@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 9
+- **Refined by:** [decision 041](041-several-packs-per-command.md) (a command writes several packs when it needs more objects than one may hold)
 
 ## Context
 
