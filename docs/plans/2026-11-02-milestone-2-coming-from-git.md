@@ -992,7 +992,7 @@ impl Repository {
     pub fn commit_first(&mut self, lock: &ChangeLock, packs: PackSet, entry: &DiaryEntry) -> Result<Id, RepoError>; // format last
 }
 ```
-`Repository::init` becomes `begin` + its empty save + `commit_first`, with no change in behaviour.
+`Repository::init` becomes `begin` + its empty save + `commit_first`. Its one change in behaviour is deliberate: `begin` refuses a `.bolt` folder another tool made (step 1 below), so `bolt start` no longer settles into bolt.new's folder either. Add a `cli.rs` test, `start_refuses_another_tools_bolt_folder`.
 
 **The flow:**
 1. **What already exists.**
