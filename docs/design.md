@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions ([decisions 024](decisions/024-red-team-gate.md) to [028](decisions/028-red-team-m1-session-2-rulings.md)); milestone 2 next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 28
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 29
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -197,7 +197,7 @@ The current design, by area. Each part links to the decision that set it.
 - **Compression:** zstd per chunk, fast on save and stronger on merge; incompressible data stored raw; sizes recorded so decompression bombs are caught.
 - **Deltas:** later, as a format feature, for small text files.
 - **Cleanup:** keeps everything reachable from lines, shelves and the undo window; a grace period protects anything recent; cheap cleanup is automatic, repacking happens on request with a space estimate.
-- **Checking:** every object is verified against its fingerprint on read.
+- **Checking:** every object is verified against its fingerprint on read, and a stored copy is read and verified before a save relies on it instead of storing its own; a bad copy is passed over for a good one in another pack, with a warning ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). Copies are tried smallest first, and a save skips, unread, a copy whose recorded size isn't the object's, so a planted copy claiming a huge size can't slow it down ([decision 029](decisions/029-red-team-m1-final-review-rulings.md)).
 
 ### 5.8 Operation log and undo ([decision 010](decisions/010-operation-log.md))
 

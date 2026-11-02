@@ -268,9 +268,10 @@ A reader must:
 - check that each entry's header matches its index line;
 - decompress zstd data without ever producing more than the recorded uncompressed size, and require the zstd frame's own content size, if present, to match;
 - check the fingerprint of every object it reads: plain BLAKE3 for content, the record's context string otherwise;
-- treat the same ID found in two packs as the same object (packs can overlap while being merged), and when one pack's copy fails a check, try the other packs' copies before giving up, so a damaged or planted pack never hides a good copy; a pack that held a bad copy is reported as damaged.
+- treat the same ID found in two packs as the same object (packs can overlap while being merged), and when one pack's copy fails for any reason (a failed check, a read error, too little memory), try the other packs' copies before giving up, so a damaged or planted pack never hides a good copy; a pack whose copy failed a check is reported as damaged;
+- try the copies smallest recorded size first, ties in pack order (a copy already checked in this process may go first), so a planted copy that claims a huge size is read last; only when no copy works does the read fail, naming a read error or lack of memory if there was one (the object may still be fine), else the damage.
 
-Before skipping an object because the store already holds it, a writer must read a stored copy of the same kind in full and check its fingerprint (once per process is enough). If no copy passes, it stores its own.
+Before skipping an object because the store already holds it, a writer must read a stored copy of the same kind in full and check its fingerprint (once per process is enough). The writer knows the object's size (a file's length, a link's target, an encoded record), so it passes over a copy that records another size without reading it, and reports that copy's pack as damaged. If no copy passes, it stores its own.
 
 Each entry's header is a fixed 50 bytes, so a writer that streams an object can fill the header in after writing its data.
 

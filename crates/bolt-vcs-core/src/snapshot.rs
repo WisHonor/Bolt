@@ -735,8 +735,9 @@ fn build(
         }
         let listing = Listing::new(entries).map_err(StoreError::from)?;
         let id = listing.id();
-        if !store.has_good_copy(&id, ObjectKind::FolderListing)? {
-            pack.add_record(ObjectKind::FolderListing, &listing.encode())?;
+        let encoded = listing.encode();
+        if !store.has_good_copy(&id, ObjectKind::FolderListing, encoded.len() as u64)? {
+            pack.add_record(ObjectKind::FolderListing, &encoded)?;
         }
         built.insert(rel, id);
     }
@@ -757,7 +758,7 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
         ))
     })?;
     let id = hash_content(target.as_bytes());
-    if !store.has_good_copy(&id, ObjectKind::Content)? {
+    if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
         pack.add_content(target.as_bytes())?;
     }
     Ok((id, target.len() as u64))
@@ -807,7 +808,7 @@ pub(crate) fn store_file(
     if size != before.0 || stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }
-    if pack.contains(&id) || store.has_good_copy(&id, ObjectKind::Content)? {
+    if pack.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
         return Ok((id, size));
     }
     file.seek(SeekFrom::Start(0)).map_err(unreadable)?;

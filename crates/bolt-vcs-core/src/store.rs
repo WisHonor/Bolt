@@ -113,7 +113,21 @@ impl Store {
 
     /// Whether the store holds a copy of `id` of `kind` that reads back whole and matches its
     /// fingerprint, so storing it again can be skipped. Once a copy passes, it isn't read again.
-    pub fn has_good_copy(&self, id: &Id, kind: ObjectKind) -> Result<bool, StoreError> {
+    /// `size` is the object's own: a copy recording another can't be `id`, so it is counted as
+    /// damaged without being read, however large it claims to be.
+    pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {
+        for at in self.copies(id) {
+            if let Some((pack, entry)) = self.entry(at)
+                && entry.kind == kind
+                && entry.uncompressed_size != size
+            {
+                let wrong = PackError::Corrupt {
+                    path: pack.path().to_owned(),
+                    reason: format!("its copy of {id} records the wrong size"),
+                };
+                self.note_damage(at, pack, &wrong);
+            }
+        }
         match self.verify(id, kind) {
             Ok(()) => Ok(true),
             Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => Ok(false),
@@ -183,9 +197,11 @@ impl Store {
         })
     }
 
-    /// Reads the copies of `id` of `kind` with `read`, in the packs' order, until one passes. A bad
-    /// copy is never read again but still counts, so no damaged pack hides a good copy, and an
-    /// object with no good copy is damage on every read. With `once`, the first copy read is last.
+    /// Reads the copies of `id` of `kind` with `read` until one passes: a copy that passed before
+    /// first, then the smallest recorded size first (ties in the packs' order), so a copy claiming
+    /// a huge size is read last. Any failure moves on to the next copy. A bad copy is never read
+    /// again but still counts, so no damaged pack hides a good copy, and an object with no good
+    /// copy is damage on every read. With `once`, the first copy read is last.
     fn first_good<T>(
         &self,
         id: &Id,
@@ -193,37 +209,39 @@ impl Store {
         once: bool,
         mut read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
-        // The first bad copy's problem is returned; a wrong kind only if no copy was bad.
-        let mut problem = StoreError::Missing(*id);
-        for at in self.copies(id) {
-            let Some((pack, entry)) = self.entry(at) else {
-                continue;
-            };
+        let mut copies: Vec<(At, &PackReader, &IndexEntry)> = self
+            .copies(id)
+            .filter_map(|at| self.entry(at).map(|(pack, entry)| (at, pack, entry)))
+            .collect();
+        {
+            let checked = self.checked();
+            copies.sort_by_key(|&(at, _, e)| (!checked.good.contains(&at), e.uncompressed_size));
+        }
+        let (mut wrong_kind, mut damage, mut other) = (None, None, None);
+        for (at, pack, entry) in copies {
             if entry.kind != kind {
-                if matches!(problem, StoreError::Missing(_)) {
-                    problem = StoreError::WrongKind {
-                        id: *id,
-                        expected: kind,
-                        found: entry.kind,
-                    };
-                }
+                wrong_kind.get_or_insert(entry.kind);
                 continue;
             }
             let known_bad = self.checked().bad.get(&at).cloned();
             let read_now = known_bad.is_none();
             let reason = match known_bad {
-                Some(reason) => reason,
+                Some(reason) => Some(reason),
                 None => match read(pack, entry) {
                     Ok(value) => {
                         self.checked().good.insert(at);
                         return Ok(value);
                     }
-                    Err(e) if is_damage(&e) => self.note_damage(at, pack, &e),
-                    Err(e) => return Err(e.into()),
+                    Err(e) if is_damage(&e) => Some(self.note_damage(at, pack, &e)),
+                    // Memory or I/O: the copy may be fine, so it is neither remembered nor damage.
+                    Err(e) => {
+                        other.get_or_insert(e);
+                        None
+                    }
                 },
             };
-            if !matches!(problem, StoreError::Pack(_)) {
-                problem = StoreError::Pack(PackError::Corrupt {
+            if let Some(reason) = reason {
+                damage.get_or_insert_with(|| PackError::Corrupt {
                     path: pack.path().to_owned(),
                     reason,
                 });
@@ -232,7 +250,16 @@ impl Store {
                 break;
             }
         }
-        Err(problem)
+        // A failure that says nothing about the copy comes first: calling it damage would mislead.
+        Err(match (other.or(damage), wrong_kind) {
+            (Some(e), _) => StoreError::Pack(e),
+            (None, Some(found)) => StoreError::WrongKind {
+                id: *id,
+                expected: kind,
+                found,
+            },
+            (None, None) => StoreError::Missing(*id),
+        })
     }
 
     fn copies(&self, id: &Id) -> impl Iterator<Item = At> + '_ {
@@ -317,7 +344,7 @@ mod tests {
             let fresh = Store::open(&packs).unwrap();
             for c in &contents {
                 let id = hash_content(c);
-                prop_assert!(fresh.has_good_copy(&id, ObjectKind::Content).unwrap());
+                prop_assert!(fresh.has_good_copy(&id, ObjectKind::Content, c.len() as u64).unwrap());
                 let mut out = Vec::new();
                 fresh.copy_content(&id, &mut out).unwrap();
                 prop_assert_eq!(&out, c);
@@ -349,7 +376,7 @@ mod tests {
         assert_eq!(store.pack_count(), 2);
         assert!(
             store
-                .has_good_copy(&hash_content(b"two"), ObjectKind::Content)
+                .has_good_copy(&hash_content(b"two"), ObjectKind::Content, 3)
                 .unwrap()
         );
     }
@@ -392,16 +419,62 @@ mod tests {
     fn only_a_copy_that_reads_back_counts_as_good() {
         let (_root, tmp, packs) = dirs();
         let content = b"bytes anyone could predict".to_vec();
-        let id = hash_content(&content);
+        let (id, size) = (hash_content(&content), content.len() as u64);
         plant_damaged_copies(&packs, &[(ObjectKind::Content, &content)]);
         let mut store = Store::open(&packs).unwrap();
-        assert!(!store.has_good_copy(&id, ObjectKind::Content).unwrap());
+        assert!(!store.has_good_copy(&id, ObjectKind::Content, size).unwrap());
         assert_eq!(store.damaged_packs().len(), 1);
         // A good copy arriving later is found past the damaged one.
         pack_of(&tmp, &packs, &[content]);
         store.refresh(&packs).unwrap();
-        assert!(store.has_good_copy(&id, ObjectKind::Content).unwrap());
-        assert!(!store.has_good_copy(&id, ObjectKind::FolderListing).unwrap());
+        assert!(store.has_good_copy(&id, ObjectKind::Content, size).unwrap());
+        assert!(
+            !store
+                .has_good_copy(&id, ObjectKind::FolderListing, size)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_copy_recording_another_size_than_the_object_is_skipped_unread() {
+        let (_root, tmp, packs) = dirs();
+        let content = b"twelve bytes".to_vec();
+        pack_of(&tmp, &packs, std::slice::from_ref(&content));
+        let store = Store::open(&packs).unwrap();
+        let id = hash_content(&content);
+        // The copy itself is fine, so only skipping it unread explains what follows.
+        assert!(!store.has_good_copy(&id, ObjectKind::Content, 13).unwrap());
+        let damaged = store.damaged_packs()[0].to_string();
+        assert!(damaged.contains("records the wrong size"), "{damaged}");
+        assert!(store.copy_content(&id, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn a_failure_that_says_nothing_about_the_copy_moves_on_but_is_not_damage() {
+        let (_root, tmp, packs) = dirs();
+        let content = b"held twice, and the 00 copy is bad".to_vec();
+        let id = hash_content(&content);
+        plant_damaged_copies(&packs, &[(ObjectKind::Content, &content)]);
+        pack_of(&tmp, &packs, std::slice::from_ref(&content));
+        let store = Store::open(&packs).unwrap();
+        let out_of_memory = |pack: &PackReader, entry: &IndexEntry| {
+            if pack.path().ends_with("00.pack") {
+                pack.copy_content(entry, &mut io::sink())
+            } else {
+                Err(PackError::OutOfMemory)
+            }
+        };
+        // Every copy is tried; the failure named is the one that doesn't mean damage.
+        let failed = store.first_good(&id, ObjectKind::Content, false, out_of_memory);
+        assert!(
+            matches!(failed, Err(StoreError::Pack(PackError::OutOfMemory))),
+            "{failed:?}"
+        );
+        assert_eq!(store.damaged_packs().len(), 1);
+        // The copy that ran out of memory isn't marked bad: with memory, it reads fine.
+        let mut out = Vec::new();
+        store.copy_content(&id, &mut out).unwrap();
+        assert_eq!(out, content);
     }
 
     #[test]
@@ -421,7 +494,7 @@ mod tests {
         let content_id = hash_content(&content);
         assert!(
             !store
-                .has_good_copy(&content_id, ObjectKind::Content)
+                .has_good_copy(&content_id, ObjectKind::Content, content.len() as u64)
                 .unwrap()
         );
         for _ in 0..2 {
@@ -448,7 +521,7 @@ mod tests {
         let (_root, _tmp, packs) = dirs();
         let store = Store::open(&packs).unwrap();
         let id = hash_content(b"nope");
-        assert!(!store.has_good_copy(&id, ObjectKind::Content).unwrap());
+        assert!(!store.has_good_copy(&id, ObjectKind::Content, 4).unwrap());
         assert!(matches!(
             store.copy_content(&id, &mut Vec::new()),
             Err(StoreError::Missing(m)) if m == id

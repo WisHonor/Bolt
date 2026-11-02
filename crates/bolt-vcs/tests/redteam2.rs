@@ -479,6 +479,115 @@ fn rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id() {
     );
 }
 
+// Checking a stored copy before trusting it means reading it, and a planted copy can claim a
+// huge size while taking little disk: every save then spent minutes on it.
+
+/// Writes `00.pack` (it sorts before Bolt's own packs) holding a copy of each of `ids`, of `kind`,
+/// that records `claimed` bytes but stores a zstd frame of 128 KiB RLE blocks: 4 bytes on disk per
+/// 128 KiB.
+fn plant_huge_copies(root: &Path, kind: ObjectKind, ids: &[bolt_core::id::Id], claimed: u64) {
+    use bolt_core::encoding::Writer;
+    use bolt_core::pack::{PACK_END_MAGIC, PACK_MAGIC, PACK_VERSION};
+    const BLOCK: u64 = 128 << 10;
+    assert!(claimed >= BLOCK && claimed.is_multiple_of(BLOCK));
+    let blocks = usize::try_from(claimed / BLOCK).unwrap();
+    // Magic, no content size or checksum, a 128 KiB window; then RLE blocks, the last one marked.
+    let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38];
+    frame.extend([0x02, 0x00, 0x10, 0x00].repeat(blocks - 1));
+    frame.extend([0x03, 0x00, 0x10, 0x00]);
+    let stored = frame.len() as u64;
+    let mut ids = ids.to_vec();
+    ids.sort();
+    let mut out = PACK_MAGIC.to_vec();
+    out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let mut index = Writer::new();
+    index.varint(ids.len() as u64);
+    for id in &ids {
+        index.id(id);
+        index.u8(kind as u8);
+        index.u64(out.len() as u64);
+        index.varint(claimed);
+        index.varint(stored);
+        let mut entry = Writer::new();
+        entry.u8(kind as u8);
+        entry.id(id);
+        entry.u64(claimed);
+        entry.u64(stored);
+        entry.u8(1); // zstd
+        out.extend_from_slice(&entry.into_bytes());
+        out.extend_from_slice(&frame);
+    }
+    let index = index.into_bytes();
+    let index_offset = out.len() as u64;
+    out.extend_from_slice(&index);
+    out.extend_from_slice(&index_offset.to_le_bytes());
+    let mut checksum = Writer::new(); // plain BLAKE3 of the index, which `hash_content` is
+    checksum.id(&bolt_core::id::hash_content(&index));
+    out.extend_from_slice(&checksum.into_bytes());
+    out.extend_from_slice(&PACK_END_MAGIC);
+    std::fs::write(root.join(".bolt/store/packs/00.pack"), out).unwrap();
+}
+
+/// Runs `f` on a thread of its own, failing if it takes longer than `secs` seconds.
+fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(f()));
+    rx.recv_timeout(Duration::from_secs(secs))
+        .unwrap_or_else(|e| panic!("no result within {secs} s: {e}"))
+}
+
+#[test]
+fn rt2_7_a_planted_copy_claiming_a_huge_size_does_not_slow_save() {
+    let env = Env::new();
+    env.ok(&["start"]);
+    let licence = b"MIT License\n\nPermission is hereby granted, free of charge, to any person\n";
+    let id = bolt_core::id::hash_content(licence);
+    // Records 1 TiB, takes about 32 MiB on disk.
+    plant_huge_copies(env.root(), ObjectKind::Content, &[id], 1 << 40);
+    std::fs::write(env.root().join("LICENSE"), licence).unwrap();
+    let mut save = env.bolt();
+    save.args(["save", "Add licence"]);
+    let end = run_limited(save, 60);
+    assert!(
+        end.code == Some(0),
+        "`bolt save` read the planted copy: {end:?}"
+    );
+    // Read back without knowing the size: the smallest copy must be tried first.
+    let root = env.root().to_path_buf();
+    let back = within(60, move || {
+        let repo = Repository::open(&root).unwrap();
+        let mut back = Vec::new();
+        let read = repo.store().copy_content(&id, &mut back);
+        read.map(|()| back).map_err(|e| e.to_string())
+    });
+    assert_eq!(back.as_deref(), Ok(&licence[..]));
+}
+
+#[test]
+fn rt2_7_planted_copies_claiming_huge_sizes_do_not_slow_history() {
+    let env = Env::new();
+    env.ok(&["start"]);
+    plant_chain(env.root(), 1000, 0, |_| {});
+    let mut ids = Vec::new();
+    let repo = Repository::open(env.root()).unwrap();
+    bolt_core::history::for_each_on_line(&repo, |id, _, _| {
+        ids.push(*id);
+        Ok::<(), bolt_core::repo::RepoError>(())
+    })
+    .unwrap();
+    drop(repo);
+    // 512 MiB claimed per save, 16 KiB on disk each.
+    plant_huge_copies(env.root(), ObjectKind::Save, &ids, 512 << 20);
+    let mut history = env.bolt();
+    history.arg("history");
+    let end = run_limited(history, 60);
+    assert!(
+        end.code == Some(0),
+        "`bolt history` read the planted copies: {end:?}"
+    );
+}
+
 // RT2-8: after `save` has committed, it walks the whole line again (`short_of`), and an error
 // there is printed with the hint "Nothing was changed", although the save was made.
 
