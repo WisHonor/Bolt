@@ -47,6 +47,7 @@
 - **Nightly:** fuzzing for a fixed time per target, differential tests on larger repositories, and benchmarks with results kept for comparison.
 - Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; repository visibility is revisited when CI starts.
 - A `.gitattributes` file turns off Git's line-ending conversion, so test files stay byte-exact on Windows.
+- Workflows run with read-only permissions, actions are pinned to exact commits, and Dependabot opens weekly update pull requests for Rust crates and actions.
 
 ## 5. Benchmarks and measurements
 
