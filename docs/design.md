@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 36
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 37
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -129,7 +129,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] How tags come in, and keeping big lists of tags and server lines out of every diary entry → [decision 034](decisions/034-tags-kept-and-shared.md)
 - [x] Names in Git trees that Bolt can't store as they are → [decision 035](decisions/035-git-names-bolt-cant-take.md)
 - [x] Submodules → [decision 036](decisions/036-submodules-as-bare-links.md)
-- [ ] Git LFS before milestone 5
+- [x] Git LFS before milestone 5 → [decision 037](decisions/037-lfs-waits-for-milestone-5.md)
 - [ ] Ignore rules after an import
 - [ ] The first save after an import
 - [ ] Re-importing
@@ -359,6 +359,7 @@ head ─► redo     main → ptvz
   - The stash, notes, replace refs and other refs aren't imported; the summary lists them. A repository with no commits, or a current branch with none yet, stops the import.
 - **Names Bolt can't take as they are** ([decision 035](decisions/035-git-names-bolt-cant-take.md)). Dangerous names are skipped with a warning, with everything under them: any spelling a system would treat as `.git` (Git's own list, on every system), `.`, `..`, empty names and names holding `/`. Names over 255 bytes and broken folders (duplicate names, wrong order, unknown modes, contents that don't match their ID, missing objects) stop the import. Commits with skipped entries are counted, since export can't recreate them exactly.
 - **Submodules become bare links** ([decision 036](decisions/036-submodules-as-bare-links.md)): a project link holding only the commit. `.gitmodules` comes in as an ordinary file and is never read. A later save keeps every link as it is and never looks inside its folder; moving, adding or removing a submodule is done in Git.
+- **Git LFS waits for milestone 5** ([decision 037](decisions/037-lfs-waits-for-milestone-5.md)): until then the import stops at the first LFS pointer (found with Git LFS's own test), naming it, and commits nothing.
 - **Tags come in exactly** ([decision 034](decisions/034-tags-kept-and-shared.md)). An annotated tag keeps its Git bytes, signature included, beside its Bolt message. A tag of something other than a commit (a folder snapshot, a single file) is skipped and listed.
 
 ## 6. Risks and watch-outs
