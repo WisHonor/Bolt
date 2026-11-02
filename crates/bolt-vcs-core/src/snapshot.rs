@@ -1004,7 +1004,7 @@ mod tests {
             panic!("the names were accepted");
         };
         let text: Vec<String> = problems.iter().map(|(_, p)| p.to_string()).collect();
-        // Case-insensitive disks (macOS by default) overwrote `README` with `readme`: no collision.
+        // On a case-insensitive disk (macOS by default) `readme` overwrote `README`: no collision.
         let both_cases = fs::read_dir(dir.path())
             .unwrap()
             .filter(|e| {

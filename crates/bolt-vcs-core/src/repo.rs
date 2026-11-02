@@ -615,8 +615,8 @@ impl Repository {
         Ok((id, DiaryEntry::decode(&bytes)?))
     }
 
-    /// Takes the change lock, waiting if another command holds it (`on_wait` gets its lock info
-    /// first). `command` must already be redacted: it is written to `state/lock-info` as given.
+    /// Takes the change lock, waiting if another command holds it; `on_wait` gets that command's
+    /// lock info first. `command` must already be redacted: it goes into `state/lock-info` as is.
     pub fn lock_for_change(
         &mut self,
         command: &str,

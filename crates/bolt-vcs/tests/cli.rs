@@ -67,7 +67,7 @@ fn start_creates_a_project() {
 }
 
 /// The check that refuses another account's project (T23) must never refuse the user's own, even
-/// where an elevated administrator's folders belong to the Administrators group (Windows CI).
+/// where an elevated administrator's folders belong to the Administrators group, as on Windows CI.
 #[test]
 fn start_and_save_work_in_a_normal_folder() {
     let env = Env::new();
