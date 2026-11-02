@@ -42,6 +42,12 @@ pub enum RepoError {
     )]
     NotYours { path: PathBuf },
     #[error(
+        "The project at {} belongs to the Administrators group, and this terminal isn't running \
+         as administrator.",
+        escape(&path.display().to_string(), false)
+    )]
+    AdminsNotElevated { path: PathBuf },
+    #[error(
         "Bolt can't tell who owns the project at {}: this drive doesn't record who owns folders.",
         escape(&path.display().to_string(), false)
     )]
@@ -89,6 +95,13 @@ impl RepoError {
                 | RepoError::OwnerUnknown { path }
                 | RepoError::OwnerLookupFailed { path, .. } => {
                     return Some(config::trust_hint(path));
+                }
+                RepoError::AdminsNotElevated { path } => {
+                    return Some(format!(
+                        "Open a terminal as administrator and run the command there, or use it \
+                         from this terminal:\n{}",
+                        config::trust_hint(path)
+                    ));
                 }
                 RepoError::StartStopped { refusal } => {
                     return refusal
@@ -193,7 +206,13 @@ fn check_owner_with(
         owner => owners.push(owner),
     }
     // Read only when needed, so a mistake in them never stops the user's own projects.
-    let safe = if owners.iter().all(|owner| matches!(owner, Ok(Owner::User))) {
+    let theirs = |owner: &io::Result<Owner>| {
+        matches!(
+            owner,
+            Ok(Owner::User | Owner::Administrators { elevated: true })
+        )
+    };
+    let safe = if owners.iter().all(theirs) {
         Vec::new()
     } else {
         safe_folders()?
@@ -202,7 +221,8 @@ fn check_owner_with(
 }
 
 /// Whether Bolt may use the project at `root`, given who owns the folder and its `.bolt` (or why
-/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself.
+/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. The
+/// Administrators group is the user's only while it is switched on in this terminal.
 fn owner_allows(
     owners: impl IntoIterator<Item = io::Result<Owner>>,
     root: &Path,
@@ -210,7 +230,10 @@ fn owner_allows(
 ) -> Result<(), RepoError> {
     let path = || root.to_owned();
     let refusal = owners.into_iter().find_map(|owner| match owner {
-        Ok(Owner::User) => None,
+        Ok(Owner::User | Owner::Administrators { elevated: true }) => None,
+        Ok(Owner::Administrators { elevated: false }) => {
+            Some(RepoError::AdminsNotElevated { path: path() })
+        }
         Ok(Owner::Other) => Some(RepoError::NotYours { path: path() }),
         Ok(Owner::Unknown) => Some(RepoError::OwnerUnknown { path: path() }),
         Err(source) => Some(RepoError::OwnerLookupFailed {
@@ -224,6 +247,30 @@ fn owner_allows(
         }
         _ => Ok(()),
     }
+}
+
+/// What `bolt start` tells the user when the project at `root` will open only from an
+/// administrator terminal: its folder or `.bolt` belongs to the Administrators group, which counts
+/// as the user's only there.
+#[must_use]
+pub fn elevated_only_note(root: &Path) -> Option<String> {
+    elevated_only_note_with(root, &bolt_platform::owner_of)
+}
+
+/// `elevated_only_note`, given how to learn who owns a path.
+fn elevated_only_note_with(
+    root: &Path,
+    owner_of: &dyn Fn(&Path) -> io::Result<Owner>,
+) -> Option<String> {
+    let group_owns =
+        |path: &Path| matches!(owner_of(path), Ok(Owner::Administrators { elevated: true }));
+    (group_owns(root) || group_owns(&root.join(".bolt"))).then(|| {
+        format!(
+            "This project belongs to the Administrators group, so it opens only from an \
+             administrator terminal unless you add it to safe-folders:\n{}",
+            config::trust_hint(root)
+        )
+    })
 }
 
 /// Checks `root` and its `.bolt` before anything inside is looked at. `owner_check` must allow
@@ -419,6 +466,7 @@ impl Repository {
             // would refuse it.
             let made = check_bolt(root, owner_check).map_err(|e| match e {
                 e @ (RepoError::NotYours { .. }
+                | RepoError::AdminsNotElevated { .. }
                 | RepoError::OwnerUnknown { .. }
                 | RepoError::OwnerLookupFailed { .. }) => RepoError::StartStopped {
                     refusal: Box::new(e),
@@ -1049,6 +1097,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn administrators_count_only_when_elevated() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let elevated = Owner::Administrators { elevated: true };
+        let normal = Owner::Administrators { elevated: false };
+        assert!(owner_allows([Ok(elevated)], root, &[]).is_ok());
+        assert!(owner_allows([Ok(elevated), Ok(Owner::User)], root, &[]).is_ok());
+        assert!(matches!(
+            owner_allows([Ok(normal)], root, &[]),
+            Err(RepoError::AdminsNotElevated { .. })
+        ));
+        // The folder and its `.bolt` are each judged, and the refusal names the project folder.
+        match owner_allows([Ok(Owner::User), Ok(normal)], root, &[]) {
+            Err(RepoError::AdminsNotElevated { path }) => assert_eq!(path, root),
+            other => panic!("{other:?}"),
+        }
+        let mixed = owner_allows([Ok(elevated), Ok(Owner::Other)], root, &[]);
+        assert!(
+            matches!(mixed, Err(RepoError::NotYours { .. })),
+            "{mixed:?}"
+        );
+        // Listing the project folder trusts it, as for every other refusal.
+        assert!(owner_allows([Ok(normal)], root, &[root.to_owned()]).is_ok());
+    }
+
+    /// The user's own project opens even when their settings can't be read; only a folder that
+    /// needs safe-folders has to read them.
+    #[test]
+    fn an_elevated_administrators_project_needs_no_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = || -> Result<Vec<PathBuf>, ConfigError> {
+            Err(ConfigError::Invalid {
+                path: PathBuf::from("config.toml"),
+                detail: "broken".into(),
+            })
+        };
+        let owned_by = |owner: Owner| check_owner_with(dir.path(), &|_| Ok(owner), &broken);
+        assert!(owned_by(Owner::User).is_ok());
+        assert!(owned_by(Owner::Administrators { elevated: true }).is_ok());
+        let normal = owned_by(Owner::Administrators { elevated: false });
+        assert!(matches!(normal, Err(RepoError::Config(_))), "{normal:?}");
+    }
+
+    #[test]
+    fn start_notes_a_project_that_opens_only_elevated() {
+        let root = Path::new("/srv/work");
+        let elevated = Owner::Administrators { elevated: true };
+        let note = elevated_only_note_with(root, &|_| Ok(elevated)).unwrap();
+        assert!(note.contains("administrator terminal"), "{note}");
+        // The way to open it from any terminal is the same line every refusal gives.
+        assert!(note.ends_with(&config::trust_hint(root)), "{note}");
+        // Either folder is enough.
+        let only_bolt = |path: &Path| {
+            Ok(if path.ends_with(".bolt") {
+                elevated
+            } else {
+                Owner::User
+            })
+        };
+        assert!(elevated_only_note_with(root, &only_bolt).is_some());
+        // The user's own account, a group that isn't elevated, and a failed look-up need no note.
+        for owner in [
+            Owner::User,
+            Owner::Other,
+            Owner::Administrators { elevated: false },
+        ] {
+            assert!(elevated_only_note_with(root, &|_| Ok(owner)).is_none());
+        }
+        let failed = elevated_only_note_with(root, &|_| Err(io::Error::other("Access is denied.")));
+        assert!(failed.is_none());
+    }
+
     /// Names that only look alike are different folders on NTFS, side by side: trusting one
     /// never trusts the other. (A KELVIN SIGN lowercases to `k`, and an ANGSTROM SIGN to `å`.)
     #[cfg(windows)]
@@ -1135,7 +1256,11 @@ mod tests {
     /// made, stops before making anything in it, and finishes when run again once it is trusted.
     #[test]
     fn start_stops_when_it_may_not_use_the_bolt_folder_it_made() {
-        for drive_says in [Owner::Unknown, Owner::Other] {
+        for drive_says in [
+            Owner::Unknown,
+            Owner::Other,
+            Owner::Administrators { elevated: false },
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
             let owner = |path: &Path| {
@@ -1151,7 +1276,11 @@ mod tests {
             };
             match (drive_says, refusal) {
                 (Owner::Unknown, RepoError::OwnerUnknown { path })
-                | (Owner::Other, RepoError::NotYours { path }) => assert_eq!(path, root),
+                | (Owner::Other, RepoError::NotYours { path })
+                | (
+                    Owner::Administrators { elevated: false },
+                    RepoError::AdminsNotElevated { path },
+                ) => assert_eq!(path, root),
                 other => panic!("{other:?}"),
             }
             // Nothing deleted, nothing made inside.
@@ -1162,7 +1291,9 @@ mod tests {
             assert!(
                 matches!(
                     again,
-                    Err(RepoError::OwnerUnknown { .. } | RepoError::NotYours { .. })
+                    Err(RepoError::OwnerUnknown { .. }
+                        | RepoError::NotYours { .. }
+                        | RepoError::AdminsNotElevated { .. })
                 ),
                 "{drive_says:?}"
             );
@@ -1617,6 +1748,31 @@ mod tests {
     }
 
     #[test]
+    fn the_refusal_names_the_group_and_both_ways_on() {
+        let root = Path::new("/srv/work");
+        let e = RepoError::AdminsNotElevated {
+            path: root.to_owned(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "The project at /srv/work belongs to the Administrators group, and this terminal \
+             isn't running as administrator."
+        );
+        let hint = e.hint().unwrap();
+        assert!(hint.contains("administrator"), "{hint}");
+        assert!(hint.ends_with(&config::trust_hint(root)), "{hint}");
+        // A `bolt start` that stops for it says how to finish, as for every other refusal.
+        let e = RepoError::StartStopped {
+            refusal: Box::new(e),
+        };
+        assert!(
+            e.hint()
+                .unwrap()
+                .ends_with("\nThen run `bolt start` again to finish.")
+        );
+    }
+
+    #[test]
     fn untrusted_text_in_errors_is_escaped() {
         use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
         for e in [
@@ -1633,6 +1789,9 @@ mod tests {
                 path: PathBuf::from(HOSTILE),
             },
             RepoError::OwnerUnknown {
+                path: PathBuf::from(HOSTILE),
+            },
+            RepoError::AdminsNotElevated {
                 path: PathBuf::from(HOSTILE),
             },
             RepoError::OwnerLookupFailed {
@@ -1657,6 +1816,7 @@ mod tests {
                 e,
                 RepoError::NotYours { .. }
                     | RepoError::OwnerUnknown { .. }
+                    | RepoError::AdminsNotElevated { .. }
                     | RepoError::OwnerLookupFailed { .. }
                     | RepoError::StartStopped { .. }
             ) {

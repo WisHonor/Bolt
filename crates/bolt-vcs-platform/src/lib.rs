@@ -79,9 +79,13 @@ pub fn is_hidden(path: &Path) -> io::Result<bool> {
 /// Who owns a file or folder, as far as Bolt can tell (decisions 025 and 026).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
-    /// The user running Bolt. Unix: the effective user. Windows: the user's own account, or the
-    /// Administrators group when the user is an administrator, elevated or not.
+    /// The user running Bolt. Unix: the effective user. Windows: the user's own account.
     User,
+    /// Windows only: the Administrators group, which owns what an administrator makes in an
+    /// administrator terminal. `elevated` is whether this terminal's token has that group switched
+    /// on, as `CheckTokenMembership` counts it: not in a normal terminal, nor for a user who isn't
+    /// an administrator.
+    Administrators { elevated: bool },
     /// Another user account.
     Other,
     /// Can't tell: the drive records no owner (FAT, exFAT, some network shares), records
@@ -131,6 +135,9 @@ mod windows_owner {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
+    };
+    use windows_sys::Win32::System::SystemServices::{
+        SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -202,18 +209,27 @@ mod windows_owner {
         if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } == 0 {
             return Ok(Owner::Other);
         }
-        // The Administrators group counts as the user if it is in their token: enabled when
-        // elevated, "for deny only" when not. CheckTokenMembership counts enabled groups only and
-        // would lock an administrator out of a project started in an elevated terminal.
+        // Elevated only if the token has the group switched on. A normal terminal's token holds
+        // it "for deny only", which grants nothing.
         let (group_buffer, groups_filled) = token_information(&token, TokenGroups)?;
         let groups = groups_in(&group_buffer, groups_filled)?;
-        let in_group = groups.iter().any(|group| {
-            // SAFETY: the group's SID points into `group_buffer`, which Windows filled and
-            // `groups` borrows, and `owner` is a valid SID in the descriptor; both stay
-            // allocated for the call, and EqualSid only reads them.
-            unsafe { EqualSid(group.Sid, owner) != 0 }
-        });
-        Ok(if in_group { Owner::User } else { Owner::Other })
+        let elevated = groups
+            .iter()
+            .filter(|group| group_counts(group.Attributes))
+            .any(|group| {
+                // SAFETY: the group's SID points into `group_buffer`, which Windows filled and
+                // `groups` borrows, and `owner` is a valid SID in the descriptor; both stay
+                // allocated for the call, and EqualSid only reads them.
+                unsafe { EqualSid(group.Sid, owner) != 0 }
+            });
+        Ok(Owner::Administrators { elevated })
+    }
+
+    /// Whether a token group with these `attributes` is switched on: enabled, and not there only
+    /// to refuse access (what `CheckTokenMembership` counts).
+    fn group_counts(attributes: u32) -> bool {
+        attributes & SE_GROUP_ENABLED.cast_unsigned() != 0
+            && attributes & SE_GROUP_USE_FOR_DENY_ONLY.cast_unsigned() == 0
     }
 
     /// The user's SID in a TOKEN_USER that Windows wrote into the first `filled` bytes of
@@ -333,6 +349,20 @@ mod windows_owner {
     mod tests {
         #![allow(clippy::unwrap_used)]
         use super::*;
+        use windows_sys::Win32::System::SystemServices::{
+            SE_GROUP_ENABLED_BY_DEFAULT, SE_GROUP_MANDATORY,
+        };
+
+        #[test]
+        fn the_group_counts_only_when_enabled() {
+            let counts = |attributes: i32| group_counts(attributes.cast_unsigned());
+            assert!(counts(
+                SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY
+            ));
+            assert!(!counts(SE_GROUP_USE_FOR_DENY_ONLY));
+            assert!(!counts(SE_GROUP_ENABLED | SE_GROUP_USE_FOR_DENY_ONLY));
+            assert!(!counts(0));
+        }
 
         #[test]
         fn the_process_token_reads_whole() {
@@ -377,10 +407,22 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    /// What an administrator makes in an administrator terminal belongs to the Administrators
+    /// group, not to their own account.
+    fn assert_mine(owner: Owner) {
+        assert!(
+            matches!(
+                owner,
+                Owner::User | Owner::Administrators { elevated: true }
+            ),
+            "{owner:?}"
+        );
+    }
+
     #[test]
     fn own_temp_folder_is_owned() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(owner_of(dir.path()).unwrap(), Owner::User);
+        assert_mine(owner_of(dir.path()).unwrap());
     }
 
     #[test]
@@ -426,7 +468,7 @@ mod tests {
                 .unwrap();
             assert!(made.success());
         }
-        assert_eq!(owner_of(&link).unwrap(), Owner::User);
+        assert_mine(owner_of(&link).unwrap());
     }
 
     #[test]

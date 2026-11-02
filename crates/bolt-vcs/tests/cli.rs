@@ -77,6 +77,23 @@ fn start_and_save_work_in_a_normal_folder() {
     env.bolt().arg("history").assert().success();
 }
 
+/// Whether a folder belongs to an elevated Administrators group is up to the computer (an
+/// administrator's terminal does it, as on Windows CI). Where it does, `start` says the project
+/// opens only from such a terminal, on stderr, whatever the output format.
+#[test]
+fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
+    for args in [&["start"][..], &["--json", "start"]] {
+        let env = Env::new();
+        let out = env.bolt().args(args).output().unwrap();
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        let expected = bolt_core::repo::elevated_only_note(env.root()).is_some();
+        let said = stderr.contains("opens only from an administrator terminal");
+        assert_eq!(said, expected, "{args:?}: {stderr}");
+        assert!(!stdout.contains("administrator terminal"), "{args:?}");
+    }
+}
+
 #[test]
 fn start_twice_is_refused() {
     let env = Env::new();

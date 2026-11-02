@@ -11,7 +11,7 @@ use bolt_core::config::{
 use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
 use bolt_core::id::{ChangeId, Id};
-use bolt_core::repo::{RepoError, Repository};
+use bolt_core::repo::{RepoError, Repository, elevated_only_note};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
 use bolt_core::text::escape;
@@ -126,6 +126,9 @@ fn start(json: bool) -> Result<(), Failure> {
         println!("Started a Bolt project in {shown}.");
         println!("Your first save is {short}, on line main.");
         println!("Next: change some files, then run: bolt save \"describe your change\"");
+    }
+    if let Some(note) = elevated_only_note(&root) {
+        eprintln!("warning: {}", escape(&note, true));
     }
     Ok(())
 }
