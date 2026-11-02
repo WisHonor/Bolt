@@ -274,7 +274,6 @@ fn rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line() {
 // names print identically.
 
 #[test]
-#[ignore = "RT2-3: fixed by Task 16 of the red-team fix branch"]
 fn rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -317,7 +316,6 @@ fn shown_paths(env: &Env) -> Vec<String> {
 // §12), but `ignore`/`globset` read `{a,b}` as a choice where Git reads it literally.
 
 #[test]
-#[ignore = "RT2-4: fixed by Task 16 of the red-team fix branch"]
 fn rt2_4_braces_in_boltignore_are_literal_as_in_git() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -336,7 +334,6 @@ fn rt2_4_braces_in_boltignore_are_literal_as_in_git() {
 /// The `ignore` matcher is case-sensitive unless told otherwise.
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
-#[ignore = "RT2-9: fixed by Task 16 of the red-team fix branch"]
 fn win_rt2_9_boltignore_ignores_case_like_git_on_case_insensitive_systems() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -392,7 +389,6 @@ fn rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT2-6: fixed by Task 16 of the red-team fix branch"]
 fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -410,9 +406,11 @@ fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
         std::fs::create_dir(&dir).unwrap();
     }
     let end = run_limited(bolt_capped(&env, env.root(), &["save", "x"]), 300);
+    // The files in force at one folder may total 1 MiB, so the second one is refused: an ordinary
+    // error that names a `.boltignore`, not an abort for want of memory.
     assert!(
-        end.code == Some(0),
-        "`bolt save` of 100 nested folders with a .boltignore each failed under a 1.5 GB cap: {end:?}"
+        end.code == Some(1) && end.stderr.contains(".boltignore"),
+        "`bolt save` of 100 nested folders with a .boltignore each did not stop cleanly under a 1.5 GB cap: {end:?}"
     );
 }
 

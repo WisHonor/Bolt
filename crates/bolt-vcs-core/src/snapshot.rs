@@ -263,16 +263,67 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
-/// The rules of the `.boltignore` in `dir`, or none if there isn't one. Read through `safe_fs`
-/// (a regular UTF-8 file of at most 1 MiB, storage-format.md §12). A folder Bolt may not look
+/// Git ignores letter case in `.gitignore` patterns on these systems (`core.ignorecase`).
+const IGNORE_CASE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// `line` with its braces made plain: Git reads `{a,b}` as ordinary characters, and `ignore`
+/// takes it for a choice. A brace that is escaped, or inside a `[...]` class, means itself already.
+fn literal_braces(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    // A `[` with no `]` after it is a plain character, and so is every `[` after that one.
+    let mut classes = true;
+    while let Some(c) = rest.chars().next() {
+        let mut len = c.len_utf8();
+        match c {
+            '\\' => len += rest[len..].chars().next().map_or(0, char::len_utf8),
+            '[' if classes => match class_len(&rest[len..]) {
+                Some(n) => len += n,
+                None => classes = false,
+            },
+            '{' | '}' => out.push('\\'),
+            _ => {}
+        }
+        out.push_str(&rest[..len]);
+        rest = &rest[len..];
+    }
+    out
+}
+
+/// The length of a class after its `[`, through its `]`, if it has one: an optional `!` or `^`,
+/// a first member that may itself be a `]`, then up to the next `]`.
+fn class_len(after: &str) -> Option<usize> {
+    let members = after.strip_prefix(['!', '^']).unwrap_or(after);
+    let mut chars = members.chars();
+    let first = chars.next()?;
+    let end = chars.as_str().find(']')?;
+    Some(after.len() - members.len() + first.len_utf8() + end + 1)
+}
+
+/// The bytes of `.boltignore` a walk has taken (storage-format.md §12).
+#[derive(Default)]
+struct Spent {
+    /// In the files of the folders the walk is inside.
+    in_force: u64,
+    /// In every file the walk has read.
+    read: u64,
+}
+
+/// The rules of the `.boltignore` in `dir` and its size, or none if there isn't one. Read through
+/// `safe_fs` (a regular UTF-8 file of at most 1 MiB, storage-format.md §12) and held to the limits
+/// before any rule is built, which costs far more memory than the file. A folder Bolt may not look
 /// into is `Unreadable`, not an ignore problem (RT-11).
-fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
+fn boltignore_rules(
+    root: &Path,
+    dir: &Path,
+    spent: &Spent,
+) -> Result<Option<(Gitignore, u64)>, SaveError> {
     let file = dir.join(".boltignore");
     let rel = shown(file.strip_prefix(root).unwrap_or(&file));
     let ignore = |detail| SaveError::Ignore { detail };
     let bytes = match safe_fs::read_capped(&file, safe_fs::MAX_BOLTIGNORE_BYTES) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Gitignore::empty()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             if let Err(source) = fs::symlink_metadata(&file)
                 && source.kind() != io::ErrorKind::NotFound
@@ -296,8 +347,24 @@ fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
             ));
         }
     };
+    let size = bytes.len() as u64;
+    if spent.in_force + size > safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES {
+        return Err(ignore(format!(
+            "{rel}: with the .boltignore files above it, it is larger than {} bytes",
+            safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES
+        )));
+    }
+    if spent.read + size > safe_fs::MAX_BOLTIGNORE_SAVE_BYTES {
+        return Err(ignore(format!(
+            "{rel}: with the other .boltignore files this save reads, it is larger than {} bytes",
+            safe_fs::MAX_BOLTIGNORE_SAVE_BYTES
+        )));
+    }
     let text = std::str::from_utf8(&bytes).map_err(|e| ignore(format!("{rel}: {e}")))?;
     let mut builder = GitignoreBuilder::new(dir);
+    builder
+        .case_insensitive(IGNORE_CASE)
+        .map_err(|e| ignore(format!("{rel}: {e}")))?;
     let mut bad = Vec::new();
     for (i, line) in text.lines().enumerate() {
         // Like Git, a byte order mark at the start is not part of the first pattern.
@@ -306,53 +373,79 @@ fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
         } else {
             line
         };
-        if let Err(e) = builder.add_line(Some(file.clone()), line) {
+        if let Err(e) = builder.add_line(Some(file.clone()), &literal_braces(line)) {
             bad.push(format!("{rel}: line {}: {e}", i + 1));
         }
     }
     if !bad.is_empty() {
         return Err(ignore(bad.join("; ")));
     }
-    builder.build().map_err(|e| ignore(format!("{rel}: {e}")))
+    let rules = builder.build().map_err(|e| ignore(format!("{rel}: {e}")))?;
+    Ok(Some((rules, size)))
+}
+
+/// A folder's `.boltignore`, for as long as the walk is inside that folder.
+struct Level {
+    dir: PathBuf,
+    rules: Gitignore,
+    /// The file's size, which counts against the limits meanwhile.
+    bytes: u64,
 }
 
 /// The `.boltignore` rules of the folders a walk is inside (nearest last), and the first problem
 /// found on entering a folder.
 struct IgnoreRules {
     root: PathBuf,
-    stack: Vec<(PathBuf, Gitignore)>,
+    stack: Vec<Level>,
+    spent: Spent,
     problem: Option<SaveError>,
 }
 
 impl IgnoreRules {
+    /// The rules for a walk of `root`, beginning with its own `.boltignore`.
+    fn new(root: &Path) -> Result<IgnoreRules, SaveError> {
+        let mut rules = IgnoreRules {
+            root: root.to_owned(),
+            stack: Vec::new(),
+            spent: Spent::default(),
+            problem: None,
+        };
+        rules.enter(root)?;
+        Ok(rules)
+    }
+
+    /// Puts the rules of the `.boltignore` in `dir`, if it has one, on the stack.
+    fn enter(&mut self, dir: &Path) -> Result<(), SaveError> {
+        if let Some((rules, bytes)) = boltignore_rules(&self.root, dir, &self.spent)? {
+            self.spent.in_force += bytes;
+            self.spent.read += bytes;
+            self.stack.push(Level {
+                dir: dir.to_owned(),
+                rules,
+                bytes,
+            });
+        }
+        Ok(())
+    }
+
     /// Whether the walk keeps `path`, as `ignore` decides: the nearest `.boltignore` with a
     /// matching pattern wins, and within it the last matching pattern. A folder whose `.boltignore`
     /// fails is not entered, and the problem is kept.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         // The walk is depth first, so the rules of folders `path` is not in are done with.
-        while self
-            .stack
-            .last()
-            .is_some_and(|(dir, _)| !path.starts_with(dir))
-        {
-            self.stack.pop();
+        while let Some(level) = self.stack.pop_if(|level| !path.starts_with(&level.dir)) {
+            self.spent.in_force -= level.bytes;
         }
-        for (_, rules) in self.stack.iter().rev() {
-            match rules.matched(path, is_dir) {
+        for level in self.stack.iter().rev() {
+            match level.rules.matched(path, is_dir) {
                 Match::Ignore(_) => return false,
                 Match::Whitelist(_) => break,
                 Match::None => {}
             }
         }
-        if is_dir {
-            match boltignore_rules(&self.root, path) {
-                Ok(rules) if rules.is_empty() => {}
-                Ok(rules) => self.stack.push((path.to_owned(), rules)),
-                Err(problem) => {
-                    self.problem.get_or_insert(problem);
-                    return false;
-                }
-            }
+        if is_dir && let Err(problem) = self.enter(path) {
+            self.problem.get_or_insert(problem);
+            return false;
         }
         true
     }
@@ -384,12 +477,7 @@ fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError
     let mut folders = Folders::from([(String::new(), Vec::new())]);
     // Bolt reads each .boltignore itself: `ignore` would reopen it by path, following links and
     // reading without a limit.
-    let top = boltignore_rules(root, root)?;
-    let rules = Arc::new(Mutex::new(IgnoreRules {
-        root: root.to_owned(),
-        stack: vec![(root.to_owned(), top)],
-        problem: None,
-    }));
+    let rules = Arc::new(Mutex::new(IgnoreRules::new(root)?));
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -1201,6 +1289,112 @@ mod tests {
         );
     }
 
+    /// The paths of the newest save, sorted.
+    fn saved_paths(repo: &Repository, outcome: SaveOutcome) -> Vec<String> {
+        let tree = saved_tree(repo.store(), saved_root(outcome));
+        tree.into_keys().collect()
+    }
+
+    #[test]
+    fn boltignore_ignores_letter_case_where_git_does() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", b"*.env\nsecrets/\n*.LOG\n");
+        write(root, "PROD.ENV", b"x");
+        write(root, "Secrets/key.pem", b"x");
+        write(root, "debug.LOG", b"x");
+        write(root, "keep.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        // Git sets core.ignorecase on Windows and macOS; on Linux a pattern matches exactly.
+        let want: &[&str] = if cfg!(any(windows, target_os = "macos")) {
+            &[".boltignore", "keep.txt"]
+        } else {
+            &[
+                ".boltignore",
+                "PROD.ENV",
+                "Secrets",
+                "Secrets/key.pem",
+                "keep.txt",
+            ]
+        };
+        assert_eq!(saved_paths(&repo, saved), want);
+    }
+
+    #[test]
+    fn braces_in_boltignore_are_literal_as_in_git() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let patterns = [
+            "{prod,dev}.env", // not a choice
+            "\\{kept\\}.txt", // already escaped: still one brace each
+            "[{]a.txt",       // a class that holds a brace
+            "[a-{]z.txt",     // a range that ends at a brace
+            "x{y",            // an unclosed brace is no error
+            "}",
+        ];
+        write(root, ".boltignore", patterns.join("\n").as_bytes());
+        for name in [
+            "{prod,dev}.env",
+            "{kept}.txt",
+            "{a.txt",
+            "{z.txt",
+            "bz.txt",
+            "x{y",
+            "}",
+        ] {
+            write(root, name, b"ignored");
+        }
+        for name in ["prod.env", "dev.env", "kept.txt", "a.txt", "5z.txt", "xy"] {
+            write(root, name, b"kept");
+        }
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [
+                ".boltignore",
+                "5z.txt",
+                "a.txt",
+                "dev.env",
+                "kept.txt",
+                "prod.env",
+                "xy"
+            ]
+        );
+    }
+
+    #[test]
+    fn braces_are_made_literal_except_where_they_already_are() {
+        for (line, want) in [
+            ("{a,b}.env", "\\{a,b\\}.env"),
+            ("*.{png,jpg}", "*.\\{png,jpg\\}"),
+            ("!{a}", "!\\{a\\}"),
+            ("no braces at all", "no braces at all"),
+            // Escaped by the user: left alone. An escaped backslash escapes nothing else.
+            ("\\{a\\}", "\\{a\\}"),
+            ("\\\\{a", "\\\\\\{a"),
+            ("trailing\\", "trailing\\"),
+            // In a class (a `]` first is a member), braces are members already.
+            ("[{}]x", "[{}]x"),
+            ("[]{]x", "[]{]x"),
+            ("[!{]x{", "[!{]x\\{"),
+            ("[é{]{", "[é{]\\{"),
+            // A `[` with no `]` after it is a plain character, and so are all later ones.
+            ("[{", "[\\{"),
+            ("[[{", "[[\\{"),
+            ("[a]{[}", "[a]\\{[\\}"),
+        ] {
+            assert_eq!(literal_braces(line), want, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_line_of_open_brackets_is_made_literal_in_linear_time() {
+        let line = "[".repeat(1 << 20);
+        let started = std::time::Instant::now();
+        assert_eq!(literal_braces(&line), line);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     #[test]
     fn a_folders_ignore_rules_end_with_the_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -1208,12 +1402,7 @@ mod tests {
         write(root, ".boltignore", b"*.log\n");
         write(root, "a/.boltignore", b"!x.log\n");
         fs::create_dir(root.join("b")).unwrap();
-        let top = boltignore_rules(root, root).unwrap();
-        let mut rules = IgnoreRules {
-            root: root.to_owned(),
-            stack: vec![(root.to_owned(), top)],
-            problem: None,
-        };
+        let mut rules = IgnoreRules::new(root).unwrap();
         // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach.
         assert!(rules.keeps(&root.join("a"), true));
         assert!(rules.keeps(&root.join("a").join("x.log"), false));
@@ -1279,6 +1468,53 @@ mod tests {
         let detail = assert_ignore_problem(&mut repo);
         assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
         assert!(!detail.contains(dir.path().to_str().unwrap()), "{detail}");
+    }
+
+    /// A `.boltignore` of `len` bytes that holds no pattern.
+    fn comment_of(len: u64) -> Vec<u8> {
+        vec![b'#'; usize::try_from(len).unwrap()]
+    }
+
+    /// What `walk` makes of the `.boltignore` files under `root`, which must be a problem.
+    fn walk_problem(root: &Path) -> String {
+        match walk(root, SaveLimits::default()) {
+            Err(SaveError::Ignore { detail }) => detail,
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn boltignore_files_in_force_at_one_folder_total_at_most_one_mebibyte() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let half = safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES / 2;
+        write(root, ".boltignore", &comment_of(half));
+        write(root, "a/.boltignore", &comment_of(half));
+        // `a`'s file is not in force at `b`, so the two folders do not add up.
+        write(root, "b/.boltignore", &comment_of(half));
+        assert!(walk(root, SaveLimits::default()).is_ok());
+        // Six bytes more, below `a`: refused before the pattern, which is wrong, is read.
+        write(root, "a/x/.boltignore", b"[z-a]\n");
+        let detail = walk_problem(root);
+        assert!(detail.starts_with("a/x/.boltignore: "), "{detail}");
+        assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
+        assert!(!detail.contains("[z-a]"), "{detail}");
+    }
+
+    #[test]
+    fn one_save_reads_at_most_sixteen_mebibytes_of_boltignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let each = safe_fs::MAX_BOLTIGNORE_BYTES;
+        for i in 0..safe_fs::MAX_BOLTIGNORE_SAVE_BYTES / each {
+            write(root, &format!("d{i}/.boltignore"), &comment_of(each));
+        }
+        assert!(walk(root, SaveLimits::default()).is_ok());
+        write(root, "e/.boltignore", &comment_of(1));
+        // Whichever file the walk reaches last is the one that goes over.
+        let detail = walk_problem(root);
+        assert!(detail.contains("/.boltignore: "), "{detail}");
+        assert!(detail.contains("larger than 16777216 bytes"), "{detail}");
     }
 
     #[cfg(unix)]

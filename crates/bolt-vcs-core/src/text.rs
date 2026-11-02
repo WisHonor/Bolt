@@ -3,15 +3,16 @@
 use std::fmt::Write as _;
 
 /// Makes text from outside Bolt safe to print. Control characters (an escape sequence could drive
-/// the terminal) become `\xNN`; bidi controls and line or paragraph separators become `\u{NNNN}`.
-/// A newline stays when `keep_newlines`. Escaping again changes nothing.
+/// the terminal) become `\xNN`; bidi controls, line and paragraph separators and other invisible
+/// characters become `\u{NNNN}`. A newline stays when `keep_newlines`. Escaping again changes
+/// nothing.
 #[must_use]
 pub fn escape(text: &str, keep_newlines: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_control() && !(keep_newlines && c == '\n') {
             let _ = write!(out, "\\x{:02x}", u32::from(c));
-        } else if reorders_or_splits(c) {
+        } else if hides_or_reorders(c) {
             let _ = write!(out, "\\u{{{:04x}}}", u32::from(c));
         } else {
             out.push(c);
@@ -20,18 +21,20 @@ pub fn escape(text: &str, keep_newlines: bool) -> String {
     out
 }
 
-/// Non-control characters that still make a terminal show a name other than the one it has:
-/// bidi controls reorder text (`invoice_\u{202e}fdp.exe` reads as `invoice_exe.pdf`) and separators
-/// end a line. Joiners are not here: emoji and many scripts need them, and they only join letters.
-fn reorders_or_splits(c: char) -> bool {
+/// Non-control characters that spoof or hide: bidi controls (`invoice_\u{202e}fdp.exe` reads as
+/// `invoice_exe.pdf`), separators, the Hangul fillers and every format character (category Cf,
+/// Unicode 18.0) but the joiners, which emoji and many scripts need.
+fn hides_or_reorders(c: char) -> bool {
     matches!(
         c,
-        // The Arabic letter mark, and the left-to-right and right-to-left marks.
-        '\u{61c}' | '\u{200e}' | '\u{200f}'
-            // Embeddings and overrides, then isolates.
-            | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-            // The line and paragraph separators.
-            | '\u{2028}' | '\u{2029}'
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+            | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'
+            | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}'
+            | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}'
+            // The fillers, and the line and paragraph separators.
+            | '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}' | '\u{2028}' | '\u{2029}'
     )
 }
 
@@ -77,9 +80,79 @@ mod tests {
             "café ✓ naïve 日本語 שלום مرحبا",
             // The joiners that emoji and many scripts need are not layout controls.
             "👨\u{200d}👩\u{200d}👧 क्‍ष \u{200c}",
+            "می\u{200c}خواهم",
+            // Variation selectors, keycaps and skin tones are not format characters.
+            "❤\u{fe0f} 1\u{fe0f}\u{20e3} 👍🏽",
+            // Real Hangul, next to the blank fillers that are escaped.
+            "한국어 \u{1100}\u{1161}\u{11a8} \u{3163}\u{3165} \u{ffa1}",
         ] {
             assert_eq!(escape(text, false), text);
             assert_eq!(escape(text, true), text);
+        }
+    }
+
+    #[test]
+    fn invisible_characters_are_escaped_with_enough_digits() {
+        // Invisible characters from many blocks; the tag is above U+FFFF, so it needs five digits.
+        let hidden = "a\u{200b}b\u{2060}\u{2063}\u{206a}\u{206e}\u{feff}\u{e0041}\u{180e}\u{ad}c";
+        let want =
+            "a\\u{200b}b\\u{2060}\\u{2063}\\u{206a}\\u{206e}\\u{feff}\\u{e0041}\\u{180e}\\u{00ad}c";
+        assert_eq!(escape(hidden, false), want);
+        assert_eq!(escape(hidden, true), want);
+        // The Hangul fillers draw nothing.
+        assert_eq!(
+            escape("\u{115f}\u{1160}\u{3164}\u{ffa0}", false),
+            "\\u{115f}\\u{1160}\\u{3164}\\u{ffa0}"
+        );
+    }
+
+    /// The format characters (category Cf) of Unicode 18.0, from its DerivedGeneralCategory.txt.
+    const FORMAT: [(u32, u32); 21] = [
+        (0x00AD, 0x00AD),
+        (0x0600, 0x0605),
+        (0x061C, 0x061C),
+        (0x06DD, 0x06DD),
+        (0x070F, 0x070F),
+        (0x0890, 0x0891),
+        (0x08E2, 0x08E2),
+        (0x180E, 0x180E),
+        (0x200B, 0x200F),
+        (0x202A, 0x202E),
+        (0x2060, 0x2064),
+        (0x2066, 0x206F),
+        (0xFEFF, 0xFEFF),
+        (0xFFF9, 0xFFFB),
+        (0x110BD, 0x110BD),
+        (0x110CD, 0x110CD),
+        (0x13430, 0x1343F),
+        (0x1BCA0, 0x1BCA3),
+        (0x1D173, 0x1D17A),
+        (0xE0001, 0xE0001),
+        (0xE0020, 0xE007F),
+    ];
+
+    /// The non-control characters `escape` must replace: the list above but for the joiners, plus
+    /// the Hangul fillers and the line and paragraph separators.
+    fn must_hide(c: char) -> bool {
+        let n = u32::from(c);
+        (FORMAT.iter().any(|&(lo, hi)| (lo..=hi).contains(&n))
+            && !matches!(c, '\u{200c}' | '\u{200d}'))
+            || matches!(
+                c,
+                '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}' | '\u{2028}' | '\u{2029}'
+            )
+    }
+
+    #[test]
+    fn exactly_the_controls_and_invisible_characters_are_escaped() {
+        for c in '\0'..=char::MAX {
+            let text = c.to_string();
+            assert_eq!(
+                escape(&text, false) != text,
+                c.is_control() || must_hide(c),
+                "U+{:04X}",
+                u32::from(c)
+            );
         }
     }
 
@@ -98,6 +171,11 @@ mod tests {
             Just('\u{2066}'),
             Just('\u{2028}'),
             Just('\u{2029}'),
+            Just('\u{200b}'),
+            Just('\u{200d}'),
+            Just('\u{feff}'),
+            Just('\u{3164}'),
+            Just('\u{e0041}'),
         ];
         proptest::collection::vec(piece, 0..24).prop_map(|chars| chars.into_iter().collect())
     }
@@ -109,14 +187,7 @@ mod tests {
             keep in any::<bool>(),
         ) {
             let once = escape(&text, keep);
-            let dangerous = |c: char| {
-                (c.is_control() && !(keep && c == '\n'))
-                    || matches!(
-                        c,
-                        '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
-                            | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}'
-                    )
-            };
+            let dangerous = |c: char| (c.is_control() && !(keep && c == '\n')) || must_hide(c);
             prop_assert!(!once.chars().any(dangerous), "{once:?}");
             prop_assert_eq!(escape(&once, keep), once);
         }

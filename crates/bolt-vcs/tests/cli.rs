@@ -984,6 +984,28 @@ fn folder_names_are_shown_escaped() {
 }
 
 #[test]
+fn boltignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    // Each file is well within its own limit; together they are past the limit for one folder.
+    let comment = "#".repeat(600 * 1024);
+    std::fs::create_dir(env.root().join("sub")).unwrap();
+    std::fs::write(env.root().join(".boltignore"), &comment).unwrap();
+    std::fs::write(env.root().join("sub/.boltignore"), &comment).unwrap();
+    let out = env.bolt().args(["save", "x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let shown = text(&out.stderr);
+    assert!(
+        shown.contains(
+            "A .boltignore file has a problem: sub/.boltignore: with the .boltignore files above it, \
+             it is larger than 1048576 bytes."
+        ),
+        "{shown:?}"
+    );
+    assert!(shown.contains("hint: Nothing was saved."), "{shown:?}");
+}
+
+#[test]
 fn text_quoted_in_an_error_is_shown_escaped() {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
