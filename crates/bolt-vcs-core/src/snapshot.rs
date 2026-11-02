@@ -1401,7 +1401,7 @@ mod tests {
         let root = dir.path();
         let lines = [
             "*.py[!c]",         // every .py? but .pyc
-            "[[:digit:]]*.log", // logs whose names start with a digit
+            "[[:alpha:]]*.log", // logs whose names start with a letter
             "a[/]b",            // a class never takes `/`, so this matches nothing
             "trail\\",          // nor does a `\` that escapes nothing
             "bar[",             // nor a `[` that never closes
@@ -1422,15 +1422,16 @@ mod tests {
         let saved = save_now(&mut repo).unwrap();
         let mut want = vec![
             ".boltignore",
+            "1.log",
             "a",
-            "a.log",
             "a/b",
             "bar[",
             "trail",
             "x.pyc",
             "x.tmp",
         ];
-        // Git reads names composed where the drive composes them, and never takes `B` for `b`.
+        // Where the drive composes names the decomposed line matches nothing, and where it
+        // ignores letter case neither does `\B`.
         if drive.composes_unicode {
             want.push(decomposed);
         }
