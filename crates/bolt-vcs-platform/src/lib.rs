@@ -13,7 +13,8 @@ pub fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // Regular files ignore O_NONBLOCK.
+        // For a regular file O_NONBLOCK mostly changes nothing; where it does, a read fails instead
+        // of waiting.
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
     }
     #[cfg(windows)]

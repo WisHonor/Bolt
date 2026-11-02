@@ -194,13 +194,8 @@ fn win_junction_in_project_is_not_walked_into() {
         .save(&entry.state.lines["main"], false)
         .unwrap();
     let root = repo.store().listing(&save.root).unwrap();
-    if let Some(e) = root.get("j") {
-        assert_ne!(
-            e.kind,
-            bolt_core::listing::EntryKind::Folder,
-            "junction walked into"
-        );
-    }
+    let saved = root.get("j").expect("the junction is not in the save");
+    assert_eq!(saved.kind, bolt_core::listing::EntryKind::Symlink);
 }
 
 // RT-2: a symlinked `.bolt/store/packs` makes `bolt save` write outside the project.
@@ -275,8 +270,8 @@ fn rt3_fifo_as_state_head_does_not_hang_history() {
     cmd.arg("history");
     let end = run_limited(cmd, 10);
     assert!(
-        !end.timed_out,
-        "`bolt history` hung on a FIFO at state/head"
+        end.code == Some(1),
+        "`bolt history` hung or crashed on a FIFO at state/head: {end:?}"
     );
 }
 
@@ -289,7 +284,10 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
     let mut cmd = env.bolt();
     cmd.arg("history");
     let end = run_limited(cmd, 10);
-    assert!(!end.timed_out, "`bolt history` hung on a FIFO named *.pack");
+    assert!(
+        end.code == Some(1),
+        "`bolt history` hung or crashed on a FIFO named *.pack: {end:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -299,12 +297,21 @@ fn rt3_fifo_as_project_config_does_not_hang_save() {
     env.ok(&["start"]);
     mkfifo(&env.root().join(".bolt/config.toml"));
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    // Without an identity the save stops before it reads the project's settings.
     let mut cmd = env.bolt_anonymous(env.root());
     cmd.args(["save", "add a"]);
     let end = run_limited(cmd, 10);
     assert!(
-        !end.timed_out,
-        "`bolt save` hung on a FIFO at .bolt/config.toml"
+        end.code == Some(1) && end.stderr.contains("needs your name and email"),
+        "`bolt save` hung or crashed on a FIFO at .bolt/config.toml: {end:?}"
+    );
+    // With one, it reads them for the note about an ignored identity, and must not hang there.
+    let mut cmd = env.bolt();
+    cmd.args(["save", "add a"]);
+    let end = run_limited(cmd, 10);
+    assert!(
+        end.code == Some(0),
+        "`bolt save` hung or failed on a FIFO at .bolt/config.toml: {end:?}"
     );
 }
 

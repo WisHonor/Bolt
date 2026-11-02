@@ -608,6 +608,28 @@ fn save_is_reported_as_saved_when_the_line_cant_be_read_to_shorten_its_id() {
     );
 }
 
+/// The same for nothing to save, which may have stored a repair, and for `show`: the whole ID
+/// and a warning, never a failure.
+#[test]
+fn nothing_to_save_and_show_work_when_the_line_cant_be_read_to_shorten_ids() {
+    let env = project_whose_first_save_is_damaged();
+    env.bolt().args(["save", "two"]).assert().success();
+    for args in [&["save", "again"][..], &["show"]] {
+        let out = env.bolt().args(args).output().unwrap();
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("warning: Bolt couldn't read this line's older saves"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Nothing was changed"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stdout.is_empty(), "{args:?}");
+    }
+}
+
 #[test]
 fn save_json_is_the_same_when_the_line_cant_be_read_to_shorten_its_id() {
     let env = project_whose_first_save_is_damaged();

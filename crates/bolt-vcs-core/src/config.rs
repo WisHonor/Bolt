@@ -123,6 +123,19 @@ fn from_file(
     let Some(file) = read_file(path, read)? else {
         return Ok(None);
     };
+    // As in safe-folders: a relative folder would name a different one wherever a command runs.
+    if project_root.is_some()
+        && let Some(folder) = file
+            .project
+            .iter()
+            .filter_map(|entry| entry.folder.as_deref())
+            .find(|folder| !Path::new(folder).is_absolute())
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_owned(),
+            detail: format!("[[project]] folder must be a full path, not \"{folder}\""),
+        });
+    }
     let for_folder = project_root.and_then(|root| {
         file.project.into_iter().rev().find_map(|entry| {
             let folder = entry.folder?;
@@ -234,9 +247,10 @@ fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> S
     )
 }
 
-/// The folders whose projects the user trusts although another account owns their `.bolt` (decision
-/// 025, T23): the `safe-folders` list in the user's own `config.toml`, never a project's. Entries
-/// must be full paths, since a relative one names a different folder wherever a command runs.
+/// The folders whose projects the user trusts although another account owns the folder or its
+/// `.bolt`, or Bolt can't tell who does (decisions 025 to 027, T23): the `safe-folders` list in the
+/// user's own `config.toml`, never a project's. Entries must be full paths, since a relative one
+/// names a different folder wherever a command runs.
 pub fn safe_folders() -> Result<Vec<PathBuf>, ConfigError> {
     user_config_path().map_or(Ok(Vec::new()), |path| safe_folders_in(&path))
 }
@@ -262,8 +276,9 @@ fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
         .collect()
 }
 
-/// What the user can do about a project another user account owns: the line that trusts its
-/// folder `root`, and where it goes (decision 025).
+/// What the user can do about a project Bolt may not use (another account owns the folder or its
+/// `.bolt`, or Bolt can't tell who does): the line that trusts its folder `root`, and where it goes
+/// (decisions 025 to 027).
 #[must_use]
 pub fn trust_hint(root: &Path) -> String {
     trust_hint_for(root, user_config_path().as_deref())
@@ -456,6 +471,21 @@ mod tests {
         for root in [&project, &missing] {
             let got = identity_from(None, Some(config.clone()), Some(root));
             assert_eq!(got.unwrap(), person("Ada", "ada@example.com"), "{root:?}");
+        }
+    }
+
+    #[test]
+    fn project_entries_must_name_full_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        for entry in ["project", "../project", "", r"\project", "C:project"] {
+            let config = user_config(dir.path(), &[(Path::new(entry), "Rel", "rel@example.com")]);
+            match identity_from(None, Some(config), Some(&project)) {
+                Err(ConfigError::Invalid { detail, .. }) => {
+                    assert!(detail.contains("full path"), "{entry:?}: {detail}");
+                }
+                other => panic!("{entry:?}: {other:?}"),
+            }
         }
     }
 

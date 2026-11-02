@@ -62,6 +62,11 @@ pub enum SaveError {
     Unreadable { path: String, source: io::Error },
     #[error("{} changed while Bolt was saving it.", escape(path, false))]
     ChangedDuringSave { path: String },
+    #[error(
+        "{} is a special file Bolt can't save yet, such as a cloud placeholder.",
+        escape(path, false)
+    )]
+    SpecialFile { path: String },
     // `reason` is Bolt's own wording.
     #[error("Bolt can't save {}: {reason}.", escape(path, false))]
     InvalidName { path: String, reason: String },
@@ -117,6 +122,7 @@ impl SaveError {
                 SaveError::ChangedDuringSave { .. } => {
                     "Nothing was saved. Try again when the file stops changing, or list it in .boltignore."
                 }
+                SaveError::SpecialFile { .. } => "Nothing was saved. List it in .boltignore for now.",
                 SaveError::InvalidName { .. } => {
                     "Nothing was saved. Rename it, or list it in .boltignore."
                 }
@@ -144,6 +150,9 @@ impl SaveError {
                 source,
             },
             SaveError::ChangedDuringSave { .. } => SaveError::ChangedDuringSave {
+                path: rel.to_owned(),
+            },
+            SaveError::SpecialFile { .. } => SaveError::SpecialFile {
                 path: rel.to_owned(),
             },
             other => other,
@@ -407,7 +416,7 @@ struct Spent {
 
 /// The rules of the `.boltignore` in `dir` and its size, or none if there isn't one. Read through
 /// `safe_fs` and held to the limits (storage-format.md §12) before any rule is built, which costs
-/// far more memory than the file. A folder Bolt may not look into is `Unreadable` (RT-11).
+/// far more memory than the file. A folder Bolt may not look into is `Unreadable`.
 fn boltignore_rules(
     root: &Path,
     dir: &Path,
@@ -560,7 +569,7 @@ impl IgnoreRules {
 
 /// Stack for the scan thread: 4 KiB per folder level the depth limit allows. Dropping the linked
 /// `ignore` matchers of a deep tree recurses once per level and needs about 2 MiB in a Windows
-/// debug build, more than the main thread's 1 MiB (RT-6). Unused stack costs address space only.
+/// debug build, more than the main thread's 1 MiB. Unused stack costs address space only.
 const WALK_STACK_BYTES: usize = (MAX_SAVE_DEPTH + 2) * 4096;
 
 /// Scans the project folder on a thread of its own, so callers don't need a deep stack.
@@ -580,7 +589,7 @@ fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
 fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
-    // read (RT-6, RT-10).
+    // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
     // Bolt reads each .boltignore itself: `ignore` would reopen it by path, following links and
     // reading without a limit.
@@ -702,7 +711,7 @@ fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
             source: io::Error::new(e.kind(), e.to_string()),
         },
         (Some(e), None) => RepoError::from(io::Error::new(e.kind(), e.to_string())).into(),
-        // Anything else is a pattern Bolt could not understand.
+        // The walker reads no ignore files itself, so this is not expected; it fails closed.
         (None, _) => SaveError::Ignore {
             detail: describe(root, &err),
         },
@@ -858,7 +867,8 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
 }
 
 /// Stores one file in two passes: hash it, then copy it into `pack` unless already held. A file
-/// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`.
+/// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`; a
+/// Windows reparse point that isn't a link gives `SpecialFile`.
 pub(crate) fn store_file(
     pack: &mut PackWriter,
     store: &Store,
@@ -873,13 +883,17 @@ pub(crate) fn store_file(
         path: path.display().to_string(),
     };
     let stamp = |f: &File| f.metadata().map(|m| (m.len(), m.modified().ok()));
-    // A link or special file here was swapped in since the scan (RT-5). On Windows it can also be a
-    // non-link reparse point (a cloud placeholder, say) that `safe_fs` refuses; see security.md §7.
+    // A link or special file here was swapped in since the scan, unless it is a Windows reparse
+    // point that isn't a link (a cloud placeholder, say), which the scan takes for a file.
     let mut file = safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
-        if e.kind() == io::ErrorKind::InvalidInput {
-            changed()
-        } else {
+        if e.kind() != io::ErrorKind::InvalidInput {
             unreadable(e)
+        } else if fs::symlink_metadata(path).is_ok_and(|m| safe_fs::is_reparse_file(&m)) {
+            SaveError::SpecialFile {
+                path: path.display().to_string(),
+            }
+        } else {
+            changed()
         }
     })?;
     let before = stamp(&file).map_err(unreadable)?;
@@ -2026,6 +2040,7 @@ mod tests {
                 source: io::Error::other(HOSTILE),
             },
             SaveError::ChangedDuringSave { path: hostile() },
+            SaveError::SpecialFile { path: hostile() },
             SaveError::InvalidName {
                 path: hostile(),
                 reason: "fine".into(),

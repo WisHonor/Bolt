@@ -205,7 +205,7 @@ Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
-**Shape of `.bolt/` itself** ([decision 025](decisions/025-red-team-m1-rulings.md)). A shared project can arrive with links planted inside `.bolt/`, so a reader must refuse a repository unless `.bolt/`, `store/`, `store/packs/`, `state/`, `cache/` and `tmp/` are real folders (never symbolic links or Windows junctions). Every file Bolt reads or writes in `.bolt/` is opened without following links and must be a regular file (never a pipe, device or folder), and reads are capped: `format` at most 4 KiB, `state/head` at most 65 bytes, `state/lock-info` and `config.toml` at most 4 KiB and 1 MiB. Clearing `tmp/` removes only Bolt's own temporary names (`tmp-` followed by 16 lowercase hex digits).
+**Shape of `.bolt/` itself** ([decision 025](decisions/025-red-team-m1-rulings.md)). A shared project can arrive with links planted inside `.bolt/`, so a reader must refuse a repository unless `.bolt/`, `store/`, `store/packs/`, `state/`, `cache/` and `tmp/` are real folders (never symbolic links or Windows junctions), and report a repository whose `store/packs/`, `state/` or `tmp/` is missing as damaged. Every file Bolt reads or writes in `.bolt/` is opened without following links and must be a regular file (never a pipe, device or folder), and reads are capped: `format` at most 4 KiB, `state/head` at most 65 bytes, `state/lock-info` and `config.toml` at most 4 KiB and 1 MiB. Clearing `tmp/` removes only Bolt's own temporary names (`tmp-` followed by 16 lowercase hex digits).
 
 **`format`** is UTF-8 text, one item per line:
 

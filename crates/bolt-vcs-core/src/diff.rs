@@ -31,8 +31,8 @@ pub struct FileChange<'a> {
 
 /// Hands every file that differs between two saves to `each`, in whole-path byte order. `old_root`
 /// is `None` with nothing to compare. A save past the limits of storage-format.md section 3 gives
-/// `SaveTooLarge` when the walk reaches it, after `each` has seen earlier changes.
-/// [`count_changes`] checks first.
+/// `SaveTooLarge` when the walk reaches it, after `each` has seen earlier changes; to find out
+/// before showing anything, run [`count_changes`] first, which walks the same way.
 pub fn for_each_change<E: From<StoreError>>(
     store: &Store,
     old_root: Option<Id>,
@@ -106,8 +106,8 @@ fn walk<E: From<StoreError>>(
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
     );
     // What is left to do waits here, not in a call per folder level, so a save nested thousands of
-    // levels deep cannot overflow the stack (RT-6). A folder's differing names are pushed last path
-    // first, so the next one popped is always the one whose paths come next.
+    // levels deep cannot overflow the stack. A folder's differing names are pushed last path first,
+    // so the next one popped is always the one whose paths come next.
     let mut todo = vec![Todo {
         name: String::new(),
         at: 0,

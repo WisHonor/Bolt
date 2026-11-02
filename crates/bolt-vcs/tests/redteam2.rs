@@ -264,8 +264,8 @@ fn rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line() {
     cmd.args(["show", "0123abcd"]);
     let end = run_limited(cmd, 60);
     assert!(
-        !end.timed_out,
-        "`bolt show 0123abcd` was still walking after 60 s on a {packs}-byte repository"
+        end.code == Some(1) && end.stderr.contains("No save, line or ID matches"),
+        "`bolt show 0123abcd` hung or failed otherwise on a {packs}-byte repository: {end:?}"
     );
 }
 
@@ -603,15 +603,32 @@ fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
         .state
         .lines["main"];
     plant_chain(env.root(), 1, 0, |_| {});
-    // The oldest save is damaged; the newest, which the new save builds on, is fine.
+    // The oldest save is damaged; the newest, which the new save builds on, is fine. Bolt's own
+    // copy is damaged too, or reads would just pass the planted one over.
     plant_lying_pack(env.root(), ObjectKind::Save, &first, b"not a save");
+    for e in std::fs::read_dir(env.root().join(".bolt/store/packs")).unwrap() {
+        let path = e.unwrap().path();
+        let found = bolt_core::pack::PackReader::open(&path)
+            .unwrap()
+            .find(&first)
+            .copied();
+        if let Some(entry) = found {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let data = entry.offset + bolt_core::pack::ENTRY_HEADER_LEN;
+            bytes[usize::try_from(data).unwrap()] ^= 1;
+            std::fs::write(&path, bytes).unwrap();
+        }
+    }
     let before = Repository::open(env.root()).unwrap().head().unwrap();
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     let out = env.bolt().args(["save", "my work"]).output().unwrap();
     let after = Repository::open(env.root()).unwrap().head().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !(after != before && stderr.contains("Nothing was changed")),
+        out.status.code() == Some(0)
+            && after != before
+            && stderr.contains("The save was made")
+            && !stderr.contains("Nothing was changed"),
         "the save was committed, but Bolt said:\n{stderr}"
     );
 }

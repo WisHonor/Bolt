@@ -10,6 +10,7 @@ use bolt_core::config::{
 };
 use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
+use bolt_core::id::{ChangeId, Id};
 use bolt_core::repo::{RepoError, Repository};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
@@ -120,7 +121,7 @@ fn start(json: bool) -> Result<(), Failure> {
             })
         );
     } else {
-        // The folder's name came from outside Bolt, like any name in a project (RT-8).
+        // The folder's name came from outside Bolt, like any name in a project.
         let shown = escape(&root.display().to_string(), false);
         println!("Started a Bolt project in {shown}.");
         println!("Your first save is {short}, on line main.");
@@ -195,7 +196,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 println!(
                     "Nothing to save: no changes since your last save ({}).",
-                    short_change_id(&repo, &current, &last.change_id)?
+                    short_or_whole(&repo, &current, &last.change_id)
                 );
             }
         }
@@ -205,6 +206,18 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
     }
     warn_about_damage(&repo);
     Ok(())
+}
+
+/// `change_id` at its shortest or, if the line can't be read to work that out, whole, with a
+/// warning: a damaged older save mustn't fail a command that otherwise worked.
+fn short_or_whole(repo: &Repository, id: &Id, change_id: &ChangeId) -> String {
+    short_change_id(repo, id, change_id).unwrap_or_else(|problem| {
+        eprintln!(
+            "warning: Bolt couldn't read this line's older saves to shorten the change ID. {}",
+            escape(&problem.to_string(), true)
+        );
+        change_id.to_letters()
+    })
 }
 
 /// Names each pack that held a damaged copy of an object the command needed. The command went on
@@ -287,7 +300,7 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     // printed, so a save that can't be listed prints only the error. The changes are then
     // printed as the walk finds them, and none is kept.
     let count = count_changes(store, old_root, save.root)?;
-    let short = short_change_id(&repo, &id, &save.change_id)?;
+    let short = short_or_whole(&repo, &id, &save.change_id);
     if json {
         // The document `json!` would make, in pieces: serde_json writes an object's keys in
         // alphabetical order, so `changes` comes between `bolt_json` and `save`.

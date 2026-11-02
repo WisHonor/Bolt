@@ -163,7 +163,7 @@ fn fixed_folders(bolt: &Path) -> [PathBuf; 6] {
 }
 
 /// Refuses a `.bolt` whose fixed folders are links, junctions or files. A missing one passes:
-/// `init` creates them, and a command that needs one fails without it.
+/// `init` creates them, and `open` reports one it needs as damage.
 fn check_shape(bolt: &Path) -> Result<(), RepoError> {
     for dir in fixed_folders(bolt) {
         match safe_fs::check_real_dir(&dir) {
@@ -530,6 +530,18 @@ impl Repository {
         let format = parse_format(&text)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
+        // Every command needs these, so a missing one is damage, named as such.
+        for (dir, name) in [
+            (&tmp, "tmp"),
+            (&bolt.join("state"), "state"),
+            (&packs, "store/packs"),
+        ] {
+            if let Err(e) = safe_fs::check_real_dir(dir)
+                && e.kind() == io::ErrorKind::NotFound
+            {
+                return Err(damaged(format!(".bolt/{name} is missing")));
+            }
+        }
         // The head first: its pack was in the store before the head pointed at it.
         let head = read_head(&bolt)?;
         let store = Store::open(&packs)?;
@@ -740,6 +752,24 @@ mod tests {
         std::fs::write(bolt.join("format"), FORMAT_TEXT).unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
+    }
+
+    #[test]
+    fn a_missing_fixed_folder_is_named_as_damage() {
+        for name in ["tmp", "state", "store/packs", "store"] {
+            let (dir, repo) = project();
+            drop(repo);
+            std::fs::remove_dir_all(dir.path().join(".bolt").join(name)).unwrap();
+            let missing = if name == "store" { "store/packs" } else { name };
+            match Repository::open(dir.path()) {
+                Err(e @ RepoError::Damaged { .. }) => {
+                    let want = format!("damaged: .bolt/{missing} is missing.");
+                    assert!(e.to_string().ends_with(&want), "{e}");
+                    assert!(e.hint().unwrap().contains("Nothing was changed"));
+                }
+                other => panic!("{name}: {:?}", other.map(|_| ())),
+            }
+        }
     }
 
     fn entry(save: u8) -> DiaryEntry {
