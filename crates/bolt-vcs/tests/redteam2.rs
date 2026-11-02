@@ -153,7 +153,7 @@ fn plant_chain(root: &Path, n: usize, lines: usize, shape: impl FnOnce(&mut Save
     let mut tip = entry.state.lines["main"];
     let mut save = repo.store().save(&tip, false).unwrap();
     shape(&mut save);
-    let mut pack = repo.new_pack().unwrap();
+    let mut pack = repo.new_packs().unwrap();
     for _ in 0..n {
         save.parents = vec![tip];
         save.change_id = ChangeId::random().unwrap();

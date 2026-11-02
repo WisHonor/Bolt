@@ -18,7 +18,7 @@ use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
-use crate::pack::{ObjectKind, PackError, PackWriter};
+use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
@@ -187,12 +187,12 @@ pub fn save_folder(
     let folders = walk(repo.root(), SaveLimits::default())?;
     let old = old_listings(repo.store(), parent.root, &folders, SaveLimits::default())?;
     check_names(&folders, &old)?;
-    let mut pack = repo.new_pack()?;
-    let root = build(repo.store(), &mut pack, &folders, &old)?;
+    let mut packs = repo.new_packs()?;
+    let root = build(repo.store(), &mut packs, &folders, &old)?;
     if root == parent.root {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
-        if !pack.is_empty() {
-            pack.finish(repo.packs_dir())?;
+        if !packs.is_empty() {
+            packs.finish()?;
         }
         return Ok(SaveOutcome::NothingChanged { current: parent_id });
     }
@@ -212,7 +212,7 @@ pub fn save_folder(
     let encoded = save.encode();
     // Refuse a save that would not read back (an over-long message, say) before storing it.
     Save::decode(&encoded, false).map_err(StoreError::from)?;
-    let save_id = pack.add_record(ObjectKind::Save, &encoded)?;
+    let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
     // Worked out before the commit, so that nothing after it can fail the save.
     let mut warnings = Vec::new();
     let short_change_id =
@@ -237,7 +237,7 @@ pub fn save_folder(
         state,
         safety_copies: vec![],
     };
-    repo.commit(&lock, pack, &diary)?;
+    repo.commit(&lock, packs, &diary)?;
     // The save is committed now; failing to count its files must not make it look failed.
     let changed_files = match count_changes(repo.store(), Some(parent.root), root) {
         Ok(count) => Some(count),
@@ -827,7 +827,7 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
 /// Stores every file and listing, deepest folders first, and returns the top listing's ID.
 fn build(
     store: &Store,
-    pack: &mut PackWriter,
+    packs: &mut PackSet,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
 ) -> Result<Id, SaveError> {
@@ -852,7 +852,7 @@ fn build(
                 }
                 Kind::File => {
                     let (id, size) =
-                        store_file(pack, store, &c.path, &mut || {}).map_err(|e| e.at(&c.rel))?;
+                        store_file(packs, store, &c.path, &mut || {}).map_err(|e| e.at(&c.rel))?;
                     // Without `x` bits, a file stays executable if it was (decision 004).
                     let executable = c.executable.unwrap_or_else(|| {
                         before
@@ -867,7 +867,7 @@ fn build(
                     (kind, id, size)
                 }
                 Kind::Symlink => {
-                    let (id, size) = store_link(pack, store, &c.path).map_err(|e| e.at(&c.rel))?;
+                    let (id, size) = store_link(packs, store, &c.path).map_err(|e| e.at(&c.rel))?;
                     (EntryKind::Symlink, id, size)
                 }
             };
@@ -882,7 +882,7 @@ fn build(
         let id = listing.id();
         let encoded = listing.encode();
         if !store.has_good_copy(&id, ObjectKind::FolderListing, encoded.len() as u64)? {
-            pack.add_record(ObjectKind::FolderListing, &encoded)?;
+            packs.add_record(ObjectKind::FolderListing, &encoded)?;
         }
         built.insert(rel, id);
     }
@@ -890,7 +890,7 @@ fn build(
 }
 
 /// Stores a symlink's target as content; the link itself is never followed.
-fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, u64), SaveError> {
+fn store_link(packs: &mut PackSet, store: &Store, path: &Path) -> Result<(Id, u64), SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: path.display().to_string(),
         source,
@@ -904,16 +904,16 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
     })?;
     let id = hash_content(target.as_bytes());
     if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
-        pack.add_content(target.as_bytes())?;
+        packs.add_content(target.as_bytes())?;
     }
     Ok((id, target.len() as u64))
 }
 
-/// Stores one file in two passes: hash it, then copy it into `pack` unless already held. A file
+/// Stores one file in two passes: hash it, then copy it into `packs` unless already held. A file
 /// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`; a
 /// Windows reparse point that isn't a link gives `SpecialFile`.
 pub(crate) fn store_file(
-    pack: &mut PackWriter,
+    packs: &mut PackSet,
     store: &Store,
     path: &Path,
     between_passes: &mut dyn FnMut(),
@@ -958,11 +958,11 @@ pub(crate) fn store_file(
     if size != before.0 || stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }
-    if pack.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
+    if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
         return Ok((id, size));
     }
     file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
-    match pack.add_content_from(&mut file, id) {
+    match packs.add_content_from(&mut file, id) {
         Ok(_) => Ok((id, size)),
         Err(PackError::ContentChanged) => Err(changed()),
         Err(e) => Err(e.into()),
@@ -2158,8 +2158,8 @@ mod tests {
         let (dir, repo) = project();
         let path = dir.path().join("growing.log");
         fs::write(&path, b"line 1\n").unwrap();
-        let mut pack = repo.new_pack().unwrap();
-        let got = store_file(&mut pack, repo.store(), &path, &mut || {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let got = store_file(&mut packs, repo.store(), &path, &mut || {}).unwrap();
         assert_eq!(got, (hash_content(b"line 1\n"), 7));
         let mut append = || {
             use std::io::Write;
@@ -2167,7 +2167,7 @@ mod tests {
             f.write_all(b"line 2\n").unwrap();
         };
         assert!(matches!(
-            store_file(&mut pack, repo.store(), &path, &mut append),
+            store_file(&mut packs, repo.store(), &path, &mut append),
             Err(SaveError::ChangedDuringSave { .. })
         ));
     }
@@ -2183,12 +2183,12 @@ mod tests {
         if !make_link(&victim) {
             return;
         }
-        let mut pack = repo.new_pack().unwrap();
-        match build(repo.store(), &mut pack, &folders, &HashMap::new()) {
+        let mut packs = repo.new_packs().unwrap();
+        match build(repo.store(), &mut packs, &folders, &HashMap::new()) {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),
             other => panic!("{other:?}"),
         }
-        assert!(pack.is_empty());
+        assert!(packs.is_empty());
     }
 
     #[test]
@@ -2213,9 +2213,9 @@ mod tests {
     #[test]
     fn file_deleted_between_scan_and_read_is_still_unreadable() {
         let (dir, repo) = project();
-        let mut pack = repo.new_pack().unwrap();
+        let mut packs = repo.new_packs().unwrap();
         let gone = dir.path().join("gone.txt");
-        match store_file(&mut pack, repo.store(), &gone, &mut || {}) {
+        match store_file(&mut packs, repo.store(), &gone, &mut || {}) {
             Err(SaveError::Unreadable { source, .. }) => {
                 assert_eq!(source.kind(), io::ErrorKind::NotFound);
             }
@@ -2238,9 +2238,9 @@ mod tests {
         // fails this test instead of stopping the whole run.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut pack = repo.new_pack().unwrap();
-            let stored = store_file(&mut pack, repo.store(), &pipe, &mut || {});
-            let _ = tx.send((stored, pack.is_empty()));
+            let mut packs = repo.new_packs().unwrap();
+            let stored = store_file(&mut packs, repo.store(), &pipe, &mut || {});
+            let _ = tx.send((stored, packs.is_empty()));
         });
         let (stored, pack_is_empty) = rx
             .recv_timeout(std::time::Duration::from_secs(10))

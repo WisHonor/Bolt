@@ -444,10 +444,10 @@ fn plant_deep_save(root: &Path, depth: usize) {
 
 use bolt_core::id::Id;
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackWriter};
+use bolt_core::pack::{ObjectKind, PackSet};
 
 /// A listing whose every entry has the same kind and points at the same object.
-fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id) -> Id {
+fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id) -> Id {
     let l = Listing::new(
         names
             .iter()
@@ -465,7 +465,7 @@ fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id)
 }
 
 /// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
-fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
+fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     use bolt_core::diary::{Action, DiaryEntry};
     use bolt_core::id::ChangeId;
     use bolt_core::repo::Repository;
@@ -476,7 +476,7 @@ fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
     let (head, entry) = repo.current().unwrap();
     let parent_id = entry.state.lines["main"];
     let parent = repo.store().save(&parent_id, false).unwrap();
-    let mut pack = repo.new_pack().unwrap();
+    let mut pack = repo.new_packs().unwrap();
     let id = build(&mut pack);
     let save = Save {
         root: id,

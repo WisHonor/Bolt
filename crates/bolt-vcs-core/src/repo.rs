@@ -15,7 +15,7 @@ use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
 use crate::listing::Listing;
-use crate::pack::{ObjectKind, PackError, PackWriter};
+use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
@@ -505,8 +505,8 @@ impl Repository {
         if has_format(root)? {
             return Err(already());
         }
-        let mut pack = repo.new_pack()?;
-        let listing = pack.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
+        let mut packs = repo.new_packs()?;
+        let listing = packs.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
         let save = Save {
             root: listing,
             parents: vec![],
@@ -521,7 +521,7 @@ impl Repository {
         let encoded = save.encode();
         // Refuse a save that would not read back (an over-long name, say) before storing it.
         Save::decode(&encoded, false)?;
-        let save = pack.add_record(ObjectKind::Save, &encoded)?;
+        let save = packs.add_record(ObjectKind::Save, &encoded)?;
         let entry = DiaryEntry {
             parent: None,
             action: Action::Command,
@@ -537,7 +537,7 @@ impl Repository {
             },
             safety_copies: vec![],
         };
-        repo.commit(&lock, pack, &entry)?;
+        repo.commit(&lock, packs, &entry)?;
         write_atomic(&repo.tmp, &format_path(root), FORMAT_TEXT.as_bytes())?;
         Ok(repo)
     }
@@ -655,8 +655,8 @@ impl Repository {
 
     /// Build packs only while holding the `ChangeLock`: `open` cleans `tmp/` whenever the lock
     /// is free, which would delete a pack being built without it.
-    pub fn new_pack(&self) -> Result<PackWriter, RepoError> {
-        Ok(PackWriter::create(&self.tmp)?)
+    pub fn new_packs(&self) -> Result<PackSet, RepoError> {
+        Ok(PackSet::new(&self.tmp, &self.packs)?)
     }
 
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
@@ -734,20 +734,21 @@ impl Repository {
         Ok(ChangeLock { _file: file })
     }
 
-    /// Stores `entry` in `pack`, moves the pack into the store, then replaces `state/head`. The
-    /// command has happened exactly when the head is replaced (decision 010), so an `Io` error from
-    /// the final folder sync does not mean "nothing changed".
+    /// Stores `entry` in the last of `packs`, moves that pack into the store, registers all of
+    /// them, then replaces `state/head`. The command has happened exactly when the head is
+    /// replaced (decision 010), so an `Io` error from the final folder sync does not mean
+    /// "nothing changed".
     pub fn commit(
         &mut self,
         _lock: &ChangeLock,
-        mut pack: PackWriter,
+        mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
         let bytes = entry.encode();
         // Refuse an entry that would not read back before storing it.
         DiaryEntry::decode(&bytes)?;
-        let id = pack.add_record(ObjectKind::DiaryEntry, &bytes)?;
-        if let Some(path) = pack.finish(&self.packs)? {
+        let id = packs.add_record(ObjectKind::DiaryEntry, &bytes)?;
+        for path in packs.finish()? {
             self.store.register(&path)?;
         }
         fault_point("commit:before-head")?;
@@ -766,7 +767,7 @@ impl Repository {
 mod tests {
     use super::*;
     use crate::diary::{Action, Position, ServerLines, State, TagList};
-    use crate::pack::PackReader;
+    use crate::pack::{PackReader, PackSet};
     use crate::save::Person;
     use crate::test_support::{commit_records, sample_records};
     use std::collections::BTreeMap;
@@ -867,8 +868,8 @@ mod tests {
 
     fn commit(repo: &mut Repository, e: &DiaryEntry) -> Result<Id, RepoError> {
         let lock = repo.lock_for_change("save", &mut |_| {})?;
-        let pack = repo.new_pack()?;
-        repo.commit(&lock, pack, e)
+        let packs = repo.new_packs()?;
+        repo.commit(&lock, packs, e)
     }
 
     #[test]
@@ -1931,9 +1932,9 @@ mod tests {
         for n in 1.. {
             assert!(n < 50, "the commit never succeeded");
             let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-            let pack = repo.new_pack().unwrap();
+            let packs = repo.new_packs().unwrap();
             fault::arm(n);
-            let result = repo.commit(&lock, pack, &entry(2));
+            let result = repo.commit(&lock, packs, &entry(2));
             fault::disarm();
             drop(lock);
             drop(repo);
@@ -1953,6 +1954,124 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn count_packs(repo: &Repository) -> usize {
+        std::fs::read_dir(repo.packs_dir()).unwrap().count()
+    }
+
+    #[test]
+    fn a_command_past_the_limit_writes_several_packs_and_takes_effect_once() {
+        let (_dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let packs_before = count_packs(&repo);
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let mut packs = PackSet::with_limit(repo.tmp_dir(), repo.packs_dir(), 3).unwrap();
+        let ids: Vec<Id> = (0..7u8).map(|i| packs.add_content(&[i]).unwrap()).collect();
+        // Two packs are in the folder by now, but nothing can see them before the commit.
+        assert_eq!(count_packs(&repo), packs_before + 2);
+        assert_eq!(repo.head().unwrap(), a);
+        assert!(matches!(
+            repo.store().copy_content(&ids[0], &mut io::sink()),
+            Err(StoreError::Missing(_))
+        ));
+        let b = repo.commit(&lock, packs, &entry(2)).unwrap();
+        // 3 + 3 + 1 objects, then the entry.
+        assert_eq!(count_packs(&repo), packs_before + 3);
+        assert_eq!(repo.head().unwrap(), b);
+        for id in ids {
+            repo.store().copy_content(&id, &mut io::sink()).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_entry_that_fills_the_last_pack_leaves_no_empty_one_behind() {
+        let (_dir, mut repo) = project();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let mut packs = PackSet::with_limit(repo.tmp_dir(), repo.packs_dir(), 3).unwrap();
+        packs.add_content(b"a").unwrap();
+        packs.add_content(b"b").unwrap();
+        // The entry is the third object, so it fills the pack.
+        let id = repo.commit(&lock, packs, &entry(1)).unwrap();
+        assert_eq!(repo.head().unwrap(), id);
+        assert_eq!(count_packs(&repo), 1);
+        assert_eq!(std::fs::read_dir(repo.tmp_dir()).unwrap().count(), 0);
+        repo.store()
+            .read_record(&id, ObjectKind::DiaryEntry)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_diary_entry_is_in_the_last_pack() {
+        let (_dir, mut repo) = project();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let mut packs = PackSet::with_limit(repo.tmp_dir(), repo.packs_dir(), 3).unwrap();
+        let ids: Vec<Id> = (0..7u8).map(|i| packs.add_content(&[i]).unwrap()).collect();
+        let entry_id = repo.commit(&lock, packs, &entry(1)).unwrap();
+        let mut holders = Vec::new();
+        for pack in std::fs::read_dir(repo.packs_dir()).unwrap() {
+            let reader = PackReader::open(&pack.unwrap().path()).unwrap();
+            if reader.find(&entry_id).is_some() {
+                holders.push(reader);
+            }
+        }
+        assert_eq!(holders.len(), 1);
+        // The last pack holds what came last: the seventh object and the entry.
+        let held: BTreeSet<Id> = holders[0].entries().iter().map(|e| e.id).collect();
+        assert_eq!(held, BTreeSet::from([ids[6], entry_id]));
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_crash_between_packs_leaves_the_repository_as_it_was() {
+        use crate::fsio::fault;
+        use crate::id::hash_content;
+        use crate::verify::verify_store;
+
+        /// A command that needs three packs: seven objects with room for three in a pack, then
+        /// its entry.
+        fn past_the_limit(repo: &mut Repository, lock: &ChangeLock) -> Result<Id, RepoError> {
+            let mut packs = PackSet::with_limit(repo.tmp_dir(), repo.packs_dir(), 3)?;
+            for i in 0..7u8 {
+                packs.add_content(&[i])?;
+            }
+            repo.commit(lock, packs, &entry(2))
+        }
+
+        let mut rolled_over = false;
+        for n in 1.. {
+            assert!(n < 50, "the command never succeeded");
+            let (dir, mut repo) = project();
+            let a = commit(&mut repo, &entry(1)).unwrap();
+            let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+            fault::arm(n);
+            let result = past_the_limit(&mut repo, &lock);
+            fault::disarm();
+            drop(lock);
+            drop(repo);
+            let mut repo = Repository::open(dir.path()).unwrap();
+            let Err(crash) = result else {
+                assert_eq!(repo.current().unwrap().1, entry(2));
+                break;
+            };
+            assert_eq!(repo.head().unwrap(), a, "fault {n}");
+            assert!(verify_store(repo.packs_dir()).is_ok(), "fault {n}");
+            // Running the command again works, and finds what the crash left behind.
+            let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+            if crash.to_string().ends_with("packs:rolled-over") {
+                rolled_over = true;
+                let first = hash_content(&[0]);
+                assert!(
+                    repo.store()
+                        .has_good_copy(&first, ObjectKind::Content, 1)
+                        .unwrap()
+                );
+            }
+            let b = past_the_limit(&mut repo, &lock).unwrap();
+            assert_eq!(repo.head().unwrap(), b, "fault {n}");
+            assert!(verify_store(repo.packs_dir()).is_ok(), "fault {n}");
+        }
+        assert!(rolled_over, "no fault point sat between two packs");
     }
 
     #[test]

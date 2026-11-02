@@ -277,8 +277,8 @@ mod tests {
             signature: vec![],
             extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
         };
-        let mut pack = repo.new_pack().unwrap();
-        let id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
         let mut state = entry.state.clone();
         if let Some(line) = line {
             state.lines.insert(line.to_owned(), id);
@@ -292,7 +292,7 @@ mod tests {
             state,
             safety_copies: vec![],
         };
-        repo.commit(&lock, pack, &diary).unwrap();
+        repo.commit(&lock, packs, &diary).unwrap();
         id
     }
 

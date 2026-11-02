@@ -37,18 +37,18 @@ pub(crate) fn commit_records(
 ) -> (Id, Id) {
     let lock = repo.lock_for_change("tag", &mut |_| {}).expect("the lock");
     let (head, mut entry) = repo.current().expect("a current entry");
-    let mut pack = repo.new_pack().expect("a pack");
-    let tags = pack
+    let mut packs = repo.new_packs().expect("a pack set");
+    let tags = packs
         .add_record(ObjectKind::TagList, &tags.encode())
         .expect("store the tag list");
-    let servers = pack
+    let servers = packs
         .add_record(ObjectKind::ServerLines, &servers.encode())
         .expect("store the server lines");
     entry.parent = Some(head);
     entry.command = "tag".into();
     entry.state.tags = Some(tags);
     entry.state.server_lines = Some(servers);
-    repo.commit(&lock, pack, &entry).expect("commit");
+    repo.commit(&lock, packs, &entry).expect("commit");
     (tags, servers)
 }
 

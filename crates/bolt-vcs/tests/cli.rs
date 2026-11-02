@@ -4,7 +4,7 @@
 use assert_cmd::Command;
 use bolt_core::id::Id;
 use bolt_core::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH};
-use bolt_core::pack::{ObjectKind, PackWriter};
+use bolt_core::pack::{ObjectKind, PackSet, PackWriter};
 use bolt_core::repo::FORMAT_TEXT;
 use std::path::Path;
 use tempfile::TempDir;
@@ -511,6 +511,21 @@ fn bolt_folder_is_hidden_on_windows() {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
     assert!(bolt_platform::is_hidden(&env.root().join(".bolt")).unwrap());
+}
+
+#[test]
+fn ordinary_commands_still_write_one_pack() {
+    let env = Env::new();
+    let packs = || {
+        std::fs::read_dir(env.root().join(".bolt/store/packs"))
+            .unwrap()
+            .count()
+    };
+    env.bolt().arg("start").assert().success();
+    assert_eq!(packs(), 1);
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    env.bolt().args(["save", "Add a"]).assert().success();
+    assert_eq!(packs(), 2);
 }
 
 #[test]
@@ -1353,7 +1368,7 @@ fn unreadable_folder_is_reported_as_unreadable() {
 // planted through Bolt's own library.
 
 /// A listing whose every entry has the same kind and points at the same object.
-fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id) -> Id {
+fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id) -> Id {
     let entries = names
         .iter()
         .map(|name| Entry {
@@ -1369,7 +1384,7 @@ fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id)
 }
 
 /// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
-fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
+fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     use bolt_core::diary::{Action, DiaryEntry};
     use bolt_core::id::ChangeId;
     use bolt_core::repo::Repository;
@@ -1380,7 +1395,7 @@ fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
     let (head, entry) = repo.current().unwrap();
     let parent_id = entry.state.lines["main"];
     let parent = repo.store().save(&parent_id, false).unwrap();
-    let mut pack = repo.new_pack().unwrap();
+    let mut pack = repo.new_packs().unwrap();
     let save = Save {
         root: build(&mut pack),
         parents: vec![parent_id],
@@ -1424,7 +1439,7 @@ fn plant_history(
     let (head, entry) = repo.current().unwrap();
     let mut tip = entry.state.lines["main"];
     let mut save = repo.store().save(&tip, false).unwrap();
-    let mut pack = repo.new_pack().unwrap();
+    let mut pack = repo.new_packs().unwrap();
     let mut change_ids = Vec::new();
     for _ in 0..n {
         save.parents = vec![tip];

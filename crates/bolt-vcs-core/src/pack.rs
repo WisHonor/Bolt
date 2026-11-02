@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "fault-injection"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const PACK_MAGIC: [u8; 8] = *b"BOLTPACK";
 pub const PACK_END_MAGIC: [u8; 8] = *b"BOLTPEND";
@@ -353,6 +355,155 @@ impl Drop for PackWriter {
     fn drop(&mut self) {
         // After a successful finish the temp file is gone, and this fails harmlessly.
         let _ = fs::remove_file(&self.tmp_path);
+    }
+}
+
+/// Most objects Bolt's writer puts in one pack. The format allows more, but a writer holds the
+/// index of the pack it builds in memory, about 100 bytes an object.
+pub const WRITER_PACK_OBJECTS: u64 = 1 << 20;
+const _: () = assert!(WRITER_PACK_OBJECTS <= MAX_PACK_OBJECTS);
+
+/// What `set_test_pack_limit` set; 0 for nothing.
+#[cfg(any(test, feature = "fault-injection"))]
+static TEST_PACK_LIMIT: AtomicU64 = AtomicU64::new(0);
+
+/// Makes every set started from now on, in any thread, roll over at `limit` objects; `None`
+/// goes back to the writer's own. It reaches every command of the process, so a test that uses
+/// it needs a process of its own.
+#[cfg(any(test, feature = "fault-injection"))]
+pub fn set_test_pack_limit(limit: Option<u64>) {
+    TEST_PACK_LIMIT.store(limit.map_or(0, |l| l.max(1)), Ordering::Relaxed);
+}
+
+fn writer_limit() -> u64 {
+    #[cfg(any(test, feature = "fault-injection"))]
+    {
+        let set = TEST_PACK_LIMIT.load(Ordering::Relaxed);
+        if set != 0 {
+            return set;
+        }
+    }
+    WRITER_PACK_OBJECTS
+}
+
+fn failed_earlier() -> PackError {
+    io::Error::other("an earlier pack of this command could not be stored").into()
+}
+
+/// The packs of one command. A pack that reaches the limit is moved into the store at once and a
+/// new one takes its place. Nothing points at these packs until the command moves the head, so
+/// any a crash leaves behind are only unused.
+pub struct PackSet {
+    tmp_dir: PathBuf,
+    packs_dir: PathBuf,
+    limit: u64,
+    /// The pack being built.
+    current: PackWriter,
+    /// The packs already moved into the store, in the order they were made.
+    done: Vec<PathBuf>,
+    /// Set when a full pack could not be moved: the objects in it are gone, so the set takes no
+    /// more.
+    broken: bool,
+}
+
+impl PackSet {
+    /// A set that rolls over at the writer's own limit.
+    pub(crate) fn new(tmp_dir: &Path, packs_dir: &Path) -> Result<PackSet, PackError> {
+        PackSet::start(tmp_dir, packs_dir, writer_limit())
+    }
+
+    /// A set that rolls over at `limit` objects, so tests can split small commands.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn with_limit(tmp_dir: &Path, packs_dir: &Path, limit: u64) -> Result<PackSet, PackError> {
+        PackSet::start(tmp_dir, packs_dir, limit)
+    }
+
+    fn start(tmp_dir: &Path, packs_dir: &Path, limit: u64) -> Result<PackSet, PackError> {
+        Ok(PackSet {
+            tmp_dir: tmp_dir.to_owned(),
+            packs_dir: packs_dir.to_owned(),
+            limit,
+            current: PackWriter::create(tmp_dir)?,
+            done: Vec::new(),
+            broken: false,
+        })
+    }
+
+    /// Stores an encoded structured record (any kind but `Content`).
+    pub fn add_record(&mut self, kind: ObjectKind, encoded: &[u8]) -> Result<Id, PackError> {
+        self.add(|pack| pack.add_record(kind, encoded))
+    }
+
+    /// Stores content held in memory.
+    pub fn add_content(&mut self, bytes: &[u8]) -> Result<Id, PackError> {
+        self.add(|pack| pack.add_content(bytes))
+    }
+
+    /// Streams content that should have the fingerprint `expected` and returns its size. If the
+    /// bytes turn out different, nothing is stored.
+    pub fn add_content_from(
+        &mut self,
+        reader: &mut dyn Read,
+        expected: Id,
+    ) -> Result<u64, PackError> {
+        self.add(|pack| pack.add_content_from(reader, expected))
+    }
+
+    /// Whether the pack being built holds `id`. Packs already in the store aren't looked in.
+    #[must_use]
+    pub fn contains(&self, id: &Id) -> bool {
+        self.current.contains(id)
+    }
+
+    /// Whether nothing has been added, to any of the packs.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.done.is_empty() && self.current.is_empty()
+    }
+
+    /// Moves the pack being built into the store, if it holds anything, and returns the paths of
+    /// all the packs in the order they were made.
+    pub fn finish(mut self) -> Result<Vec<PathBuf>, PackError> {
+        if self.broken {
+            return Err(failed_earlier());
+        }
+        // An empty pack is only dropped, which removes its temp file.
+        if !self.current.is_empty()
+            && let Some(path) = self.current.finish(&self.packs_dir)?
+        {
+            self.done.push(path);
+        }
+        Ok(self.done)
+    }
+
+    /// Runs `write` on the pack being built, then moves the pack into the store if it is full.
+    fn add<T>(
+        &mut self,
+        write: impl FnOnce(&mut PackWriter) -> Result<T, PackError>,
+    ) -> Result<T, PackError> {
+        if self.broken {
+            return Err(failed_earlier());
+        }
+        let added = write(&mut self.current)?;
+        if self.current.index.len() as u64 >= self.limit
+            && let Err(e) = self.roll_over()
+        {
+            self.broken = true;
+            return Err(e);
+        }
+        Ok(added)
+    }
+
+    /// Moves the full pack into the store and starts the next one.
+    fn roll_over(&mut self) -> Result<(), PackError> {
+        // The next one first, so the set always has a pack to add to.
+        let next = PackWriter::create(&self.tmp_dir)?;
+        let full = std::mem::replace(&mut self.current, next);
+        if let Some(path) = full.finish(&self.packs_dir)? {
+            self.done.push(path);
+        }
+        fsio::fault_point("packs:rolled-over")?;
+        Ok(())
     }
 }
 
@@ -1226,5 +1377,123 @@ mod tests {
                 (n, other) => panic!("fault {n}: unexpected {other:?}"),
             }
         }
+    }
+
+    /// Adds the one-byte contents 0 to `n - 1` and returns their IDs.
+    fn add_bytes(set: &mut PackSet, n: u8) -> Vec<Id> {
+        (0..n).map(|i| set.add_content(&[i]).unwrap()).collect()
+    }
+
+    fn objects_in(path: &Path) -> usize {
+        PackReader::open(path).unwrap().entries().len()
+    }
+
+    #[test]
+    fn a_set_moves_each_full_pack_into_the_store_and_starts_the_next() {
+        let (_root, tmp, packs) = dirs();
+        let mut set = PackSet::with_limit(&tmp, &packs, 3).unwrap();
+        let ids = add_bytes(&mut set, 7);
+        // The first two packs are in the store; only the newest is still being built.
+        assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 2);
+        assert!(set.contains(&ids[6]) && !set.contains(&ids[0]));
+        let paths = set.finish().unwrap();
+        let sizes: Vec<usize> = paths.iter().map(|p| objects_in(p)).collect();
+        assert_eq!(sizes, [3, 3, 1]);
+        // In the order they were made, so the last one holds what came last.
+        assert!(PackReader::open(&paths[2]).unwrap().find(&ids[6]).is_some());
+        assert!(is_empty_dir(&tmp));
+    }
+
+    #[test]
+    fn a_pack_that_just_filled_is_not_followed_by_an_empty_one() {
+        let (_root, tmp, packs) = dirs();
+        let mut set = PackSet::with_limit(&tmp, &packs, 3).unwrap();
+        add_bytes(&mut set, 6);
+        assert!(!set.is_empty());
+        assert_eq!(set.finish().unwrap().len(), 2);
+        assert!(is_empty_dir(&tmp));
+    }
+
+    #[test]
+    fn an_object_added_twice_counts_once_towards_the_limit() {
+        let (_root, tmp, packs) = dirs();
+        let mut set = PackSet::with_limit(&tmp, &packs, 2).unwrap();
+        set.add_content(b"a").unwrap();
+        set.add_content(b"a").unwrap();
+        assert!(is_empty_dir(&packs));
+        set.add_content(b"b").unwrap();
+        assert_eq!(std::fs::read_dir(&packs).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_set_with_nothing_in_it_writes_no_pack() {
+        let (_root, tmp, packs) = dirs();
+        let set = PackSet::with_limit(&tmp, &packs, 3).unwrap();
+        assert!(set.is_empty());
+        assert!(set.finish().unwrap().is_empty());
+        assert!(is_empty_dir(&tmp) && is_empty_dir(&packs));
+    }
+
+    #[test]
+    fn streamed_content_goes_through_the_set() {
+        let (_root, tmp, packs) = dirs();
+        let mut set = PackSet::with_limit(&tmp, &packs, 2).unwrap();
+        // Content that turns out different stores nothing, and the set carries on.
+        let err = set
+            .add_content_from(&mut &b"new"[..], hash_content(b"old"))
+            .unwrap_err();
+        assert!(matches!(err, PackError::ContentChanged), "{err:?}");
+        assert!(set.is_empty());
+        let data = b"streamed ".repeat(20_000);
+        let size = set
+            .add_content_from(&mut &data[..], hash_content(&data))
+            .unwrap();
+        assert_eq!(size, data.len() as u64);
+        assert!(set.contains(&hash_content(&data)));
+        set.add_record(ObjectKind::FolderListing, &Listing::empty().encode())
+            .unwrap();
+        // That was the second object, so the pack is in the store.
+        let paths = set.finish().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(objects_in(&paths[0]), 2);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_crash_while_rolling_over_leaves_only_whole_packs() {
+        use crate::fsio::fault;
+        let mut rolled_over = false;
+        for n in 1.. {
+            assert!(n < 20, "the set never finished");
+            let (_root, tmp, packs) = dirs();
+            let mut set = PackSet::with_limit(&tmp, &packs, 2).unwrap();
+            fault::arm(n);
+            let result = match (0..5u8).try_for_each(|i| set.add_content(&[i]).map(drop)) {
+                Ok(()) => set.finish(),
+                Err(e) => {
+                    // The objects of a pack that could not be moved are gone, so the set takes
+                    // no more and cannot be finished.
+                    assert!(set.add_content(b"more").is_err(), "fault {n}");
+                    assert!(set.finish().is_err(), "fault {n}");
+                    Err(e)
+                }
+            };
+            fault::disarm();
+            assert!(is_empty_dir(&tmp), "fault {n} left a temp file");
+            match result {
+                Err(PackError::Io(e)) => {
+                    rolled_over |= e.to_string().ends_with("packs:rolled-over");
+                    for pack in std::fs::read_dir(&packs).unwrap() {
+                        assert!(objects_in(&pack.unwrap().path()) > 0, "fault {n}");
+                    }
+                }
+                Ok(paths) => {
+                    assert_eq!(paths.len(), 3);
+                    break;
+                }
+                Err(other) => panic!("fault {n}: unexpected {other:?}"),
+            }
+        }
+        assert!(rolled_over, "no fault point sat between two packs");
     }
 }
