@@ -615,7 +615,6 @@ fn rt8_start_does_not_print_escape_sequences_from_the_folder_name() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "RT-9: fixed by Task 7 of plans/2026-11-01-red-team-m1-fixes.md"]
 fn rt9_project_config_cannot_override_the_users_own_identity() {
     let env = Env::new();
     std::fs::write(

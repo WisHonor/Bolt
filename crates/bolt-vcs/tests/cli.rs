@@ -132,6 +132,171 @@ fn start_reads_the_users_own_config_through_a_link() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Who the user is: only from the environment and their own settings, never from a project's
+// (RT-9, decision 025).
+// ---------------------------------------------------------------------------------------------
+
+const REAL_USER: &str = "[user]\nname = \"Real User\"\nemail = \"real@example.com\"\n";
+const MALLORY: &str = "[user]\nname = \"Mallory\"\nemail = \"mallory@evil.example\"\n";
+
+/// The user's own settings, a started project, and a `.bolt/config.toml` in it (the one a shared
+/// project can bring) that names someone else; `a.txt` is waiting to be saved.
+fn project_naming_mallory() -> Env {
+    let env = Env::new();
+    std::fs::write(env.config.path().join("config.toml"), REAL_USER).unwrap();
+    env.bolt_anonymous(env.root())
+        .arg("start")
+        .assert()
+        .success();
+    std::fs::write(env.root().join(".bolt/config.toml"), MALLORY).unwrap();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    env
+}
+
+fn json_of(env: &Env, args: &[&str]) -> serde_json::Value {
+    let out = env.bolt_anonymous(env.root()).args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+const MALLORY_NOTE: &str = "note: This project's settings name Mallory <mallory@evil.example>; \
+                            Bolt ignores identities from project settings.";
+
+#[test]
+fn save_notes_an_ignored_project_identity() {
+    let env = project_naming_mallory();
+    let out = env
+        .bolt_anonymous(env.root())
+        .args(["save", "my work"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // The save is the user's own, whatever the project's settings say.
+    let history = json_of(&env, &["--json", "history"]);
+    assert_eq!(history["saves"][0]["author"]["name"], "Real User");
+    assert_eq!(history["saves"][0]["saver"]["email"], "real@example.com");
+
+    let stdout = text(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let config = env.config.path().join("config.toml");
+    let folder = env.root().file_name().unwrap().to_str().unwrap();
+    assert_eq!(lines.len(), 7, "{stdout}");
+    assert!(lines[0].starts_with("Saved "), "{stdout}");
+    assert_eq!(lines[1], MALLORY_NOTE, "{stdout}");
+    assert_eq!(
+        lines[2],
+        format!(
+            "hint: To save as them in this project, add this to {}:",
+            config.display()
+        ),
+        "{stdout}"
+    );
+    // This folder, and who the project names, ready to be added to the user's own settings.
+    assert_eq!(lines[3], "[[project]]", "{stdout}");
+    assert!(
+        lines[4].starts_with("folder = ") && lines[4].contains(folder),
+        "{stdout}"
+    );
+    assert_eq!(lines[5], "name = \"Mallory\"", "{stdout}");
+    assert_eq!(lines[6], "email = \"mallory@evil.example\"", "{stdout}");
+
+    // Said again when there is nothing to save: the settings are still there.
+    let out = env
+        .bolt_anonymous(env.root())
+        .args(["save", "again"])
+        .output()
+        .unwrap();
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("Nothing to save"), "{stdout}");
+    assert_eq!(stdout.lines().nth(1), Some(MALLORY_NOTE), "{stdout}");
+}
+
+#[test]
+fn save_json_names_the_ignored_project_identity() {
+    let env = project_naming_mallory();
+    let json = json_of(&env, &["--json", "save", "my work"]);
+    assert_eq!(
+        json["ignored_project_identity"],
+        serde_json::json!({"name": "Mallory", "email": "mallory@evil.example"})
+    );
+    assert_eq!(json["save"]["author"]["name"], "Real User");
+    // Nothing was saved this time, and the key is there all the same. (`json_of` reads all of
+    // stdout as one document, so `--json` prints no note beside it.)
+    let again = json_of(&env, &["--json", "save", "again"]);
+    assert_eq!(again["result"], "nothing-changed");
+    assert_eq!(again["ignored_project_identity"]["name"], "Mallory");
+
+    // A project that names nobody, or the user themselves, has nothing to say.
+    for named in ["", REAL_USER] {
+        std::fs::write(env.root().join(".bolt/config.toml"), named).unwrap();
+        let again = json_of(&env, &["--json", "save", "again"]);
+        assert_eq!(
+            again,
+            serde_json::json!({"bolt_json": 1, "result": "nothing-changed"})
+        );
+        let out = env
+            .bolt_anonymous(env.root())
+            .args(["save", "again"])
+            .output()
+            .unwrap();
+        assert_eq!(text(&out.stdout).lines().count(), 1);
+    }
+}
+
+/// The user approves the identity on purpose by adding the lines the note shows to their own
+/// settings. From then on it is used for that folder, and for no other.
+#[test]
+fn approving_the_ignored_identity_takes_effect() {
+    let env = project_naming_mallory();
+    let out = env
+        .bolt_anonymous(env.root())
+        .args(["save", "my work"])
+        .output()
+        .unwrap();
+    let stdout = text(&out.stdout);
+    let snippet = &stdout[stdout.find("[[project]]").expect(&stdout)..];
+    let config = env.config.path().join("config.toml");
+    std::fs::write(&config, format!("{REAL_USER}\n{snippet}")).unwrap();
+
+    std::fs::write(env.root().join("b.txt"), "b").unwrap();
+    let json = json_of(&env, &["--json", "save", "as Mallory, on purpose"]);
+    assert_eq!(json["save"]["author"]["name"], "Mallory");
+    assert_eq!(json["save"]["author"]["email"], "mallory@evil.example");
+    // It is what the project names, so there is nothing left to ignore.
+    assert!(json.get("ignored_project_identity").is_none(), "{json}");
+    // Only this folder: another project still gets the user's own.
+    let other = tempfile::tempdir().unwrap();
+    let out = env
+        .bolt_anonymous(other.path())
+        .args(["--json", "start"])
+        .output()
+        .unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(started["save"]["author"]["name"], "Real User");
+}
+
+/// The first save of a project is recorded as the user said it should be for that folder.
+#[test]
+fn start_uses_the_project_entry_for_its_folder() {
+    let env = Env::new();
+    let entry = format!(
+        "\n[[project]]\nfolder = '{}'\nname = \"Work Name\"\nemail = \"me@work.example\"\n",
+        env.root().display()
+    );
+    std::fs::write(
+        env.config.path().join("config.toml"),
+        format!("{REAL_USER}{entry}"),
+    )
+    .unwrap();
+    env.bolt_anonymous(env.root())
+        .arg("start")
+        .assert()
+        .success();
+    let history = json_of(&env, &["--json", "history"]);
+    assert_eq!(history["saves"][0]["author"]["name"], "Work Name");
+}
+
 #[test]
 fn start_json_output() {
     let env = Env::new();

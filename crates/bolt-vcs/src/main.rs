@@ -4,7 +4,10 @@ mod output;
 
 use std::process::ExitCode;
 
-use bolt_core::config::{ConfigError, load_identity, now_person};
+use bolt_core::config::{
+    ConfigError, Identity, ignored_identity_note, ignored_project_identity, load_identity,
+    now_person,
+};
 use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
 use bolt_core::history::{ResolveError, line_history, resolve, short_change_ids};
 use bolt_core::id::Id;
@@ -107,7 +110,8 @@ fn short_of(repo: &Repository, id: &Id, save: &Save) -> Result<String, Failure> 
 
 fn start(json: bool) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
-    let who = now_person(&load_identity(None)?);
+    // The user's own settings may name this folder, so the first save is theirs too.
+    let who = now_person(&load_identity(Some(&root))?);
     let repo = Repository::init(&root, &who)?;
     let (_, entry) = repo.current()?;
     let id = entry.state.lines.get("main").ok_or_else(|| Failure {
@@ -146,6 +150,8 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
     }
     let mut repo = Repository::discover(&std::env::current_dir()?)?;
     let who = now_person(&load_identity(Some(repo.root()))?);
+    // A project's own settings never say who the user is; if they try, the user is told.
+    let ignored = ignored_project_identity(repo.root());
     let req = SaveRequest {
         message: &message,
         who: &who,
@@ -162,15 +168,13 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
         } => {
             let short = short_of(&repo, &save_id, &save)?;
             if json {
-                println!(
-                    "{}",
-                    json!({
-                        "bolt_json": BOLT_JSON,
-                        "result": "saved",
-                        "save": output::save_json(&save_id, &save, &short),
-                        "changed_files": changed_files,
-                    })
-                );
+                let document = json!({
+                    "bolt_json": BOLT_JSON,
+                    "result": "saved",
+                    "save": output::save_json(&save_id, &save, &short),
+                    "changed_files": changed_files,
+                });
+                println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
                 let title = escape(message.lines().next().unwrap_or_default(), false);
                 let counted = match changed_files {
@@ -183,10 +187,8 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
         }
         SaveOutcome::NothingChanged { current } => {
             if json {
-                println!(
-                    "{}",
-                    json!({"bolt_json": BOLT_JSON, "result": "nothing-changed"})
-                );
+                let document = json!({"bolt_json": BOLT_JSON, "result": "nothing-changed"});
+                println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 println!(
@@ -196,7 +198,19 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
             }
         }
     }
+    if !json && let Some(ignored) = &ignored {
+        println!("{}", ignored_identity_note(ignored, repo.root()));
+    }
     Ok(())
+}
+
+/// `document`, plus the identity a project's settings named and Bolt ignored, if there was one.
+fn with_ignored(mut document: serde_json::Value, ignored: Option<&Identity>) -> serde_json::Value {
+    if let Some(identity) = ignored {
+        document["ignored_project_identity"] =
+            json!({"name": identity.name, "email": identity.email});
+    }
+    document
 }
 
 fn now_ms() -> i64 {

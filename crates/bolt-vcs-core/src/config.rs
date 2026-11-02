@@ -1,4 +1,6 @@
-//! Settings: who the user is (name and email), from the environment or a `config.toml` file.
+//! Settings: who the user is (name and email), from the environment or the user's own
+//! `config.toml`. A project's `.bolt/config.toml` is never asked: a project shared as a zip carries
+//! that file, so a stranger could make the user's saves claim to be from someone else (decision 025).
 
 use std::path::{Path, PathBuf};
 
@@ -50,10 +52,20 @@ impl ConfigError {
 #[derive(Deserialize)]
 struct ConfigFile {
     user: Option<User>,
+    /// An identity for one folder; only the user's own file is asked for these.
+    #[serde(default)]
+    project: Vec<ProjectEntry>,
 }
 
 #[derive(Deserialize)]
 struct User {
+    name: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProjectEntry {
+    folder: Option<String>,
     name: Option<String>,
     email: Option<String>,
 }
@@ -67,12 +79,32 @@ fn both(name: Option<String>, email: Option<String>) -> Option<Identity> {
     }
 }
 
-/// The identity in a `config.toml` file, if it exists and names both. `read` is
-/// `safe_fs::read_capped` for a project's file, which never follows a link, and
-/// `safe_fs::read_capped_following_links` for the user's own.
+/// Whether `a` and `b` are one and the same folder. Each is resolved first (links, `.` and `..`,
+/// short names), and on Windows capital letters don't tell folders apart. A folder that can't be
+/// resolved (it doesn't exist, say) is never the same as anything: callers trust or customise a
+/// folder only when it matches, so no match is the safe answer.
+pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
+    let (Ok(a), Ok(b)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) else {
+        return false;
+    };
+    a == b
+        || (cfg!(windows)
+            && matches!(
+                (a.to_str(), b.to_str()),
+                (Some(a), Some(b)) if a.to_lowercase() == b.to_lowercase()
+            ))
+}
+
+/// The identity in a `config.toml` file, if it exists and names both: the `[[project]]` entry for
+/// `project_root` if the file has one (the last complete one, so a line added at the end of the
+/// file takes effect), else the `[user]` section. A project's own file is read with `None` for
+/// `project_root`, as it has no say in who the user is. `read` is `safe_fs::read_capped` for a
+/// project's file, which never follows a link, and `safe_fs::read_capped_following_links` for the
+/// user's own.
 fn from_file(
     path: &Path,
     read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
+    project_root: Option<&Path>,
 ) -> Result<Option<Identity>, ConfigError> {
     let invalid = |detail: String| ConfigError::Invalid {
         path: path.to_owned(),
@@ -84,7 +116,15 @@ fn from_file(
         Err(e) => return Err(invalid(e.to_string())),
     };
     let file: ConfigFile = toml::from_slice(&bytes).map_err(|e| invalid(e.message().to_owned()))?;
-    Ok(file.user.and_then(|u| both(u.name, u.email)))
+    let for_folder = project_root.and_then(|root| {
+        file.project.into_iter().rev().find_map(|entry| {
+            let folder = entry.folder?;
+            same_folder(Path::new(&folder), root)
+                .then(|| both(entry.name, entry.email))
+                .flatten()
+        })
+    });
+    Ok(for_folder.or_else(|| file.user.and_then(|u| both(u.name, u.email))))
 }
 
 /// `config.toml` in `BOLT_CONFIG_DIR` if set, else in the system's settings folder for Bolt.
@@ -99,28 +139,94 @@ pub fn user_config_path() -> Option<PathBuf> {
     Some(dir.join("config.toml"))
 }
 
-/// The user's name and email: from `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, else the project's
-/// `.bolt/config.toml`, else the user's `config.toml`.
+/// The user's name and email, from the first of these that names both (decision 025):
+/// 1. `BOLT_USER_NAME` and `BOLT_USER_EMAIL`;
+/// 2. the `[[project]]` entry for `project_root` in the user's own `config.toml`;
+/// 3. the `[user]` section of the user's own `config.toml`.
+///
+/// The project's `.bolt/config.toml` is never one of them.
 pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigError> {
     let env = |key| std::env::var(key).ok();
-    if let Some(identity) = both(env("BOLT_USER_NAME"), env("BOLT_USER_EMAIL")) {
+    identity_from(
+        both(env("BOLT_USER_NAME"), env("BOLT_USER_EMAIL")),
+        user_config_path(),
+        project_root,
+    )
+}
+
+/// `load_identity` with the places it looks in given, so that tests can choose them: the
+/// environment's identity, and the path of the user's own `config.toml`.
+fn identity_from(
+    from_env: Option<Identity>,
+    user_config: Option<PathBuf>,
+    project_root: Option<&Path>,
+) -> Result<Identity, ConfigError> {
+    if let Some(identity) = from_env {
         return Ok(identity);
     }
-    if let Some(root) = project_root
-        && let Some(identity) = from_file(
-            &root.join(".bolt").join("config.toml"),
-            safe_fs::read_capped,
-        )?
+    if let Some(path) = &user_config
+        && let Some(identity) = from_file(path, safe_fs::read_capped_following_links, project_root)?
     {
         return Ok(identity);
     }
-    let path = user_config_path();
-    if let Some(path) = &path
-        && let Some(identity) = from_file(path, safe_fs::read_capped_following_links)?
-    {
-        return Ok(identity);
-    }
-    Err(ConfigError::MissingIdentity { path })
+    Err(ConfigError::MissingIdentity { path: user_config })
+}
+
+/// The identity the project's own `.bolt/config.toml` names, if Bolt did not use it: it differs
+/// from the one `load_identity` gives (which is none, if that fails). The file is read the way
+/// every file from a project is, never through a link and at most 1 MiB; one that can't be read
+/// names nobody.
+#[must_use]
+pub fn ignored_project_identity(project_root: &Path) -> Option<Identity> {
+    ignored_given(
+        project_root,
+        load_identity(Some(project_root)).ok().as_ref(),
+    )
+}
+
+/// `ignored_project_identity`, given the identity that is in use.
+fn ignored_given(project_root: &Path, used: Option<&Identity>) -> Option<Identity> {
+    let path = project_root.join(".bolt").join("config.toml");
+    let named = from_file(&path, safe_fs::read_capped, None)
+        .ok()
+        .flatten()?;
+    (used != Some(&named)).then_some(named)
+}
+
+/// What `save` adds when a project's settings name an identity that Bolt ignored: what was
+/// ignored, and the lines that would make it the user's choice for this folder, filled in
+/// (decision 025). Everything that came from the project is escaped for the terminal.
+#[must_use]
+pub fn ignored_identity_note(ignored: &Identity, project_root: &Path) -> String {
+    note_for(ignored, project_root, user_config_path().as_deref())
+}
+
+/// `ignored_identity_note`, given the path of the user's `config.toml`.
+fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> String {
+    let (name, email) = (escape(&ignored.name, false), escape(&ignored.email, false));
+    // The TOML writer does the quoting, so no folder, name or email can break out of its line or
+    // start a table. Escaping first keeps the snippet to its four lines and valid TOML.
+    let quoted = |text: &str| toml::Value::String(escape(text, false)).to_string();
+    let snippet = format!(
+        "[[project]]\nfolder = {}\nname = {}\nemail = {}",
+        quoted(&project_root.to_string_lossy()),
+        quoted(&ignored.name),
+        quoted(&ignored.email),
+    );
+    let place = match config {
+        Some(path) => format!(
+            "add this to {}:",
+            escape(&path.display().to_string(), false)
+        ),
+        None => "set BOLT_CONFIG_DIR to a folder and add this to config.toml there:".to_owned(),
+    };
+    format!(
+        "note: This project's settings name {name} <{email}>; \
+         Bolt ignores identities from project settings.\n\
+         hint: To save as them in this project, {place}\n{}",
+        // The lines are Bolt's own, so their newlines stay.
+        escape(&snippet, true)
+    )
 }
 
 /// `identity`, now: the time in milliseconds and the local offset from UTC in minutes.
@@ -144,7 +250,7 @@ mod tests {
     fn reads_the_user_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let read = |path: &Path| from_file(path, safe_fs::read_capped);
+        let read = |path: &Path| from_file(path, safe_fs::read_capped, None);
         assert_eq!(read(&path).unwrap(), None);
         std::fs::write(
             &path,
@@ -202,5 +308,331 @@ mod tests {
         });
         assert!(p.time_ms > 1_700_000_000_000);
         assert!(p.tz_offset_min.abs() <= 26 * 60);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Whose identity it is (RT-9, decision 025)
+    // -----------------------------------------------------------------------------------------
+
+    fn person(name: &str, email: &str) -> Identity {
+        Identity {
+            name: name.into(),
+            email: email.into(),
+        }
+    }
+
+    /// `text` as a TOML string, however awkward it is.
+    fn quoted(text: &str) -> String {
+        toml::Value::String(text.into()).to_string()
+    }
+
+    /// The user's own settings: `[user]` Ada, and then these `[[project]]` entries.
+    fn user_config(dir: &Path, entries: &[(&Path, &str, &str)]) -> PathBuf {
+        let mut text = "[user]\nname = \"Ada\"\nemail = \"ada@example.com\"\n".to_owned();
+        for (folder, name, email) in entries {
+            let folder = quoted(&folder.display().to_string());
+            text += &format!(
+                "\n[[project]]\nfolder = {folder}\nname = {}\nemail = {}\n",
+                quoted(name),
+                quoted(email)
+            );
+        }
+        let path = dir.join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn folder(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// The `.bolt/config.toml` a shared project can bring.
+    fn project_settings(root: &Path, text: &str) {
+        std::fs::create_dir_all(root.join(".bolt")).unwrap();
+        std::fs::write(root.join(".bolt").join("config.toml"), text).unwrap();
+    }
+
+    const MALLORY: &str = "[user]\nname = \"Mallory\"\nemail = \"mallory@evil.example\"\n";
+
+    #[test]
+    fn project_entry_in_user_config_wins_for_that_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, play) = (folder(dir.path(), "work"), folder(dir.path(), "play"));
+        let config = user_config(dir.path(), &[(&work, "Work Name", "me@work.example")]);
+        let identity = |root: Option<&Path>| identity_from(None, Some(config.clone()), root);
+        assert_eq!(
+            identity(Some(&work)).unwrap(),
+            person("Work Name", "me@work.example")
+        );
+        // The same folder written another way: through a `..`, and with a closing separator.
+        let roundabout = play.join("..").join("work").join("");
+        assert_eq!(
+            identity(Some(&roundabout)).unwrap(),
+            person("Work Name", "me@work.example")
+        );
+        // Every other folder, and a project that is not started yet, get the user's own.
+        assert_eq!(
+            identity(Some(&play)).unwrap(),
+            person("Ada", "ada@example.com")
+        );
+        assert_eq!(identity(None).unwrap(), person("Ada", "ada@example.com"));
+        // The environment still comes first.
+        let env = person("Env", "env@example.com");
+        let first = identity_from(Some(env.clone()), Some(config.clone()), Some(&work));
+        assert_eq!(first.unwrap(), env);
+    }
+
+    #[test]
+    fn project_entry_for_another_folder_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        let (other, below) = (folder(dir.path(), "other"), folder(&project, "below"));
+        let missing = dir.path().join("missing");
+        // An entry for another folder, for a folder inside this one, for one that doesn't exist
+        // (which matches nothing, not even itself), and one for this folder with no email.
+        let config = user_config(
+            dir.path(),
+            &[
+                (&other, "Other", "other@example.com"),
+                (&below, "Below", "below@example.com"),
+                (&missing, "Missing", "missing@example.com"),
+                (&project, "No Email", ""),
+            ],
+        );
+        for root in [&project, &missing] {
+            let got = identity_from(None, Some(config.clone()), Some(root));
+            assert_eq!(got.unwrap(), person("Ada", "ada@example.com"), "{root:?}");
+        }
+    }
+
+    #[test]
+    fn the_last_complete_entry_for_a_folder_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        let config = user_config(
+            dir.path(),
+            &[
+                (&project, "First", "first@example.com"),
+                (&project, "Second", "second@example.com"),
+                (&project, "Third", ""),
+            ],
+        );
+        let got = identity_from(None, Some(config), Some(&project));
+        assert_eq!(got.unwrap(), person("Second", "second@example.com"));
+    }
+
+    #[test]
+    fn bolt_config_identity_is_never_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        // Whatever a project says about who the user is, in either shape.
+        let planted = format!(
+            "{MALLORY}\n[[project]]\nfolder = {}\nname = \"Mallory\"\nemail = \"mallory@evil.example\"\n",
+            quoted(&project.display().to_string())
+        );
+        project_settings(&project, &planted);
+        let config = user_config(dir.path(), &[]);
+        let got = identity_from(None, Some(config), Some(&project));
+        assert_eq!(got.unwrap(), person("Ada", "ada@example.com"));
+        // With nobody else to be, the user is told to say who they are, not given Mallory.
+        let none = dir.path().join("no-such-config.toml");
+        let got = identity_from(None, Some(none), Some(&project));
+        assert!(matches!(got, Err(ConfigError::MissingIdentity { .. })));
+        let got = identity_from(None, None, Some(&project));
+        assert!(matches!(
+            got,
+            Err(ConfigError::MissingIdentity { path: None })
+        ));
+    }
+
+    #[test]
+    fn same_folder_resolves_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (folder(dir.path(), "a"), folder(dir.path(), "b"));
+        assert!(same_folder(&a, &a));
+        assert!(same_folder(&a, &b.join("..").join("a")));
+        assert!(!same_folder(&a, &b));
+        // A folder that isn't there is the same as nothing, itself included.
+        let missing = dir.path().join("missing");
+        assert!(!same_folder(&missing, &missing));
+        assert!(!same_folder(&a, &missing) && !same_folder(&missing, &a));
+        let link = dir.path().join("link");
+        if crate::test_support::symlink(&a, &link) {
+            assert!(same_folder(&link, &a) && same_folder(&a, &link));
+            assert!(!same_folder(&link, &b));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_folder_ignores_case_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = folder(dir.path(), "Work");
+        let shouted = work.to_string_lossy().to_uppercase();
+        let whispered = work.to_string_lossy().to_lowercase();
+        assert!(same_folder(&work, Path::new(&shouted)));
+        assert!(same_folder(Path::new(&whispered), &work));
+    }
+
+    #[test]
+    fn what_the_project_names_is_ignored_unless_it_was_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        let mallory = person("Mallory", "mallory@evil.example");
+        assert_eq!(ignored_given(&project, None), None, "no settings at all");
+        project_settings(&project, MALLORY);
+        let ada = person("Ada", "ada@example.com");
+        assert_eq!(ignored_given(&project, Some(&ada)), Some(mallory.clone()));
+        // Nobody could be found for the user: the project's is still not used.
+        assert_eq!(ignored_given(&project, None), Some(mallory.clone()));
+        // The same as the identity in use: nothing was ignored.
+        assert_eq!(ignored_given(&project, Some(&mallory)), None);
+        // Not an identity: half of one, or none.
+        for text in ["[user]\nname = \"Mallory\"\n", "[user]\n", "", "x = 1\n"] {
+            project_settings(&project, text);
+            assert_eq!(ignored_given(&project, Some(&ada)), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn project_settings_that_cannot_be_read_name_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        let ada = person("Ada", "ada@example.com");
+        let path = project.join(".bolt").join("config.toml");
+        let unreadable =
+            |what: &str| assert_eq!(ignored_given(&project, Some(&ada)), None, "{what}");
+
+        project_settings(&project, "[user\n");
+        unreadable("not TOML");
+        let big = format!("{MALLORY}# {}\n", "x".repeat(1 << 20));
+        project_settings(&project, &big);
+        unreadable("over 1 MiB");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        unreadable("a folder");
+        std::fs::remove_dir(&path).unwrap();
+        unreadable("missing");
+
+        // A link is never followed, and a pipe is never waited on (the way into RT-3 and RT-4).
+        let target = dir.path().join("target.toml");
+        std::fs::write(&target, MALLORY).unwrap();
+        if crate::test_support::symlink(&target, &path) {
+            unreadable("a link to a settings file");
+        }
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+            unreadable("a link to /dev/zero");
+            std::fs::remove_file(&path).unwrap();
+            let made = std::process::Command::new("mkfifo").arg(&path).status();
+            assert!(made.unwrap().success());
+            // A hang fails this test instead of stopping the whole run.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(ignored_given(&project, None));
+            });
+            let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+            assert_eq!(got.expect("reading a named pipe hung"), None);
+        }
+    }
+
+    const MALLORY_NOTE: &str = "note: This project's settings name Mallory \
+                                <mallory@evil.example>; Bolt ignores identities from project settings.";
+
+    #[test]
+    fn the_note_says_what_was_ignored_and_offers_the_lines() {
+        let mallory = person("Mallory", "mallory@evil.example");
+        let cfg = Path::new("/home/me/.config/bolt/config.toml");
+        let note = note_for(&mallory, Path::new("/home/me/Work"), Some(cfg));
+        let expected = [
+            MALLORY_NOTE,
+            "hint: To save as them in this project, add this to /home/me/.config/bolt/config.toml:",
+            "[[project]]",
+            "folder = \"/home/me/Work\"",
+            "name = \"Mallory\"",
+            "email = \"mallory@evil.example\"",
+        ];
+        assert_eq!(note, expected.join("\n"));
+
+        // A Windows folder keeps its backslashes, in the quoting TOML gives them
+        // (decision 025's example).
+        let note = note_for(&mallory, Path::new(r"C:\Users\me\Projects\Work"), None);
+        assert!(
+            note.contains("\nfolder = 'C:\\Users\\me\\Projects\\Work'\n"),
+            "{note}"
+        );
+        // With nowhere known to put them, the way to get one is said instead.
+        let hint = "hint: To save as them in this project, set BOLT_CONFIG_DIR to a folder \
+                    and add this to config.toml there:\n[[project]]\n";
+        assert!(note.contains(hint), "{note}");
+    }
+
+    /// The part of a note after its two lines of words.
+    fn snippet(note: &str) -> &str {
+        note.splitn(3, '\n').nth(2).unwrap()
+    }
+
+    #[test]
+    fn the_snippet_stays_valid_toml_for_awkward_folders_and_names() {
+        let cases = [
+            (r"C:\Users\me\Projects\Work", "Work Name", "me@work.example"),
+            (
+                r"C:\Users\o'brien\Work",
+                r#"Bob "Bobby" O'Neil"#,
+                "bob@example.com",
+            ),
+            ("/home/it's \"mine\"", r"A\B", "a'b@example.com"),
+            ("/tmp/''' and \"\"\"", "x\"\"\"y'''z", "'''@\"\"\""),
+            (
+                "/tmp/ends with a quote'",
+                "ends with a backslash\\",
+                "e@x.example",
+            ),
+            ("/tmp/café 日本語", "Zoë 日本語", "zoe@example.com"),
+        ];
+        for (folder, name, email) in cases {
+            let note = note_for(&person(name, email), Path::new(folder), None);
+            let parsed: toml::Table = toml::from_str(snippet(&note)).unwrap_or_else(|e| {
+                panic!("{folder:?}, {name:?}: {e}\n{note}");
+            });
+            let entry = &parsed["project"][0];
+            assert_eq!(
+                parsed["project"].as_array().map(Vec::len),
+                Some(1),
+                "{note}"
+            );
+            assert_eq!(entry["folder"].as_str(), Some(folder), "{note}");
+            assert_eq!(entry["name"].as_str(), Some(name), "{note}");
+            assert_eq!(entry["email"].as_str(), Some(email), "{note}");
+            assert_eq!(snippet(&note).lines().count(), 4, "{note}");
+        }
+    }
+
+    #[test]
+    fn the_note_and_snippet_cannot_drive_the_terminal() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let planted = person(HOSTILE, &format!("{HOSTILE}@evil.example"));
+        let cfg = PathBuf::from(HOSTILE);
+        let note = note_for(&planted, Path::new(HOSTILE), Some(&cfg));
+        assert_hostile_text_escaped(&note);
+        // Two lines of words and four of snippet, whatever the project put in its name: no
+        // line break of its own, and no text that would pass for the lines Bolt writes.
+        assert_eq!(note.lines().count(), 6, "{note}");
+        let parsed: toml::Table = toml::from_str(snippet(&note)).unwrap();
+        assert_eq!(
+            parsed["project"].as_array().map(Vec::len),
+            Some(1),
+            "{note}"
+        );
+        // A name that is a whole TOML table, or a line of the note.
+        let sneaky = "x\"\n[user]\nname = \"Mallory\"\nhint: do something";
+        let note = note_for(&person(sneaky, "m@evil.example"), Path::new("/p"), None);
+        assert_eq!(note.lines().count(), 6, "{note}");
+        let parsed: toml::Table = toml::from_str(snippet(&note)).unwrap();
+        assert!(parsed.get("user").is_none(), "{note}");
     }
 }
