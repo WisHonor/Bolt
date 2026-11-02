@@ -1,24 +1,29 @@
-//! `bolt save`: walks the project folder, stores its files in a pack, builds the folder
-//! listings bottom-up, and commits the save with its diary entry.
+//! `bolt save`: walks the project folder, stores its files, and commits the save.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 
-use ignore::WalkBuilder;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{Match, WalkBuilder};
 
 use crate::diary::{Action, DiaryEntry, Position};
-use crate::diff::diff_saves;
+use crate::diff::count_changes;
+use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
-use crate::listing::{Entry, EntryKind, Listing};
+use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
 use crate::pack::{ObjectKind, PackError, PackWriter};
 use crate::repo::{RepoError, Repository};
+use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
+use crate::text::escape;
 
 pub struct SaveRequest<'a> {
     pub message: &'a str,
@@ -34,29 +39,46 @@ pub enum SaveOutcome {
     Saved {
         save_id: Id,
         save: Save,
-        changed_files: usize,
+        /// Files that differ from the save before; `None` if it can't be compared with this one.
+        changed_files: Option<usize>,
+        /// The shortest form of the save's change ID, or why the line couldn't be read to work
+        /// it out. Either way the save is made.
+        short_change_id: Result<String, RepoError>,
     },
     /// The folder matches the line's current save, which is `current`.
     NothingChanged { current: Id },
 }
 
+/// Why a save was refused. Names from the project folder are untrusted, so messages escape them.
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
     #[error(transparent)]
     Repo(#[from] RepoError),
-    #[error("Can't read {path}: {source}.")]
+    #[error(
+        "Can't read {}: {}.",
+        escape(path, false),
+        escape(&source.to_string(), false)
+    )]
     Unreadable { path: String, source: io::Error },
-    #[error("{path} changed while Bolt was saving it.")]
+    #[error("{} changed while Bolt was saving it.", escape(path, false))]
     ChangedDuringSave { path: String },
-    #[error("Bolt can't save {path}: {reason}.")]
+    #[error(
+        "{} is a special file Bolt can't save yet, such as a cloud placeholder.",
+        escape(path, false)
+    )]
+    SpecialFile { path: String },
+    // `reason` is Bolt's own wording.
+    #[error("Bolt can't save {}: {reason}.", escape(path, false))]
     InvalidName { path: String, reason: String },
     #[error("{}", not_portable(problems))]
     NotPortable {
         /// The folder (empty for the project's top folder) and the problem found in it.
         problems: Vec<(String, PortabilityProblem)>,
     },
-    #[error("A .boltignore file has a problem: {detail}.")]
+    #[error("A .boltignore file has a problem: {}.", escape(detail, false))]
     Ignore { detail: String },
+    #[error("This project is too large to save: {detail}.")]
+    TooLarge { detail: String },
     #[error("You are not on a line, so the save has nowhere to go.")]
     NotOnALine,
 }
@@ -74,13 +96,14 @@ impl From<PackError> for SaveError {
     }
 }
 
+/// One line for each problem; the names in the problems are escaped by their own messages.
 fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     let mut text = "Some new names would not work on every system:".to_owned();
     for (folder, problem) in problems {
         if folder.is_empty() {
             let _ = write!(text, "\n  {problem}");
         } else {
-            let _ = write!(text, "\n  in {folder}/: {problem}");
+            let _ = write!(text, "\n  in {}/: {problem}", escape(folder, false));
         }
     }
     text
@@ -94,18 +117,25 @@ impl SaveError {
             match self {
                 SaveError::Repo(e) => return e.hint(),
                 SaveError::Unreadable { .. } => {
-                    "Nothing was saved. Let Bolt read the file, or list it in .boltignore."
+                    "Nothing was saved. Let Bolt read it, or list it in .boltignore."
                 }
                 SaveError::ChangedDuringSave { .. } => {
                     "Nothing was saved. Try again when the file stops changing, or list it in .boltignore."
                 }
+                SaveError::SpecialFile { .. } => "Nothing was saved. List it in .boltignore for now.",
                 SaveError::InvalidName { .. } => {
                     "Nothing was saved. Rename it, or list it in .boltignore."
                 }
                 SaveError::NotPortable { .. } => {
                     "Nothing was saved. Rename them, or list them in .boltignore."
                 }
-                SaveError::Ignore { .. } => "Nothing was saved. Fix the pattern and try again.",
+                SaveError::Ignore { .. } => {
+                    // Not only for a pattern: the file may be a link, a pipe, huge or not text.
+                    "Nothing was saved. Fix that .boltignore file and try again."
+                }
+                SaveError::TooLarge { .. } => {
+                    "Nothing was saved. List the deep or huge folder in .boltignore."
+                }
                 _ => return None,
             }
             .to_owned(),
@@ -120,6 +150,9 @@ impl SaveError {
                 source,
             },
             SaveError::ChangedDuringSave { .. } => SaveError::ChangedDuringSave {
+                path: rel.to_owned(),
+            },
+            SaveError::SpecialFile { .. } => SaveError::SpecialFile {
                 path: rel.to_owned(),
             },
             other => other,
@@ -147,12 +180,16 @@ pub fn save_folder(
             detail: format!("the current line {line} has no save"),
         })?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
-    let folders = walk(repo.root())?;
-    let old = old_listings(repo.store(), parent.root, &folders)?;
+    let folders = walk(repo.root(), SaveLimits::default())?;
+    let old = old_listings(repo.store(), parent.root, &folders, SaveLimits::default())?;
     check_names(&folders, &old)?;
     let mut pack = repo.new_pack()?;
     let root = build(repo.store(), &mut pack, &folders, &old)?;
     if root == parent.root {
+        // Anything stored here replaces a damaged copy the last save needs, so it is kept.
+        if !pack.is_empty() {
+            pack.finish(repo.packs_dir())?;
+        }
         return Ok(SaveOutcome::NothingChanged { current: parent_id });
     }
     let save = Save {
@@ -172,6 +209,8 @@ pub fn save_folder(
     // Refuse a save that would not read back (an over-long message, say) before storing it.
     Save::decode(&encoded, false).map_err(StoreError::from)?;
     let save_id = pack.add_record(ObjectKind::Save, &encoded)?;
+    // Worked out before the commit, so that nothing after it can fail the save.
+    let short_change_id = history::short_change_id(repo, &save_id, &save.change_id);
     let mut state = entry.state.clone();
     state.lines.insert(line.clone(), save_id);
     let diary = DiaryEntry {
@@ -185,11 +224,12 @@ pub fn save_folder(
     };
     repo.commit(&lock, pack, &diary)?;
     // The save is committed now; failing to count its files must not make it look failed.
-    let changed_files = diff_saves(repo.store(), Some(parent.root), root).map_or(0, |c| c.len());
+    let changed_files = count_changes(repo.store(), Some(parent.root), root).ok();
     Ok(SaveOutcome::Saved {
         save_id,
         save,
         changed_files,
+        short_change_id,
     })
 }
 
@@ -203,7 +243,6 @@ enum Kind {
 struct Child {
     name: String,
     kind: Kind,
-    /// Where it is on disk.
     path: PathBuf,
     /// Its project path, with `/` between names.
     rel: String,
@@ -211,8 +250,7 @@ struct Child {
     executable: Option<bool>,
 }
 
-/// Every folder of the project by project path (`""` for the top folder), with its children
-/// sorted by name.
+/// Every folder by project path (`""` is the top folder), with its children sorted by name.
 type Folders = BTreeMap<String, Vec<Child>>;
 
 /// A project path as the user should see it; names that aren't UTF-8 are shown lossily.
@@ -234,8 +272,343 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
-fn walk(root: &Path) -> Result<Folders, SaveError> {
+/// Windows and macOS don't tell letter case apart in names: Git ignores it in patterns
+/// (`core.ignorecase`), and its folder may be spelled `.GIT`.
+const IGNORE_CASE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Whether a folder of this name is Bolt's or Git's, which a save never enters.
+fn is_internal_folder(name: &str) -> bool {
+    name == ".bolt" || name == ".git" || (IGNORE_CASE && name.eq_ignore_ascii_case(".git"))
+}
+
+/// The lines of a `.boltignore` as Git splits them: without a byte order mark at the start, at
+/// each LF, with one CR before it dropped.
+fn git_lines(text: &str) -> impl Iterator<Item = &str> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+}
+
+/// `line` without the spaces at its end that no `\` escapes, trimmed as Git trims it.
+fn trim_trailing_spaces(line: &str) -> &str {
+    let (mut cut, mut escaped) = (None, false);
+    for (i, c) in line.char_indices() {
+        if c == ' ' && !escaped {
+            cut.get_or_insert(i);
+        } else {
+            cut = None;
+        }
+        escaped = !escaped && c == '\\';
+    }
+    &line[..cut.unwrap_or(line.len())]
+}
+
+// What to change in a pattern Bolt can't yet read the way Git does (storage-format.md §12).
+const CONTROL: &str = "Remove the tab or other control character from it";
+const BLANK_AT_END: &str = "Remove the no-break space or other blank at its end";
+const BACKSLASH_AT_END: &str = "Remove the \\ at its end (or before its final /)";
+const STARS_BY_BACKSLASH: &str = "Use / to separate folders, never a \\ next to **";
+const NOT_NFC: &str = "Retype it with each accented letter as one character (Unicode NFC)";
+const NEVER_CLOSED: &str = "Close the [ with a ], or write \\[ for a plain [";
+const NEGATED: &str = "Rewrite it without [!…] or [^…], or list the names one per line";
+const NOT_SIMPLE: &str = "Inside [ ], use only letters, digits, . and _, and ranges from low to \
+                          high such as a-z or 0-9; or list the names one per line";
+const CAPITAL_ESCAPED: &str =
+    "Here Git ignores letter case, but not after a \\: remove the \\ before the capital letter";
+const CAPITAL_IN_CLASS: &str = "Here Git ignores letter case, but not for a capital letter in [ ] \
+                                without its small letter: add the small letter, as in [Bb]";
+
+/// Whether Bolt's matcher reads `pattern` (a line already trimmed) exactly as Git does; if not,
+/// what to change. Only forms where the two agree are allowed (storage-format.md §12).
+fn like_git(pattern: &str) -> Result<(), &'static str> {
+    // Git ends a pattern at a NUL.
+    if pattern.contains(|c: char| c.is_ascii_control()) {
+        return Err(CONTROL);
+    }
+    if pattern.ends_with(|c: char| c.is_whitespace() && c != ' ') {
+        return Err(BLANK_AT_END);
+    }
+    // Git drops a final `/` before it matches, so `foo\/` ends in a `\` that escapes nothing.
+    if pattern.ends_with("\\/") {
+        return Err(BACKSLASH_AT_END);
+    }
+    // On Windows the matcher takes a `\` beside `**` for a folder separator.
+    if pattern.contains("**\\") || pattern.contains("\\**") {
+        return Err(STARS_BY_BACKSLASH);
+    }
+    // Git on macOS compares names in composed form.
+    if !unicode_normalization::is_nfc(pattern) {
+        return Err(NOT_NFC);
+    }
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '\\' => {
+                let escaped = rest.chars().next().ok_or(BACKSLASH_AT_END)?;
+                if IGNORE_CASE && escaped.is_ascii_uppercase() {
+                    return Err(CAPITAL_ESCAPED);
+                }
+                rest = &rest[escaped.len_utf8()..];
+            }
+            '[' => rest = &rest[simple_class(rest)?..],
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The length of a simple class after its `[`, through its `]`: letters, digits, `.` and `_`,
+/// and ranges between two digits, two small letters or two capitals, lower end first.
+fn simple_class(after: &str) -> Result<usize, &'static str> {
+    let close = after.find(']').ok_or(NEVER_CLOSED)?;
+    let members = &after.as_bytes()[..close];
+    if members.starts_with(b"!") || members.starts_with(b"^") {
+        return Err(NEGATED);
+    }
+    if members.is_empty() {
+        return Err(NOT_SIMPLE);
+    }
+    let same_kind = |a: u8, b: u8| {
+        a <= b
+            && (a.is_ascii_digit() && b.is_ascii_digit()
+                || a.is_ascii_lowercase() && b.is_ascii_lowercase()
+                || a.is_ascii_uppercase() && b.is_ascii_uppercase())
+    };
+    // Tables, not lists, so a class of a million members is checked in one pass.
+    let (mut in_class, mut alone) = ([false; 128], [false; 128]);
+    let mut rest = members;
+    while let Some((&lo, after_lo)) = rest.split_first() {
+        if !(lo.is_ascii_alphanumeric() || lo == b'.' || lo == b'_') {
+            return Err(NOT_SIMPLE);
+        }
+        match after_lo {
+            [b'-', hi, more @ ..] if same_kind(lo, *hi) => {
+                for c in lo..=*hi {
+                    in_class[usize::from(c)] = true;
+                }
+                rest = more;
+            }
+            [b'-', ..] => return Err(NOT_SIMPLE),
+            _ => {
+                in_class[usize::from(lo)] = true;
+                alone[usize::from(lo)] = true;
+                rest = after_lo;
+            }
+        }
+    }
+    // Git folds the name's letter case but not the class's: a capital alone matches nothing.
+    let unmatched = |c: u8| alone[usize::from(c)] && !in_class[usize::from(c.to_ascii_lowercase())];
+    if IGNORE_CASE && (b'A'..=b'Z').any(unmatched) {
+        return Err(CAPITAL_IN_CLASS);
+    }
+    Ok(close + 1)
+}
+
+/// `pattern` with its braces escaped: Git reads `{a,b}` as plain characters, and `ignore` would
+/// take it for a choice. Classes hold no braces (`like_git` sees to that).
+fn literal_braces(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    for c in pattern.chars() {
+        if !escaped && matches!(c, '{' | '}') {
+            out.push('\\');
+        }
+        escaped = !escaped && c == '\\';
+        out.push(c);
+    }
+    out
+}
+
+/// The bytes of `.boltignore` a walk has taken (storage-format.md §12).
+#[derive(Default)]
+struct Spent {
+    /// In the files of the folders the walk is inside.
+    in_force: u64,
+    /// In every file the walk has read, including those that then failed.
+    read: u64,
+}
+
+/// The rules of the `.boltignore` in `dir` and its size, or none if there isn't one. Read through
+/// `safe_fs` and held to the limits (storage-format.md §12) before any rule is built, which costs
+/// far more memory than the file. A folder Bolt may not look into is `Unreadable`.
+fn boltignore_rules(
+    root: &Path,
+    dir: &Path,
+    spent: &mut Spent,
+) -> Result<Option<(Gitignore, u64)>, SaveError> {
+    let file = dir.join(".boltignore");
+    let rel = shown(file.strip_prefix(root).unwrap_or(&file));
+    let ignore = |detail| SaveError::Ignore { detail };
+    let bytes = match safe_fs::read_capped(&file, safe_fs::MAX_BOLTIGNORE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            if let Err(source) = fs::symlink_metadata(&file)
+                && source.kind() != io::ErrorKind::NotFound
+            {
+                let folder = shown(dir.strip_prefix(root).unwrap_or(dir));
+                let path = if folder.is_empty() {
+                    "the project folder".to_owned()
+                } else {
+                    folder
+                };
+                return Err(SaveError::Unreadable { path, source });
+            }
+            // `safe_fs` refusals start with the full path; the project path replaces it, so the
+            // file is named once.
+            let why = e.to_string();
+            return Err(ignore(
+                match why.strip_prefix(&file.display().to_string()) {
+                    Some(rest) => format!("{rel}{rest}"),
+                    None => format!("{rel}: {why}"),
+                },
+            ));
+        }
+    };
+    let size = bytes.len() as u64;
+    if spent.in_force + size > safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES {
+        return Err(ignore(format!(
+            "{rel}: with the .boltignore files above it, it is larger than {} bytes",
+            safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES
+        )));
+    }
+    if spent.read + size > safe_fs::MAX_BOLTIGNORE_SAVE_BYTES {
+        return Err(ignore(format!(
+            "{rel}: with the other .boltignore files this save reads, it is larger than {} bytes",
+            safe_fs::MAX_BOLTIGNORE_SAVE_BYTES
+        )));
+    }
+    // Counted before anything can fail, so that files which fail use up the save's share too.
+    spent.read += size;
+    let text = std::str::from_utf8(&bytes).map_err(|e| ignore(format!("{rel}: {e}")))?;
+    let mut builder = GitignoreBuilder::new(dir);
+    builder
+        .case_insensitive(IGNORE_CASE)
+        .map_err(|e| ignore(format!("{rel}: {e}")))?;
+    for (i, line) in git_lines(text).enumerate() {
+        let pattern = trim_trailing_spaces(line);
+        if line.starts_with('#') || pattern.is_empty() {
+            continue;
+        }
+        let at = format!("{rel}, line {}", i + 1);
+        like_git(pattern).map_err(|change| {
+            let mut quoted: String = line.chars().take(80).collect();
+            if quoted.len() < line.len() {
+                quoted.push('…');
+            }
+            ignore(format!(
+                "{at}: Bolt can't yet read \"{quoted}\" the way Git does. {change}"
+            ))
+        })?;
+        builder
+            .add_line(Some(file.clone()), &literal_braces(pattern))
+            .map_err(|e| ignore(format!("{at}: {e}")))?;
+    }
+    let rules = builder.build().map_err(|_| {
+        ignore(format!(
+            "{rel} has too many or too complex patterns for Bolt to use; split it or simplify it"
+        ))
+    })?;
+    Ok(Some((rules, size)))
+}
+
+/// A folder's `.boltignore`, for as long as the walk is inside that folder.
+struct Level {
+    dir: PathBuf,
+    rules: Gitignore,
+    /// The file's size, which counts against the limits meanwhile.
+    bytes: u64,
+}
+
+/// The `.boltignore` rules of the folders a walk is inside (nearest last), and the first problem
+/// found on entering a folder.
+struct IgnoreRules {
+    root: PathBuf,
+    stack: Vec<Level>,
+    spent: Spent,
+    problem: Option<SaveError>,
+}
+
+impl IgnoreRules {
+    /// The rules for a walk of `root`, beginning with its own `.boltignore`.
+    fn new(root: &Path) -> Result<IgnoreRules, SaveError> {
+        let mut rules = IgnoreRules {
+            root: root.to_owned(),
+            stack: Vec::new(),
+            spent: Spent::default(),
+            problem: None,
+        };
+        rules.enter(root)?;
+        Ok(rules)
+    }
+
+    /// Puts the rules of the `.boltignore` in `dir`, if it has one, on the stack.
+    fn enter(&mut self, dir: &Path) -> Result<(), SaveError> {
+        if let Some((rules, bytes)) = boltignore_rules(&self.root, dir, &mut self.spent)? {
+            self.spent.in_force += bytes;
+            self.stack.push(Level {
+                dir: dir.to_owned(),
+                rules,
+                bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether the walk keeps `path`, as `ignore` decides: the nearest `.boltignore` with a
+    /// matching pattern wins, and within it the last matching pattern. After a `.boltignore`
+    /// fails, the problem is kept and nothing more is: the save will stop anyway.
+    fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
+        if self.problem.is_some() {
+            return false;
+        }
+        // The walk is depth first, so the rules of folders `path` is not in are done with.
+        while let Some(level) = self.stack.pop_if(|level| !path.starts_with(&level.dir)) {
+            self.spent.in_force -= level.bytes;
+        }
+        for level in self.stack.iter().rev() {
+            match level.rules.matched(path, is_dir) {
+                Match::Ignore(_) => return false,
+                Match::Whitelist(_) => break,
+                Match::None => {}
+            }
+        }
+        if is_dir && let Err(problem) = self.enter(path) {
+            self.problem.get_or_insert(problem);
+            return false;
+        }
+        true
+    }
+}
+
+/// Stack for the scan thread: 4 KiB per folder level the depth limit allows. Dropping the linked
+/// `ignore` matchers of a deep tree recurses once per level and needs about 2 MiB in a Windows
+/// debug build, more than the main thread's 1 MiB. Unused stack costs address space only.
+const WALK_STACK_BYTES: usize = (MAX_SAVE_DEPTH + 2) * 4096;
+
+/// Scans the project folder on a thread of its own, so callers don't need a deep stack.
+fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
+    thread::scope(|scope| {
+        let scan = thread::Builder::new()
+            .stack_size(WALK_STACK_BYTES)
+            .spawn_scoped(scope, || scan_folder(root, limits))
+            .map_err(|e| SaveError::Repo(e.into()))?;
+        scan.join().unwrap_or_else(|_| {
+            let stopped = io::Error::other("the scan of the project folder stopped unexpectedly");
+            Err(SaveError::Repo(stopped.into()))
+        })
+    })
+}
+
+fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
+    // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
+    // Bolt reads each .boltignore itself: `ignore` would reopen it by path, following links and
+    // reading without a limit.
+    let rules = Arc::new(Mutex::new(IgnoreRules::new(root)?));
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -244,34 +617,20 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
         .ignore(false)
         .parents(false)
         .follow_links(false)
-        .add_custom_ignore_filename(".boltignore")
-        .filter_entry(|e| {
-            let dir = e.file_type().is_some_and(|t| t.is_dir());
-            !(dir && matches!(e.file_name().to_str(), Some(".bolt" | ".git")))
+        .filter_entry({
+            let rules = Arc::clone(&rules);
+            move |e| {
+                let is_dir = e.file_type().is_some_and(|t| t.is_dir());
+                if is_dir && e.file_name().to_str().is_some_and(is_internal_folder) {
+                    return false;
+                }
+                let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
+                rules.keeps(e.path(), is_dir)
+            }
         })
         .build();
     for item in walker {
         let entry = item.map_err(|e| walk_error(root, e))?;
-        // A broken or unreadable .boltignore comes with its folder's entry, not as an error
-        // item; going on without it would save the files it was meant to keep out.
-        if let Some(err) = entry.error() {
-            return Err(SaveError::Ignore {
-                detail: describe(root, err),
-            });
-        }
-        // `ignore` drops read errors on ignore files without a word (an unreadable file, a
-        // folder, bytes that aren't UTF-8), so read each one whole here first.
-        if entry.file_type().is_some_and(|t| t.is_dir()) {
-            let file = entry.path().join(".boltignore");
-            match fs::read_to_string(&file) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    return Err(SaveError::Ignore {
-                        detail: format!("{}: {e}", shown(file.strip_prefix(root).unwrap_or(&file))),
-                    });
-                }
-                _ => {}
-            }
-        }
         let path = entry.path();
         let rel_path = path.strip_prefix(root).unwrap_or(path);
         let rel = shown(rel_path);
@@ -297,6 +656,7 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
         let kind = if t.is_symlink() {
             Kind::Symlink
         } else if t.is_dir() {
+            limits.check_depth(names.len()).map_err(too_large)?;
             folders.entry(rel.clone()).or_default();
             Kind::Folder
         } else if t.is_file() {
@@ -305,6 +665,7 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
             // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
             continue;
         };
+        limits.add(1).map_err(too_large)?;
         folders.entry(parents.join("/")).or_default().push(Child {
             name: (*name).to_owned(),
             kind,
@@ -312,6 +673,15 @@ fn walk(root: &Path) -> Result<Folders, SaveError> {
             rel,
             executable: executable_bits(&meta),
         });
+    }
+    // Going on without a folder's .boltignore would save the files it was meant to keep out.
+    let problem = rules
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .problem
+        .take();
+    if let Some(problem) = problem {
+        return Err(problem);
     }
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -356,18 +726,21 @@ fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
             source: io::Error::new(e.kind(), e.to_string()),
         },
         (Some(e), None) => RepoError::from(io::Error::new(e.kind(), e.to_string())).into(),
-        // Anything else is a pattern Bolt could not understand.
+        // The walker reads no ignore files itself, so this is not expected; it fails closed.
         (None, _) => SaveError::Ignore {
             detail: describe(root, &err),
         },
     }
 }
 
-/// The parent save's listing of each folder, if it had that folder.
+/// The parent save's listing of each folder, if it had that folder. It reads the old save only
+/// along the folders on disk, so `walk` has already held it to the depth limit. Every listing it
+/// reads counts against the entry limit, a shared one once per path.
 fn old_listings(
     store: &Store,
     old_root: Id,
     folders: &Folders,
+    mut limits: SaveLimits,
 ) -> Result<HashMap<String, Option<Listing>>, SaveError> {
     let mut old: HashMap<String, Option<Listing>> = HashMap::new();
     // A folder's path sorts after its parent's, so the parent is always looked up first.
@@ -385,6 +758,11 @@ fn old_listings(
                 _ => None,
             }
         };
+        if let Some(l) = &listing {
+            limits
+                .add(l.entries().len())
+                .map_err(|detail| StoreError::SaveTooLarge { detail })?;
+        }
         old.insert(rel.clone(), listing);
     }
     Ok(old)
@@ -474,8 +852,9 @@ fn build(
         }
         let listing = Listing::new(entries).map_err(StoreError::from)?;
         let id = listing.id();
-        if !store.contains(&id) {
-            pack.add_record(ObjectKind::FolderListing, &listing.encode())?;
+        let encoded = listing.encode();
+        if !store.has_good_copy(&id, ObjectKind::FolderListing, encoded.len() as u64)? {
+            pack.add_record(ObjectKind::FolderListing, &encoded)?;
         }
         built.insert(rel, id);
     }
@@ -496,14 +875,15 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
         ))
     })?;
     let id = hash_content(target.as_bytes());
-    if !store.contains(&id) {
+    if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
         pack.add_content(target.as_bytes())?;
     }
     Ok((id, target.len() as u64))
 }
 
-/// Stores one file in two passes: hash it, then copy it into `pack` unless the store or pack
-/// already holds it. A file that changes in between gives `ChangedDuringSave`.
+/// Stores one file in two passes: hash it, then copy it into `pack` unless already held. A file
+/// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`; a
+/// Windows reparse point that isn't a link gives `SpecialFile`.
 pub(crate) fn store_file(
     pack: &mut PackWriter,
     store: &Store,
@@ -518,7 +898,19 @@ pub(crate) fn store_file(
         path: path.display().to_string(),
     };
     let stamp = |f: &File| f.metadata().map(|m| (m.len(), m.modified().ok()));
-    let mut file = File::open(path).map_err(unreadable)?;
+    // A link or special file here was swapped in since the scan, unless it is a Windows reparse
+    // point that isn't a link (a cloud placeholder, say), which the scan takes for a file.
+    let mut file = safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
+        if e.kind() != io::ErrorKind::InvalidInput {
+            unreadable(e)
+        } else if fs::symlink_metadata(path).is_ok_and(|m| safe_fs::is_reparse_file(&m)) {
+            SaveError::SpecialFile {
+                path: path.display().to_string(),
+            }
+        } else {
+            changed()
+        }
+    })?;
     let before = stamp(&file).map_err(unreadable)?;
     let mut hasher = ContentHasher::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -538,7 +930,7 @@ pub(crate) fn store_file(
     if size != before.0 || stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }
-    if store.contains(&id) || pack.contains(&id) {
+    if pack.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
         return Ok((id, size));
     }
     file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
@@ -554,9 +946,11 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::id::hash_content;
-    use crate::listing::EntryKind;
+    use crate::listing::{EntryKind, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES};
     use crate::names::{name_problems, validate_name};
+    use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
+    use crate::test_support::plant_damaged_copies;
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -712,11 +1106,16 @@ mod tests {
             save_id,
             save,
             changed_files,
+            short_change_id,
         } = save_now(&mut repo).unwrap()
         else {
             panic!("nothing was saved");
         };
-        assert_eq!(changed_files, 1);
+        assert_eq!(changed_files, Some(1));
+        assert_eq!(
+            short_change_id.unwrap(),
+            history::short_change_id(&repo, &save_id, &save.change_id).unwrap()
+        );
         assert_eq!(save.line(), Some("main"));
         assert_eq!(save.author, who());
         let (head, entry) = repo.current().unwrap();
@@ -730,6 +1129,71 @@ mod tests {
             SaveOutcome::Saved { .. } => panic!("saved again"),
         }
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn save_stores_a_file_even_when_a_damaged_copy_claims_its_id() {
+        let (dir, _repo) = project();
+        // Content anyone can predict, like a licence, in a pack that came with the project.
+        let licence = b"Permission is hereby granted, free of charge, to any person\n";
+        plant_damaged_copies(
+            &dir.path().join(".bolt/store/packs"),
+            &[(ObjectKind::Content, licence)],
+        );
+        write(dir.path(), "LICENSE", licence);
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let damaged = repo.store().damaged_packs();
+        assert_eq!(damaged.len(), 1, "{damaged:?}");
+        assert!(damaged[0].to_string().contains("00.pack"), "{damaged:?}");
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
+    }
+
+    #[test]
+    fn save_stores_listings_even_when_damaged_copies_claim_their_ids() {
+        let (dir, _repo) = project();
+        fs::create_dir(dir.path().join("empty")).unwrap();
+        write(dir.path(), "sub/a.txt", b"x");
+        let sub = Listing::new(vec![Entry {
+            name: "a.txt".into(),
+            kind: EntryKind::File,
+            id: hash_content(b"x"),
+            size: 1,
+        }])
+        .unwrap();
+        // The empty listing has the same ID in every project.
+        plant_damaged_copies(
+            &dir.path().join(".bolt/store/packs"),
+            &[
+                (ObjectKind::FolderListing, &Listing::empty().encode()),
+                (ObjectKind::FolderListing, &sub.encode()),
+            ],
+        );
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let root = saved_root(save_now(&mut repo).unwrap());
+        assert_eq!(repo.store().damaged_packs().len(), 1);
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
+    }
+
+    #[test]
+    fn a_save_with_no_changes_keeps_the_copy_it_stored_in_place_of_a_damaged_one() {
+        let (dir, mut repo) = project();
+        let licence = b"Permission is hereby granted, free of charge, to any person\n";
+        let id = hash_content(licence);
+        write(dir.path(), "LICENSE", licence);
+        save_now(&mut repo).unwrap();
+        damage_the_only_copy_of(&repo, &id);
+        let mut repo = Repository::open(dir.path()).unwrap();
+        assert!(matches!(
+            save_now(&mut repo).unwrap(),
+            SaveOutcome::NothingChanged { .. }
+        ));
+        let mut back = Vec::new();
+        let fresh = Repository::open(dir.path()).unwrap();
+        fresh.store().copy_content(&id, &mut back).unwrap();
+        assert_eq!(back, licence);
     }
 
     #[test]
@@ -760,12 +1224,55 @@ mod tests {
         else {
             panic!("nothing was saved");
         };
-        let history: Vec<Id> = crate::history::line_history(&open())
-            .unwrap()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        assert_eq!(history[..2], [second, saved[0]]);
+        let mut line = Vec::new();
+        history::for_each_on_line::<RepoError>(&open(), |id, _, _| {
+            line.push(*id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(line[..2], [second, saved[0]]);
+    }
+
+    /// Bit rot in the only copy of an object: its first stored byte is flipped.
+    fn damage_the_only_copy_of(repo: &Repository, id: &Id) {
+        for e in fs::read_dir(repo.packs_dir()).unwrap() {
+            let path = e.unwrap().path();
+            let found = PackReader::open(&path).unwrap().find(id).copied();
+            if let Some(entry) = found {
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+                fs::write(&path, bytes).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_save_is_made_even_when_the_line_cant_be_read_to_shorten_its_id() {
+        let (dir, mut repo) = project();
+        let first = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        saved_root(save_now(&mut repo).unwrap());
+        damage_the_only_copy_of(&repo, &first);
+
+        let mut repo = Repository::open(dir.path()).unwrap();
+        write(dir.path(), "b.txt", b"b");
+        let SaveOutcome::Saved {
+            save_id,
+            save,
+            short_change_id,
+            ..
+        } = save_now(&mut repo).unwrap()
+        else {
+            panic!("nothing was saved");
+        };
+        assert!(
+            matches!(short_change_id, Err(RepoError::Damaged { .. })),
+            "{short_change_id:?}"
+        );
+        // The save is made all the same, and is the line's newest.
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(fresh.current().unwrap().1.state.lines["main"], save_id);
+        assert_eq!(saved_tree(fresh.store(), save.root), disk_tree(dir.path()));
     }
 
     #[test]
@@ -848,8 +1355,7 @@ mod tests {
             panic!("the names were accepted");
         };
         let text: Vec<String> = problems.iter().map(|(_, p)| p.to_string()).collect();
-        // On a case-insensitive disk (macOS by default) `readme` overwrote `README`, so the
-        // collision can't exist there.
+        // On a case-insensitive disk (macOS by default) `readme` overwrote `README`: no collision.
         let both_cases = fs::read_dir(dir.path())
             .unwrap()
             .filter(|e| {
@@ -885,11 +1391,333 @@ mod tests {
     }
 
     #[test]
+    fn boltignore_rules_work_as_in_git() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        // A byte order mark is not part of the first pattern, and the last match wins. `build/` is
+        // folders only, nothing returns from inside an ignored folder, and `.git` stays out.
+        let top = "\u{feff}*.log\n!keep.log\nbuild/\n!build/keep.txt\n!.git/\n";
+        write(root, ".boltignore", top.as_bytes());
+        write(root, "a.log", b"x");
+        write(root, "keep.log", b"x");
+        write(root, "build/out.bin", b"x");
+        write(root, "build/keep.txt", b"x");
+        write(root, "src/build", b"a file, not a folder");
+        write(root, ".git/config", b"x");
+        // The nearest .boltignore decides first: `sub` takes one .log file back, and the top
+        // one still ignores the other.
+        write(root, "sub/.boltignore", b"!debug.log\n");
+        write(root, "sub/debug.log", b"x");
+        write(root, "sub/other.log", b"x");
+        let id = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), id);
+        let paths: Vec<&str> = tree.keys().map(String::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                ".boltignore",
+                "keep.log",
+                "src",
+                "src/build",
+                "sub",
+                "sub/.boltignore",
+                "sub/debug.log"
+            ]
+        );
+    }
+
+    /// The paths of the newest save, sorted.
+    fn saved_paths(repo: &Repository, outcome: SaveOutcome) -> Vec<String> {
+        let tree = saved_tree(repo.store(), saved_root(outcome));
+        tree.into_keys().collect()
+    }
+
+    #[test]
+    fn boltignore_ignores_letter_case_where_git_does() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", b"*.env\nsecrets/\n*.LOG\n");
+        write(root, "PROD.ENV", b"x");
+        write(root, "Secrets/key.pem", b"x");
+        write(root, "debug.LOG", b"x");
+        write(root, "keep.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        // Git sets core.ignorecase on Windows and macOS; on Linux a pattern matches exactly.
+        let want: &[&str] = if IGNORE_CASE {
+            &[".boltignore", "keep.txt"]
+        } else {
+            &[
+                ".boltignore",
+                "PROD.ENV",
+                "Secrets",
+                "Secrets/key.pem",
+                "keep.txt",
+            ]
+        };
+        assert_eq!(saved_paths(&repo, saved), want);
+    }
+
+    #[test]
+    fn a_name_taken_back_with_a_pattern_keeps_its_letter_case_where_case_is_ignored() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", b"*.env\n!keep.env\n");
+        write(root, "KEEP.ENV", b"x");
+        write(root, "OTHER.ENV", b"x");
+        write(root, "plain.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let want: &[&str] = if IGNORE_CASE {
+            &[".boltignore", "KEEP.ENV", "plain.txt"]
+        } else {
+            &[".boltignore", "KEEP.ENV", "OTHER.ENV", "plain.txt"]
+        };
+        assert_eq!(saved_paths(&repo, saved), want);
+    }
+
+    #[test]
+    fn a_git_folder_is_never_saved_in_any_letter_case_where_git_reads_it_so() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, ".GIT/config", b"x");
+        write(root, "sub/.Git/HEAD", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        // Only on Windows and macOS is `.GIT` Git's folder; elsewhere it is an ordinary one.
+        let want: &[&str] = if IGNORE_CASE {
+            &["keep.txt", "sub"]
+        } else {
+            &[
+                ".GIT",
+                ".GIT/config",
+                "keep.txt",
+                "sub",
+                "sub/.Git",
+                "sub/.Git/HEAD",
+            ]
+        };
+        assert_eq!(saved_paths(&repo, saved), want);
+    }
+
+    #[test]
+    fn braces_in_boltignore_are_literal_as_in_git() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let patterns = [
+            "{prod,dev}.env", // not a choice
+            "\\{kept\\}.txt", // already escaped: still one brace each
+            "x{y",            // an unclosed brace is no error
+            "}",
+        ];
+        write(root, ".boltignore", patterns.join("\n").as_bytes());
+        for name in ["{prod,dev}.env", "{kept}.txt", "x{y", "}"] {
+            write(root, name, b"ignored");
+        }
+        for name in ["prod.env", "dev.env", "kept.txt", "xy"] {
+            write(root, name, b"kept");
+        }
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".boltignore", "dev.env", "kept.txt", "prod.env", "xy"]
+        );
+    }
+
+    #[test]
+    fn braces_are_made_literal_except_where_they_already_are() {
+        for (line, want) in [
+            ("{a,b}.env", "\\{a,b\\}.env"),
+            ("*.{png,jpg}", "*.\\{png,jpg\\}"),
+            ("!{a}", "!\\{a\\}"),
+            ("[ab]{", "[ab]\\{"),
+            ("no braces at all", "no braces at all"),
+            // Already escaped: left alone. After an escaped backslash (`\\`) a brace is bare.
+            ("\\{a\\}", "\\{a\\}"),
+            ("\\\\{a", "\\\\\\{a"),
+        ] {
+            assert_eq!(literal_braces(line), want, "{line}");
+        }
+    }
+
+    #[test]
+    fn boltignore_lines_are_split_and_trimmed_as_git_does() {
+        let lines: Vec<&str> = git_lines("\u{feff}\u{feff}a\r\nb\r\r\n\nc\r").collect();
+        assert_eq!(lines, ["\u{feff}a", "b\r", "", "c"]);
+        for (line, want) in [
+            ("foo  ", "foo"),
+            ("foo\\ ", "foo\\ "),
+            ("foo\\\\ ", "foo\\\\"),
+            ("foo\\  ", "foo\\ "),
+            ("foo \\ ", "foo \\ "),
+            ("trail\\", "trail\\"),
+            ("foo\t ", "foo\t"),
+            ("   ", ""),
+        ] {
+            assert_eq!(trim_trailing_spaces(line), want, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn patterns_bolt_cant_yet_read_like_git_are_refused() {
+        for (pattern, why) in [
+            ("secret.txt\t", CONTROL),
+            ("foo\\\t", CONTROL),
+            ("a\tb", CONTROL),
+            ("!keep.log\0", CONTROL),
+            ("x\r", CONTROL),
+            ("x\u{7f}", CONTROL),
+            ("a\u{a0}", BLANK_AT_END),
+            ("**\\*.md", STARS_BY_BACKSLASH),
+            ("x/**\\y", STARS_BY_BACKSLASH),
+            ("a\\\\**", STARS_BY_BACKSLASH),
+            ("cafe\u{301}.txt", NOT_NFC),
+            ("trail\\", BACKSLASH_AT_END),
+            ("foo\\/", BACKSLASH_AT_END),
+            ("foo\\\\/", BACKSLASH_AT_END),
+            ("bar[", NEVER_CLOSED),
+            ("[a-{b}", NEVER_CLOSED),
+            ("*.py[!c]", NEGATED),
+            ("[^a]x", NEGATED),
+            ("[]", NOT_SIMPLE),
+            ("[]a]", NOT_SIMPLE),
+            ("a[/]b", NOT_SIMPLE),
+            ("[\\]]", NOT_SIMPLE),
+            ("[[]", NOT_SIMPLE),
+            ("[[:alpha:]]", NOT_SIMPLE),
+            ("[{a}]", NOT_SIMPLE),
+            ("[a,b]", NOT_SIMPLE),
+            ("[a-]", NOT_SIMPLE),
+            ("[-a]", NOT_SIMPLE),
+            ("[ä]", NOT_SIMPLE),
+            ("x[z-a]", NOT_SIMPLE),
+            ("[a-Z]", NOT_SIMPLE),
+            ("[0-9a-c-e]", NOT_SIMPLE),
+            ("ok[ab]then[!c]", NEGATED),
+        ] {
+            assert_eq!(like_git(pattern), Err(why), "{pattern:?}");
+        }
+        // Where letter case is ignored, Git leaves these capitals alone, so they match nothing.
+        for (pattern, why) in [
+            ("\\B.txt", CAPITAL_ESCAPED),
+            ("[B].txt", CAPITAL_IN_CLASS),
+            ("[Ab]", CAPITAL_IN_CLASS),
+        ] {
+            let want = if IGNORE_CASE { Err(why) } else { Ok(()) };
+            assert_eq!(like_git(pattern), want, "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn common_patterns_are_read_like_git() {
+        for pattern in [
+            "*.py[cod]",
+            "[Bb]in/",
+            "[Dd]ebug/",
+            "*.sw[a-p]",
+            "[._]*.s[a-v][a-z]",
+            "*.[oa]",
+            "[0-9]*.log",
+            "foo\\ ",
+            "\\#notes",
+            "!keep.txt",
+            "[A-Z]*.md",
+            "[Ba-z]x",
+            "\\[x]",
+            "{a,b}",
+            "x\\b",
+            "café.txt",
+            "**/*.md",
+            "x/**/y",
+        ] {
+            assert_eq!(like_git(pattern), Ok(()), "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn long_lines_are_checked_in_linear_time() {
+        let started = std::time::Instant::now();
+        assert_eq!(like_git(&"[".repeat(1 << 20)), Err(NEVER_CLOSED));
+        assert_eq!(like_git(&"[a]".repeat(1 << 18)), Ok(()));
+        // Every capital is checked for its small letter, and there is one.
+        assert_eq!(like_git(&format!("[{}a]", "A".repeat(1 << 20))), Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_pattern_bolt_cant_yet_read_like_git_stops_the_save_at_the_first_such_line() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "keep.txt", b"x");
+        write(dir.path(), ".boltignore", b"keep.txt\n*.py[!c]\nbar[\n");
+        let detail = assert_ignore_problem(&mut repo);
+        assert_eq!(
+            detail,
+            ".boltignore, line 2: Bolt can't yet read \"*.py[!c]\" the way Git does. Rewrite it \
+             without [!…] or [^…], or list the names one per line"
+        );
+        // A long line is quoted only in part.
+        let long = format!("{}[!c]\n", "x".repeat(200));
+        write(dir.path(), ".boltignore", long.as_bytes());
+        let detail = assert_ignore_problem(&mut repo);
+        assert!(
+            detail.contains(&format!("\"{}…\"", "x".repeat(80))),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn the_scan_stops_at_the_first_boltignore_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a/.boltignore", b"[!x]\n");
+        write(root, "b/.boltignore", b"\xff\n");
+        let mut rules = IgnoreRules::new(root).unwrap();
+        assert!(!rules.keeps(&root.join("a"), true));
+        // Past the first problem nothing is kept, and no other .boltignore is read.
+        assert!(!rules.keeps(&root.join("b"), true));
+        assert!(!rules.keeps(&root.join("c.txt"), false));
+        let Some(SaveError::Ignore { detail }) = rules.problem else {
+            panic!("no problem kept");
+        };
+        assert!(detail.starts_with("a/.boltignore, line 1: "), "{detail}");
+        assert_eq!(rules.spent.read, 5);
+    }
+
+    #[test]
+    fn a_question_mark_or_letter_case_never_spans_a_character_beyond_ascii() {
+        // As in Git, which matches bytes and folds only ASCII letters.
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", "?.txt\nä.md\n".as_bytes());
+        write(root, "a.txt", b"x");
+        write(root, "ä.txt", b"x");
+        write(root, "one/ä.md", b"x");
+        write(root, "two/Ä.md", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".boltignore", "one", "two", "two/Ä.md", "ä.txt"]
+        );
+    }
+
+    #[test]
+    fn a_folders_ignore_rules_end_with_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, ".boltignore", b"*.log\n");
+        write(root, "a/.boltignore", b"!x.log\n");
+        fs::create_dir(root.join("b")).unwrap();
+        let mut rules = IgnoreRules::new(root).unwrap();
+        // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach.
+        assert!(rules.keeps(&root.join("a"), true));
+        assert!(rules.keeps(&root.join("a").join("x.log"), false));
+        assert!(rules.keeps(&root.join("b"), true));
+        assert!(!rules.keeps(&root.join("b").join("x.log"), false));
+    }
+
+    #[test]
     fn broken_boltignore_stops_the_save() {
         let (dir, mut repo) = project();
         let head = repo.head().unwrap();
         write(dir.path(), "secret.key", b"x");
-        // `a[` would be fine: like Git, `ignore` reads an unclosed `[` literally.
         write(dir.path(), ".boltignore", b"secret.key\n[z-a]\n");
         match save_now(&mut repo) {
             Err(SaveError::Ignore { detail }) => {
@@ -903,16 +1731,177 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
-    /// The save must stop with `Ignore` naming `.boltignore`, and change nothing.
-    fn assert_ignore_problem(repo: &mut Repository) {
+    /// The save must stop with `Ignore` naming `.boltignore` by its project path, once, and
+    /// change nothing. Returns the problem's text.
+    fn assert_ignore_problem(repo: &mut Repository) -> String {
         let head = repo.head().unwrap();
-        match save_now(repo) {
-            Err(SaveError::Ignore { detail }) => {
-                assert!(detail.starts_with(".boltignore: "), "{detail}");
-            }
+        let detail = match save_now(repo) {
+            Err(SaveError::Ignore { detail }) => detail,
+            other => panic!("{:?}", other.map(|_| ())),
+        };
+        assert!(detail.starts_with(".boltignore"), "{detail}");
+        assert_eq!(detail.matches(".boltignore").count(), 1, "{detail}");
+        assert_eq!(repo.head().unwrap(), head);
+        detail
+    }
+
+    #[test]
+    fn symlinked_boltignore_stops_the_save() {
+        let (dir, mut repo) = project();
+        let outside = tempfile::tempdir().unwrap();
+        let patterns = outside.path().join("patterns");
+        fs::write(&patterns, b"*.key\n").unwrap();
+        write(dir.path(), "secret.key", b"x");
+        if !crate::test_support::symlink(&patterns, &dir.path().join(".boltignore")) {
+            return;
+        }
+        let detail = assert_ignore_problem(&mut repo);
+        assert!(detail.contains("regular file"), "{detail}");
+        assert!(!detail.contains(dir.path().to_str().unwrap()), "{detail}");
+    }
+
+    #[test]
+    fn oversized_boltignore_stops_the_save() {
+        let (dir, mut repo) = project();
+        // One comment line, 1 MiB + 1 byte with its newline.
+        let mut big = vec![b'#'; 1 << 20];
+        big.push(b'\n');
+        write(dir.path(), ".boltignore", &big);
+        let detail = assert_ignore_problem(&mut repo);
+        assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
+        assert!(!detail.contains(dir.path().to_str().unwrap()), "{detail}");
+    }
+
+    /// A `.boltignore` of `len` bytes that holds no pattern.
+    fn comment_of(len: u64) -> Vec<u8> {
+        vec![b'#'; usize::try_from(len).unwrap()]
+    }
+
+    /// What `walk` makes of the `.boltignore` files under `root`, which must be a problem.
+    fn walk_problem(root: &Path) -> String {
+        match walk(root, SaveLimits::default()) {
+            Err(SaveError::Ignore { detail }) => detail,
             other => panic!("{:?}", other.map(|_| ())),
         }
-        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn boltignore_files_in_force_at_one_folder_total_at_most_one_mebibyte() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let half = safe_fs::MAX_BOLTIGNORE_IN_FORCE_BYTES / 2;
+        write(root, ".boltignore", &comment_of(half));
+        write(root, "a/.boltignore", &comment_of(half));
+        // `a`'s file is not in force at `b`, so the two folders do not add up.
+        write(root, "b/.boltignore", &comment_of(half));
+        assert!(walk(root, SaveLimits::default()).is_ok());
+        // Six bytes more below `a` put it past the limit; its bad pattern is never reached.
+        write(root, "a/x/.boltignore", b"[z-a]\n");
+        let detail = walk_problem(root);
+        assert!(detail.starts_with("a/x/.boltignore: "), "{detail}");
+        assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
+        assert!(!detail.contains("[z-a]"), "{detail}");
+    }
+
+    #[test]
+    fn one_save_reads_at_most_sixteen_mebibytes_of_boltignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let each = safe_fs::MAX_BOLTIGNORE_BYTES;
+        for i in 0..safe_fs::MAX_BOLTIGNORE_SAVE_BYTES / each {
+            write(root, &format!("d{i}/.boltignore"), &comment_of(each));
+        }
+        assert!(walk(root, SaveLimits::default()).is_ok());
+        write(root, "e/.boltignore", &comment_of(1));
+        // Whichever file the walk reaches last is the one that goes over.
+        let detail = walk_problem(root);
+        assert!(detail.contains("/.boltignore: "), "{detail}");
+        assert!(detail.contains("larger than 16777216 bytes"), "{detail}");
+    }
+
+    #[test]
+    fn boltignore_files_that_fail_still_count_toward_the_save_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // As big as a file may be and not UTF-8, so each one fails on its own.
+        let mut bad = comment_of(safe_fs::MAX_BOLTIGNORE_BYTES - 1);
+        bad.push(0xff);
+        let share = safe_fs::MAX_BOLTIGNORE_SAVE_BYTES / safe_fs::MAX_BOLTIGNORE_BYTES;
+        for i in 0..=share {
+            write(root, &format!("d{i}/.boltignore"), &bad);
+        }
+        let mut rules = IgnoreRules::new(root).unwrap();
+        for i in 0..=share {
+            let Err(SaveError::Ignore { detail }) = rules.enter(&root.join(format!("d{i}"))) else {
+                panic!("d{i} was accepted");
+            };
+            let want = if i < share {
+                "invalid utf-8"
+            } else {
+                "larger than 16777216 bytes"
+            };
+            assert!(detail.contains(want), "d{i}: {detail}");
+        }
+        // The walk still reports the first failure, as before.
+        let detail = walk_problem(root);
+        assert!(detail.contains("invalid utf-8"), "{detail}");
+    }
+
+    const TOO_COMPLEX: &str =
+        ".boltignore has too many or too complex patterns for Bolt to use; split it or simplify it";
+
+    #[test]
+    fn a_boltignore_the_matcher_cannot_build_is_refused_in_plain_words() {
+        // The matcher builds about 130,000 `?` in one pattern; this is more than twice that.
+        let (dir, mut repo) = project();
+        write(dir.path(), ".boltignore", "?".repeat(300_000).as_bytes());
+        match save_now(&mut repo) {
+            Err(SaveError::Ignore { detail }) => assert_eq!(detail, TOO_COMPLEX),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn ignoring_letter_case_limits_how_many_paths_one_boltignore_can_hold() {
+        // Windows and macOS: a few thousand paths are too many. Elsewhere they are cheap.
+        let (dir, mut repo) = project();
+        let paths: String = (0..6000)
+            .map(|i| format!("Assets/Textures/Characters/Hero/diffuse_{i:05}.png\n"))
+            .collect();
+        write(dir.path(), ".boltignore", paths.as_bytes());
+        match (IGNORE_CASE, save_now(&mut repo)) {
+            (false, Ok(_)) => {}
+            (true, Err(SaveError::Ignore { detail })) => assert_eq!(detail, TOO_COMPLEX),
+            (_, other) => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boltignore_pipe_stops_the_save_without_hanging() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "sub/secret.key", b"x");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("sub/.boltignore"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Opening a named pipe waits for a writer, so the save runs on another thread: a hang
+        // fails this test instead of stopping the whole run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(save_now(&mut repo).map(|_| ()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the save hung on a named pipe");
+        match result {
+            Err(SaveError::Ignore { detail }) => assert!(
+                detail.starts_with("sub/.boltignore is not a regular file"),
+                "{detail}"
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1037,6 +2026,83 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
+    /// RT-11: a folder Bolt may not enter is an unreadable folder, not a `.boltignore` problem.
+    #[cfg(unix)]
+    #[test]
+    fn save_names_an_unreadable_folder_as_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = project();
+        let head = repo.head().unwrap();
+        write(dir.path(), "sub/locked/f.txt", b"secret");
+        let locked = dir.path().join("sub/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads everything, so there is nothing to test.
+        let root_user = fs::read_dir(&locked).is_ok();
+        let saved = save_now(&mut repo);
+        // Back to normal first, so that the temporary folder can be removed whatever happens.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            return;
+        }
+        match saved {
+            Err(SaveError::Unreadable { path, source }) => {
+                assert_eq!(path, "sub/locked");
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn errors_show_untrusted_text_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let hostile = || HOSTILE.to_owned();
+        for e in [
+            SaveError::Unreadable {
+                path: hostile(),
+                source: io::Error::other("fine"),
+            },
+            SaveError::Unreadable {
+                path: "fine".into(),
+                source: io::Error::other(HOSTILE),
+            },
+            SaveError::ChangedDuringSave { path: hostile() },
+            SaveError::SpecialFile { path: hostile() },
+            SaveError::InvalidName {
+                path: hostile(),
+                reason: "fine".into(),
+            },
+            SaveError::Ignore { detail: hostile() },
+        ] {
+            assert_hostile_text_escaped(&e.to_string());
+        }
+        // The lines Bolt writes itself stay lines; the folders and names in them are escaped.
+        let e = SaveError::NotPortable {
+            problems: vec![
+                (String::new(), PortabilityProblem::ReservedName(hostile())),
+                (
+                    hostile(),
+                    PortabilityProblem::TrailingDotOrSpace("a.".into()),
+                ),
+            ],
+        };
+        let shown = e.to_string();
+        assert_hostile_text_escaped(&shown);
+        assert_eq!(shown.lines().count(), 3, "{shown}");
+        assert!(
+            shown.lines().skip(1).all(|l| l.starts_with("  ")),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_boltignore_hint_does_not_blame_a_pattern() {
+        // A link, a pipe, a huge file or a file that isn't text has no pattern to fix.
+        let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
+        assert!(!hint.contains("pattern"), "{hint}");
+    }
+
     #[test]
     fn save_stops_when_a_file_changes_during_the_save() {
         let (dir, repo) = project();
@@ -1054,5 +2120,252 @@ mod tests {
             store_file(&mut pack, repo.store(), &path, &mut append),
             Err(SaveError::ChangedDuringSave { .. })
         ));
+    }
+
+    /// Scans a project holding `victim.txt`, lets `make_link` put a link in its place (it says
+    /// whether it could make one), then reads the files as `save` does after its scan.
+    fn assert_swap_for_a_link_is_refused(make_link: impl FnOnce(&Path) -> bool) {
+        let (dir, repo) = project();
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, b"x").unwrap();
+        let folders = walk(dir.path(), SaveLimits::default()).unwrap();
+        fs::remove_file(&victim).unwrap();
+        if !make_link(&victim) {
+            return;
+        }
+        let mut pack = repo.new_pack().unwrap();
+        match build(repo.store(), &mut pack, &folders, &HashMap::new()) {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),
+            other => panic!("{other:?}"),
+        }
+        assert!(pack.is_empty());
+    }
+
+    #[test]
+    fn file_replaced_by_a_link_between_scan_and_read_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("id_ed25519");
+        fs::write(&secret, b"hunter2").unwrap();
+        assert_swap_for_a_link_is_refused(|victim| crate::test_support::symlink(&secret, victim));
+    }
+
+    /// Making a junction needs no privilege, so this runs on every Windows account.
+    #[cfg(windows)]
+    #[test]
+    fn file_replaced_by_a_junction_between_scan_and_read_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        assert_swap_for_a_link_is_refused(|victim| {
+            crate::test_support::junction(victim, outside.path());
+            true
+        });
+    }
+
+    #[test]
+    fn file_deleted_between_scan_and_read_is_still_unreadable() {
+        let (dir, repo) = project();
+        let mut pack = repo.new_pack().unwrap();
+        let gone = dir.path().join("gone.txt");
+        match store_file(&mut pack, repo.store(), &gone, &mut || {}) {
+            Err(SaveError::Unreadable { source, .. }) => {
+                assert_eq!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_replaced_by_a_pipe_between_scan_and_read_is_refused_without_hanging() {
+        let (dir, repo) = project();
+        // `.boltignore` is saved like any other file, so it can be swapped like one.
+        let pipe = dir.path().join(".boltignore");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Opening a named pipe waits for a writer, so the read runs on another thread: a hang
+        // fails this test instead of stopping the whole run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut pack = repo.new_pack().unwrap();
+            let stored = store_file(&mut pack, repo.store(), &pipe, &mut || {});
+            let _ = tx.send((stored, pack.is_empty()));
+        });
+        let (stored, pack_is_empty) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a named pipe hung");
+        assert!(
+            matches!(stored, Err(SaveError::ChangedDuringSave { .. })),
+            "{stored:?}"
+        );
+        assert!(pack_is_empty);
+    }
+
+    /// Nested folders for a test, removed bottom-up on drop (even if the test fails), because
+    /// `remove_dir_all` recurses once per level.
+    struct DeepFolders {
+        top: PathBuf,
+        bottom: PathBuf,
+    }
+
+    impl DeepFolders {
+        /// `levels` nested folders named `d` under `top`; `None` (with a printed reason) if the
+        /// system can't hold that path: 4,097 levels are 8 KB, over the limit on Linux (4,096) and
+        /// macOS (1,024). Windows takes it, so there a failure fails the test.
+        fn make(top: &Path, levels: usize) -> Option<DeepFolders> {
+            let mut deep = DeepFolders {
+                top: top.to_path_buf(),
+                bottom: top.to_path_buf(),
+            };
+            for _ in 0..levels {
+                deep.bottom.push("d");
+                if let Err(e) = fs::create_dir(&deep.bottom) {
+                    deep.bottom.pop();
+                    if cfg!(windows) {
+                        panic!("this system can't make {levels} nested folders: {e}");
+                    }
+                    eprintln!("skipped: this system can't make {levels} nested folders: {e}");
+                    return None;
+                }
+            }
+            Some(deep)
+        }
+    }
+
+    impl Drop for DeepFolders {
+        fn drop(&mut self) {
+            while self.bottom != self.top && fs::remove_dir(&self.bottom).is_ok() {
+                self.bottom.pop();
+            }
+        }
+    }
+
+    #[test]
+    fn folder_deeper_than_the_limit_is_refused() {
+        let (dir, _repo) = project();
+        // a, a/b and a/b/c are folders 1, 2 and 3 levels down; f is a file, not a level.
+        write(dir.path(), "a/b/c/f", b"x");
+        assert!(walk(dir.path(), SaveLimits::new(3, MAX_SAVE_ENTRIES)).is_ok());
+        let Err(err) = walk(dir.path(), SaveLimits::new(2, MAX_SAVE_ENTRIES)) else {
+            panic!("a folder 3 levels down was accepted under a limit of 2");
+        };
+        match &err {
+            SaveError::TooLarge { detail } => {
+                assert!(detail.contains("more than 2 levels"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(err.hint().unwrap().contains(".boltignore"));
+    }
+
+    #[test]
+    fn more_entries_than_the_limit_are_refused() {
+        let (dir, _repo) = project();
+        // a, b, c and d are 4 entries of the top folder, and d/e is a fifth.
+        for name in ["a", "b", "c", "d/e"] {
+            write(dir.path(), name, b"x");
+        }
+        assert!(walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 5)).is_ok());
+        let Err(SaveError::TooLarge { detail }) =
+            walk(dir.path(), SaveLimits::new(MAX_SAVE_DEPTH, 4))
+        else {
+            panic!("5 entries were accepted under a limit of 4");
+        };
+        assert!(detail.contains("more than 4 "), "{detail}");
+    }
+
+    #[test]
+    fn old_listings_count_every_path_against_the_entry_limit() {
+        let (dir, mut repo) = project();
+        // Three folders with the same two files: the save holds one listing for all of them.
+        for folder in ["a", "b", "c"] {
+            write(dir.path(), &format!("{folder}/x"), b"x");
+            write(dir.path(), &format!("{folder}/y"), b"y");
+        }
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let folders = walk(dir.path(), SaveLimits::default()).unwrap();
+        // Reading the listing of every folder is 3 entries (the top listing) and, for each of
+        // the 3 folders, the 2 entries of the shared listing.
+        const PATHS: u64 = 3 + 3 * 2;
+        assert!(
+            old_listings(
+                repo.store(),
+                root,
+                &folders,
+                SaveLimits::new(MAX_SAVE_DEPTH, PATHS)
+            )
+            .is_ok()
+        );
+        let err = old_listings(
+            repo.store(),
+            root,
+            &folders,
+            SaveLimits::new(MAX_SAVE_DEPTH, PATHS - 1),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SaveError::Repo(RepoError::Damaged { .. })),
+            "{err:?}"
+        );
+    }
+
+    /// Runs `f` on a thread with a stack of `bytes`. Windows' main thread, where `bolt` runs a
+    /// save, has 1 MiB.
+    fn on_a_stack_of<T: Send>(bytes: usize, f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(bytes)
+                .spawn_scoped(scope, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn refusing_a_deep_tree_does_not_depend_on_the_callers_stack() {
+        let (dir, _repo) = project();
+        // Dropping `ignore`'s linked matchers recurses once per level (about 400 bytes in a debug
+        // build): 300 levels need about 120 KB, more than the 64 KiB stack here, and are few enough
+        // to make everywhere.
+        let Some(_deep) = DeepFolders::make(dir.path(), 300) else {
+            return;
+        };
+        let refused = on_a_stack_of(64 * 1024, || {
+            let limits = SaveLimits::new(299, MAX_SAVE_ENTRIES);
+            matches!(walk(dir.path(), limits), Err(SaveError::TooLarge { .. }))
+        });
+        assert!(refused);
+    }
+
+    // The real limit of 4,096 levels takes about a minute per test on Windows, so these run on
+    // request (and in CI on Windows only), on a 1 MiB stack like `bolt`'s main thread. Run with:
+    // `cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders`
+
+    #[test]
+    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    fn real_folders_one_level_past_the_limit_are_refused() {
+        let (dir, mut repo) = project();
+        let head = repo.head().unwrap();
+        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH + 1) else {
+            return;
+        };
+        match on_a_stack_of(1 << 20, || save_now(&mut repo)) {
+            Err(SaveError::TooLarge { detail }) => assert!(detail.contains("4096"), "{detail}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    fn real_folders_at_the_limit_are_saved() {
+        let (dir, mut repo) = project();
+        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH) else {
+            return;
+        };
+        let saved = on_a_stack_of(1 << 20, || save_now(&mut repo));
+        assert!(matches!(saved, Ok(SaveOutcome::Saved { .. })), "{saved:?}");
     }
 }

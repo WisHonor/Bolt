@@ -1,11 +1,11 @@
-//! Which file names Bolt stores, and which it flags as non-portable (decision 004).
-//!
-//! The always-on rules ([`validate_name`]) refuse a name outright. The portability
-//! checks ([`name_problems`], [`folder_problems`]) describe names that work here but
-//! would break on another operating system.
+//! Which file names Bolt stores, and which it flags as non-portable (decision 004):
+//! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
+//! that work here but would break on another operating system.
 
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
+
+use crate::text::escape;
 
 /// Longest allowed name, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
@@ -27,20 +27,33 @@ pub enum NameError {
     BoltSpelling,
 }
 
-/// A name that is stored fine here but would break on another system.
+/// A name that is stored fine here but would break on another system. The names in the messages
+/// came from outside Bolt and are shown escaped.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PortabilityProblem {
     #[error(
-        "\"{a}\" and \"{b}\" differ only in upper/lower case, so they clash on Windows and macOS"
+        "\"{}\" and \"{}\" differ only in upper/lower case, so they clash on Windows and macOS",
+        escape(a, false),
+        escape(b, false)
     )]
     CaseCollision { a: String, b: String },
-    #[error("\"{a}\" and \"{b}\" are the same name written two ways, so they clash on macOS")]
+    #[error(
+        "\"{}\" and \"{}\" are the same name written two ways, so they clash on macOS",
+        escape(a, false),
+        escape(b, false)
+    )]
     NormalizationCollision { a: String, b: String },
-    #[error("\"{0}\" is a reserved device name on Windows")]
+    #[error("\"{}\" is a reserved device name on Windows", escape(.0, false))]
     ReservedName(String),
-    #[error("\"{0}\" ends with a dot or a space, which Windows does not allow")]
+    #[error(
+        "\"{}\" ends with a dot or a space, which Windows does not allow",
+        escape(.0, false)
+    )]
     TrailingDotOrSpace(String),
-    #[error("\"{name}\" contains {ch:?}, which Windows does not allow in names")]
+    #[error(
+        "\"{}\" contains {ch:?}, which Windows does not allow in names",
+        escape(name, false)
+    )]
     ForbiddenCharacter { name: String, ch: char },
 }
 
@@ -91,13 +104,15 @@ fn is_reserved(name: &str) -> bool {
     ) {
         return true;
     }
-    // COM0-9 / LPT0-9 and the superscript digits Windows also treats as digits.
+    // Microsoft's "Naming Files, Paths, and Namespaces" page lists COM1-COM9 and LPT1-LPT9, and
+    // the same names with a superscript 1, 2 or 3 (U+00B9, U+00B2, U+00B3) as the digit. COM0
+    // and LPT0 are not on that list, and Windows 11 creates them as ordinary files, so they pass.
     ["COM", "LPT"].iter().any(|p| {
         up.strip_prefix(p).is_some_and(|d| {
             let mut it = d.chars();
             matches!(
                 (it.next(), it.next()),
-                (Some('0'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None)
+                (Some('1'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None)
             )
         })
     })
@@ -235,7 +250,6 @@ mod tests {
             "CONOUT$",
             "COM\u{b9}",
             "lpt\u{b3}.txt",
-            "COM0",
             "nul .txt",
         ] {
             assert!(
@@ -273,7 +287,15 @@ mod tests {
                 "{name}"
             );
         }
-        for fine in ["Player.cs", "console.txt", "COM10", "aux_data", "nul2"] {
+        for fine in [
+            "Player.cs",
+            "console.txt",
+            "COM10",
+            "aux_data",
+            "nul2",
+            "COM0",
+            "LPT0",
+        ] {
             assert!(name_problems(fine).is_empty(), "{fine}");
         }
     }
@@ -292,5 +314,29 @@ mod tests {
         );
         assert!(folder_problems(&["a", "b", "A.txt"]).is_empty());
         assert!(!folder_problems(&["CON", "a"]).is_empty());
+    }
+
+    #[test]
+    fn problems_show_the_names_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let name = || HOSTILE.to_owned();
+        for problem in [
+            PortabilityProblem::CaseCollision {
+                a: name(),
+                b: name(),
+            },
+            PortabilityProblem::NormalizationCollision {
+                a: name(),
+                b: name(),
+            },
+            PortabilityProblem::ReservedName(name()),
+            PortabilityProblem::TrailingDotOrSpace(name()),
+            PortabilityProblem::ForbiddenCharacter {
+                name: name(),
+                ch: '*',
+            },
+        ] {
+            assert_hostile_text_escaped(&problem.to_string());
+        }
     }
 }

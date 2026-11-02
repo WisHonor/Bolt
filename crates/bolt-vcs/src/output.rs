@@ -2,6 +2,7 @@
 
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
+use bolt_core::text::escape;
 use serde_json::{Value, json};
 
 /// The version of every JSON document `bolt --json` prints.
@@ -29,21 +30,8 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
     })
 }
 
-/// Makes repository text safe to print: control characters (a hostile repository could embed
-/// terminal escapes) become a visible `\xNN`; a newline stays when `keep_newlines`.
-pub fn sanitize(text: &str, keep_newlines: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() && !(keep_newlines && c == '\n') {
-            out.push_str(&format!("\\x{:02x}", u32::from(c)));
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// A failed command's message and what to do about it.
+/// A failed command's message and what to do about it. Text from outside Bolt in a message is
+/// already escaped by the error that made it; the lines Bolt writes itself are not.
 pub struct Failure {
     pub message: String,
     pub hint: Option<String>,
@@ -60,9 +48,11 @@ pub fn print_error(json: bool, failure: &Failure) {
             })
         );
     } else {
-        eprintln!("error: {}", sanitize(&failure.message, false));
+        // Escaped once more, so that a piece nobody thought of escaping still can't drive the
+        // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
+        eprintln!("error: {}", escape(&failure.message, true));
         if let Some(hint) = &failure.hint {
-            eprintln!("hint: {}", sanitize(hint, false));
+            eprintln!("hint: {}", escape(hint, true));
         }
     }
 }
@@ -141,7 +131,5 @@ mod tests {
             ]
         );
         assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
-        assert_eq!(sanitize("a\x1b[31m\nb", false), "a\\x1b[31m\\x0ab");
-        assert_eq!(sanitize("a\x1b]0;t\x07\nb", true), "a\\x1b]0;t\\x07\nb");
     }
 }

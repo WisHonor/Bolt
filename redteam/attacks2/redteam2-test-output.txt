@@ -1,0 +1,98 @@
+
+running 10 tests
+i 1/10
+rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing --- FAILED
+rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes --- FAILED
+rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw --- FAILED
+rt2_4_braces_in_boltignore_are_literal_as_in_git --- FAILED
+rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size --- FAILED
+test rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line has been running for over 60 seconds
+rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line --- FAILED
+rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id --- FAILED
+rt2_8_a_committed_save_is_never_reported_as_nothing_changed --- FAILED
+test rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save has been running for over 60 seconds
+rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save --- FAILED
+
+failures:
+
+---- rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing stdout ----
+
+thread 'rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing' (9286) panicked at crates/bolt-vcs/tests/redteam2.rs:248:5:
+`bolt save` failed (committed anyway: true): Ended { code: Some(1), timed_out: false, secs: 2.560594257, peak_mb: 1443, stderr: "error: This project's Bolt data looks damaged: pack /tmp/.tmpYYaXtD/.bolt/store/packs/4013474c40071fc744b4abc3b07eedeee8778a80b10c1b4b1c910ee9ac240f8b.pack (the zstd data of 5829587729225b104eda4ecfeb6a43d018af0ccdf51026aa8fbc021cb27d605f is invalid: Allocation error : not enough memory).\nhint: Nothing was changed. Ask for help before trying to repair it.\n" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes stdout ----
+all packs together: 610834 bytes
+
+thread 'rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes' (9285) panicked at crates/bolt-vcs/tests/redteam2.rs:229:5:
+`bolt history` on a 610834-byte repository failed under a 1.5 GB cap: Ended { code: Some(1), timed_out: false, secs: 2.528272318, peak_mb: 1459, stderr: "error: This project's Bolt data looks damaged: pack /tmp/.tmpC5fEi8/.bolt/store/packs/da2a63a9764d78c1b0d27a415ecb237fa19049200a4f6daac639557704ff99a0.pack (the zstd data of 939e1a867ebc00258d522c4ffa555450820bda56819776a844311fdf019568bb is invalid: Allocation error : not enough memory).\nhint: Nothing was changed. Ask for help before trying to repair it.\n" }
+
+---- rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw stdout ----
+
+thread 'rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw' (9294) panicked at crates/bolt-vcs/tests/redteam2.rs:301:5:
+printed raw: ["U+200B", "U+2060", "U+2063", "U+206A", "U+206E", "U+FEFF", "U+E0041", "U+180E", "U+00AD"]
+Save swmo · Test · just now
+    Fix typo​⁠⁣⁪⁮﻿󠁁᠎­
+
+  added     setup.py  (4 B)
+  added     setup­.py  (6 B)
+  added     setup᠎.py  (6 B)
+  added     setup​.py  (6 B)
+  added     setup⁠.py  (6 B)
+  added     setup⁣.py  (6 B)
+  added     setup⁪.py  (6 B)
+  added     setup⁮.py  (6 B)
+  added     setup﻿.py  (6 B)
+  added     setup󠁁.py  (6 B)
+swmo  just now  Test  Fix typo​⁠⁣⁪⁮﻿󠁁᠎­
+xluz  just now  Test  Start project
+
+
+---- rt2_4_braces_in_boltignore_are_literal_as_in_git stdout ----
+
+thread 'rt2_4_braces_in_boltignore_are_literal_as_in_git' (9300) panicked at crates/bolt-vcs/tests/redteam2.rs:327:5:
+Git ignores `{prod,dev}.env` and keeps `prod.env`; Bolt saved [".boltignore", "{prod,dev}.env"]
+
+---- rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size stdout ----
+
+thread 'rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size' (9305) panicked at crates/bolt-vcs/tests/redteam2.rs:377:5:
+`bolt history` on a pack that takes 8 KB of disk peaked at 2056 MB: Ended { code: Some(1), timed_out: false, secs: 14.47247374, peak_mb: 2056, stderr: "error: This project's Bolt data looks damaged: pack /tmp/.tmptvkCLU/.bolt/store/packs/zz.pack (the index checksum does not match).\nhint: Nothing was changed. Ask for help before trying to repair it.\n" }
+
+---- rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line stdout ----
+
+thread 'rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line' (9292) panicked at crates/bolt-vcs/tests/redteam2.rs:269:5:
+`bolt show 0123abcd` was still walking after 60 s on a 135611-byte repository
+
+---- rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id stdout ----
+
+thread 'rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id' (9313) panicked at crates/bolt-vcs/tests/redteam2.rs:468:5:
+`bolt save` said "Saved mplt  \"Add licence\"  (1 file)\n", but LICENSE can't be read back: Err(Pack(FingerprintMismatch { id: Id([87, 119, 77, 47, 9, 87, 195, 103, 64, 39, 143, 57, 172, 198, 104, 99, 155, 119, 2, 242, 247, 59, 47, 98, 183, 242, 65, 178, 202, 144, 185, 38]) }))
+
+---- rt2_8_a_committed_save_is_never_reported_as_nothing_changed stdout ----
+
+thread 'rt2_8_a_committed_save_is_never_reported_as_nothing_changed' (9318) panicked at crates/bolt-vcs/tests/redteam2.rs:492:5:
+the save was committed, but Bolt said:
+error: This project's Bolt data looks damaged: object ebd2b19bfd347b1a683fa9730aed4db7ff0eb7d7d70c6ae43d556d25b29030ce does not match its fingerprint.
+hint: Nothing was changed. Ask for help before trying to repair it.
+
+
+---- rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save stdout ----
+
+thread 'rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save' (9309) panicked at crates/bolt-vcs/tests/redteam2.rs:408:5:
+`bolt save` of 100 nested folders with a .boltignore each failed under a 1.5 GB cap: Ended { code: None, timed_out: false, secs: 102.490459604, peak_mb: 1422, stderr: "memory allocation of 8388608 bytes failed\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+
+
+failures:
+    rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes
+    rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing
+    rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line
+    rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw
+    rt2_4_braces_in_boltignore_are_literal_as_in_git
+    rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size
+    rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save
+    rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id
+    rt2_8_a_committed_save_is_never_reported_as_nothing_changed
+
+test result: FAILED. 0 passed; 9 failed; 1 ignored; 0 measured; 0 filtered out; finished in 123.01s
+
+error: test failed, to rerun pass `-p bolt-vcs --test redteam2`

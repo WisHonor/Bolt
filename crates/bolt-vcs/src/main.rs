@@ -4,14 +4,17 @@ mod output;
 
 use std::process::ExitCode;
 
-use bolt_core::config::{ConfigError, load_identity, now_person};
-use bolt_core::diff::{ChangeKind, diff_saves};
-use bolt_core::history::{ResolveError, line_history, resolve, short_change_ids};
-use bolt_core::id::Id;
+use bolt_core::config::{
+    ConfigError, Identity, ignored_identity_note, ignored_project_identity, load_identity,
+    now_person,
+};
+use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
+use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
+use bolt_core::id::{ChangeId, Id};
 use bolt_core::repo::{RepoError, Repository};
-use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
+use bolt_core::text::escape;
 use clap::{Parser, Subcommand};
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
@@ -95,18 +98,10 @@ impl From<std::io::Error> for Failure {
     }
 }
 
-/// The shortest unique form of a save's change ID among the line's saves (and this one).
-fn short_of(repo: &Repository, id: &Id, save: &Save) -> Result<String, Failure> {
-    let mut saves = line_history(repo)?;
-    if !saves.iter().any(|(i, _)| i == id) {
-        saves.push((*id, save.clone()));
-    }
-    Ok(short_change_ids(&saves).remove(id).unwrap_or_default())
-}
-
 fn start(json: bool) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
-    let who = now_person(&load_identity(None)?);
+    // The user's own settings may name this folder, so the first save is theirs too.
+    let who = now_person(&load_identity(Some(&root))?);
     let repo = Repository::init(&root, &who)?;
     let (_, entry) = repo.current()?;
     let id = entry.state.lines.get("main").ok_or_else(|| Failure {
@@ -114,7 +109,7 @@ fn start(json: bool) -> Result<(), Failure> {
         hint: None,
     })?;
     let save = repo.store().save(id, repo.signatures_allowed())?;
-    let short = &short_of(&repo, id, &save)?;
+    let short = &short_change_id(&repo, id, &save.change_id)?;
     if json {
         println!(
             "{}",
@@ -126,7 +121,9 @@ fn start(json: bool) -> Result<(), Failure> {
             })
         );
     } else {
-        println!("Started a Bolt project in {}.", root.display());
+        // The folder's name came from outside Bolt, like any name in a project.
+        let shown = escape(&root.display().to_string(), false);
+        println!("Started a Bolt project in {shown}.");
         println!("Your first save is {short}, on line main.");
         println!("Next: change some files, then run: bolt save \"describe your change\"");
     }
@@ -143,6 +140,8 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
     }
     let mut repo = Repository::discover(&std::env::current_dir()?)?;
     let who = now_person(&load_identity(Some(repo.root()))?);
+    // A project's own settings never say who the user is; if they try, the user is told.
+    let ignored = ignored_project_identity(repo.root());
     let req = SaveRequest {
         message: &message,
         who: &who,
@@ -156,40 +155,92 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
             save_id,
             save,
             changed_files,
+            short_change_id: shortened,
         } => {
-            let short = short_of(&repo, &save_id, &save)?;
+            // The save is made, so nothing from here on may fail the command. If the line couldn't
+            // be read to shorten the ID, the whole ID is shown and a warning says why.
+            let (short, long_because) = match shortened {
+                Ok(short) => (short, None),
+                Err(problem) => (save.change_id.to_letters(), Some(problem)),
+            };
             if json {
-                println!(
-                    "{}",
-                    json!({
-                        "bolt_json": BOLT_JSON,
-                        "result": "saved",
-                        "save": output::save_json(&save_id, &save, &short),
-                        "changed_files": changed_files,
-                    })
-                );
+                let document = json!({
+                    "bolt_json": BOLT_JSON,
+                    "result": "saved",
+                    "save": output::save_json(&save_id, &save, &short),
+                    "changed_files": changed_files,
+                });
+                println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
-                let title = output::sanitize(message.lines().next().unwrap_or_default(), false);
-                let files = if changed_files == 1 { "file" } else { "files" };
-                println!("Saved {short}  \"{title}\"  ({changed_files} {files})");
+                let title = escape(message.lines().next().unwrap_or_default(), false);
+                let counted = match changed_files {
+                    Some(1) => "(1 file)".to_owned(),
+                    Some(n) => format!("({n} files)"),
+                    None => "(couldn't count the changed files)".to_owned(),
+                };
+                println!("Saved {short}  \"{title}\"  {counted}");
+            }
+            if let Some(problem) = long_because {
+                eprintln!(
+                    "warning: The save was made, but Bolt couldn't read this line's older saves \
+                     to shorten its ID. {}",
+                    escape(&problem.to_string(), true)
+                );
             }
         }
         SaveOutcome::NothingChanged { current } => {
             if json {
-                println!(
-                    "{}",
-                    json!({"bolt_json": BOLT_JSON, "result": "nothing-changed"})
-                );
+                let document = json!({"bolt_json": BOLT_JSON, "result": "nothing-changed"});
+                println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 println!(
                     "Nothing to save: no changes since your last save ({}).",
-                    short_of(&repo, &current, &last)?
+                    short_or_whole(&repo, &current, &last.change_id)
                 );
             }
         }
     }
+    if !json && let Some(ignored) = &ignored {
+        println!("{}", ignored_identity_note(ignored, repo.root()));
+    }
+    warn_about_damage(&repo);
     Ok(())
+}
+
+/// `change_id` at its shortest or, if the line can't be read to work that out, whole, with a
+/// warning: a damaged older save mustn't fail a command that otherwise worked.
+fn short_or_whole(repo: &Repository, id: &Id, change_id: &ChangeId) -> String {
+    short_change_id(repo, id, change_id).unwrap_or_else(|problem| {
+        eprintln!(
+            "warning: Bolt couldn't read this line's older saves to shorten the change ID. {}",
+            escape(&problem.to_string(), true)
+        );
+        change_id.to_letters()
+    })
+}
+
+/// Names each pack that held a damaged copy of an object the command needed. The command went on
+/// without that copy, so it still succeeded.
+fn warn_about_damage(repo: &Repository) {
+    let damaged = repo.store().damaged_packs();
+    for pack in &damaged {
+        eprintln!("warning: {}.", escape(&pack.to_string(), true));
+    }
+    if !damaged.is_empty() {
+        eprintln!(
+            "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
+        );
+    }
+}
+
+/// `document`, plus the identity a project's settings named and Bolt ignored, if there was one.
+fn with_ignored(mut document: serde_json::Value, ignored: Option<&Identity>) -> serde_json::Value {
+    if let Some(identity) = ignored {
+        document["ignored_project_identity"] =
+            json!({"name": identity.name, "email": identity.email});
+    }
+    document
 }
 
 fn now_ms() -> i64 {
@@ -202,34 +253,34 @@ fn now_ms() -> i64 {
 
 fn history(json: bool) -> Result<(), Failure> {
     let repo = Repository::discover(&std::env::current_dir()?)?;
-    let saves = line_history(&repo)?;
-    let shorts = short_change_ids(&saves);
     if json {
         let line = match &repo.current()?.1.state.position {
             bolt_core::diary::Position::OnLine(name) => json!(name),
             bolt_core::diary::Position::AtSave(_) => json!(null),
         };
-        let list: Vec<_> = saves
-            .iter()
-            .map(|(id, s)| output::save_json(id, s, &shorts[id]))
-            .collect();
-        println!(
-            "{}",
-            json!({"bolt_json": BOLT_JSON, "line": line, "saves": list})
-        );
+        // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
+        // Its opening goes out with the first save, so a line that can't be read prints no half.
+        let mut before = format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":[");
+        for_each_on_line(&repo, |id, save, short| {
+            print!("{before}{}", output::save_json(id, save, short));
+            before = ",".to_owned();
+            Ok::<(), Failure>(())
+        })?;
+        println!("]}}");
     } else {
         let now = now_ms();
-        for (id, s) in &saves {
+        for_each_on_line(&repo, |_, s, short| {
             let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
             let title = s.message.lines().next().unwrap_or_default();
             println!(
-                "{}  {when}  {}  {}",
-                shorts[id],
-                output::sanitize(&s.author.name, false),
-                output::sanitize(title, false)
+                "{short}  {when}  {}  {}",
+                escape(&s.author.name, false),
+                escape(title, false)
             );
-        }
+            Ok::<(), Failure>(())
+        })?;
     }
+    warn_about_damage(&repo);
     Ok(())
 }
 
@@ -237,13 +288,7 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     let repo = Repository::discover(&std::env::current_dir()?)?;
     let id = match text {
         Some(t) => resolve(&repo, t)?,
-        None => line_history(&repo)?
-            .first()
-            .map(|(id, _)| *id)
-            .ok_or_else(|| Failure {
-                message: "This line has no saves.".into(),
-                hint: None,
-            })?,
+        None => current_save(&repo)?,
     };
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
@@ -251,12 +296,19 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
         Some(p) => Some(store.save(p, repo.signatures_allowed())?.root),
         None => None,
     };
-    let changes = diff_saves(store, old_root, save.root)?;
-    let short = short_of(&repo, &id, &save)?;
+    // Counting first holds the saves to the limits and reads them for damage before anything is
+    // printed, so a save that can't be listed prints only the error. The changes are then
+    // printed as the walk finds them, and none is kept.
+    let count = count_changes(store, old_root, save.root)?;
+    let short = short_or_whole(&repo, &id, &save.change_id);
     if json {
-        let list: Vec<_> = changes
-            .iter()
-            .map(|c| {
+        // The document `json!` would make, in pieces: serde_json writes an object's keys in
+        // alphabetical order, so `changes` comes between `bolt_json` and `save`.
+        print!("{{\"bolt_json\":{BOLT_JSON},\"changes\":[");
+        let mut comma = "";
+        for_each_change(store, old_root, save.root, |c| {
+            print!(
+                "{comma}{}",
                 json!({
                     "path": c.path,
                     "change": match c.change {
@@ -269,23 +321,31 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
                     "old_size": c.old_size,
                     "new_size": c.new_size,
                 })
-            })
-            .collect();
-        println!(
-            "{}",
-            json!({"bolt_json": BOLT_JSON, "save": output::save_json(&id, &save, &short), "changes": list})
-        );
+            );
+            comma = ",";
+            Ok::<(), Failure>(())
+        })?;
+        println!("],\"save\":{}}}", output::save_json(&id, &save, &short));
+        warn_about_damage(&repo);
         return Ok(());
     }
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
     println!(
         "Save {short} · {} · {when}",
-        output::sanitize(&save.author.name, false)
+        escape(&save.author.name, false)
     );
-    println!("{}\n", output::sanitize(save.message.trim_end(), true));
+    // Indented, as Git does, so that no line of the message can pass for a change below it.
+    for line in escape(save.message.trim_end(), true).lines() {
+        if line.trim().is_empty() {
+            println!();
+        } else {
+            println!("    {line}");
+        }
+    }
+    println!();
     let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
-    for c in &changes {
-        let p = &output::sanitize(&c.path, false);
+    for_each_change(store, old_root, save.root, |c| {
+        let p = &escape(c.path, false);
         match c.change {
             ChangeKind::Added => println!("  added     {p}  ({})", size(c.new_size)),
             ChangeKind::Removed => println!("  removed   {p}  ({})", size(c.old_size)),
@@ -301,10 +361,12 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
                 println!("  changed   {p}  ({old} → {})", c.kind.as_str());
             }
         }
-    }
-    if changes.is_empty() {
+        Ok::<(), Failure>(())
+    })?;
+    if count == 0 {
         println!("  (no file changes)");
     }
+    warn_about_damage(&repo);
     Ok(())
 }
 

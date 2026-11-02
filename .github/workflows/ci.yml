@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -12,8 +15,10 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --check
       - run: cargo build --workspace
       - name: cargo clippy
@@ -22,6 +27,13 @@ jobs:
       - name: cargo test
         shell: bash
         run: cargo test --workspace --all-features 2>&1 | tee -a test-output.txt; exit ${PIPESTATUS[0]}
+      # Saves a project nested 4,096 levels deep, and refuses one at 4,097, on a 1 MiB stack like
+      # bolt's main thread. A minute each, and only Windows can make paths that long, so these
+      # tests are #[ignore]d everywhere and run only here. The filter must match only them.
+      - name: Real-depth save tests
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders 2>&1 | tee -a test-output.txt; exit ${PIPESTATUS[0]}
       - name: Show failing tests as annotations
         if: failure()
         shell: bash
@@ -33,5 +45,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

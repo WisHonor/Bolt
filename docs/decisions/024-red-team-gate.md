@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (process change after milestone 1)
+- **Followed by:** [decision 025](025-red-team-m1-rulings.md) (rulings after milestone 1's first session), [decision 028](028-red-team-m1-session-2-rulings.md) (after its second) and [decision 029](029-red-team-m1-final-review-rulings.md) (after the final review of the fixes)
 
 ## Context
 

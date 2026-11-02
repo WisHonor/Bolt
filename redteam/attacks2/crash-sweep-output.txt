@@ -1,0 +1,32 @@
+n=1 crashed_save=134 history=0 save_after=0 show=0 tmp_left=0 Saved yxom  "again"  (4 files)
+n=2 crashed_save=134 history=0 save_after=0 show=0 tmp_left=0 Saved qvlu  "again"  (4 files)
+n=3 crashed_save=134 history=0 save_after=0 show=0 tmp_left=0 Saved zoql  "again"  (4 files)
+n=4 crashed_save=134 history=0 save_after=0 show=0 tmp_left=0 Saved lyqu  "again"  (4 files)
+n=5 crashed_save=134 history=0 save_after=0 show=0 tmp_left=0 Saved zntt  "again"  (4 files)
+n=6 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved pull  "again"  (2 files)
+n=7 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved szlo  "again"  (2 files)
+n=8 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved tlrr  "again"  (2 files)
+n=9 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved yumm  "again"  (2 files)
+n=10 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved vnql  "again"  (2 files)
+n=11 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved vpxl  "again"  (2 files)
+n=12 crashed_save=0 history=0 save_after=0 show=0 tmp_left=0 Saved kpzu  "again"  (2 files)
+start n=1 crashed=134 restart=0 history=0 Started a Bolt project in /tmp/tmp.sL8g4pJxKk.
+Your first save is zupq, on line main.
+Next: change s
+start n=2 crashed=134 restart=0 history=0 Started a Bolt project in /tmp/tmp.8l6B2wEjRn.
+Your first save is uqzu, on line main.
+Next: change s
+start n=3 crashed=134 restart=0 history=0 Started a Bolt project in /tmp/tmp.J8CobV2LD3.
+Your first save is rzsr, on line main.
+Next: change s
+start n=4 crashed=134 restart=0 history=0 Started a Bolt project in /tmp/tmp.oG001G1Hf3.
+Your first save is zwmx, on line main.
+Next: change s
+start n=5 crashed=134 restart=0 history=0 Started a Bolt project in /tmp/tmp.UnyL07F8B0.
+Your first save is kkmo, on line main.
+Next: change s
+start n=6 crashed=134 restart=0 history=0 Started a Bolt project in /tmp/tmp.2OqYf35xQG.
+Your first save is qwln, on line main.
+Next: change s
+start n=7 crashed=0 restart=1 history=0 error: This folder is already a Bolt project.
+start n=8 crashed=0 restart=1 history=0 error: This folder is already a Bolt project.

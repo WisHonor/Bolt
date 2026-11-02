@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01; its red-team fixes ([decisions 024](decisions/024-red-team-gate.md) and [025](decisions/025-red-team-m1-rulings.md)), then milestone 2 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 25
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 29
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -183,8 +183,8 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** The project's rules live in two normal files at the top of your project, so they travel with it and are part of its history. Your personal settings stay on your machine and can never change the project's rules.
 
-- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (same syntax as `.gitignore`).
-- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from your own settings, never from a project's ([decision 025](decisions/025-red-team-m1-rulings.md)). Anything that runs a program is personal only.
+- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (the `.gitignore` syntax; [storage-format.md](storage-format.md) §12 gives its limits and the few forms Bolt refuses until milestone 2, because it can't yet read them exactly as Git does).
+- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from you: `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, else a `[[project]]` entry in your own settings for this exact folder (written as a full path), else `[user]`; a project's own settings are ignored, with a note ([decision 025](decisions/025-red-team-m1-rulings.md)). Bolt uses a project only when both its folder and its `.bolt/` belong to you, as Git requires ([decisions 025](decisions/025-red-team-m1-rulings.md), [026](decisions/026-ownership-check-details.md) and [027](decisions/027-project-folder-must-be-yours.md)). On Windows, folders the Administrators group owns count as yours when you are an administrator, elevated or not. To trust a folder anyway (a shared folder, a drive that records no owner, or your Windows home folder itself, which Windows gives to SYSTEM), list that exact folder in the top-level `safe-folders` list of your own settings. Anything that runs a program is personal only.
 - **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
 - **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
 
@@ -192,12 +192,12 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** Each command writes its new data into one big "pack" file, which only appears once it's complete, so a crash can never leave half-written data in the store. Big files are cut into chunks based on their content, so an edit in the middle of a file only adds the chunks around the change (when the file format keeps edits local).
 
-- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; small packs merged later.
+- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; at most 2^24 objects each ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)); small packs merged later.
 - **Chunking:** FastCDC for files of 1 MB and up; 16 KB / 64 KB / 256 KB (minimum / average / maximum) to start, tuned later with real assets.
 - **Compression:** zstd per chunk, fast on save and stronger on merge; incompressible data stored raw; sizes recorded so decompression bombs are caught.
 - **Deltas:** later, as a format feature, for small text files.
 - **Cleanup:** keeps everything reachable from lines, shelves and the undo window; a grace period protects anything recent; cheap cleanup is automatic, repacking happens on request with a space estimate.
-- **Checking:** every object is verified against its fingerprint on read.
+- **Checking:** every object is verified against its fingerprint on read, and a stored copy is read and verified before a save relies on it instead of storing its own; a bad copy is passed over for a good one in another pack, with a warning ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). Copies are tried smallest first, and a save skips, unread, a copy whose recorded size isn't the object's, so a planted copy claiming a huge size can't slow it down ([decision 029](decisions/029-red-team-m1-final-review-rulings.md)).
 
 ### 5.8 Operation log and undo ([decision 010](decisions/010-operation-log.md))
 
@@ -349,9 +349,13 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
+- **Objects per pack vs. one pack per command.** A pack holds at most 2^24 objects ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)), and each command that stores data writes one pack ([decision 009](decisions/009-storage-engine.md)). A file of millions of chunks (milestone 5), or a very large Git import (milestone 2), could need more. Decide while planning milestone 2: several packs per command (a change to decision 009), or another way.
 - ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository is public, so Actions minutes aren't a constraint.
+
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
 - **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before format 1 freezes at the v0.1 release: the name is built into `.bolt/`, `bolt.toml`, `.boltignore` and the pack files' magic bytes. Until then, renaming only means changing constants (decision 019).]
+- **Path-length limit** in the format. Depth and entries are limited, but a path can reach about 1 MB (255-byte names, 4,096 levels deep). [Readers never hold every path at once. Decide with milestone 3's write-out, where operating-system path limits apply, and before format 1 freezes at v0.1 (decision 026).]
+- **Memory bound for hostile saves.** Inside the format's limits, a hostile save can still make a reader hold about 1.5 to 4 GB. [Revisit with the speed-bar benchmarks before v0.1 (decisions 023, 026).]
 - **Contribution licensing**: CLA or DCO. [Matters if the server is AGPL and ever dual-licensed; decide before accepting outside contributions.]
 - **GUI and editor plugins** (Unreal, Unity, Godot, Blender). [All logic stays in the engine library so a GUI can embed it.]
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]

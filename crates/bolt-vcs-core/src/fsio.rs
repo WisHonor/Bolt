@@ -1,10 +1,13 @@
 //! The single place every disk write goes through: temp files, atomic replacement, durable
 //! renames, and the fault points that crash tests use.
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::safe_fs;
 
 /// Creates a new, empty file named `tmp-<16 random hex>` in `tmp_dir`.
 pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
@@ -17,6 +20,15 @@ pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
         .create_new(true)
         .open(&path)?;
     Ok((file, path))
+}
+
+/// Whether `name` is one `create_temp` makes: `tmp-` and 16 lowercase hex digits.
+pub fn is_temp_name(name: &OsStr) -> bool {
+    name.to_str()
+        .and_then(|n| n.strip_prefix("tmp-"))
+        .is_some_and(|hex| {
+            hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 /// Replaces `dest` with `bytes` so that, even after a crash, it holds either the old or the
@@ -62,22 +74,14 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Creates `dir` and any missing folders above it, flushing each new folder's parent so the
-/// folders survive a crash.
+/// Creates the folder `dir` in its existing parent and flushes the parent so it survives a crash.
+/// Whatever is already at `dir`, a link included, is left alone for the caller to check.
 pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
-    if dir.is_dir() {
-        return Ok(());
-    }
-    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-        create_dir_durable(parent)?;
-    }
     match fs::create_dir(dir) {
-        Ok(()) => {}
-        // Another process made it first.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
-        Err(e) => return Err(e),
+        Ok(()) => sync_parent(dir),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
     }
-    sync_parent(dir)
 }
 
 /// Deletes a file. Not flushed: only used for leftovers, which may as well come back.
@@ -85,24 +89,26 @@ pub fn remove_file(path: &Path) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-/// Opens the change-lock file for reading and writing, creating it if needed. Its contents
-/// never matter, so it is never truncated.
+/// Opens the change-lock file for reading and writing, creating it if needed, never through a
+/// link (`safe_fs::open_regular`). Its contents never matter, so it is never truncated.
 pub fn open_lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    safe_fs::open_regular(
+        path,
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
 }
 
-/// Flushes a folder's entries to disk. Windows has no such call: a rename there is not written
-/// through, so it keeps its order with earlier writes but can be lost on power failure
-/// (making it durable is a milestone 4 item).
+/// Flushes a folder's entries to disk. Windows has no such call: a rename there keeps its order
+/// with earlier writes but can be lost on power failure.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     if cfg!(unix) {
         File::open(dir)?.sync_all()
     } else {
+        // shortcut: renames are not durable on Windows; make them so in milestone 4.
         let _ = dir;
         Ok(())
     }
@@ -186,12 +192,20 @@ mod tests {
     }
 
     #[test]
-    fn create_dir_durable_makes_every_missing_folder() {
+    fn create_dir_durable_never_follows_what_is_already_there() {
         let root = tempfile::tempdir().unwrap();
-        let deep = root.path().join("a").join("b").join("c");
-        create_dir_durable(&deep).unwrap();
-        create_dir_durable(&deep).unwrap();
-        assert!(deep.is_dir());
+        let dir = root.path().join("a");
+        create_dir_durable(&dir).unwrap();
+        create_dir_durable(&dir).unwrap();
+        assert!(dir.is_dir());
+        // A link already there, to nothing: following it would look in its target.
+        let (link, target) = (root.path().join("link"), root.path().join("target"));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&link, &target);
+        create_dir_durable(&link).unwrap();
+        assert!(!target.exists());
     }
 
     #[cfg(feature = "fault-injection")]

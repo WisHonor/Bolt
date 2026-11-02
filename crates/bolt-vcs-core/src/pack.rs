@@ -1,11 +1,13 @@
 //! Pack files: the container every stored object lives in (docs/storage-format.md section 11).
 
-use crate::encoding::{Reader, Writer};
+use crate::encoding::{DecodeError, Reader, Writer};
 use crate::fsio;
 use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
+use crate::safe_fs;
+use crate::text::escape;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub const PACK_MAGIC: [u8; 8] = *b"BOLTPACK";
@@ -15,6 +17,11 @@ pub const PACK_VERSION: u32 = 1;
 pub const MAX_OBJECT_SIZE: u64 = 1 << 40;
 /// Largest uncompressed structured record (512 MiB).
 pub const MAX_RECORD_SIZE: u64 = 512 << 20;
+/// Most objects one pack may hold (storage-format.md section 11).
+pub const MAX_PACK_OBJECTS: u64 = 1 << 24;
+// While files are stored whole, a save's pack holds at most an object per entry plus its root
+// listing, the save and its diary entry. Chunked files can need more (decision 028).
+const _: () = assert!(crate::listing::MAX_SAVE_ENTRIES + 3 <= MAX_PACK_OBJECTS);
 /// kind, id, uncompressed size, stored size, compression.
 pub const ENTRY_HEADER_LEN: u64 = 50;
 
@@ -23,6 +30,8 @@ const PACK_HEADER_LEN: u64 = 16;
 const TRAILER_LEN: u64 = 48;
 /// Smallest possible index line: id, kind, offset, two one-byte varints.
 const MIN_INDEX_LINE: u64 = 43;
+/// Longest possible index line: id, kind, offset, two ten-byte varints.
+const MAX_INDEX_LINE: u64 = 61;
 const ZSTD_LEVEL: i32 = 3;
 /// Streams decide whether to compress from this much of their start.
 const SAMPLE_LEN: u64 = 64 << 10;
@@ -97,7 +106,11 @@ pub struct IndexEntry {
 pub enum PackError {
     #[error(transparent)]
     Io(#[from] io::Error),
-    #[error("pack {} is damaged: {reason}", path.display())]
+    // The path has the project folder's name in it, which came from outside Bolt.
+    #[error(
+        "pack {} is damaged: {reason}",
+        escape(&path.display().to_string(), false)
+    )]
     Corrupt { path: PathBuf, reason: String },
     #[error("object {id} does not match its fingerprint")]
     FingerprintMismatch { id: Id },
@@ -105,6 +118,9 @@ pub enum PackError {
     ContentChanged,
     #[error("the object is larger than Bolt can store")]
     TooLarge,
+    // Not damage: the same pack reads fine with more memory.
+    #[error("Bolt ran out of memory while reading the project's data")]
+    OutOfMemory,
 }
 
 fn misuse(what: &'static str) -> PackError {
@@ -274,6 +290,9 @@ impl PackWriter {
         if self.broken {
             return Err(io::Error::other("an earlier write to this pack failed").into());
         }
+        if self.index.len() as u64 >= MAX_PACK_OBJECTS {
+            return Err(misuse("a pack can't hold more than 2^24 objects"));
+        }
         let start = self.end;
         let result = (|| {
             self.file.write_all(&[0; ENTRY_HEADER_LEN as usize])?;
@@ -369,10 +388,21 @@ impl PackReader {
     /// Opens a pack and checks its header, trailer, index checksum and that every entry lies
     /// inside the file without overlapping another.
     pub fn open(path: &Path) -> Result<PackReader, PackError> {
-        let file = File::open(path)?;
+        PackReader::open_with(path, MAX_PACK_OBJECTS)
+    }
+
+    /// `open`, with a smaller limit on objects than the format's; tests use one.
+    fn open_with(path: &Path, max_objects: u64) -> Result<PackReader, PackError> {
         let corrupt = |reason: String| PackError::Corrupt {
             path: path.to_path_buf(),
             reason,
+        };
+        // A link, pipe or device named like a pack is damage, never followed or waited on.
+        let file = match safe_fs::open_regular(path, OpenOptions::new().read(true)) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                return Err(corrupt("it is not a regular file".into()));
+            }
+            opened => opened?,
         };
         let len = file.metadata()?.len();
         if len < PACK_HEADER_LEN + TRAILER_LEN {
@@ -401,14 +431,12 @@ impl PackReader {
         if index_offset < PACK_HEADER_LEN || index_offset > len - TRAILER_LEN {
             return Err(corrupt("the index offset is outside the file".into()));
         }
-        let index_len = len - TRAILER_LEN - index_offset;
-        let index = read_vec(&file, index_offset, index_len)?;
-        if *blake3::hash(&index).as_bytes() != checksum {
-            return Err(corrupt("the index checksum does not match".into()));
-        }
-
-        let entries = parse_index(&index, index_offset)
-            .map_err(|reason| corrupt(format!("index: {reason}")))?;
+        let index = Section {
+            file: &file,
+            pos: index_offset,
+            end: len - TRAILER_LEN,
+        };
+        let entries = read_index(path, index, max_objects, checksum)?;
         Ok(PackReader {
             file,
             path: path.to_path_buf(),
@@ -420,6 +448,11 @@ impl PackReader {
     #[must_use]
     pub fn entries(&self) -> &[IndexEntry] {
         &self.entries
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     #[must_use]
@@ -440,7 +473,7 @@ impl PackReader {
         out.try_reserve_exact(
             usize::try_from(entry.uncompressed_size).map_err(|_| PackError::TooLarge)?,
         )
-        .map_err(|_| PackError::TooLarge)?;
+        .map_err(|_| PackError::OutOfMemory)?;
         self.decode_into(entry, &mut out)?;
         if hash_record(flavor, &out) != entry.id {
             return Err(PackError::FingerprintMismatch { id: entry.id });
@@ -510,9 +543,16 @@ impl PackReader {
                         );
                     }
                 }
-                let decoder = zstd::stream::read::Decoder::new(data)?;
-                copy_decoded(&mut decoder.take(size.saturating_add(1)), out)
-                    .map_err(|e| self.corrupt(format!("the zstd data of {id} is invalid: {e}")))??
+                // Making a decoder fails only when memory runs out.
+                let decoder =
+                    zstd::stream::read::Decoder::new(data).map_err(|_| PackError::OutOfMemory)?;
+                copy_decoded(&mut decoder.take(size.saturating_add(1)), out).map_err(|e| {
+                    if zstd_ran_out_of_memory(&e) {
+                        PackError::OutOfMemory
+                    } else {
+                        self.corrupt(format!("the zstd data of {id} is invalid: {e}"))
+                    }
+                })??
             }
             _ => return Err(self.corrupt(format!("{id} has an unknown compression"))),
         };
@@ -521,6 +561,12 @@ impl PackReader {
         }
         Ok(())
     }
+}
+
+/// zstd tells its errors apart only by their text.
+fn zstd_ran_out_of_memory(e: &io::Error) -> bool {
+    let code = zstd::zstd_safe::zstd_sys::ZSTD_ErrorCode::ZSTD_error_memory_allocation as usize;
+    e.to_string() == zstd::zstd_safe::get_error_name(code.wrapping_neg())
 }
 
 /// Like `io::copy`, but read errors (bad compressed data) and write errors are kept apart:
@@ -545,32 +591,56 @@ fn copy_decoded(
     }
 }
 
-/// Parses and checks the index; `index_offset` is where the entry area ends.
-fn parse_index(index: &[u8], index_offset: u64) -> Result<Vec<IndexEntry>, String> {
-    let mut r = Reader::new(index);
-    let count = r
-        .count(index.len() as u64 / MIN_INDEX_LINE, "entry count")
-        .map_err(|e| e.to_string())?;
+/// Reads and checks the index (it starts where the entry area ends) a buffer at a time, keeping
+/// only lines that passed, so a huge or sparse index costs little memory.
+fn read_index(
+    path: &Path,
+    index: Section,
+    max_objects: u64,
+    checksum: [u8; 32],
+) -> Result<Vec<IndexEntry>, PackError> {
+    let (entry_area_end, len) = (index.pos, index.end - index.pos);
+    let hashing = HashingReader {
+        inner: index,
+        hasher: blake3::Hasher::new(),
+    };
+    let mut r = IndexReader {
+        src: BufReader::with_capacity(SAMPLE_LEN as usize, hashing),
+        read: 0,
+        path,
+    };
+    let count = r.varint()?;
+    // The cheap checks first: nothing more is read of an index that can't be right.
+    if count > max_objects {
+        return Err(r.corrupt(format!("it lists {count} objects, more than {max_objects}")));
+    }
+    let lines = len - r.read;
+    if lines < count.saturating_mul(MIN_INDEX_LINE) || lines > count.saturating_mul(MAX_INDEX_LINE)
+    {
+        return Err(r.corrupt(format!(
+            "its {lines} bytes don't fit its entry count of {count}"
+        )));
+    }
     let mut entries: Vec<IndexEntry> = Vec::new();
     for _ in 0..count {
-        let id = r.id().map_err(|e| e.to_string())?;
-        let kind = r.u8().map_err(|e| e.to_string())?;
-        let kind =
-            ObjectKind::from_u8(kind).ok_or_else(|| format!("unknown object kind {kind}"))?;
-        let offset = r.u64().map_err(|e| e.to_string())?;
-        let uncompressed_size = r.varint().map_err(|e| e.to_string())?;
-        let stored_size = r.varint().map_err(|e| e.to_string())?;
+        let id = Id(r.bytes()?);
+        let [kind] = r.bytes()?;
+        let kind = ObjectKind::from_u8(kind)
+            .ok_or_else(|| r.corrupt(format!("unknown object kind {kind}")))?;
+        let offset = u64::from_le_bytes(r.bytes()?);
+        let uncompressed_size = r.varint()?;
+        let stored_size = r.varint()?;
         if entries.last().is_some_and(|prev| prev.id >= id) {
-            return Err("entries are not sorted by id, or repeat one".into());
+            return Err(r.corrupt("entries are not sorted by id, or repeat one"));
         }
         if uncompressed_size > kind.max_size() {
-            return Err(format!("{id} is larger than allowed"));
+            return Err(r.corrupt(format!("{id} is larger than allowed")));
         }
         let end = offset
             .checked_add(ENTRY_HEADER_LEN)
             .and_then(|o| o.checked_add(stored_size));
-        if offset < PACK_HEADER_LEN || end.is_none_or(|end| end > index_offset) {
-            return Err(format!("{id} lies outside the entry area"));
+        if offset < PACK_HEADER_LEN || end.is_none_or(|end| end > entry_area_end) {
+            return Err(r.corrupt(format!("{id} lies outside the entry area")));
         }
         entries.push(IndexEntry {
             id,
@@ -580,7 +650,15 @@ fn parse_index(index: &[u8], index_offset: u64) -> Result<Vec<IndexEntry>, Strin
             stored_size,
         });
     }
-    r.finish().map_err(|e| e.to_string())?;
+    if r.read != len {
+        return Err(r.corrupt(DecodeError::TrailingBytes.to_string()));
+    }
+    if *r.src.get_ref().hasher.finalize().as_bytes() != checksum {
+        return Err(PackError::Corrupt {
+            path: path.to_path_buf(),
+            reason: "the index checksum does not match".into(),
+        });
+    }
 
     let mut by_offset: Vec<&IndexEntry> = entries.iter().collect();
     by_offset.sort_by_key(|e| e.offset);
@@ -589,9 +667,70 @@ fn parse_index(index: &[u8], index_offset: u64) -> Result<Vec<IndexEntry>, Strin
         .windows(2)
         .any(|p| p[0].offset + ENTRY_HEADER_LEN + p[0].stored_size > p[1].offset)
     {
-        return Err("two entries overlap".into());
+        return Err(r.corrupt("two entries overlap"));
     }
     Ok(entries)
+}
+
+/// Hands out an index's bytes a buffer at a time, counting them; everything read is hashed.
+struct IndexReader<'a> {
+    src: BufReader<HashingReader<Section<'a>>>,
+    /// Bytes handed out so far.
+    read: u64,
+    path: &'a Path,
+}
+
+impl IndexReader<'_> {
+    fn corrupt(&self, reason: impl Into<String>) -> PackError {
+        PackError::Corrupt {
+            path: self.path.to_path_buf(),
+            reason: format!("index: {}", reason.into()),
+        }
+    }
+
+    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], PackError> {
+        let mut out = [0u8; N];
+        match self.src.read_exact(&mut out) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(self.corrupt(DecodeError::UnexpectedEnd.to_string()));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.read += N as u64;
+        Ok(out)
+    }
+
+    /// A varint, read a byte at a time and decoded by the format's strict rules.
+    fn varint(&mut self) -> Result<u64, PackError> {
+        let mut bytes = [0u8; 10];
+        let mut n = 0;
+        while n < bytes.len() {
+            let [b] = self.bytes()?;
+            bytes[n] = b;
+            n += 1;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        Reader::new(&bytes[..n])
+            .varint()
+            .map_err(|e| self.corrupt(e.to_string()))
+    }
+}
+
+/// Passes reads through while hashing them.
+struct HashingReader<R> {
+    inner: R,
+    hasher: blake3::Hasher,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
 }
 
 /// `N` bytes of `bytes` starting at `at`; the caller guarantees the range.
@@ -841,6 +980,116 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
         assert!(PackReader::open(&path).is_err());
+    }
+
+    /// A pack with no entries but `index`, under a correct checksum.
+    fn pack_with_index(index: &[u8]) -> Vec<u8> {
+        let mut out = PACK_MAGIC.to_vec();
+        out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(index);
+        out.extend_from_slice(&PACK_HEADER_LEN.to_le_bytes());
+        out.extend_from_slice(blake3::hash(index).as_bytes());
+        out.extend_from_slice(&PACK_END_MAGIC);
+        out
+    }
+
+    fn zero_the_checksum(pack: &mut [u8]) {
+        let at = pack.len() - 40;
+        pack[at..at + 32].fill(0);
+    }
+
+    /// Why `bytes`, as a pack, is refused.
+    fn refusal(dir: &Path, bytes: &[u8]) -> String {
+        let path = dir.join("bad.pack");
+        std::fs::write(&path, bytes).unwrap();
+        match PackReader::open(&path) {
+            Err(PackError::Corrupt { reason, .. }) => reason,
+            other => panic!("{:?}", other.map(|r| r.entries().len())),
+        }
+    }
+
+    fn varint(n: u64) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.varint(n);
+        w.into_bytes()
+    }
+
+    #[test]
+    fn an_index_listing_too_many_objects_is_refused_before_its_lines_are_read() {
+        let (_root, tmp, _packs) = dirs();
+        // Only the count is there: reading lines would have run into the end of the index.
+        let reason = refusal(&tmp, &pack_with_index(&varint(MAX_PACK_OBJECTS + 1)));
+        assert!(reason.contains("more than 16777216"), "{reason}");
+    }
+
+    #[test]
+    fn an_index_whose_length_does_not_fit_its_count_is_refused_before_its_lines_are_read() {
+        let (_root, tmp, _packs) = dirs();
+        // A line is 43 to 61 bytes: no lines take 0 bytes, one at most 61, two at least 86.
+        for (count, len) in [(0, 1), (1, 62), (2, 85)] {
+            let mut index = varint(count);
+            index.resize(index.len() + len, 0);
+            let reason = refusal(&tmp, &pack_with_index(&index));
+            let want = format!("its {len} bytes don't fit its entry count of {count}");
+            assert!(reason.contains(&want), "{reason}");
+        }
+    }
+
+    #[test]
+    fn an_index_of_zeros_is_refused_long_before_its_checksum() {
+        let (_root, tmp, _packs) = dirs();
+        // A sparse pack in small: zeros, and a checksum of zeros.
+        let mut zeros = pack_with_index(&vec![0; 1 << 20]);
+        zero_the_checksum(&mut zeros);
+        let reason = refusal(&tmp, &zeros);
+        assert!(
+            reason.contains("don't fit its entry count of 0"),
+            "{reason}"
+        );
+        // With a count that fits the length, zeros fail at the first line.
+        let mut index = varint(1000);
+        index.resize(index.len() + 1000 * 43, 0);
+        let mut zeros = pack_with_index(&index);
+        zero_the_checksum(&mut zeros);
+        let reason = refusal(&tmp, &zeros);
+        assert!(reason.contains("unknown object kind 0"), "{reason}");
+    }
+
+    #[test]
+    fn an_index_at_the_limit_is_accepted() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        for c in [&b"a"[..], b"b", b"c"] {
+            w.add_content(c).unwrap();
+        }
+        let path = w.finish(&packs).unwrap().unwrap();
+        assert_eq!(PackReader::open_with(&path, 3).unwrap().entries().len(), 3);
+        assert!(matches!(
+            PackReader::open_with(&path, 2),
+            Err(PackError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn zstd_running_out_of_memory_is_told_apart_from_bad_data() {
+        // The text zstd gives when memory runs out.
+        let oom = io::Error::other("Allocation error : not enough memory");
+        assert!(zstd_ran_out_of_memory(&oom));
+        assert!(!zstd_ran_out_of_memory(&io::Error::other(
+            "Corrupted block detected"
+        )));
+    }
+
+    #[test]
+    fn a_damaged_packs_path_is_shown_escaped() {
+        let (_root, _tmp, packs) = dirs();
+        // A name no terminal may be shown as it is; the project folder's name is in the path too.
+        let path = packs.join("a\u{202e}b.pack");
+        std::fs::write(&path, b"short").unwrap();
+        let shown = PackReader::open(&path).err().unwrap().to_string();
+        assert!(!shown.contains('\u{202e}'), "{shown}");
+        assert!(shown.contains("a\\u{202e}b.pack is damaged"), "{shown}");
     }
 
     /// A pack with one content entry whose header and index claim `claimed` uncompressed bytes.

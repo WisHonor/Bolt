@@ -97,8 +97,7 @@ impl ContentHasher {
 pub struct ChangeId(pub [u8; 16]);
 
 impl ChangeId {
-    /// # Errors
-    /// Fails if the OS random source is unavailable.
+    /// A new random ID; fails if the OS random source is unavailable.
     pub fn random() -> Result<ChangeId, getrandom::Error> {
         let mut b = [0u8; 16];
         getrandom::fill(&mut b)?;

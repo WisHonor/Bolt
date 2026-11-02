@@ -7,6 +7,64 @@ use crate::names::{MAX_NAME_BYTES, validate_name};
 /// Most entries one listing may hold.
 pub const MAX_ENTRIES: u64 = 1_000_000;
 
+/// Most levels of folders below the root of one save (storage-format.md section 3).
+pub const MAX_SAVE_DEPTH: usize = 4096;
+
+/// Most entries one save may describe in total, counting every path: a listing reached through
+/// two paths counts twice (storage-format.md section 3).
+pub const MAX_SAVE_ENTRIES: u64 = 10_000_000;
+
+/// The limits for a whole save, and how much of a save one walk has met so far. Every walk over a
+/// save takes one of these (two when it compares two saves), so the rule lives here.
+pub struct SaveLimits {
+    max_depth: usize,
+    max_entries: u64,
+    entries: u64,
+}
+
+impl Default for SaveLimits {
+    /// The limits of the format: `MAX_SAVE_DEPTH` and `MAX_SAVE_ENTRIES`.
+    fn default() -> SaveLimits {
+        SaveLimits::new(MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES)
+    }
+}
+
+impl SaveLimits {
+    /// Limits of other sizes than the format's; tests use small ones.
+    pub(crate) fn new(max_depth: usize, max_entries: u64) -> SaveLimits {
+        SaveLimits {
+            max_depth,
+            max_entries,
+            entries: 0,
+        }
+    }
+
+    /// Says what is wrong if a folder `depth` levels below the root of the save (the root's own
+    /// listing is level 0) is deeper than the limit.
+    pub fn check_depth(&self, depth: usize) -> Result<(), String> {
+        if depth > self.max_depth {
+            return Err(format!(
+                "its folders nest more than {} levels deep",
+                self.max_depth
+            ));
+        }
+        Ok(())
+    }
+
+    /// Counts `n` more entries, a listing again for every path it is reached by; says what is
+    /// wrong if that makes more than the limit.
+    pub fn add(&mut self, n: usize) -> Result<(), String> {
+        self.entries = self.entries.saturating_add(n as u64);
+        if self.entries > self.max_entries {
+            return Err(format!(
+                "it has more than {} files and folders in total",
+                self.max_entries
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// What a listing entry points to.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

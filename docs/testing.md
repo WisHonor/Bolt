@@ -1,6 +1,6 @@
 # Bolt Test Plan — Draft
 
-> **Status:** design-phase draft (2026-10-31).
+> **Status:** drafted in the design phase (2026-10-31); §3 and §4 describe the tests and CI as they run after milestone 1 (2026-11-02).
 
 **In plain words.** Bolt's first promise is "never lose or corrupt your data". Tests are how that promise survives every change to the code. Each kind of test below proves something specific, and together they run on Windows, macOS and Linux every time code is pushed.
 
@@ -16,7 +16,7 @@
 | Kind | What it proves | Tools |
 |---|---|---|
 | Unit tests | Each small piece does what it says | Rust's built-in tests |
-| Format tests | Every record encodes to exactly the bytes in the test vectors and decodes back; every invalid variant is rejected | golden files in `tests/vectors/` |
+| Format tests | Every record encodes to exactly the bytes in the test vectors and decodes back; every invalid variant is rejected | golden files in `crates/bolt-vcs-core/tests/vectors/` |
 | Round-trip tests | Saving and then restoring gives byte-identical files, names, executable flags, symlinks and empty folders | `assert_fs` |
 | Property tests | Random sequences of edits and commands never lose data and always match a simple model of what should happen | `proptest` |
 | Crash tests | Stopping Bolt at any point while it writes leaves the repository usable, and the next command recovers | fault injection, killed processes |
@@ -39,14 +39,17 @@
 
 **Malicious-repository corpus.** At least one case per threat in [security.md](security.md) §4: path tricks, `.bolt` spellings, symlink escapes, case and Unicode collisions, device names, bombs, non-canonical encodings, wrong fingerprints, truncated packs and corrupted indexes. Cases inspired by Git's published vulnerabilities are added as they are reviewed.
 
-**Windows-specific tests.** A helper process holds a file open, to test retries and the "file in use by" message; reserved names; long paths; read-only files; the hidden `.bolt/` folder.
+**Red-team proof tests.** Every proven red-team finding keeps its proof as a permanent test that runs on every push: `crates/bolt-vcs/tests/redteam.rs` (session 1, 18 tests) and `crates/bolt-vcs/tests/redteam2.rs` (session 2 and the final review of its fixes, 12 tests). Each runs on the systems its attack needs; the only ignored test is a helper that plants files for the session's attack scripts.
+
+**Windows-specific tests.** A helper process holds a file open, to test retries and the "file in use by" message; reserved names; long paths; read-only files; the hidden `.bolt/` folder; junctions inside and around `.bolt/`; a project nested 4,096 folders deep (§4).
 
 ## 4. CI on GitHub
 
-- **Every push and pull request:** formatting check, clippy with warnings denied, every test on Windows, macOS and Linux, a build without features, and `cargo-deny` (which also checks the RustSec advisory database).
-- **Nightly:** fuzzing for a fixed time per target, differential tests on larger repositories, and benchmarks with results kept for comparison.
-- Private repositories get a limited free Actions allowance that Windows and macOS runners use up faster; repository visibility is revisited when CI starts.
+- **Every push and pull request:** formatting check, clippy with warnings denied, every test on Windows, macOS and Linux, a build without features, and `cargo-deny` (which also checks the RustSec advisory database and that every crate comes from crates.io). On Windows, one more step runs the slow tests that save a project nested 4,096 folders deep and refuse one at 4,097; they are marked ignored, so only that step runs them.
+- **Nightly, and on every push to `main`:** fuzzing of every target, 5 minutes each nightly and 1 minute on pushes. Differential tests on larger repositories join with milestone 2, and benchmarks, with results kept for comparison, once they exist.
+- The repository is public, so Actions minutes aren't a constraint ([design.md](design.md) §7).
 - A `.gitattributes` file turns off Git's line-ending conversion, so test files stay byte-exact on Windows.
+- Workflows run with read-only permissions, actions are pinned to exact commits, and Dependabot opens weekly update pull requests for Rust crates and actions.
 
 ## 5. Benchmarks and measurements
 
