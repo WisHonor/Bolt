@@ -20,7 +20,7 @@
 
 - Decision 026: `sudo bolt` in the user's own project is refused, because Bolt then runs as root and the project belongs to the user. Trust `SUDO_UID` as Git does, in a later milestone.
 
-- Task 1: minor (deferred): ~~deny.toml advisories only implicit~~ (done 2026-11-01); ~~ci.yml lacks `permissions: contents: read`~~ and ~~actions tag-pinned not SHA-pinned~~ (done 2026-11-01); push+pull_request duplicate runs (plan-mandated).
+- Task 1: minor (deferred): ~~deny.toml advisories only implicit~~ (already explicit when checked on 2026-11-01, so no change was needed: [advisories] sets version = 2 and yanked = "deny"); ~~ci.yml lacks `permissions: contents: read`~~ and ~~actions tag-pinned not SHA-pinned~~ (done 2026-11-01); push+pull_request duplicate runs (plan-mandated).
 - Task 2: minor (deferred): from_hex/from_letters negative paths thinly tested; collision test covers 4 of 7 domains; ChangeId::random untested; to_hex allocates per byte.
 - Task 3: minor (deferred): varint edge tests ([0x80,0x80,0x00], 10th byte 0x00/0x81), round-trips for bytes/id/change_id/bool/u64/i64, limit-before-input test; consider a property test that every non-minimal re-encoding is rejected.
 - Task 4: minor (deferred): NTFS hashed short names (BOxxxx~1) not covered (same as Git); ignorable-range edge tests; folder_problems drops exact duplicates silently; Windows-only collisions (a vs a.) and HFS ignorable collisions not reported; `con:` flagged only as forbidden char; NameError messages lack the name/next step.
