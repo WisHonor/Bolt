@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 8
+- **Partly superseded by:** [decision 038](038-gitignore-and-saved-files.md) (Bolt reads `.gitignore` files as well, so a Git import copies nothing into `.boltignore`)
 
 ## Context
 

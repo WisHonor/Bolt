@@ -38,6 +38,8 @@ Sorted lists are sorted by the raw UTF-8 bytes of their key, strictly ascending,
 | Project link | `bolt-vcs 2026-10-31 project-link v1` |
 | Conflict record | `bolt-vcs 2026-10-31 conflict v1` |
 | Diary entry | `bolt-vcs 2026-10-31 diary-entry v1` |
+| Tag list | `bolt-vcs 2026-11-02 tag-list v1` |
+| Server lines | `bolt-vcs 2026-11-02 server-lines v1` |
 
 Context strings are constants forever, even if the product is renamed.
 
@@ -100,12 +102,18 @@ person:
 
 - Parents must be distinct.
 - **Limits:** person name and email at most 4 KiB each; move-note paths (`from`, `to`) at most 4 KiB each; extra-field keys at most 256 bytes; signature at most 64 KiB. Move notes must be strictly sorted by `to` and extra-field keys strictly sorted (so no duplicates); readers reject anything else.
-- **Defined extra fields:** `line` holds the name of the line the save was made on, as UTF-8 (decision 012). `git-commit` holds, as hex, the Git commit an imported save came from; `git-original-message` holds the original bytes of a Git message that couldn't be converted to UTF-8 exactly (decision 019). Readers keep extra fields they don't understand.
+- **Defined extra fields:** `line` holds the name of the line the save was made on, as UTF-8 (decision 012). `git-commit` holds, as hex, the Git commit an imported save came from; `git-original-message` holds the original bytes of a Git message that couldn't be converted to UTF-8 exactly (decision 019); `git-header` holds the original header of a commit that the standard form below can't rebuild: every byte before the empty line that ends the header (decision 032). Readers keep extra fields they don't understand.
+- **Rebuilding a Git commit** (decision 032). A save imported from Git gives back its commit's exact bytes:
+  - With `git-header`: that field's bytes, an LF, then the message bytes.
+  - Otherwise, the standard form, each line ending in an LF: `tree <hex>`; one `parent <hex>` per parent, in order; `author <name> <<email>> <seconds> <zone>`; `committer` the same way, from the saver; an empty line; then the message bytes. `<hex>` is the Git ID of the commit's tree or of the parent's commit, `<seconds>` the time in whole seconds, and `<zone>` a `+` (a `-` for a negative offset) followed by the offset's hours and minutes, two digits each (`+0530`).
+  - The message bytes are `git-original-message` if the save has it, else the save's message.
+  - Import keeps `git-header` exactly when the standard form doesn't give back the original bytes, and checks that the rebuilt bytes hash to the commit's ID. A tree in Git's standard form gets the same Git ID when it is written again from the save's listings; import counts the commits whose trees aren't in that form.
 - **Signatures (later):** the signed bytes will be the save encoded with an empty signature field (decisions 006 and 019).
 
 ## 5. Change IDs
 
-- 16 random bytes from the operating system's secure random source, created with the save (decision 006).
+- A save made in Bolt: 16 random bytes from the operating system's secure random source, created with the save (decision 006).
+- A save imported from Git takes its change ID from its commit, so importing a repository again gives the same saves (decision 032): the commit's first `change-id` header, written by Jujutsu, if it decodes to 16 bytes in Jujutsu's letters (`z` for 0 down to `k` for 15); otherwise the last 16 bytes of the commit ID, in reverse order, with the bits of each byte reversed (Jujutsu's rule for commits without that header).
 - **Display:** each half-byte (value 0–15) becomes the letter `k` plus that value, so change IDs use only the letters `k` to `z` and never look like hex fingerprints. Screens show the shortest unique prefix, at least 4 letters.
 
 ## 6. Big files and chunk lists
@@ -138,6 +146,8 @@ string  url
 bytes   commit ID in that system (20 or 32 bytes for Git)
 ```
 
+A Git submodule's link has an empty `url`: its address stays in `.gitmodules`, which comes in as an ordinary file (decision 036).
+
 ## 8. Conflict record (reserved for v0.2)
 
 Drafted now so the format can hold it (decision 007); finalised before v0.2.
@@ -161,7 +171,7 @@ A repository that contains any conflict record lists the `conflicts` feature in 
 
 ## 9. Diary entry
 
-One per changing command (decision 010). Each entry records the complete state after the command.
+One per changing command (decision 010). Each entry records the complete state after the command. Tags and server lines change rarely, so they live in records of their own that the entry points to (decision 034); an entry that changes neither points to the same records as its parent, and they are stored once.
 
 ```text
 u8      version = 1
@@ -174,11 +184,10 @@ person  who and when (as in §4)
 string  Bolt version
 state:
   varint  line count;    lines, sorted by name:   string name, id save
-  varint  tag count;     tags, sorted by name:    string name, id save, string message
+  bool    has tags;      if true: id of the tag list
   u8      position (1 = on a line, 2 = at a save), then string line name or id save
   varint  shelf count;   shelves, newest first:   string label (unique), id save
-  varint  remote count;  remotes, sorted by name: string remote name,
-                           varint line count, lines sorted by name: string name, id save
+  bool    has server lines; if true: id of the server-lines list
 varint  safety-copy count
 safety copies, sorted by path:
   string  path
@@ -187,9 +196,37 @@ safety copies, sorted by path:
   varint  size
 ```
 
-Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique. The remote list stays empty until v0.3.
+Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique.
 
-- **Limits:** line, tag and shelf names at most 255 bytes (remote names too); tag messages at most 64 KiB; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines (in the state and per remote), 100,000 tags, 10,000 shelves, 64 remotes and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
+- **Limits:** line and shelf names at most 255 bytes; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines, 10,000 shelves and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
+
+**Tag list** (decision 034). Never empty: an entry without tags has none.
+
+```text
+u8      version = 1
+varint  tag count (1 to 100,000)
+tags, sorted by name:
+  string  name (1 to 255 bytes)
+  id      save
+  string  message (at most 64 KiB)
+  varint  Git tag object count (0 to 16)
+  bytes × n  the original bytes of each Git tag object, from the tag's ref to the commit (each at most 1 MiB)
+```
+
+A tag made in Bolt, or imported from a lightweight Git tag, has no Git tag objects. An imported annotated tag keeps every tag object on its way to the commit, signature included, so export can recreate them exactly. Like every record, a tag list is at most 512 MiB (§11).
+
+**Server lines** (decision 033, 034). Each server's lines as last seen; until v0.3 these are only the server branches a Git import brought in. Never empty: a server without lines is left out, and an entry without servers has no list.
+
+```text
+u8      version = 1
+varint  server count (1 to 64)
+servers, sorted by name:
+  string  server name
+  varint  line count (1 to 100,000)
+  lines, sorted by name: string name, id save
+```
+
+Server names and their line names follow the line-name rules, and no two server names, nor two line names of one server, differ only by letter case.
 
 ## 10. Repository files in `.bolt/`
 
@@ -224,7 +261,7 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 
 ## 11. Pack files
 
-Each command that stores data writes one pack (decision 009): it is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`.
+Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
 
 ```text
 header:
@@ -261,6 +298,8 @@ trailer:
 | Conflict record | 19 |
 | Diary entry | 20 |
 | Project link | 21 |
+| Tag list | 22 |
+| Server lines | 23 |
 
 A reader must:
 - check both magic values, the index checksum, and that every offset and size stays inside the file;
@@ -277,12 +316,14 @@ Each entry's header is a fixed 50 bytes, so a writer that streams an object can 
 
 Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
 
-**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack; what a command does when it needs more objects than one pack may hold is open, to be decided while planning milestone 2 ([decision 028](decisions/028-red-team-m1-session-2-rulings.md), [design.md §7](design.md#7-open-questions-and-deferred-decisions)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
+**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
 
 - **`bolt.toml`** (TOML; decisions 008 and 016). Draft keys: `preset`, `chunk-files-over`, `ask-before-saving-over`, and `[[rule]]` tables with `files`, `lockable`, `conflict-markers` and `moves-with-asset`. Unknown keys produce a warning. Final key names are settled when presets are built (milestone 6).
-- **`.boltignore`** files work like `.gitignore` files: one at the project root, and optionally more in subfolders, each using the `.gitignore` pattern syntax relative to its own folder. `.bolt/` and `.git/` are always ignored (decision 019); on Windows and macOS that includes `.git` in any letter case (`.GIT`), because there it is Git's folder too. A `.boltignore` must be a regular file of at most 1 MiB; a link, pipe or larger file stops the save with an error (decision 025). Decisions 028 and 029 add:
+- **`.boltignore`** files work like `.gitignore` files: one at the project root, and optionally more in subfolders, each using the `.gitignore` pattern syntax relative to its own folder. `.bolt/` and `.git/` are always ignored (decision 019); on Windows and macOS that includes `.git` in any letter case (`.GIT`), because there it is Git's folder too. A `.boltignore` must be a regular file of at most 1 MiB; a link, pipe or larger file stops the save with an error (decision 025). Decisions 028, 029 and 038 add:
+  - **`.gitignore` files are read too** (decision 038), as if each were a `.boltignore` in its folder, with that folder's `.boltignore` lines after its `.gitignore` lines, so they can add to Git's rules or undo them. The limits below count both kinds. A `.gitignore` that isn't a regular file (a link, say) is skipped with a warning, as Git skips a linked one. Git's personal lists (`.git/info/exclude`, the user's global Git ignore file) are not read.
+  - **Rules keep out only what isn't saved yet** (decision 038). A file or link in the save the new one builds on is saved again even when a rule matches it, as in Git; it leaves history only when it is deleted from the folder. So a save looks inside an ignored folder where that save holds entries, and keeps only those.
   - **Letter case.** On Windows and macOS patterns match without regard to letter case, as Git does there by default (`core.ignorecase`): `*.env` ignores `PROD.ENV`, and `secrets/` ignores `Secrets/`. On Linux patterns match exactly, as in Git.
   - **Braces.** `{` and `}` are ordinary characters, as in Git: `{a,b}` is not a choice, and `\{` means the same as `{`.
   - **Limits.** The `.boltignore` files in force at one folder (its own and those of the folders above it) total at most 1 MiB, and the files one save takes rules from total at most 16 MiB, counting each file whose bytes Bolt has read and sized, even if its patterns then fail. Bolt checks both before it builds any rule from a file. Past either limit the save stops, saves nothing, and the error names the file that went over. A file refused before it is counted (one over 1 MiB, say) still costs a read of up to 1 MiB, but the save stops there, so no later file is read.
@@ -313,5 +354,4 @@ Vectors are added milestone by milestone, for the records each milestone builds;
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
 - The signature format (later).
-- What a command does when it needs more objects than one pack may hold (§11; decided while planning milestone 2).
 - A limit on path length (decided with milestone 3's write-out, before format 1 freezes; decision 026).

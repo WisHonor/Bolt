@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 6
+- **Refined by:** [decision 032](032-exact-repeatable-commit-import.md) (a save imported from Git takes its change ID from its commit)
 
 ## Context
 

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 12
+- **Refined by:** [decision 033](033-git-branches-to-lines.md) (server lines exist from v0.1, filled by a Git import; server names follow the line-name rules); [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in shared records; imported annotated tags keep their Git bytes)
 
 ## Context
 

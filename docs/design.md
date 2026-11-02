@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 29
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 being planned (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 41
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -122,6 +122,19 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
 - [x] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestones in [decision 018](decisions/018-milestone-plan.md); review clarifications in [decision 019](decisions/019-review-clarifications.md); the owner's answers to the review in decisions [020](decisions/020-lfs-import.md), [021](decisions/021-v0.1-command-scope.md), [022](decisions/022-engineering-rules.md) and [023](decisions/023-v0.1-speed-bar.md). Signed off by the owner on 2026-10-31.
 
+**Milestone 2 planning** (from 2026-11-02; each question is decided before the milestone's plan is written)
+- [x] Reading Git repositories → [decision 031](decisions/031-own-git-reader.md)
+- [x] How a Git commit becomes a save → [decision 032](decisions/032-exact-repeatable-commit-import.md)
+- [x] How branches become lines, and where you stand after an import → [decision 033](decisions/033-git-branches-to-lines.md)
+- [x] How tags come in, and keeping big lists of tags and server lines out of every diary entry → [decision 034](decisions/034-tags-kept-and-shared.md)
+- [x] Names in Git trees that Bolt can't store as they are → [decision 035](decisions/035-git-names-bolt-cant-take.md)
+- [x] Submodules → [decision 036](decisions/036-submodules-as-bare-links.md)
+- [x] Git LFS before milestone 5 → [decision 037](decisions/037-lfs-waits-for-milestone-5.md)
+- [x] Ignore rules after an import → [decision 038](decisions/038-gitignore-and-saved-files.md)
+- [x] The first save after an import → [decision 039](decisions/039-first-save-after-import.md)
+- [x] Re-importing → [decision 040](decisions/040-import-once-catch-up-later.md)
+- [x] More objects than one pack may hold (decision 028's open question) → [decision 041](decisions/041-several-packs-per-command.md)
+
 ## 5. Design
 
 The current design, by area. Each part links to the decision that set it.
@@ -131,7 +144,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** Your project folder is separate from history: nothing enters history until you run `bolt save`. But Bolt never destroys unsaved work without keeping a copy first, so `undo` can always bring it back. It works like an IDE's local history, built into the version control system.
 
 - **Saving.** `bolt save "msg"` records every change in the folder; `bolt save <files or folders> "msg"` records only those. Choosing parts of a file comes later.
-- **Tracking.** New files are tracked automatically (there is no `add` step) unless ignore rules exclude them. A save that adds unusually much at once asks for confirmation first; the threshold is set per preset (topic 16), and a flag skips the question for scripts.
+- **Tracking.** New files are tracked automatically (there is no `add` step) unless ignore rules exclude them. Rules keep out only files that aren't saved yet: a saved file stays saved until it is deleted, as in Git ([decision 038](decisions/038-gitignore-and-saved-files.md)). A save that adds unusually much at once asks for confirmation first; the threshold is set per preset (topic 16), and a flag skips the question for scripts.
 - **Safety copies.** Before any command overwrites or removes unsaved work (`discard`, `goto`, `combine`, `undo`, `redo`, `shelf`), Bolt stores the current content of the affected files and records it in the operation log. Only files about to be touched are copied. Safety copies live in the normal object store, so content that is already stored costs nothing extra.
 - **Shelf.** `bolt shelf` sets unsaved changes aside as a hidden save and restores the folder; shelving is undoable.
 - **`goto` with unsaved changes.** Changes come along when nothing collides; otherwise Bolt stops and offers to shelve, save or discard them.
@@ -142,14 +155,14 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** Bolt stores exactly what's in your project and never changes a file's bytes. It checks new names when you save, so a project that works on Linux won't break on Windows or a Mac, and it refuses to write anything dangerous when it puts files back on disk.
 
-- **Entry kinds:** regular file, executable file, symlink, folder (empty folders included), and a link to another project (from Git submodules; not fetched).
+- **Entry kinds:** regular file, executable file, symlink, folder (empty folders included), and a link to another project (from Git submodules; not fetched, and kept as it is by every save: [decision 036](decisions/036-submodules-as-bare-links.md)).
 - **Bytes in = bytes out:** no line-ending conversion or any other change to contents by default.
 - **Not stored:** timestamps, Windows attributes, other permissions. On Windows the executable flag keeps whatever history says.
 - **Names (always):** valid UTF-8, `/` between folders, no empty, `.` or `..` parts, no absolute paths, and no part that Windows or macOS would treat as `.bolt`.
 - **Portability check on save:** new names that would break on Windows or macOS are refused (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, forbidden characters), unless the project relaxes the rule. Imported histories keep their names.
 - **Safety on write-out:** never through a symlink, never outside the project, never to a name the OS would misread; such entries are reported instead. Symlinks that leave the project, or that the OS can't create, become placeholder files with a warning.
 - **Nested projects:** a folder with its own `.bolt/` is left alone by the outer project.
-- **Entries this computer can't hold** (names Windows can't create, names that collide here, symlinks written as placeholders) stay in history untouched: `status` lists them as not written on this computer, and saves never record them as deleted or changed (decision 019).
+- **Entries this computer can't hold** (names Windows can't create, names that collide here, symlinks written as placeholders) stay in history untouched: `status` lists them as not written on this computer, and saves never record them as deleted or changed (decision 019). Saves keep them from milestone 2, when imports first bring them, and also keep a symlink that Git wrote as a plain file holding its target ([decision 039](decisions/039-first-save-after-import.md)).
 
 ### 5.3 How data is identified ([decision 005](decisions/005-object-identity.md))
 
@@ -167,7 +180,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** A save points at the photo of your project (its top folder listing) and records who, when and why. Each save also has a short, stable change ID made of letters (`kxqmz`) that survives edits, and it can note files Bolt is sure you moved.
 
 - **Fields:** top folder listing ID; ordered parents; author and saver (name, email, time, time zone); message; change ID; optional move notes; reserved signature slot; extra fields that older versions keep but ignore.
-- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one.
+- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one. A save imported from Git takes its change ID from its commit instead ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
 - **Move notes:** recorded only when Bolt is certain (same contents moved, or a Unity `.meta` file moved with its asset); used by diffs, merges and locks; they never change the snapshot.
 
 ### 5.5 Conflicts ([decision 007](decisions/007-conflicts.md))
@@ -183,8 +196,8 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** The project's rules live in two normal files at the top of your project, so they travel with it and are part of its history. Your personal settings stay on your machine and can never change the project's rules.
 
-- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (the `.gitignore` syntax; [storage-format.md](storage-format.md) §12 gives its limits and the few forms Bolt refuses until milestone 2, because it can't yet read them exactly as Git does).
-- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from you: `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, else a `[[project]]` entry in your own settings for this exact folder (written as a full path), else `[user]`; a project's own settings are ignored, with a note ([decision 025](decisions/025-red-team-m1-rulings.md)). Bolt uses a project only when both its folder and its `.bolt/` belong to you, as Git requires ([decisions 025](decisions/025-red-team-m1-rulings.md), [026](decisions/026-ownership-check-details.md) and [027](decisions/027-project-folder-must-be-yours.md)). On Windows, folders the Administrators group owns count as yours when you are an administrator, elevated or not. To trust a folder anyway (a shared folder, a drive that records no owner, or your Windows home folder itself, which Windows gives to SYSTEM), list that exact folder in the top-level `safe-folders` list of your own settings. Anything that runs a program is personal only.
+- **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (the `.gitignore` syntax; [storage-format.md](storage-format.md) §12 gives its limits and the few forms Bolt refuses until milestone 2, because it can't yet read them exactly as Git does). Bolt reads a folder's `.gitignore` too, before its `.boltignore` ([decision 038](decisions/038-gitignore-and-saved-files.md)).
+- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from you: `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, else a `[[project]]` entry in your own settings for this exact folder (written as a full path), else `[user]`; a project's own settings are ignored, with a note ([decision 025](decisions/025-red-team-m1-rulings.md)). Bolt uses a project only when both its folder and its `.bolt/` belong to you, as Git requires ([decisions 025](decisions/025-red-team-m1-rulings.md), [026](decisions/026-ownership-check-details.md) and [027](decisions/027-project-folder-must-be-yours.md)). On Windows, folders the Administrators group owns count as yours only in an elevated terminal, as in Git ([decision 030](decisions/030-administrators-only-when-elevated.md)). To trust a folder anyway (a shared folder, a drive that records no owner, or your Windows home folder itself, which Windows gives to SYSTEM), list that exact folder in the top-level `safe-folders` list of your own settings. Anything that runs a program is personal only.
 - **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
 - **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
 
@@ -192,7 +205,7 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** Each command writes its new data into one big "pack" file, which only appears once it's complete, so a crash can never leave half-written data in the store. Big files are cut into chunks based on their content, so an edit in the middle of a file only adds the chunks around the change (when the file format keeps edits local).
 
-- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; at most 2^24 objects each ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)); small packs merged later.
+- **Packs:** written to `tmp/`, made durable, then renamed into the store; index at the end with its own checksum; at most 2^24 objects each ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)); a command that needs more writes several, and only its last holds the diary entry ([decision 041](decisions/041-several-packs-per-command.md)); small packs merged later.
 - **Chunking:** FastCDC for files of 1 MB and up; 16 KB / 64 KB / 256 KB (minimum / average / maximum) to start, tuned later with real assets.
 - **Compression:** zstd per chunk, fast on save and stronger on merge; incompressible data stored raw; sizes recorded so decompression bombs are caught.
 - **Deltas:** later, as a format feature, for small text files.
@@ -203,7 +216,7 @@ The current design, by area. Each part links to the decision that set it.
 
 **In plain words.** Bolt keeps a diary of every command that changed something. Each entry records the whole state of the repository afterwards, so `undo` simply goes back to an earlier entry, like Ctrl+Z in an editor. Changing commands take turns, and a crash can never leave a command half-done.
 
-- **Entries:** objects in the store; each holds the full state (every line, where you are, shelves), the safety copies made, its parent, and metadata.
+- **Entries:** objects in the store; each holds the full state (every line, where you are, shelves), the safety copies made, its parent, and metadata. Tags and server lines, which change rarely, sit in records of their own that entries point to and share while unchanged ([decision 034](decisions/034-tags-kept-and-shared.md)).
 - **Committing:** one pack (new data + entry), then `.bolt/state/head` is replaced atomically. Folder rewrites are journaled first, so an interrupted command is finished or rolled back on the next run.
 - **Undo/redo:** new entries that copy an earlier state and restore files from safety copies; nothing is erased, and undo can jump to any entry.
 - **Other people:** undo changes only your repository; for sent saves and locks, Bolt offers the opposite action (v0.3).
@@ -262,7 +275,7 @@ head ─► redo     main → ptvz
 - **Tags:** fixed names for important saves; they never move, and changing one asks first.
 - **In v0.1:** lines can be created (by saving away from a line), listed and switched; combining, renaming and deleting come in v0.2.
 - **Combining (v0.2):** three-way merge per file; text merged line by line; binaries never merged automatically; move notes followed.
-- **Server lines (v0.3):** shown as `main@origin`.
+- **Server lines (v0.3):** shown as `main@origin`. Until then the only ones are the server branches a Git import brought in ([decision 033](decisions/033-git-branches-to-lines.md)).
 
 ### 5.11 What's on your computer ([decision 013](decisions/013-local-data-and-offline.md))
 
@@ -323,6 +336,35 @@ head ─► redo     main → ptvz
 
 - **Output:** `--json` on every command; colors and progress only in a terminal; no questions without a terminal; examples first in help.
 
+### 5.16 Importing from Git (milestone 2)
+
+**In plain words.** `bolt import` turns a Git repository's whole history into Bolt saves, in place next to `.git/`, without changing the Git repository. Bolt reads Git's files itself, with the same care it takes with its own: nothing in them is trusted, every read is bounded, and big files flow straight through.
+
+- **Already decided:** every branch becomes a line and every tag a tag; each save records its Git commit in the extra field `git-commit`; paths that aren't valid UTF-8 stop the import with a list of where they occur; messages in other encodings are converted to UTF-8, keeping the original bytes; `.bolt` entries in Git trees are skipped with a warning; up to 1,024 parents ([decision 019](decisions/019-review-clarifications.md)). Submodules become project links ([decision 004](decisions/004-project-contents.md)); LFS contents must be on disk ([decision 020](decisions/020-lfs-import.md), milestone 5).
+- **Reading Git** ([decision 031](decisions/031-own-git-reader.md)): Bolt's own read-only reader, for loose objects, packs and their deltas, refs, and from `.git/config` only the format lines (plus `core.sparseCheckout`, only to refuse); SHA-1 and SHA-256 repositories.
+  - No memory-mapping, and every read is bounded. Files in `.git` are opened without following links, objects Git stored whole stream straight into Bolt's pack, and every Git object's ID is checked as it is read (SHA-1 with collision detection).
+  - A deltified object and its base may each be at most 512 MiB, which Git never exceeds by default.
+  - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files.
+  - It refuses, before writing anything and saying what to do: unknown formats or extensions, reftable, partial and shallow clones, alternates, a `.git` that is a file, and a `.git` another account owns.
+- **Commits become saves exactly** ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
+  - Tree, parents (in Git's order), author, committer (as the saver) and message carry over; imported saves get no `line` note, since Git never recorded where a commit was made.
+  - Whatever the save's own fields can't rebuild (a signature, a signed merge, extra or unusual header lines) stays in the extra field `git-header`. Import checks that every commit rebuilds to its own Git ID, so a later export can give back the same IDs.
+  - A save's change ID comes from its commit (Jujutsu's rule, or the `change-id` header Jujutsu writes), so importing the same repository again, on any computer, gives identical saves.
+  - A commit with a message over 1 MiB or a header over 64 KiB stops the import; commits whose trees an old tool wrote in a non-standard form are counted, since export can't recreate their IDs.
+- **Branches become lines** ([decision 033](decisions/033-git-branches-to-lines.md)).
+  - Your own branches become lines.
+  - Each server's branches, as Git last saw them, become server lines (`feature-x@origin`); they move only with another import.
+  - Names Bolt's rules refuse are renamed by a fixed rule, which the summary lists: each character Bolt doesn't allow becomes `-`, a name over 255 bytes is shortened, and a clash gets `-2`, `-3` and so on. The same repository always gets the same names.
+  - You stand where Git did: on its current branch's line, or at the save of a detached `HEAD`.
+  - The stash, notes, replace refs and other refs aren't imported; the summary lists them. A repository with no commits, or a current branch with none yet, stops the import.
+- **Names Bolt can't take as they are** ([decision 035](decisions/035-git-names-bolt-cant-take.md)). Dangerous names are skipped with a warning, with everything under them: any spelling a system would treat as `.git` (Git's own list, on every system), `.`, `..`, empty names and names holding `/`. Names over 255 bytes and broken folders (duplicate names, wrong order, unknown modes, contents that don't match their ID, missing objects) stop the import. Commits with skipped entries are counted, since export can't recreate them exactly.
+- **Submodules become bare links** ([decision 036](decisions/036-submodules-as-bare-links.md)): a project link holding only the commit. `.gitmodules` comes in as an ordinary file and is never read. A later save keeps every link as it is and never looks inside its folder; moving, adding or removing a submodule is done in Git.
+- **The first save after an import** ([decision 039](decisions/039-first-save-after-import.md)) keeps what this computer can't hold exactly as it was, and stops when files differ from the imported version only by line endings Git converted, offering to have Git write them back or to save them as they are. Sparse checkouts are refused by the import. Uncommitted work in Git becomes part of the next save.
+- **Import is one-time for now** ([decision 040](decisions/040-import-once-catch-up-later.md)): a second `bolt import` refuses; catching up with Git's new commits comes later.
+- **Ignore rules carry over by themselves** ([decision 038](decisions/038-gitignore-and-saved-files.md)): Bolt reads `.gitignore` files as well as `.boltignore`, so an import copies nothing, and files Git tracks despite a rule stay saved.
+- **Git LFS waits for milestone 5** ([decision 037](decisions/037-lfs-waits-for-milestone-5.md)): until then the import stops at the first LFS pointer (found with Git LFS's own test), naming it, and commits nothing.
+- **Tags come in exactly** ([decision 034](decisions/034-tags-kept-and-shared.md)). An annotated tag keeps its Git bytes, signature included, beside its Bolt message. A tag of something other than a commit (a folder snapshot, a single file) is skipped and listed.
+
 ## 6. Risks and watch-outs
 
 Raised at kickoff. Each is either answered by a topic or tracked here until it is.
@@ -344,17 +386,18 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 15. **Build order.** Answered by decision 001: test infrastructure is built with the object store, a minimal Git importer follows saves and history, and chunked big files come before lines and combine. Locking waits for the server (v0.3).
 16. **A data-integrity tool written mostly by an AI while the owner learns Rust.** Subtle bugs can look fine in review. *Answered by decision 022:* the rules are approved and copied into CLAUDE.md, with `unsafe` allowed only in a tiny platform crate for operating-system calls. *Decision 024* adds an attacker's view: a red-team session from an isolated sandbox at the end of every milestone.
 17. **Too many open packs.** Every save adds a pack and the store keeps every pack open, so a long-lived project will hit the operating system's open-file limit. *Response:* merge small packs and open packs lazily before real use (milestone 3).
+18. **Our own Git reader meets hostile repositories first.** Readers of Git's formats keep having crash and memory bugs on crafted packs (gitoxide, go-git, libgit2 and dulwich all published some in 2026). *Response:* decision 031's bounds; fuzzing; malicious-repository cases drawn from Git's published vulnerabilities (reviewed 2026-11-02); differential tests against Git; milestone 2's red-team session.
 
 ## 7. Open questions and deferred decisions
 
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
-- **Objects per pack vs. one pack per command.** A pack holds at most 2^24 objects ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)), and each command that stores data writes one pack ([decision 009](decisions/009-storage-engine.md)). A file of millions of chunks (milestone 5), or a very large Git import (milestone 2), could need more. Decide while planning milestone 2: several packs per command (a change to decision 009), or another way.
+- ~~**Objects per pack vs. one pack per command.**~~ *Decided while planning milestone 2* ([decision 041](decisions/041-several-packs-per-command.md)): a command writes several packs when it needs more than one may hold.
 - ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository is public, so Actions minutes aren't a constraint.
 
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
 - **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before format 1 freezes at the v0.1 release: the name is built into `.bolt/`, `bolt.toml`, `.boltignore` and the pack files' magic bytes. Until then, renaming only means changing constants (decision 019).]
-- **Path-length limit** in the format. Depth and entries are limited, but a path can reach about 1 MB (255-byte names, 4,096 levels deep). [Readers never hold every path at once. Decide with milestone 3's write-out, where operating-system path limits apply, and before format 1 freezes at v0.1 (decision 026).]
+- **Path-length limit** in the format. Depth and entries are limited, but a path can reach about 1 MB (255-byte names, 4,096 levels deep). With it, the 255-byte name limit: Windows allows 255 UTF-16 units, up to 765 bytes in UTF-8, so a Windows project can hold names Bolt refuses, and an import stops at them (decision 035). [Readers never hold every path at once. Decide with milestone 3's write-out, where operating-system path limits apply, and before format 1 freezes at v0.1 (decision 026).]
 - **Memory bound for hostile saves.** Inside the format's limits, a hostile save can still make a reader hold about 1.5 to 4 GB. [Revisit with the speed-bar benchmarks before v0.1 (decisions 023, 026).]
 - **Contribution licensing**: CLA or DCO. [Matters if the server is AGPL and ever dual-licensed; decide before accepting outside contributions.]
 - **GUI and editor plugins** (Unreal, Unity, Godot, Blender). [All logic stays in the engine library so a GUI can embed it.]
@@ -374,7 +417,10 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Live two-way Git sync.** [Not promised (decision 002); the importer's commit-mapping table keeps the door open.]
 - **Perforce import.** Many game studios use Perforce; a natural second importer after Git. [Later.]
 - **Nested projects.** [A folder with its own `.bolt/` is left alone, and Git submodules import as project links (decision 004).]
-- **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004).]
+- **Opt-in line-ending conversion** for specific files. [Only if real projects need it; the default stays bytes in = bytes out (decision 004). Until then the first save after an import stops at files Git converted (decision 039).]
+- **Catching up with Git.** A second import that adds new commits and moves lines that haven't moved in Bolt since the last import. [Imports are repeatable, so it is small (decision 032); before v0.1 if the milestones leave room, otherwise after (decision 040).]
+- **Importing reftable repositories.** [The reader refuses them, saying how to make a copy it can read; teach it the format before Git 3.0 makes reftable common (decision 031).]
+- **Change-ID letters like Jujutsu's.** Bolt writes 0 as `k` and 15 as `z`; Jujutsu, whose change IDs imported saves share, writes them the other way round. [Display only, no stored data changes; decide before v0.1 (decision 032).]
 
 ## 8. Prior art
 
