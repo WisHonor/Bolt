@@ -1,8 +1,11 @@
-//! What `bolt` prints: JSON shapes and error messages.
+//! What `bolt` prints: JSON shapes, warnings and error messages.
+
+use std::fmt::Write as _;
 
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::text::escape;
+use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
 
 /// The version of every JSON document `bolt --json` prints.
@@ -30,22 +33,84 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
     })
 }
 
+/// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
+pub fn warnings_json(warnings: &[Warning]) -> Value {
+    warnings
+        .iter()
+        .map(|w| json!({"kind": w.kind, "message": w.message}))
+        .collect()
+}
+
+/// Prints each warning on stderr for people; a damaged copy also gets the hint.
+pub fn print_warnings(warnings: &[Warning]) {
+    for warning in warnings {
+        eprintln!("warning: {}", warning.message);
+    }
+    if warnings.iter().any(|w| w.kind == warning::DAMAGED_PACK) {
+        eprintln!(
+            "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
+        );
+    }
+}
+
 /// A failed command's message and what to do about it. Text from outside Bolt in a message is
 /// already escaped by the error that made it; the lines Bolt writes itself are not.
 pub struct Failure {
     pub message: String,
     pub hint: Option<String>,
+    /// The command's `--json` document already ends with this failure.
+    pub printed: bool,
 }
 
-/// Prints `failure`: to stdout as JSON with `--json`, else to stderr as text.
+fn error_json(failure: &Failure) -> Value {
+    json!({ "message": failure.message, "hint": failure.hint })
+}
+
+/// The end of a `--json` document that is printed in pieces and whose last array is still open:
+/// the array's `]`, then the members of `more` and the warnings, then the error if the command
+/// failed after printing began, and the closing `}`. Members come in alphabetical order, as
+/// serde_json writes them, so a finished document reads as if it had been written whole.
+pub fn document_end(more: Value, warnings: &[Warning], failure: Option<&Failure>) -> String {
+    let mut members = match more {
+        Value::Object(members) => members,
+        _ => serde_json::Map::new(),
+    };
+    members.insert("warnings".into(), warnings_json(warnings));
+    if let Some(failure) = failure {
+        members.insert("error".into(), error_json(failure));
+    }
+    let mut end = "]".to_owned();
+    for (key, value) in &members {
+        let _ = write!(end, ",{}:{value}", Value::from(key.as_str()));
+    }
+    end.push('}');
+    end
+}
+
+/// Prints [`document_end`] and passes `result` on. A failure comes back marked as printed, since
+/// the document says it.
+pub fn end_document(
+    more: Value,
+    warnings: &[Warning],
+    result: Result<(), Failure>,
+) -> Result<(), Failure> {
+    println!("{}", document_end(more, warnings, result.as_ref().err()));
+    result.map_err(|failure| Failure {
+        printed: true,
+        ..failure
+    })
+}
+
+/// Prints `failure`: to stdout as JSON with `--json`, else to stderr as text. A failure the
+/// command's own document already ends with is not printed again.
 pub fn print_error(json: bool, failure: &Failure) {
+    if failure.printed {
+        return;
+    }
     if json {
         println!(
             "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "error": { "message": failure.message, "hint": failure.hint },
-            })
+            json!({ "bolt_json": BOLT_JSON, "error": error_json(failure) })
         );
     } else {
         // Escaped once more, so that a piece nobody thought of escaping still can't drive the
@@ -101,7 +166,45 @@ pub fn format_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    /// A `history` document that was printing its saves when the command failed.
+    const SO_FAR: &str =
+        r#"{"bolt_json":1,"line":"main","saves":[{"message":"one"},{"message":"two"}"#;
+
+    #[test]
+    fn a_document_cut_short_by_an_error_ends_as_one_valid_document() {
+        let failure = Failure {
+            message: "Can't read it.".into(),
+            hint: Some("Try again.".into()),
+            printed: false,
+        };
+        let warnings = [Warning::new("damaged_pack", "pack x is damaged.")];
+        let end = document_end(json!({}), &warnings, Some(&failure));
+        let doc: Value = serde_json::from_str(&format!("{SO_FAR}{end}")).unwrap();
+        // What was printed stays, and the error and the warnings come after it.
+        assert_eq!(doc["saves"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            doc["error"],
+            json!({"message": "Can't read it.", "hint": "Try again."})
+        );
+        assert_eq!(doc["warnings"][0]["kind"], "damaged_pack");
+        assert_eq!(doc["warnings"][0]["message"], "pack x is damaged.");
+    }
+
+    #[test]
+    fn a_finished_document_ends_as_serde_json_would_write_it() {
+        let end = document_end(json!({"save": {"id": "x"}}), &[], None);
+        let whole = format!(r#"{{"bolt_json":1,"changes":[{{"path":"a"}}{end}"#);
+        let expected = json!({
+            "bolt_json": 1,
+            "changes": [{"path": "a"}],
+            "save": {"id": "x"},
+            "warnings": [],
+        });
+        assert_eq!(whole, expected.to_string());
+    }
 
     #[test]
     fn times_and_sizes_read_naturally() {

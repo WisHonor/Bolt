@@ -335,6 +335,7 @@ head ─► redo     main → ptvz
 | Upkeep | `verify` (fsck) · `tidy` (gc) |
 
 - **Output:** `--json` on every command; colors and progress only in a terminal; no questions without a terminal; examples first in help.
+- **`--json` formats:** every document, field and kind of warning is in [json.md](json.md).
 
 ### 5.16 Importing from Git (milestone 2)
 

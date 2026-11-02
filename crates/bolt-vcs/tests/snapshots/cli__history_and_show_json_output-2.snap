@@ -31,5 +31,6 @@ expression: show
       "time_ms": "[redacted]",
       "tz_offset_min": "[redacted]"
     }
-  }
+  },
+  "warnings": []
 }

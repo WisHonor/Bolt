@@ -24,6 +24,7 @@ use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
 use crate::text::escape;
+use crate::warning::{self, Warning};
 
 pub struct SaveRequest<'a> {
     pub message: &'a str,
@@ -41,9 +42,12 @@ pub enum SaveOutcome {
         save: Save,
         /// Files that differ from the save before; `None` if it can't be compared with this one.
         changed_files: Option<usize>,
-        /// The shortest form of the save's change ID, or why the line couldn't be read to work
-        /// it out. Either way the save is made.
-        short_change_id: Result<String, RepoError>,
+        /// The shortest form of the save's change ID, or the whole ID if the line couldn't be read
+        /// to work it out.
+        short_change_id: String,
+        /// What went wrong with the save's own results; the save is made all the same. Problems
+        /// the store found are `Store::warnings`.
+        warnings: Vec<Warning>,
     },
     /// The folder matches the line's current save, which is `current`.
     NothingChanged { current: Id },
@@ -210,7 +214,18 @@ pub fn save_folder(
     Save::decode(&encoded, false).map_err(StoreError::from)?;
     let save_id = pack.add_record(ObjectKind::Save, &encoded)?;
     // Worked out before the commit, so that nothing after it can fail the save.
-    let short_change_id = history::short_change_id(repo, &save_id, &save.change_id);
+    let mut warnings = Vec::new();
+    let short_change_id =
+        history::short_change_id(repo, &save_id, &save.change_id).unwrap_or_else(|why| {
+            warnings.push(Warning::new(
+                warning::CHANGE_ID_NOT_SHORTENED,
+                format!(
+                    "The save was made, but Bolt couldn't read this line's older saves to \
+                     shorten its ID. {why}"
+                ),
+            ));
+            save.change_id.to_letters()
+        });
     let mut state = entry.state.clone();
     state.lines.insert(line.clone(), save_id);
     let diary = DiaryEntry {
@@ -224,12 +239,25 @@ pub fn save_folder(
     };
     repo.commit(&lock, pack, &diary)?;
     // The save is committed now; failing to count its files must not make it look failed.
-    let changed_files = count_changes(repo.store(), Some(parent.root), root).ok();
+    let changed_files = match count_changes(repo.store(), Some(parent.root), root) {
+        Ok(count) => Some(count),
+        Err(why) => {
+            warnings.push(Warning::new(
+                warning::CHANGED_FILES_NOT_COUNTED,
+                format!(
+                    "The save was made, but Bolt couldn't count the files it changed. {}",
+                    RepoError::from(why)
+                ),
+            ));
+            None
+        }
+    };
     Ok(SaveOutcome::Saved {
         save_id,
         save,
         changed_files,
         short_change_id,
+        warnings,
     })
 }
 
@@ -1107,15 +1135,17 @@ mod tests {
             save,
             changed_files,
             short_change_id,
+            warnings,
         } = save_now(&mut repo).unwrap()
         else {
             panic!("nothing was saved");
         };
         assert_eq!(changed_files, Some(1));
         assert_eq!(
-            short_change_id.unwrap(),
+            short_change_id,
             history::short_change_id(&repo, &save_id, &save.change_id).unwrap()
         );
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(save.line(), Some("main"));
         assert_eq!(save.author, who());
         let (head, entry) = repo.current().unwrap();
@@ -1260,14 +1290,21 @@ mod tests {
             save_id,
             save,
             short_change_id,
+            warnings,
             ..
         } = save_now(&mut repo).unwrap()
         else {
             panic!("nothing was saved");
         };
+        // The whole ID stands in for the short one, and a warning says why.
+        assert_eq!(short_change_id, save.change_id.to_letters());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "change_id_not_shortened");
         assert!(
-            matches!(short_change_id, Err(RepoError::Damaged { .. })),
-            "{short_change_id:?}"
+            warnings[0].message.starts_with(
+                "The save was made, but Bolt couldn't read this line's older saves to shorten its ID."
+            ),
+            "{warnings:?}"
         );
         // The save is made all the same, and is the line's newest.
         let fresh = Repository::open(dir.path()).unwrap();

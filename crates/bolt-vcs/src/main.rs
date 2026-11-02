@@ -15,6 +15,7 @@ use bolt_core::repo::{RepoError, Repository, elevated_only_note};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
 use bolt_core::text::escape;
+use bolt_core::warning::{self, Warning};
 use clap::{Parser, Subcommand};
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
@@ -50,6 +51,7 @@ impl From<RepoError> for Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
+            printed: false,
         }
     }
 }
@@ -59,6 +61,7 @@ impl From<ConfigError> for Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
+            printed: false,
         }
     }
 }
@@ -74,6 +77,7 @@ impl From<SaveError> for Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
+            printed: false,
         }
     }
 }
@@ -88,6 +92,7 @@ impl From<ResolveError> for Failure {
         Failure {
             hint,
             message: e.to_string(),
+            printed: false,
         }
     }
 }
@@ -107,9 +112,15 @@ fn start(json: bool) -> Result<(), Failure> {
     let id = entry.state.lines.get("main").ok_or_else(|| Failure {
         message: "The new project has no line main.".into(),
         hint: None,
+        printed: false,
     })?;
     let save = repo.store().save(id, repo.signatures_allowed())?;
     let short = &short_change_id(&repo, id, &save.change_id)?;
+    let mut warnings: Vec<Warning> = elevated_only_note(&root)
+        .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
+        .into_iter()
+        .collect();
+    warnings.extend(repo.store().warnings());
     if json {
         println!(
             "{}",
@@ -118,6 +129,7 @@ fn start(json: bool) -> Result<(), Failure> {
                 "root": root.display().to_string(),
                 "line": "main",
                 "save": output::save_json(id, &save, short),
+                "warnings": output::warnings_json(&warnings),
             })
         );
     } else {
@@ -127,9 +139,7 @@ fn start(json: bool) -> Result<(), Failure> {
         println!("Your first save is {short}, on line main.");
         println!("Next: change some files, then run: bolt save \"describe your change\"");
     }
-    if let Some(note) = elevated_only_note(&root) {
-        eprintln!("warning: {}", escape(&note, true));
-    }
+    output::print_warnings(&warnings);
     Ok(())
 }
 
@@ -139,6 +149,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
         return Err(Failure {
             message: "A save needs a message.".into(),
             hint: Some("Say what you changed: bolt save \"describe your change\"".into()),
+            printed: false,
         });
     }
     let mut repo = Repository::discover(&std::env::current_dir()?)?;
@@ -153,25 +164,23 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
     let outcome = save_folder(&mut repo, &req, &mut |_| {
         eprintln!("Waiting for another Bolt command to finish...");
     })?;
-    match outcome {
+    let warnings = match outcome {
         SaveOutcome::Saved {
             save_id,
             save,
             changed_files,
-            short_change_id: shortened,
+            short_change_id: short,
+            mut warnings,
         } => {
-            // The save is made, so nothing from here on may fail the command. If the line couldn't
-            // be read to shorten the ID, the whole ID is shown and a warning says why.
-            let (short, long_because) = match shortened {
-                Ok(short) => (short, None),
-                Err(problem) => (save.change_id.to_letters(), Some(problem)),
-            };
+            // The save is made, so nothing from here on may fail the command.
+            warnings.extend(repo.store().warnings());
             if json {
                 let document = json!({
                     "bolt_json": BOLT_JSON,
                     "result": "saved",
                     "save": output::save_json(&save_id, &save, &short),
                     "changed_files": changed_files,
+                    "warnings": output::warnings_json(&warnings),
                 });
                 println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
@@ -183,58 +192,51 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                 };
                 println!("Saved {short}  \"{title}\"  {counted}");
             }
-            if let Some(problem) = long_because {
-                eprintln!(
-                    "warning: The save was made, but Bolt couldn't read this line's older saves \
-                     to shorten its ID. {}",
-                    escape(&problem.to_string(), true)
-                );
-            }
+            warnings
         }
         SaveOutcome::NothingChanged { current } => {
+            let mut warnings = Vec::new();
             if json {
-                let document = json!({"bolt_json": BOLT_JSON, "result": "nothing-changed"});
+                warnings.extend(repo.store().warnings());
+                let document = json!({
+                    "bolt_json": BOLT_JSON,
+                    "result": "nothing-changed",
+                    "warnings": output::warnings_json(&warnings),
+                });
                 println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
-                println!(
-                    "Nothing to save: no changes since your last save ({}).",
-                    short_or_whole(&repo, &current, &last.change_id)
-                );
+                let short = short_or_whole(&repo, &current, &last.change_id, &mut warnings);
+                warnings.extend(repo.store().warnings());
+                println!("Nothing to save: no changes since your last save ({short}).");
             }
+            warnings
         }
-    }
+    };
     if !json && let Some(ignored) = &ignored {
         println!("{}", ignored_identity_note(ignored, repo.root()));
     }
-    warn_about_damage(&repo);
+    output::print_warnings(&warnings);
     Ok(())
 }
 
 /// `change_id` at its shortest or, if the line can't be read to work that out, whole, with a
 /// warning: a damaged older save mustn't fail a command that otherwise worked.
-fn short_or_whole(repo: &Repository, id: &Id, change_id: &ChangeId) -> String {
+fn short_or_whole(
+    repo: &Repository,
+    id: &Id,
+    change_id: &ChangeId,
+    warnings: &mut Vec<Warning>,
+) -> String {
     short_change_id(repo, id, change_id).unwrap_or_else(|problem| {
-        eprintln!(
-            "warning: Bolt couldn't read this line's older saves to shorten the change ID. {}",
-            escape(&problem.to_string(), true)
-        );
+        warnings.push(Warning::new(
+            warning::CHANGE_ID_NOT_SHORTENED,
+            format!(
+                "Bolt couldn't read this line's older saves to shorten the change ID. {problem}"
+            ),
+        ));
         change_id.to_letters()
     })
-}
-
-/// Names each pack that held a damaged copy of an object the command needed. The command went on
-/// without that copy, so it still succeeded.
-fn warn_about_damage(repo: &Repository) {
-    let damaged = repo.store().damaged_packs();
-    for pack in &damaged {
-        eprintln!("warning: {}.", escape(&pack.to_string(), true));
-    }
-    if !damaged.is_empty() {
-        eprintln!(
-            "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
-        );
-    }
 }
 
 /// `document`, plus the identity a project's settings named and Bolt ignored, if there was one.
@@ -264,26 +266,36 @@ fn history(json: bool) -> Result<(), Failure> {
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         // Its opening goes out with the first save, so a line that can't be read prints no half.
         let mut before = format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":[");
-        for_each_on_line(&repo, |id, save, short| {
+        let mut begun = false;
+        let streamed = for_each_on_line(&repo, |id, save, short| {
             print!("{before}{}", output::save_json(id, save, short));
             before = ",".to_owned();
+            begun = true;
             Ok::<(), Failure>(())
-        })?;
-        println!("]}}");
-    } else {
-        let now = now_ms();
-        for_each_on_line(&repo, |_, s, short| {
-            let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
-            let title = s.message.lines().next().unwrap_or_default();
-            println!(
-                "{short}  {when}  {}  {}",
-                escape(&s.author.name, false),
-                escape(title, false)
-            );
-            Ok::<(), Failure>(())
-        })?;
+        });
+        return match streamed {
+            Err(failure) if !begun => Err(failure),
+            // Once saves are printed, the document ends with the error, still as one document.
+            result => {
+                let warnings = repo.store().warnings();
+                let ended = output::end_document(json!({}), &warnings, result);
+                output::print_warnings(&warnings);
+                ended
+            }
+        };
     }
-    warn_about_damage(&repo);
+    let now = now_ms();
+    for_each_on_line(&repo, |_, s, short| {
+        let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
+        let title = s.message.lines().next().unwrap_or_default();
+        println!(
+            "{short}  {when}  {}  {}",
+            escape(&s.author.name, false),
+            escape(title, false)
+        );
+        Ok::<(), Failure>(())
+    })?;
+    output::print_warnings(&repo.store().warnings());
     Ok(())
 }
 
@@ -303,13 +315,14 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     // printed, so a save that can't be listed prints only the error. The changes are then
     // printed as the walk finds them, and none is kept.
     let count = count_changes(store, old_root, save.root)?;
-    let short = short_or_whole(&repo, &id, &save.change_id);
+    let mut warnings = Vec::new();
+    let short = short_or_whole(&repo, &id, &save.change_id, &mut warnings);
     if json {
         // The document `json!` would make, in pieces: serde_json writes an object's keys in
         // alphabetical order, so `changes` comes between `bolt_json` and `save`.
         print!("{{\"bolt_json\":{BOLT_JSON},\"changes\":[");
         let mut comma = "";
-        for_each_change(store, old_root, save.root, |c| {
+        let walked = for_each_change(store, old_root, save.root, |c| {
             print!(
                 "{comma}{}",
                 json!({
@@ -327,10 +340,12 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
             );
             comma = ",";
             Ok::<(), Failure>(())
-        })?;
-        println!("],\"save\":{}}}", output::save_json(&id, &save, &short));
-        warn_about_damage(&repo);
-        return Ok(());
+        });
+        warnings.extend(store.warnings());
+        let more = json!({"save": output::save_json(&id, &save, &short)});
+        let ended = output::end_document(more, &warnings, walked);
+        output::print_warnings(&warnings);
+        return ended;
     }
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
     println!(
@@ -369,7 +384,8 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     if count == 0 {
         println!("  (no file changes)");
     }
-    warn_about_damage(&repo);
+    warnings.extend(store.warnings());
+    output::print_warnings(&warnings);
     Ok(())
 }
 

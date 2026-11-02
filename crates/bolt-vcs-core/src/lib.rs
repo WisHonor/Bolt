@@ -18,6 +18,7 @@ pub mod snapshot;
 pub mod store;
 pub mod text;
 pub mod verify;
+pub mod warning;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -55,6 +55,16 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The `kind` of each warning in a `--json` document.
+fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
+    doc["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["kind"].as_str().unwrap())
+        .collect()
+}
+
 #[test]
 fn start_creates_a_project() {
     let env = Env::new();
@@ -79,7 +89,8 @@ fn start_and_save_work_in_a_normal_folder() {
 
 /// Whether a folder belongs to an elevated Administrators group is up to the computer (an
 /// administrator's terminal does it, as on Windows CI). Where it does, `start` says the project
-/// opens only from such a terminal, on stderr, whatever the output format.
+/// opens only from such a terminal, on stderr, whatever the output format; with `--json` it is
+/// also a warning of the document.
 #[test]
 fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
     for args in [&["start"][..], &["--json", "start"]] {
@@ -88,9 +99,17 @@ fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
         assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
         let expected = bolt_core::repo::elevated_only_note(env.root()).is_some();
-        let said = stderr.contains("opens only from an administrator terminal");
+        let said = stderr.contains("warning: This project belongs to the Administrators group");
         assert_eq!(said, expected, "{args:?}: {stderr}");
-        assert!(!stdout.contains("administrator terminal"), "{args:?}");
+        if args.contains(&"--json") {
+            let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            let kinds = warning_kinds(&doc);
+            assert_eq!(kinds.contains(&"elevated_only"), expected, "{doc}");
+            let note = doc["warnings"][0]["message"].as_str().unwrap_or_default();
+            assert_eq!(note.contains("administrator terminal"), expected, "{doc}");
+        } else {
+            assert!(!stdout.contains("administrator terminal"), "{args:?}");
+        }
     }
 }
 
@@ -259,7 +278,7 @@ fn save_json_names_the_ignored_project_identity() {
         let again = json_of(&env, &["--json", "save", "again"]);
         assert_eq!(
             again,
-            serde_json::json!({"bolt_json": 1, "result": "nothing-changed"})
+            serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "warnings": []})
         );
         let out = env
             .bolt_anonymous(env.root())
@@ -409,6 +428,17 @@ fn start_json_output() {
         assert!(save[person]["time_ms"].as_i64().unwrap() > 1_700_000_000_000);
         assert!(save[person]["tz_offset_min"].is_i64());
     }
+    // The one warning a fresh project can have depends on the computer, so the snapshot has none.
+    let elevated = bolt_core::repo::elevated_only_note(env.root()).is_some();
+    assert_eq!(
+        warning_kinds(&json),
+        if elevated {
+            vec!["elevated_only"]
+        } else {
+            vec![]
+        }
+    );
+    json["warnings"] = serde_json::json!([]);
     let redact = |v: &mut serde_json::Value| *v = "[redacted]".into();
     redact(&mut json["root"]);
     let save = &mut json["save"];
@@ -529,9 +559,8 @@ fn save_requires_a_message() {
     }
 }
 
-/// A pack holding a damaged copy of a file's content doesn't stop the save, and is named.
-#[test]
-fn save_warns_about_a_pack_holding_a_damaged_copy() {
+/// A started project with a `LICENSE` to save, and a pack that holds a damaged copy of its content.
+fn project_with_a_damaged_copy_of_its_licence() -> Env {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
     let licence = b"Permission is hereby granted, free of charge, to any person\n";
@@ -543,7 +572,35 @@ fn save_warns_about_a_pack_holding_a_damaged_copy() {
     pack[16 + 50] ^= 1; // the first byte after the pack header and the entry header
     std::fs::write(env.root().join(".bolt/store/packs/00.pack"), pack).unwrap();
     std::fs::write(env.root().join("LICENSE"), licence).unwrap();
+    env
+}
 
+/// The warning goes in the document too, with the words people see on stderr.
+#[test]
+fn save_json_carries_a_damaged_pack_warning() {
+    let env = project_with_a_damaged_copy_of_its_licence();
+    let out = env
+        .bolt()
+        .args(["--json", "save", "Add licence"])
+        .output()
+        .unwrap();
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["result"], "saved", "{doc}");
+    assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{doc}");
+    let message = doc["warnings"][0]["message"].as_str().unwrap();
+    assert!(message.contains("00.pack is damaged: object "), "{message}");
+    assert!(
+        stderr.contains(&format!("warning: {message}\n")),
+        "{stderr}"
+    );
+}
+
+/// A pack holding a damaged copy of a file's content doesn't stop the save, and is named.
+#[test]
+fn save_warns_about_a_pack_holding_a_damaged_copy() {
+    let env = project_with_a_damaged_copy_of_its_licence();
     let out = env.bolt().args(["save", "Add licence"]).output().unwrap();
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
@@ -572,6 +629,23 @@ fn damage_the_only_copy_of(root: &Path, id: &Id) {
             std::fs::write(&path, bytes).unwrap();
         }
     }
+}
+
+/// Writes `00.pack`, which sorts before Bolt's own packs, holding a copy of the save `id` with one
+/// bit flipped. The save's own copy is fine, so reads pass the damaged one over.
+fn plant_damaged_copy_of_save(root: &Path, id: &Id) {
+    use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
+    use bolt_core::repo::Repository;
+    let repo = Repository::open(root).unwrap();
+    let record = repo.store().read_record(id, ObjectKind::Save).unwrap();
+    let made = tempfile::tempdir().unwrap();
+    let mut w = PackWriter::create(made.path()).unwrap();
+    w.add_record(ObjectKind::Save, &record).unwrap();
+    let path = w.finish(made.path()).unwrap().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let entry = PackReader::open(&path).unwrap().find(id).copied().unwrap();
+    bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+    std::fs::write(root.join(".bolt/store/packs/00.pack"), bytes).unwrap();
 }
 
 /// A started project with two saves, the first of which can no longer be read, and a file
@@ -659,6 +733,39 @@ fn save_json_is_the_same_when_the_line_cant_be_read_to_shorten_its_id() {
     assert_eq!(json["save"]["change_id"].as_str().unwrap().len(), 32);
     assert!(stderr.contains("warning: The save was made"), "{stderr}");
     assert!(!stderr.contains("Nothing was changed"), "{stderr}");
+    // The same words are in the document, and the damaged save's pack is named beside them.
+    assert_eq!(
+        warning_kinds(&json),
+        ["change_id_not_shortened", "damaged_pack"],
+        "{json}"
+    );
+    let said = json["warnings"][0]["message"].as_str().unwrap();
+    assert!(
+        said.starts_with("The save was made, but Bolt couldn't read"),
+        "{said}"
+    );
+}
+
+/// `show` shortens the ID of the save it shows, so it can fail to, too.
+#[test]
+fn show_json_carries_the_warning_about_the_id_it_couldnt_shorten() {
+    let env = project_whose_first_save_is_damaged();
+    env.bolt().args(["save", "two"]).assert().success();
+    let out = env.bolt().args(["--json", "show"]).output().unwrap();
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        warning_kinds(&doc),
+        ["change_id_not_shortened", "damaged_pack"],
+        "{doc}"
+    );
+    let said = doc["warnings"][0]["message"].as_str().unwrap();
+    assert!(
+        said.starts_with("Bolt couldn't read this line's older saves"),
+        "{said}"
+    );
+    assert!(stderr.contains(&format!("warning: {said}\n")), "{stderr}");
 }
 
 #[test]
@@ -701,7 +808,7 @@ fn save_json_output() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"bolt_json": 1, "result": "nothing-changed"})
+        serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "warnings": []})
     );
 }
 
@@ -940,6 +1047,90 @@ fn history_json_is_the_one_compact_line_serde_json_would_write() {
         .map(|s| s["message"].as_str().unwrap())
         .collect();
     assert_eq!(messages, ["two", "one", "Start project"]);
+}
+
+/// Every document, whatever it says, has `warnings`; with nothing to warn about, an empty list.
+#[test]
+fn every_json_document_has_warnings() {
+    let env = Env::new();
+    let run = |args: &[&str]| -> serde_json::Value {
+        let out = env.bolt().args(args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let started = run(&["--json", "start"]);
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let saved = run(&["--json", "save", "m"]);
+    let again = run(&["--json", "save", "m"]);
+    let history = run(&["--json", "history"]);
+    let shown = run(&["--json", "show"]);
+    assert_eq!(saved["result"], "saved");
+    assert_eq!(again["result"], "nothing-changed");
+    for (what, doc) in [
+        ("start", &started),
+        ("save", &saved),
+        ("nothing to save", &again),
+        ("history", &history),
+        ("show", &shown),
+    ] {
+        assert!(doc["warnings"].is_array(), "{what}: {doc}");
+    }
+    // A healthy project has nothing to warn about (`start` may say how it opens, see above).
+    for doc in [&saved, &again, &history, &shown] {
+        assert_eq!(doc["warnings"], serde_json::json!([]), "{doc}");
+    }
+}
+
+/// A save nobody can read ends a command, but never in a half document: whatever `--json` prints
+/// is one JSON document, with the error in it.
+#[test]
+fn history_json_stays_valid_when_a_save_is_unreadable() {
+    let env = project_with_two_saves();
+    let history = json_of(&env, &["--json", "history"]);
+    // Three saves, and the middle one has no other copy.
+    let middle = Id::from_hex(history["saves"][1]["id"].as_str().unwrap()).unwrap();
+    damage_the_only_copy_of(env.root(), &middle);
+    for command in ["history", "show"] {
+        let out = env.bolt().args(["--json", command]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{command}");
+        // `from_slice` takes one document and nothing after it.
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["bolt_json"], 1, "{command}: {doc}");
+        let error = doc["error"]["message"].as_str().unwrap();
+        assert!(error.contains("damaged"), "{command}: {error}");
+        assert!(
+            doc.get("saves").is_none() && doc.get("changes").is_none(),
+            "{doc}"
+        );
+    }
+}
+
+/// Copies that were passed over are reported by the commands that only read, too.
+#[test]
+fn history_and_show_json_carry_a_damaged_pack_warning() {
+    let env = project_with_two_saves();
+    let first = Id::from_hex(
+        json_of(&env, &["--json", "history"])["saves"][2]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    plant_damaged_copy_of_save(env.root(), &first);
+    for command in ["history", "show"] {
+        let out = env.bolt().args(["--json", command]).output().unwrap();
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{command}: {stderr}");
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{command}: {doc}");
+        let said = doc["warnings"][0]["message"].as_str().unwrap();
+        assert!(said.contains("00.pack is damaged"), "{command}: {said}");
+        assert!(stderr.contains(&format!("warning: {said}\n")), "{stderr}");
+    }
 }
 
 #[test]
@@ -1288,6 +1479,13 @@ fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
         stdout.ends_with("  \"my work\"  (couldn't count the changed files)\n"),
         "{stdout:?}"
     );
+    // The reason is on stderr, with the words the document has.
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr
+            .contains("warning: The save was made, but Bolt couldn't count the files it changed."),
+        "{stderr}"
+    );
     assert!(stdout_of(&env, &["history"]).contains("my work"));
 }
 
@@ -1302,7 +1500,16 @@ fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["result"], "saved");
-    assert!(json["changed_files"].is_null(), "{json}");
+    // Present and null, not left out; the warning says why.
+    assert_eq!(json.get("changed_files"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        warning_kinds(&json),
+        ["changed_files_not_counted"],
+        "{json}"
+    );
+    let said = json["warnings"][0]["message"].as_str().unwrap();
+    assert!(said.contains("too large"), "{said}");
+    assert!(text(&out.stderr).contains(&format!("warning: {said}\n")));
 }
 
 /// Nested folders with files at the bottom, all names 255 bytes: each file's path is about 100 KB
