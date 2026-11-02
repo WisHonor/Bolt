@@ -109,7 +109,8 @@ pub fn is_reparse_file(meta: &Metadata) -> bool {
 }
 
 /// A plain file: not a link, folder, pipe or device, and on Windows no reparse point at all.
-fn is_regular(meta: &Metadata) -> bool {
+/// `meta` comes from `symlink_metadata`.
+pub fn is_regular(meta: &Metadata) -> bool {
     meta.is_file() && !is_reparse_point(meta)
 }
 

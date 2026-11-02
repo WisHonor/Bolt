@@ -349,8 +349,20 @@ impl Base<'_> {
     }
 }
 
+/// The walk met `path` before reading what the base save holds in the folder above it. It hands
+/// over every folder before anything in it, so this is a fault in Bolt, or a folder that became
+/// a link mid-walk (a known limit, security.md T20).
+fn unnoted(path: &str) -> SaveError {
+    let fault = format!(
+        "Bolt reached {} before reading what the last save holds in the folder above it, so \
+         nothing was saved. This is a fault in Bolt: please report it.",
+        escape(path, false)
+    );
+    RepoError::from(io::Error::other(fault)).into()
+}
+
 /// The ignore rules of the folders a walk is inside, what the base save holds there, and the
-/// first problem found on entering a folder.
+/// first problem found.
 struct IgnoreRules {
     root: PathBuf,
     matcher: Matcher,
@@ -359,8 +371,8 @@ struct IgnoreRules {
     problem: Option<SaveError>,
     /// One for each `.gitignore` skipped.
     warnings: Vec<Warning>,
-    /// The base save's listing of each folder the walk has kept, by project path, or `None`
-    /// where the base save has no such folder.
+    /// The base save's listing of each folder the walk has noted, by project path, or `None`
+    /// where the base save has no such folder. A folder not here hasn't been noted.
     old: HashMap<String, Option<Listing>>,
     /// Ignored folders the walk goes into only for the base save's entries in them.
     held: HashSet<String>,
@@ -387,12 +399,8 @@ impl IgnoreRules {
     /// too. The folder above it must have been noted already.
     fn note_folder(&mut self, rel: &str, base: &mut Base) -> Result<(), SaveError> {
         let (up, name) = rel.rsplit_once('/').unwrap_or(("", rel));
-        let listing = match self
-            .old
-            .get(up)
-            .and_then(Option::as_ref)
-            .and_then(|l| l.get(name))
-        {
+        let above = self.old.get(up).ok_or_else(|| unnoted(rel))?;
+        let listing = match above.as_ref().and_then(|l| l.get(name)) {
             Some(e) if e.kind == EntryKind::Folder => Some(base.listing(e.id)?),
             _ => None,
         };
@@ -434,18 +442,21 @@ impl IgnoreRules {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                if let Err(source) = fs::symlink_metadata(&file)
-                    && source.kind() != io::ErrorKind::NotFound
-                {
-                    let path = if folder.is_empty() {
-                        "the project folder".to_owned()
-                    } else {
-                        folder.to_owned()
-                    };
-                    return Err(SaveError::Unreadable { path, source });
-                }
-                // `safe_fs` gives `InvalidInput` for a link, folder or special file.
-                if name == ".gitignore" && e.kind() == io::ErrorKind::InvalidInput {
+                let meta = match fs::symlink_metadata(&file) {
+                    Ok(meta) => Some(meta),
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+                    Err(source) => {
+                        let path = if folder.is_empty() {
+                            "the project folder".to_owned()
+                        } else {
+                            folder.to_owned()
+                        };
+                        return Err(SaveError::Unreadable { path, source });
+                    }
+                };
+                // Judged by what the file is: an open can fail for other reasons with the same
+                // error kind, and a regular .gitignore that can't be read must stop the save.
+                if name == ".gitignore" && meta.is_some_and(|m| !safe_fs::is_regular(&m)) {
                     self.warnings.push(Warning::new(
                         warning::GITIGNORE_SKIPPED,
                         format!(
@@ -488,8 +499,8 @@ impl IgnoreRules {
     }
 
     /// Whether the walk keeps `path`: what Git would ignore stays out, unless the base save has
-    /// it. After an ignore file fails, the problem is kept and nothing more is: the save will
-    /// stop anyway.
+    /// it. After a problem, such as an ignore file that fails, the problem is kept and nothing
+    /// more is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         if self.problem.is_some() {
             return false;
@@ -515,10 +526,15 @@ impl IgnoreRules {
     /// and only if it is one now: what is saved stays saved, as in Git (decision 038). A folder
     /// kept this way is held: its ignore files aren't read, and it keeps only what was saved.
     fn saved_before(&mut self, folder: &str, rel: &Path, is_dir: bool) -> bool {
+        // Taking "not read" for "not saved" would record saved files as removed.
+        let Some(listing) = self.old.get(folder) else {
+            self.problem.get_or_insert(unnoted(&shown(rel)));
+            return false;
+        };
         let saved = rel
             .file_name()
             .and_then(|name| name.to_str())
-            .and_then(|name| self.old.get(folder)?.as_ref()?.get(name))
+            .and_then(|name| listing.as_ref()?.get(name))
             .is_some_and(|e| (e.kind == EntryKind::Folder) == is_dir);
         if saved && is_dir {
             self.held.insert(shown(rel));
@@ -1593,17 +1609,40 @@ mod tests {
 
     #[test]
     fn a_folders_ignore_rules_end_with_the_folder() {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, repo) = project();
         let root = dir.path();
         write(root, ".boltignore", b"*.log\n");
         write(root, "a/.boltignore", b"!x.log\n");
         fs::create_dir(root.join("b")).unwrap();
+        let mut base = newest(&repo);
         let mut rules = IgnoreRules::new(root, this_drive(), Listing::empty()).unwrap();
-        // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach.
+        // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach. The walk
+        // notes each folder it keeps before it looks inside.
         assert!(rules.keeps(&root.join("a"), true));
+        rules.note_folder("a", &mut base).unwrap();
         assert!(rules.keeps(&root.join("a").join("x.log"), false));
         assert!(rules.keeps(&root.join("b"), true));
+        rules.note_folder("b", &mut base).unwrap();
         assert!(!rules.keeps(&root.join("b").join("x.log"), false));
+        assert!(rules.problem.is_none());
+    }
+
+    #[test]
+    fn a_folder_the_walk_never_noted_stops_the_save() {
+        let (dir, repo) = project();
+        let root = dir.path();
+        write(root, ".gitignore", b"*.dll\n");
+        let mut rules = IgnoreRules::new(root, this_drive(), Listing::empty()).unwrap();
+        // Bolt can't tell whether the last save holds `a/x.dll` without `a`'s listing, so it
+        // stops rather than leave out what may be saved.
+        assert!(!rules.keeps(&root.join("a").join("x.dll"), false));
+        let Some(problem) = rules.problem.take() else {
+            panic!("the save would go on");
+        };
+        assert!(problem.to_string().contains("fault in Bolt"), "{problem}");
+        // Nor can a folder be noted before the one above it.
+        let err = rules.note_folder("b/c", &mut newest(&repo)).unwrap_err();
+        assert!(err.to_string().contains("fault in Bolt"), "{err}");
     }
 
     #[test]
@@ -1969,6 +2008,26 @@ mod tests {
     }
 
     #[test]
+    fn no_ignore_file_is_read_inside_an_ignored_folder_kept_for_saved_files() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "Library/keep.txt", b"x");
+        save_now(&mut repo).unwrap();
+        write(root, ".gitignore", b"Library/\n");
+        // As in Git, neither is read: one can't take a name back, and the other would stop the
+        // save for its size.
+        write(root, "Library/.gitignore", b"!new.txt\n");
+        let too_big = comment_of(safe_fs::MAX_IGNORE_FILE_BYTES + 1);
+        write(root, "Library/.boltignore", &too_big);
+        write(root, "Library/new.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".gitignore", "Library", "Library/keep.txt"]
+        );
+    }
+
+    #[test]
     fn deleting_a_saved_ignored_file_removes_it() {
         let (dir, mut repo) = project();
         let root = dir.path();
@@ -2324,7 +2383,7 @@ mod tests {
     }
 
     #[test]
-    fn old_listings_count_every_path_against_the_entry_limit() {
+    fn reading_the_last_save_counts_every_path_against_the_entry_limit() {
         let (dir, mut repo) = project();
         // Three folders with the same two files: the save holds one listing for all of them.
         for folder in ["a", "b", "c"] {
