@@ -304,8 +304,11 @@ fn trim_trailing_spaces(line: &str) -> &str {
 }
 
 // What to change in a pattern Bolt can't yet read the way Git does (storage-format.md §12).
-const BLANK_AT_END: &str = "Remove the tab or other blank at its end";
+const CONTROL: &str = "Remove the tab or other control character from it";
+const BLANK_AT_END: &str = "Remove the no-break space or other blank at its end";
 const BACKSLASH_AT_END: &str = "Remove the \\ at its end (or before its final /)";
+const STARS_BY_BACKSLASH: &str = "Use / to separate folders, never a \\ next to **";
+const NOT_NFC: &str = "Retype it with each accented letter as one character (Unicode NFC)";
 const NEVER_CLOSED: &str = "Close the [ with a ], or write \\[ for a plain [";
 const NEGATED: &str = "Rewrite it without [!…] or [^…], or list the names one per line";
 const NOT_SIMPLE: &str = "Inside [ ], use only letters, digits, . and _, and ranges from low to \
@@ -318,12 +321,24 @@ const CAPITAL_IN_CLASS: &str = "Here Git ignores letter case, but not for a capi
 /// Whether Bolt's matcher reads `pattern` (a line already trimmed) exactly as Git does; if not,
 /// what to change. Only forms where the two agree are allowed (storage-format.md §12).
 fn like_git(pattern: &str) -> Result<(), &'static str> {
+    // Git ends a pattern at a NUL.
+    if pattern.contains(|c: char| c.is_ascii_control()) {
+        return Err(CONTROL);
+    }
     if pattern.ends_with(|c: char| c.is_whitespace() && c != ' ') {
         return Err(BLANK_AT_END);
     }
     // Git drops a final `/` before it matches, so `foo\/` ends in a `\` that escapes nothing.
     if pattern.ends_with("\\/") {
         return Err(BACKSLASH_AT_END);
+    }
+    // On Windows the matcher takes a `\` beside `**` for a folder separator.
+    if pattern.contains("**\\") || pattern.contains("\\**") {
+        return Err(STARS_BY_BACKSLASH);
+    }
+    // Git on macOS compares names in composed form.
+    if !unicode_normalization::is_nfc(pattern) {
+        return Err(NOT_NFC);
     }
     let mut rest = pattern;
     while let Some(c) = rest.chars().next() {
@@ -351,13 +366,17 @@ fn simple_class(after: &str) -> Result<usize, &'static str> {
     if members.starts_with(b"!") || members.starts_with(b"^") {
         return Err(NEGATED);
     }
+    if members.is_empty() {
+        return Err(NOT_SIMPLE);
+    }
     let same_kind = |a: u8, b: u8| {
         a <= b
             && (a.is_ascii_digit() && b.is_ascii_digit()
                 || a.is_ascii_lowercase() && b.is_ascii_lowercase()
                 || a.is_ascii_uppercase() && b.is_ascii_uppercase())
     };
-    let (mut singles, mut ranges) = (Vec::new(), Vec::new());
+    // Tables, not lists, so a class of a million members is checked in one pass.
+    let (mut in_class, mut alone) = ([false; 128], [false; 128]);
     let mut rest = members;
     while let Some((&lo, after_lo)) = rest.split_first() {
         if !(lo.is_ascii_alphanumeric() || lo == b'.' || lo == b'_') {
@@ -365,26 +384,22 @@ fn simple_class(after: &str) -> Result<usize, &'static str> {
         }
         match after_lo {
             [b'-', hi, more @ ..] if same_kind(lo, *hi) => {
-                ranges.push(lo..=*hi);
+                for c in lo..=*hi {
+                    in_class[usize::from(c)] = true;
+                }
                 rest = more;
             }
             [b'-', ..] => return Err(NOT_SIMPLE),
             _ => {
-                singles.push(lo);
+                in_class[usize::from(lo)] = true;
+                alone[usize::from(lo)] = true;
                 rest = after_lo;
             }
         }
     }
-    if singles.is_empty() && ranges.is_empty() {
-        return Err(NOT_SIMPLE);
-    }
     // Git folds the name's letter case but not the class's: a capital alone matches nothing.
-    let has = |c: u8| singles.contains(&c) || ranges.iter().any(|r| r.contains(&c));
-    if IGNORE_CASE
-        && singles
-            .iter()
-            .any(|c| c.is_ascii_uppercase() && !has(c.to_ascii_lowercase()))
-    {
+    let unmatched = |c: u8| alone[usize::from(c)] && !in_class[usize::from(c.to_ascii_lowercase())];
+    if IGNORE_CASE && (b'A'..=b'Z').any(unmatched) {
         return Err(CAPITAL_IN_CLASS);
     }
     Ok(close + 1)
@@ -1544,9 +1559,17 @@ mod tests {
     #[test]
     fn patterns_bolt_cant_yet_read_like_git_are_refused() {
         for (pattern, why) in [
-            ("secret.txt\t", BLANK_AT_END),
-            ("foo\\\t", BLANK_AT_END),
+            ("secret.txt\t", CONTROL),
+            ("foo\\\t", CONTROL),
+            ("a\tb", CONTROL),
+            ("!keep.log\0", CONTROL),
+            ("x\r", CONTROL),
+            ("x\u{7f}", CONTROL),
             ("a\u{a0}", BLANK_AT_END),
+            ("**\\*.md", STARS_BY_BACKSLASH),
+            ("x/**\\y", STARS_BY_BACKSLASH),
+            ("a\\\\**", STARS_BY_BACKSLASH),
+            ("cafe\u{301}.txt", NOT_NFC),
             ("trail\\", BACKSLASH_AT_END),
             ("foo\\/", BACKSLASH_AT_END),
             ("foo\\\\/", BACKSLASH_AT_END),
@@ -1601,16 +1624,21 @@ mod tests {
             "\\[x]",
             "{a,b}",
             "x\\b",
+            "café.txt",
+            "**/*.md",
+            "x/**/y",
         ] {
             assert_eq!(like_git(pattern), Ok(()), "{pattern:?}");
         }
     }
 
     #[test]
-    fn a_line_of_open_brackets_is_refused_in_linear_time() {
+    fn long_lines_are_checked_in_linear_time() {
         let started = std::time::Instant::now();
         assert_eq!(like_git(&"[".repeat(1 << 20)), Err(NEVER_CLOSED));
         assert_eq!(like_git(&"[a]".repeat(1 << 18)), Ok(()));
+        // Every capital is checked for its small letter, and there is one.
+        assert_eq!(like_git(&format!("[{}a]", "A".repeat(1 << 20))), Ok(()));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
