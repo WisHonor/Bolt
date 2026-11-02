@@ -304,11 +304,20 @@ fn format_path(root: &Path) -> PathBuf {
 /// nothing behind it is touched. A real `.bolt` folder counts when it holds an entry named
 /// `format`, of any kind (`open` checks it). Anything else, a file named `.bolt` included, doesn't.
 fn has_project(folder: &Path) -> bool {
-    let bolt = folder.join(".bolt");
-    match fs::symlink_metadata(&bolt) {
+    match fs::symlink_metadata(folder.join(".bolt")) {
         Ok(meta) if safe_fs::is_link(&meta) => true,
-        Ok(meta) if meta.is_dir() => fs::symlink_metadata(bolt.join("format")).is_ok(),
+        Ok(meta) if meta.is_dir() => has_format(folder).unwrap_or(false),
         _ => false,
+    }
+}
+
+/// Whether `root/.bolt` holds an entry named `format`, of any kind (`open` checks it). A link
+/// there is not followed. Callers make sure `.bolt` itself is not a link.
+fn has_format(root: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(format_path(root)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -359,7 +368,7 @@ impl Repository {
         if bolt.try_exists()? {
             owner_check(root)?;
         }
-        if format_path(root).try_exists()? {
+        if has_format(root)? {
             return Err(already());
         }
         if let Some(outer) = enclosing_project(root, owner_check)? {
@@ -399,7 +408,7 @@ impl Repository {
         };
         let lock = repo.lock_for_change("start", &mut |_| {})?;
         // Another `bolt start` may have finished while this one waited for the lock.
-        if format_path(root).try_exists()? {
+        if has_format(root)? {
             return Err(already());
         }
         let mut pack = repo.new_pack()?;
@@ -1050,6 +1059,33 @@ mod tests {
         // An entry named `format` of any kind counts: `open` checks it.
         std::fs::create_dir(bolt.join("format")).unwrap();
         assert!(has_project(folder), "a folder named format");
+    }
+
+    /// `bolt start` in a folder whose `.bolt/format` is a link (a shared project can bring one)
+    /// never follows it: the folder is already a project, which `open` reports as damaged.
+    #[test]
+    fn start_never_follows_a_format_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join(".bolt")).unwrap();
+        // A link to nothing: followed, it would look like no `format` at all.
+        let nothing = root.join("missing");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nothing, format_path(root)).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&format_path(root), &nothing);
+        let started = Repository::init(root, &entry(0).who);
+        assert!(
+            matches!(started, Err(RepoError::AlreadyAProject { .. })),
+            "{:?}",
+            started.map(|_| ())
+        );
+        let opened = Repository::open(root);
+        assert!(
+            matches!(opened, Err(RepoError::Damaged { .. })),
+            "{:?}",
+            opened.map(|_| ())
+        );
     }
 
     /// A `.bolt` link or junction in a folder above is found, never followed (decision 026's
