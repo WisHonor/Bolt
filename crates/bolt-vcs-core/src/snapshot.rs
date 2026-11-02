@@ -263,15 +263,22 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
-/// Git ignores letter case in `.gitignore` patterns on these systems (`core.ignorecase`).
+/// Windows and macOS don't tell letter case apart in names: Git ignores it in patterns
+/// (`core.ignorecase`), and its folder may be spelled `.GIT`.
 const IGNORE_CASE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Whether a folder of this name is Bolt's or Git's, which a save never enters.
+fn is_internal_folder(name: &str) -> bool {
+    name == ".bolt" || name == ".git" || (IGNORE_CASE && name.eq_ignore_ascii_case(".git"))
+}
 
 /// `line` with its braces made plain: Git reads `{a,b}` as ordinary characters, and `ignore`
 /// takes it for a choice. A brace that is escaped, or inside a `[...]` class, means itself already.
 fn literal_braces(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
-    // A `[` with no `]` after it is a plain character, and so is every `[` after that one.
+    // A `[` with no `]` after it is a plain character, and so is every `[` after that one. Each is
+    // escaped, so `ignore` never reads on from it as if a class had begun.
     let mut classes = true;
     while let Some(c) = rest.chars().next() {
         let mut len = c.len_utf8();
@@ -279,9 +286,12 @@ fn literal_braces(line: &str) -> String {
             '\\' => len += rest[len..].chars().next().map_or(0, char::len_utf8),
             '[' if classes => match class_len(&rest[len..]) {
                 Some(n) => len += n,
-                None => classes = false,
+                None => {
+                    classes = false;
+                    out.push('\\');
+                }
             },
-            '{' | '}' => out.push('\\'),
+            '[' | '{' | '}' => out.push('\\'),
             _ => {}
         }
         out.push_str(&rest[..len]);
@@ -305,7 +315,7 @@ fn class_len(after: &str) -> Option<usize> {
 struct Spent {
     /// In the files of the folders the walk is inside.
     in_force: u64,
-    /// In every file the walk has read.
+    /// In every file the walk has read, including those that then failed.
     read: u64,
 }
 
@@ -315,7 +325,7 @@ struct Spent {
 fn boltignore_rules(
     root: &Path,
     dir: &Path,
-    spent: &Spent,
+    spent: &mut Spent,
 ) -> Result<Option<(Gitignore, u64)>, SaveError> {
     let file = dir.join(".boltignore");
     let rel = shown(file.strip_prefix(root).unwrap_or(&file));
@@ -359,6 +369,8 @@ fn boltignore_rules(
             safe_fs::MAX_BOLTIGNORE_SAVE_BYTES
         )));
     }
+    // Counted before anything can fail, so that files which fail use up the save's share too.
+    spent.read += size;
     let text = std::str::from_utf8(&bytes).map_err(|e| ignore(format!("{rel}: {e}")))?;
     let mut builder = GitignoreBuilder::new(dir);
     builder
@@ -379,7 +391,11 @@ fn boltignore_rules(
     if !bad.is_empty() {
         return Err(ignore(bad.join("; ")));
     }
-    let rules = builder.build().map_err(|e| ignore(format!("{rel}: {e}")))?;
+    let rules = builder.build().map_err(|_| {
+        ignore(format!(
+            "{rel} has too many or too complex patterns for Bolt to use; split it or simplify it"
+        ))
+    })?;
     Ok(Some((rules, size)))
 }
 
@@ -415,9 +431,8 @@ impl IgnoreRules {
 
     /// Puts the rules of the `.boltignore` in `dir`, if it has one, on the stack.
     fn enter(&mut self, dir: &Path) -> Result<(), SaveError> {
-        if let Some((rules, bytes)) = boltignore_rules(&self.root, dir, &self.spent)? {
+        if let Some((rules, bytes)) = boltignore_rules(&self.root, dir, &mut self.spent)? {
             self.spent.in_force += bytes;
-            self.spent.read += bytes;
             self.stack.push(Level {
                 dir: dir.to_owned(),
                 rules,
@@ -489,7 +504,7 @@ fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError
             let rules = Arc::clone(&rules);
             move |e| {
                 let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-                if is_dir && matches!(e.file_name().to_str(), Some(".bolt" | ".git")) {
+                if is_dir && e.file_name().to_str().is_some_and(is_internal_folder) {
                     return false;
                 }
                 let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1320,6 +1335,47 @@ mod tests {
     }
 
     #[test]
+    fn a_name_taken_back_with_a_pattern_keeps_its_letter_case_where_case_is_ignored() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", b"*.env\n!keep.env\n");
+        write(root, "KEEP.ENV", b"x");
+        write(root, "OTHER.ENV", b"x");
+        write(root, "plain.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let want: &[&str] = if IGNORE_CASE {
+            &[".boltignore", "KEEP.ENV", "plain.txt"]
+        } else {
+            &[".boltignore", "KEEP.ENV", "OTHER.ENV", "plain.txt"]
+        };
+        assert_eq!(saved_paths(&repo, saved), want);
+    }
+
+    #[test]
+    fn a_git_folder_is_never_saved_in_any_letter_case_where_git_reads_it_so() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, ".GIT/config", b"x");
+        write(root, "sub/.Git/HEAD", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        // Only on Windows and macOS is `.GIT` Git's folder; elsewhere it is an ordinary one.
+        let want: &[&str] = if IGNORE_CASE {
+            &["keep.txt", "sub"]
+        } else {
+            &[
+                ".GIT",
+                ".GIT/config",
+                "keep.txt",
+                "sub",
+                "sub/.Git",
+                "sub/.Git/HEAD",
+            ]
+        };
+        assert_eq!(saved_paths(&repo, saved), want);
+    }
+
+    #[test]
     fn braces_in_boltignore_are_literal_as_in_git() {
         let (dir, mut repo) = project();
         let root = dir.path();
@@ -1377,10 +1433,11 @@ mod tests {
             ("[]{]x", "[]{]x"),
             ("[!{]x{", "[!{]x\\{"),
             ("[é{]{", "[é{]\\{"),
-            // A `[` with no `]` after it is a plain character, and so are all later ones.
-            ("[{", "[\\{"),
-            ("[[{", "[[\\{"),
-            ("[a]{[}", "[a]\\{[\\}"),
+            // A `[` that opens no class is escaped, so `ignore` can't read a class into the rest.
+            ("[{", "\\[\\{"),
+            ("[[{", "\\[\\[\\{"),
+            ("[a]{[}", "[a]\\{\\[\\}"),
+            ("[a-{b}", "\\[a-\\{b\\}"),
         ] {
             assert_eq!(literal_braces(line), want, "{line}");
         }
@@ -1390,8 +1447,18 @@ mod tests {
     fn a_line_of_open_brackets_is_made_literal_in_linear_time() {
         let line = "[".repeat(1 << 20);
         let started = std::time::Instant::now();
-        assert_eq!(literal_braces(&line), line);
+        assert_eq!(literal_braces(&line), "\\[".repeat(1 << 20));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_unclosed_bracket_before_a_brace_is_not_read_as_a_class() {
+        // Unescaped, `ignore` would read `[a-\{b\}` as a class from `a` to a backslash: no range.
+        let (dir, mut repo) = project();
+        write(dir.path(), ".boltignore", b"[a-{b}\n");
+        write(dir.path(), "keep.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(saved_paths(&repo, saved), [".boltignore", "keep.txt"]);
     }
 
     #[test]
@@ -1514,6 +1581,63 @@ mod tests {
         let detail = walk_problem(root);
         assert!(detail.contains("/.boltignore: "), "{detail}");
         assert!(detail.contains("larger than 16777216 bytes"), "{detail}");
+    }
+
+    #[test]
+    fn boltignore_files_that_fail_still_count_toward_the_save_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // As big as a file may be and not UTF-8, so each one fails on its own.
+        let mut bad = comment_of(safe_fs::MAX_BOLTIGNORE_BYTES - 1);
+        bad.push(0xff);
+        let share = safe_fs::MAX_BOLTIGNORE_SAVE_BYTES / safe_fs::MAX_BOLTIGNORE_BYTES;
+        for i in 0..=share {
+            write(root, &format!("d{i}/.boltignore"), &bad);
+        }
+        let mut rules = IgnoreRules::new(root).unwrap();
+        for i in 0..=share {
+            let Err(SaveError::Ignore { detail }) = rules.enter(&root.join(format!("d{i}"))) else {
+                panic!("d{i} was accepted");
+            };
+            let want = if i < share {
+                "invalid utf-8"
+            } else {
+                "larger than 16777216 bytes"
+            };
+            assert!(detail.contains(want), "d{i}: {detail}");
+        }
+        // The walk still reports the first failure, as before.
+        let detail = walk_problem(root);
+        assert!(detail.contains("invalid utf-8"), "{detail}");
+    }
+
+    const TOO_COMPLEX: &str =
+        ".boltignore has too many or too complex patterns for Bolt to use; split it or simplify it";
+
+    #[test]
+    fn a_boltignore_the_matcher_cannot_build_is_refused_in_plain_words() {
+        // The matcher builds about 130,000 `?` in one pattern; this is more than twice that.
+        let (dir, mut repo) = project();
+        write(dir.path(), ".boltignore", "?".repeat(300_000).as_bytes());
+        match save_now(&mut repo) {
+            Err(SaveError::Ignore { detail }) => assert_eq!(detail, TOO_COMPLEX),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn ignoring_letter_case_limits_how_many_paths_one_boltignore_can_hold() {
+        // Windows and macOS: a few thousand paths are too many. Elsewhere they are cheap.
+        let (dir, mut repo) = project();
+        let paths: String = (0..6000)
+            .map(|i| format!("Assets/Textures/Characters/Hero/diffuse_{i:05}.png\n"))
+            .collect();
+        write(dir.path(), ".boltignore", paths.as_bytes());
+        match (IGNORE_CASE, save_now(&mut repo)) {
+            (false, Ok(_)) => {}
+            (true, Err(SaveError::Ignore { detail })) => assert_eq!(detail, TOO_COMPLEX),
+            (_, other) => panic!("{:?}", other.map(|_| ())),
+        }
     }
 
     #[cfg(unix)]
