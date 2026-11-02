@@ -310,9 +310,8 @@ struct Spent {
 }
 
 /// The rules of the `.boltignore` in `dir` and its size, or none if there isn't one. Read through
-/// `safe_fs` (a regular UTF-8 file of at most 1 MiB, storage-format.md §12) and held to the limits
-/// before any rule is built, which costs far more memory than the file. A folder Bolt may not look
-/// into is `Unreadable`, not an ignore problem (RT-11).
+/// `safe_fs` and held to the limits (storage-format.md §12) before any rule is built, which costs
+/// far more memory than the file. A folder Bolt may not look into is `Unreadable` (RT-11).
 fn boltignore_rules(
     root: &Path,
     dir: &Path,
@@ -1369,7 +1368,7 @@ mod tests {
             ("*.{png,jpg}", "*.\\{png,jpg\\}"),
             ("!{a}", "!\\{a\\}"),
             ("no braces at all", "no braces at all"),
-            // Escaped by the user: left alone. An escaped backslash escapes nothing else.
+            // Already escaped: left alone. After an escaped backslash (`\\`) a brace is bare.
             ("\\{a\\}", "\\{a\\}"),
             ("\\\\{a", "\\\\\\{a"),
             ("trailing\\", "trailing\\"),
@@ -1493,7 +1492,7 @@ mod tests {
         // `a`'s file is not in force at `b`, so the two folders do not add up.
         write(root, "b/.boltignore", &comment_of(half));
         assert!(walk(root, SaveLimits::default()).is_ok());
-        // Six bytes more, below `a`: refused before the pattern, which is wrong, is read.
+        // Six bytes more below `a` put it past the limit; its bad pattern is never reached.
         write(root, "a/x/.boltignore", b"[z-a]\n");
         let detail = walk_problem(root);
         assert!(detail.starts_with("a/x/.boltignore: "), "{detail}");

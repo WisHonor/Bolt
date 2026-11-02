@@ -410,7 +410,7 @@ fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
     // error that names a `.boltignore`, not an abort for want of memory.
     assert!(
         end.code == Some(1) && end.stderr.contains(".boltignore"),
-        "`bolt save` of 100 nested folders with a .boltignore each did not stop cleanly under a 1.5 GB cap: {end:?}"
+        "`bolt save` of 100 nested .boltignore files did not stop cleanly under a 1.5 GB cap: {end:?}"
     );
 }
 

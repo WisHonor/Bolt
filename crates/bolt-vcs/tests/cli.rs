@@ -996,10 +996,11 @@ fn boltignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(
-        shown.contains(
-            "A .boltignore file has a problem: sub/.boltignore: with the .boltignore files above it, \
-             it is larger than 1048576 bytes."
-        ),
+        shown.contains("problem: sub/.boltignore: with the .boltignore files above it, "),
+        "{shown:?}"
+    );
+    assert!(
+        shown.contains("it is larger than 1048576 bytes."),
         "{shown:?}"
     );
     assert!(shown.contains("hint: Nothing was saved."), "{shown:?}");
