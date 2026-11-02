@@ -111,10 +111,8 @@ impl Store {
         self.packs.len()
     }
 
-    /// Whether the store holds a copy of `id` of `kind` that reads back whole and matches its
-    /// fingerprint, so storing it again can be skipped. Once a copy passes, it isn't read again.
-    /// `size` is the object's own: a copy recording another can't be `id`, so it is counted as
-    /// damaged without being read, however large it claims to be.
+    /// Whether a copy of `id` reads back whole and matches its fingerprint, so storing it can be
+    /// skipped. A copy recording another `size` than the object's is damage, and is never read.
     pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {
         for at in self.copies(id) {
             if let Some((pack, entry)) = self.entry(at)
@@ -197,11 +195,8 @@ impl Store {
         })
     }
 
-    /// Reads the copies of `id` of `kind` with `read` until one passes: a copy that passed before
-    /// first, then the smallest recorded size first (ties in the packs' order), so a copy claiming
-    /// a huge size is read last. Any failure moves on to the next copy. A bad copy is never read
-    /// again but still counts, so no damaged pack hides a good copy, and an object with no good
-    /// copy is damage on every read. With `once`, the first copy read is last.
+    /// Reads copies of `id` with `read` until one passes: known good first, then smallest first, so
+    /// a copy claiming a huge size comes last. With `once`, the first copy read is the last.
     fn first_good<T>(
         &self,
         id: &Id,
@@ -223,6 +218,7 @@ impl Store {
                 wrong_kind.get_or_insert(entry.kind);
                 continue;
             }
+            // A bad copy is never read again but still counts, so no good copy is damage every time.
             let known_bad = self.checked().bad.get(&at).cloned();
             let read_now = known_bad.is_none();
             let reason = match known_bad {
@@ -450,7 +446,29 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_that_says_nothing_about_the_copy_moves_on_but_is_not_damage() {
+    fn a_copy_that_runs_out_of_memory_is_passed_over_for_the_next() {
+        let (_root, tmp, packs) = dirs();
+        let content = b"held in two packs".to_vec();
+        let id = hash_content(&content);
+        pack_of(&tmp, &packs, std::slice::from_ref(&content));
+        pack_of(&tmp, &packs, &[content.clone(), b"other".to_vec()]);
+        let store = Store::open(&packs).unwrap();
+        let mut tried = Vec::new();
+        let read = store.first_good(&id, ObjectKind::Content, false, |pack, entry| {
+            tried.push(pack.path().to_owned());
+            if tried.len() == 1 {
+                return Err(PackError::OutOfMemory);
+            }
+            pack.copy_content(entry, &mut io::sink())
+                .map(|()| pack.path().to_owned())
+        });
+        assert_eq!(tried.len(), 2);
+        assert_eq!(read.unwrap(), tried[1]);
+        assert!(store.damaged_packs().is_empty());
+    }
+
+    #[test]
+    fn with_no_good_copy_a_failure_that_isnt_damage_is_named_first() {
         let (_root, tmp, packs) = dirs();
         let content = b"held twice, and the 00 copy is bad".to_vec();
         let id = hash_content(&content);
@@ -464,7 +482,6 @@ mod tests {
                 Err(PackError::OutOfMemory)
             }
         };
-        // Every copy is tried; the failure named is the one that doesn't mean damage.
         let failed = store.first_good(&id, ObjectKind::Content, false, out_of_memory);
         assert!(
             matches!(failed, Err(StoreError::Pack(PackError::OutOfMemory))),

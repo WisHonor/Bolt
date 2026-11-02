@@ -28,4 +28,4 @@ Before the red-team fixes were merged, two reviews read the whole branch. They f
 
 - [storage-format.md](../storage-format.md) §11 and §12, and threats T9, T11 and T12 in [security.md](../security.md), state these rules.
 - Common patterns keep working: `*.py[cod]`, `[Bb]in/`, `*.sw[a-p]`, `[0-9]*.log`, `foo\ `, `\#notes`, `!keep.txt`. Rarer ones, such as `[!…]`, `[[:alpha:]]` or `a[/]b`, must be rewritten until milestone 2.
-- A planted copy that records the right size still costs one read of that size per save, and each planted pack's index costs memory. Both are follow-ups before v0.1 ([plans/2026-11-01-milestone-1-follow-ups.md](../plans/2026-11-01-milestone-1-follow-ups.md)).
+- A planted copy that records the right size can be padded up to its pack's size, so it still costs a read of its stored size per save, though the attacker pays for that size on disk; and each planted pack's index costs memory. Both are follow-ups before v0.1 ([plans/2026-11-01-milestone-1-follow-ups.md](../plans/2026-11-01-milestone-1-follow-ups.md)).
