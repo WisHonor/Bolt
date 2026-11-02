@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md))
+- **Refined by:** [decision 026](026-ownership-check-details.md) (details of the ownership check, and limits left for later)
 
 ## Context
 

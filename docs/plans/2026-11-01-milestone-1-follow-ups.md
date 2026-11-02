@@ -8,12 +8,17 @@
 |---|---|
 | Milestone 3 | Writing files out on Windows (`goto`, `discard`) must refuse any name containing `\` or `:` (`PathBuf::join("C:x")` replaces the root), with a test. |
 | Milestone 3 | Merge small packs and open packs lazily (each save adds a pack and every pack stays open; already in `milestones.md`). |
+| Milestone 3 | Handle-relative walking (`openat`-style), built with write-out: a *folder* swapped for a link while `save` walks or reads the project is still followed (only a link at a file's own name is refused, security.md T20), and a fixed `.bolt/` folder swapped after the shape check (for example `store/packs` before a pack is renamed into it) is too. |
+| Milestone 3, before v0.1 | Decide the format's path-length limit with write-out (decision 026). |
+| Before v0.1 | Revisit the memory a hostile save inside the limits can cost a reader (about 1.5 to 4 GB) with the speed-bar benchmarks (decision 026). |
 | Milestone 4 | Undo must validate safety-copy paths from the diary through `names` (no `..`, no absolute paths) before writing anything. |
 | Milestone 4 | Windows rename durability: use `MOVEFILE_WRITE_THROUGH` (platform crate) so a power cut can't lose a just-renamed pack or head. |
 | Before networking (v0.3) | Cap the pack index allocation before reading packs received from a server (a hostile pack can ask for a huge allocation). |
 | Before v0.1 | Choose a license; add `license` to the manifests and drop the `private` exemption in `deny.toml`. |
 
 ## Should do (minor review findings, verbatim from the task reviews)
+
+- Decision 026: `sudo bolt` in the user's own project is refused, because Bolt then runs as root and the project belongs to the user. Trust `SUDO_UID` as Git does, in a later milestone.
 
 - Task 1: minor (deferred): deny.toml advisories only implicit; ci.yml lacks `permissions: contents: read`, actions tag-pinned not SHA-pinned; push+pull_request duplicate runs (plan-mandated).
 - Task 2: minor (deferred): from_hex/from_letters negative paths thinly tested; collision test covers 4 of 7 domains; ChangeId::random untested; to_hex allocates per byte.

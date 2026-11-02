@@ -184,7 +184,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** The project's rules live in two normal files at the top of your project, so they travel with it and are part of its history. Your personal settings stay on your machine and can never change the project's rules.
 
 - **Project rules:** `bolt.toml` (preset, chunking, lockable files, conflict-marker rules, large-save threshold), purely declarative, and `.boltignore` (same syntax as `.gitignore`).
-- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from your own settings, never from a project's ([decision 025](decisions/025-red-team-m1-rulings.md)). Anything that runs a program is personal only.
+- **Personal settings:** identity, editor, merge tools, display; kept in your user config folder or `.bolt/config.toml` and never shared. Your name and email come only from your own settings (`[user]`, or a `[[project]]` entry for one folder), never from a project's ([decision 025](decisions/025-red-team-m1-rulings.md)). Bolt refuses a project whose `.bolt/` belongs to another user account unless you list its folder in your own `safe-folders` ([decisions 025](decisions/025-red-team-m1-rulings.md) and [026](decisions/026-ownership-check-details.md)). Anything that runs a program is personal only.
 - **`.bolt/`:** `format` (version + feature list), `store/` (saved data), `state/` (lines, operation log), `cache/` (rebuildable), `tmp/` (files being written), `config.toml` (personal). Hidden on Windows.
 - **Format safety:** if `format` lists a feature Bolt doesn't know, it refuses to open the repository and asks to be updated. Format upgrades only happen when you ask, through `bolt setup`.
 
@@ -352,6 +352,8 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository is public, so Actions minutes aren't a constraint.
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
 - **Name.** "Bolt" collides with bolt.new (a widely used AI app builder) and Puppet Bolt, which installs a `bolt` command. On crates.io, `bolt`, `bolt-core` and `bolt-cli` are taken and `bolt-vcs` is free (checked 2026-10-31); package names can differ from the command name. [Decide before format 1 freezes at the v0.1 release: the name is built into `.bolt/`, `bolt.toml`, `.boltignore` and the pack files' magic bytes. Until then, renaming only means changing constants (decision 019).]
+- **Path-length limit** in the format. Depth and entries are limited, but a path can reach about 1 MB (255-byte names, 4,096 levels deep). [Readers never hold every path at once. Decide with milestone 3's write-out, where operating-system path limits apply, and before format 1 freezes at v0.1 (decision 026).]
+- **Memory bound for hostile saves.** Inside the format's limits, a hostile save can still make a reader hold about 1.5 to 4 GB. [Revisit with the speed-bar benchmarks before v0.1 (decisions 023, 026).]
 - **Contribution licensing**: CLA or DCO. [Matters if the server is AGPL and ever dual-licensed; decide before accepting outside contributions.]
 - **GUI and editor plugins** (Unreal, Unity, Godot, Blender). [All logic stays in the engine library so a GUI can embed it.]
 - **Interactive save viewer** (`bolt show`, ratatui + crossterm). [After the core works.]
