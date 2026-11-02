@@ -16,9 +16,8 @@ impl VerifyReport {
     }
 }
 
-/// Opens each pack on its own, so a broken pack becomes a listed problem instead of stopping the check.
-/// The problems are lines for a person to read, so the folder and pack names in them, which came
-/// from outside Bolt, are escaped.
+/// Opens each pack on its own, so a broken pack becomes a listed problem instead of stopping the
+/// check. Folder and pack names in the problems came from outside Bolt, so they are escaped.
 #[must_use]
 pub fn verify_store(packs_dir: &Path) -> VerifyReport {
     let mut report = VerifyReport {

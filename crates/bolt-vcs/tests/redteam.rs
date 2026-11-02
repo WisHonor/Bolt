@@ -1,6 +1,6 @@
-//! Red-team session 1 (milestone 1, decision 024). Every test here asserts the SAFE behaviour
-//! and fails without the fix for the finding it is named after (`win_junction_…` is the one
-//! guard that passed from the start). See docs/redteam/2026-11-01-milestone-1.md.
+//! Red-team proof tests for milestone 1 (decision 024): each asserts the safe behaviour and fails
+//! without the fix for the finding it is named after (`win_junction_…` always passed).
+//! See docs/redteam/2026-11-01-milestone-1.md.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
@@ -107,8 +107,8 @@ fn mkfifo(path: &Path) {
     assert!(st.success());
 }
 
-/// `bolt <args>` in `dir` with its address space capped at ~1.5 GB, so a runaway allocation
-/// shows up as an abort instead of taking the whole sandbox down.
+/// `bolt <args>` in `dir` with its address space capped at about 1.5 GB, so a runaway allocation
+/// aborts instead of taking the whole machine down.
 #[cfg(unix)]
 fn bolt_capped(env: &Env, dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("sh");
@@ -124,9 +124,7 @@ fn bolt_capped(env: &Env, dir: &Path, args: &[&str]) -> Command {
     cmd
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-1: a symlinked `.bolt/tmp` makes ANY command delete files outside the project.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -148,7 +146,7 @@ fn rt1_symlinked_bolt_tmp_does_not_delete_files_outside_the_project() {
     );
 }
 
-/// Windows twin of RT-1: a junction needs no privileges. UNVERIFIED in the Linux sandbox.
+/// Windows twin of RT-1: a junction needs no privileges.
 #[cfg(windows)]
 #[test]
 fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
@@ -170,9 +168,8 @@ fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
     assert!(victim.path().join("thesis.docx").exists());
 }
 
-/// Windows: a junction INSIDE the project that points outside must be saved as a link, never
-/// walked into. Verified on GitHub's Windows machine on 2026-11-01: it passes, because junctions
-/// count as symlinks for both `ignore` and `symlink_metadata`.
+/// Windows: a junction INSIDE the project that points outside must be saved as a link, never walked
+/// into. It passes because junctions count as symlinks for both `ignore` and `symlink_metadata`.
 #[cfg(windows)]
 #[test]
 fn win_junction_in_project_is_not_walked_into() {
@@ -206,9 +203,7 @@ fn win_junction_in_project_is_not_walked_into() {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-2: a symlinked `.bolt/store/packs` makes `bolt save` write outside the project.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -266,9 +261,7 @@ fn rt2_start_does_not_build_a_repository_through_a_symlinked_bolt_folder() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-3: FIFOs planted in `.bolt` hang every command forever.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -315,9 +308,7 @@ fn rt3_fifo_as_project_config_does_not_hang_save() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-4: `.bolt` files that are symlinks to /dev/zero are read without a size limit.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -352,10 +343,8 @@ fn rt4_project_config_pointing_at_dev_zero_is_refused_not_read_forever() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-5: a file swapped for a symlink between the scan and the read is saved as the symlink's
 // TARGET: `bolt save` copies a file from outside the project into history.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -430,10 +419,8 @@ fn rt5_save_never_stores_the_target_of_a_file_swapped_for_a_symlink() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-6: deeply nested folder listings in a shared repository crash `bolt show` (and the
 // diff that runs after every `bolt save`).
-// ---------------------------------------------------------------------------------------------
 
 /// Commits, through Bolt's own library, a save whose top folder is `a/a/a/...` `depth` deep.
 fn plant_deep_save(root: &Path, depth: usize) {
@@ -539,10 +526,8 @@ fn rt6_deeply_nested_listings_do_not_crash_the_next_save() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-10: a "tree bomb": four tiny listings of 1,000 entries that all point at the same
 // sub-listing describe 10^9 files. `bolt show` tries to list them all.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -570,9 +555,7 @@ fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-7: Unicode format characters (bidi overrides) pass the terminal sanitizer.
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn rt7_bidi_override_in_a_file_name_is_not_printed_raw() {
@@ -591,9 +574,7 @@ fn rt7_bidi_override_in_a_file_name_is_not_printed_raw() {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-8: `bolt start` prints the project path without sanitizing it.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
@@ -610,9 +591,7 @@ fn rt8_start_does_not_print_escape_sequences_from_the_folder_name() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
 // RT-9: a shared project's `.bolt/config.toml` decides who YOUR saves say you are.
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn rt9_project_config_cannot_override_the_users_own_identity() {

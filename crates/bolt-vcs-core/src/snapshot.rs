@@ -1,5 +1,4 @@
-//! `bolt save`: walks the project folder, stores its files in a pack, builds the folder
-//! listings bottom-up, and commits the save with its diary entry.
+//! `bolt save`: walks the project folder, stores its files, and commits the save.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
@@ -39,16 +38,14 @@ pub enum SaveOutcome {
     Saved {
         save_id: Id,
         save: Save,
-        /// How many files differ from the save before; `None` if that save can't be compared
-        /// with this one (it is too large to read safely, say), so the number is unknown.
+        /// Files that differ from the save before; `None` if it can't be compared with this one.
         changed_files: Option<usize>,
     },
     /// The folder matches the line's current save, which is `current`.
     NothingChanged { current: Id },
 }
 
-/// Why a save was refused. The paths and details in the messages name things from the project
-/// folder, which came from outside Bolt, so they are shown escaped.
+/// Why a save was refused. Names from the project folder are untrusted, so messages escape them.
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
     #[error(transparent)]
@@ -226,7 +223,6 @@ enum Kind {
 struct Child {
     name: String,
     kind: Kind,
-    /// Where it is on disk.
     path: PathBuf,
     /// Its project path, with `/` between names.
     rel: String,
@@ -234,8 +230,7 @@ struct Child {
     executable: Option<bool>,
 }
 
-/// Every folder of the project by project path (`""` for the top folder), with its children
-/// sorted by name.
+/// Every folder by project path (`""` is the top folder), with its children sorted by name.
 type Folders = BTreeMap<String, Vec<Child>>;
 
 /// A project path as the user should see it; names that aren't UTF-8 are shown lossily.
@@ -257,11 +252,9 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
 }
 
-/// The rules of the `.boltignore` in `dir`, read once through `safe_fs` (storage-format.md §12:
-/// a regular UTF-8 file of at most 1 MiB) and parsed line by line as `ignore` would; none if
-/// it is missing. A problem with the file names it by its project path, once. A folder Bolt
-/// may not look into can't show whether it holds the file: that is the folder's trouble, and
-/// is reported as `Unreadable` (RT-11).
+/// The rules of the `.boltignore` in `dir`, or none if there isn't one. Read through `safe_fs`
+/// (a regular UTF-8 file of at most 1 MiB, storage-format.md §12). A folder Bolt may not look
+/// into is `Unreadable`, not an ignore problem (RT-11).
 fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
     let file = dir.join(".boltignore");
     let rel = shown(file.strip_prefix(root).unwrap_or(&file));
@@ -281,8 +274,8 @@ fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
                 };
                 return Err(SaveError::Unreadable { path, source });
             }
-            // `safe_fs` starts its refusals with the file's whole path, which the project path
-            // stands in for, so that the file is named once.
+            // `safe_fs` refusals start with the full path; the project path replaces it, so the
+            // file is named once.
             let why = e.to_string();
             return Err(ignore(
                 match why.strip_prefix(&file.display().to_string()) {
@@ -312,8 +305,8 @@ fn boltignore_rules(root: &Path, dir: &Path) -> Result<Gitignore, SaveError> {
     builder.build().map_err(|e| ignore(format!("{rel}: {e}")))
 }
 
-/// The `.boltignore` rules of the folders a walk is inside, nearest last, and the first problem
-/// found in a folder the walk was to enter: with its `.boltignore`, or in looking for one.
+/// The `.boltignore` rules of the folders a walk is inside (nearest last), and the first problem
+/// found on entering a folder.
 struct IgnoreRules {
     root: PathBuf,
     stack: Vec<(PathBuf, Gitignore)>,
@@ -321,9 +314,8 @@ struct IgnoreRules {
 }
 
 impl IgnoreRules {
-    /// Whether the walk keeps `path`, decided as `ignore` decides for its own ignore files: the
-    /// nearest folder's file with a matching pattern wins, and in it the last such pattern. A
-    /// folder that is kept adds its own rules; one whose `.boltignore` fails is not entered, and
+    /// Whether the walk keeps `path`, with `ignore`'s precedence: the nearest folder's file wins,
+    /// and within it the last matching pattern. A folder whose `.boltignore` fails is not entered;
     /// the problem is kept.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         // The walk is depth first, so the rules of folders `path` is not in are done with.
@@ -355,16 +347,12 @@ impl IgnoreRules {
     }
 }
 
-/// Stack for the thread that scans the project folder: 4 KiB for each level the depth limit
-/// allows, 16 MiB in all. Giving up a scan of a deep project frees one `ignore` matcher for each
-/// folder level, each linked to its parent's, so the chain is dropped by nested calls, one for
-/// each level. Measured on Windows, the longest chain the limit allows (4,098) needs about 2 MiB
-/// in a debug build and 0.4 MiB in a release build, and Windows gives its main thread 1 MiB: a
-/// caller's stack is not enough (RT-6, on disk). Unused stack costs address space only.
+/// Stack for the scan thread: 4 KiB per folder level the depth limit allows. Dropping the linked
+/// `ignore` matchers of a deep tree recurses once per level and needs about 2 MiB in a Windows
+/// debug build, more than the main thread's 1 MiB (RT-6). Unused stack costs address space only.
 const WALK_STACK_BYTES: usize = (MAX_SAVE_DEPTH + 2) * 4096;
 
-/// Scans the project folder (see `scan_folder`) on a thread made for the job, so that no caller
-/// needs a deep stack of its own.
+/// Scans the project folder on a thread of its own, so callers don't need a deep stack.
 fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
     thread::scope(|scope| {
         let scan = thread::Builder::new()
@@ -380,11 +368,11 @@ fn walk(root: &Path, limits: SaveLimits) -> Result<Folders, SaveError> {
 
 fn scan_folder(root: &Path, mut limits: SaveLimits) -> Result<Folders, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
-    // `limits` is checked while the tree is scanned, so one too deep or too big for a save is
-    // refused before it has all been read (RT-6, RT-10).
+    // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
+    // read (RT-6, RT-10).
     let mut folders = Folders::from([(String::new(), Vec::new())]);
-    // Bolt reads each .boltignore itself, once, and applies its rules here: `ignore` would open
-    // the file again by path, following links and reading without a limit.
+    // Bolt reads each .boltignore itself: `ignore` would reopen it by path, following links and
+    // reading without a limit.
     let top = boltignore_rules(root, root)?;
     let rules = Arc::new(Mutex::new(IgnoreRules {
         root: root.to_owned(),
@@ -515,12 +503,9 @@ fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
     }
 }
 
-/// The parent save's listing of each folder, if it had that folder.
-///
-/// Walks the old save only along the folders on disk, one listing for each and without
-/// recursion, so `walk` has already held it to the depth limit. It keeps every listing it reads,
-/// a shared one once for every path, so those are counted against the entry limit like those of
-/// any other walk over a save.
+/// The parent save's listing of each folder, if it had that folder. Walks the old save only along
+/// the folders on disk, so `walk` has already held it to the depth limit; every listing read
+/// (a shared one once per path) counts against the entry limit.
 fn old_listings(
     store: &Store,
     old_root: Id,
@@ -665,9 +650,8 @@ fn store_link(pack: &mut PackWriter, store: &Store, path: &Path) -> Result<(Id, 
     Ok((id, target.len() as u64))
 }
 
-/// Stores one file in two passes: hash it, then copy it into `pack` unless the store or pack
-/// already holds it. A file that changes in between, or that is a link or special file by the
-/// time it is opened, gives `ChangedDuringSave`; links are never followed.
+/// Stores one file in two passes: hash it, then copy it into `pack` unless already held. A file
+/// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`.
 pub(crate) fn store_file(
     pack: &mut PackWriter,
     store: &Store,
@@ -682,9 +666,8 @@ pub(crate) fn store_file(
         path: path.display().to_string(),
     };
     let stamp = |f: &File| f.metadata().map(|m| (m.len(), m.modified().ok()));
-    // A link or special file here was swapped in since the scan (RT-5). On Windows it can also be
-    // a non-link reparse point (a cloud placeholder, say) that the scan took for an ordinary file
-    // and `safe_fs` refuses; see security.md §7.
+    // A link or special file here was swapped in since the scan (RT-5). On Windows it can also be a
+    // non-link reparse point (a cloud placeholder, say) that `safe_fs` refuses; see security.md §7.
     let mut file = safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
         if e.kind() == io::ErrorKind::InvalidInput {
             changed()
@@ -1021,8 +1004,7 @@ mod tests {
             panic!("the names were accepted");
         };
         let text: Vec<String> = problems.iter().map(|(_, p)| p.to_string()).collect();
-        // On a case-insensitive disk (macOS by default) `readme` overwrote `README`, so the
-        // collision can't exist there.
+        // Case-insensitive disks (macOS by default) overwrote `README` with `readme`: no collision.
         let both_cases = fs::read_dir(dir.path())
             .unwrap()
             .filter(|e| {
@@ -1061,9 +1043,8 @@ mod tests {
     fn boltignore_rules_work_as_in_git() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        // A byte order mark is not part of the first pattern; the last matching pattern wins;
-        // `build/` matches folders only; nothing comes back from inside an ignored folder;
-        // `.git` never comes back.
+        // A byte order mark is not part of the first pattern; the last match wins; `build/` is
+        // folders only; nothing returns from inside an ignored folder; `.git` stays out.
         let top = "\u{feff}*.log\n!keep.log\nbuild/\n!build/keep.txt\n!.git/\n";
         write(root, ".boltignore", top.as_bytes());
         write(root, "a.log", b"x");
@@ -1499,20 +1480,17 @@ mod tests {
         assert!(pack_is_empty);
     }
 
-    /// Nested folders made for a test, removed again from the bottom up when dropped (even if
-    /// the test fails), because `remove_dir_all` goes one call deeper for every level.
+    /// Nested folders for a test, removed bottom-up on drop (even if the test fails), because
+    /// `remove_dir_all` recurses once per level.
     struct DeepFolders {
         top: PathBuf,
         bottom: PathBuf,
     }
 
     impl DeepFolders {
-        /// `levels` folders under `top`, each named `d` and inside the one before. None, with a
-        /// printed reason, if the system can't make that many: even with one-letter names,
-        /// 4,097 levels are an 8 KB path, too long for Linux (4,096 bytes) and macOS (1,024),
-        /// where no walk can see such a tree either. Windows takes it, because Rust asks it for
-        /// the long form of any long path. So on Windows a failure fails the test, and the real
-        /// depth tests that CI runs there can't pass without having run.
+        /// `levels` nested folders named `d` under `top`; `None` (with a printed reason) if the
+        /// system can't hold that path: 4,097 levels are 8 KB, over the limit on Linux (4,096) and
+        /// macOS (1,024). Windows takes it, so there a failure fails the test.
         fn make(top: &Path, levels: usize) -> Option<DeepFolders> {
             let mut deep = DeepFolders {
                 top: top.to_path_buf(),
@@ -1626,10 +1604,9 @@ mod tests {
     #[test]
     fn refusing_a_deep_tree_does_not_depend_on_the_callers_stack() {
         let (dir, _repo) = project();
-        // The `ignore` crate links each folder's matchers to its parent's, so giving up the scan
-        // frees a chain as long as the tree is deep, one nested call for each link: about 400
-        // bytes a level in a debug build. 300 levels take about 120 KB, more than the 64 KiB
-        // the caller has here, and are few enough to make on every system.
+        // Dropping `ignore`'s linked matchers recurses once per level (about 400 bytes in a debug
+        // build): 300 levels need about 120 KB, more than the 64 KiB stack here, and are few enough
+        // to make everywhere.
         let Some(_deep) = DeepFolders::make(dir.path(), 300) else {
             return;
         };
@@ -1640,11 +1617,9 @@ mod tests {
         assert!(refused);
     }
 
-    // The two tests below use the real limit of 4,096 levels. They take about a minute each on
-    // Windows (about 50 s of it making the folders: every operation on a path that long costs
-    // time for each level), so they run on request, and in CI on Windows only:
+    // The real limit of 4,096 levels takes about a minute per test on Windows, so these run on
+    // request (and in CI on Windows), on a 1 MiB stack like `bolt`'s main thread:
     // `cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders`
-    // They run the save on a 1 MiB stack, like `bolt`'s own main thread.
 
     #[test]
     #[ignore = "slow on Windows (about a minute): run with --ignored"]

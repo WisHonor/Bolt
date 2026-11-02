@@ -66,9 +66,8 @@ fn start_creates_a_project() {
     assert!(text(&out.stdout).contains("Started a Bolt project"));
 }
 
-/// The check that refuses another account's project (T23) must never refuse the user's own,
-/// including where an elevated administrator's folders belong to the Administrators group, as on
-/// the Windows CI runners (review focus 5).
+/// The check that refuses another account's project (T23) must never refuse the user's own, even
+/// where an elevated administrator's folders belong to the Administrators group (Windows CI).
 #[test]
 fn start_and_save_work_in_a_normal_folder() {
     let env = Env::new();
@@ -144,10 +143,8 @@ fn start_reads_the_users_own_config_through_a_link() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }
 
-// ---------------------------------------------------------------------------------------------
 // Who the user is: only from the environment and their own settings, never from a project's
 // (RT-9, decision 025).
-// ---------------------------------------------------------------------------------------------
 
 const REAL_USER: &str = "[user]\nname = \"Real User\"\nemail = \"real@example.com\"\n";
 const MALLORY: &str = "[user]\nname = \"Mallory\"\nemail = \"mallory@evil.example\"\n";
@@ -309,11 +306,9 @@ fn start_uses_the_project_entry_for_its_folder() {
     assert_eq!(history["saves"][0]["author"]["name"], "Work Name");
 }
 
-// A project's own settings are read only to see whether there is something to say about them,
-// after the user's identity is known. A file there that can't be read the ordinary way (a pipe
-// that waits for a writer, a link to a file that never ends) must not stop the save of a user who
-// has an identity. `rt3_…` and `rt4_…` in redteam.rs run without one, so they stop at the missing
-// identity before the file is looked at; these two reach it.
+// A project's own settings are read only after the user's identity is known. A file there that
+// can't be read the ordinary way (a pipe that waits for a writer, a link to a file that never ends)
+// must not stop the save. `rt3_…` and `rt4_…` in redteam.rs stop earlier, for lack of an identity.
 
 #[cfg(unix)]
 #[test]
@@ -367,10 +362,9 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     assert!(!stderr.contains("memory"), "{stderr}");
     assert!(stdout.starts_with("Saved "), "{stdout}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    // Reaching the cap is not an abort here: the standard library's reads give up with an error
-    // when memory runs out, and a project's settings that can't be read are ignored, so a save
-    // that read the link would still end well, a gigabyte later. What shows it is the memory.
-    // (Where the system has no /proc, as on macOS, the peak is not known and this passes.)
+    // Reaching the cap is not an abort here: reads fail with an error and unreadable settings are
+    // ignored, so a save that read the link would still end well, a gigabyte later. The peak memory
+    // shows it (without /proc, as on macOS, the peak is unknown and this passes).
     assert!(
         peak_kb < 200_000,
         "bolt save held {} MB: it read the link to /dev/zero",
@@ -880,10 +874,9 @@ fn text_quoted_in_an_error_is_shown_escaped() {
     assert!(message.contains("'[z-a]\\u{202e}'"), "{message:?}");
 }
 
-/// Two names that would not work on every system, so that the error has two lines of problems.
-/// Where any name is allowed, a device name and a name with a trailing dot. Windows allows
-/// neither (and macOS folds the same name written two ways into one), so there it is the same
-/// name written two ways, in the top folder and in a folder below it.
+/// Two names that would not work on every system, so the error has two lines of problems. Where
+/// any name is allowed: a device name and a name with a trailing dot. On Windows, which allows
+/// neither: one name written two ways, in the top folder and in a folder below it.
 fn plant_two_non_portable_names(root: &Path) {
     #[cfg(not(windows))]
     for name in ["CON", "name."] {
@@ -921,9 +914,8 @@ fn multi_line_error_prints_lines() {
     assert!(lines[3].starts_with("hint: "), "{err}");
 }
 
-/// RT-11: a folder that can't be entered is an unreadable folder, not a problem with a
-/// `.boltignore` that can't be reached in it. (On Windows it never was one: only unix refuses to
-/// look inside a folder for a name.)
+/// RT-11: a folder that can't be entered is unreadable, not a problem with a `.boltignore` in it.
+/// (Windows never made this mistake: only unix refuses to look inside a folder for a name.)
 #[cfg(unix)]
 #[test]
 fn unreadable_folder_is_reported_as_unreadable() {
@@ -949,10 +941,8 @@ fn unreadable_folder_is_reported_as_unreadable() {
     assert!(!err.contains("A .boltignore file has a problem"), "{err}");
 }
 
-// ---------------------------------------------------------------------------------------------
-// Saves that no real folder tree could be: too deep, or with paths far too long to hold together.
-// They are planted through Bolt's own library.
-// ---------------------------------------------------------------------------------------------
+// Saves that no real folder tree could be (too deep, or paths far too long to hold together),
+// planted through Bolt's own library.
 
 /// A listing whose every entry has the same kind and points at the same object.
 fn add_listing(pack: &mut PackWriter, names: &[String], kind: EntryKind, id: Id) -> Id {
@@ -1084,10 +1074,9 @@ fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
     assert!(json["changed_files"].is_null(), "{json}");
 }
 
-/// Folders one inside the other, and files at the bottom. All names are 255 bytes, so each file
-/// has a path of about `LONG_FOLDERS * 256` bytes, 100 KB, and the 2,500 paths together are over
-/// 250 MB: far more than `bolt` is given below, in packs of only 66 KB. A save of this kind is
-/// inside the limits of the format (4,096 levels, 10 million entries), so it must be readable.
+/// Nested folders with files at the bottom, all names 255 bytes: each file's path is about 100 KB
+/// and the 2,500 paths together over 250 MB, far more than `bolt` is given below. This is within
+/// the format's limits (4,096 levels, 10 million entries), so it must be readable.
 #[cfg(unix)]
 const LONG_FOLDERS: usize = 400;
 #[cfg(unix)]
@@ -1111,18 +1100,16 @@ fn plant_long_paths(root: &Path) {
     });
 }
 
-/// `bolt <args>` in the project, with its address space capped, so that holding too much shows
-/// as an abort ("memory allocation of … bytes failed") rather than slowing the machine down.
-/// Where the system does not enforce the cap (macOS), the command runs without one, and the test
-/// passes there without proving anything.
+/// `bolt <args>` in the project, with its address space capped, so that holding too much aborts
+/// ("memory allocation of … bytes failed") instead of slowing the machine down. Where the cap isn't
+/// enforced (macOS), the test passes without proving anything.
 #[cfg(unix)]
 fn bolt_capped(env: &Env, args: &[&str]) -> std::process::Command {
     bolt_capped_at(env, CAP_KB, args)
 }
 
-/// Runs `cmd` for at most `secs` seconds, then kills it, and reports with its output the most
-/// memory it was seen to hold: its peak resident set in KB, read from `/proc` (Linux has it; 0
-/// where the system has none).
+/// Runs `cmd` for at most `secs` seconds, then kills it, and returns its output with the peak
+/// resident set it was seen to hold, in KB, read from `/proc` (0 where there is none).
 #[cfg(unix)]
 fn run_noting_peak_memory(
     mut cmd: std::process::Command,

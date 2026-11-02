@@ -74,9 +74,8 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Creates the folder `dir` in its existing parent, flushing the parent so it survives a crash.
-/// Whatever is already at `dir`, a link included, is left alone, unfollowed, for the caller to
-/// check.
+/// Creates the folder `dir` in its existing parent and flushes the parent so it survives a crash.
+/// Whatever is already at `dir`, a link included, is left alone for the caller to check.
 pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
     match fs::create_dir(dir) {
         Ok(()) => sync_parent(dir),
@@ -103,13 +102,13 @@ pub fn open_lock_file(path: &Path) -> io::Result<File> {
     )
 }
 
-/// Flushes a folder's entries to disk. Windows has no such call: a rename there is not written
-/// through, so it keeps its order with earlier writes but can be lost on power failure
-/// (making it durable is a milestone 4 item).
+/// Flushes a folder's entries to disk. Windows has no such call: a rename there keeps its order
+/// with earlier writes but can be lost on power failure.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     if cfg!(unix) {
         File::open(dir)?.sync_all()
     } else {
+        // shortcut: renames are not durable on Windows; make them so in milestone 4.
         let _ = dir;
         Ok(())
     }

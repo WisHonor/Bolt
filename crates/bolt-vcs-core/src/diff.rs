@@ -29,19 +29,9 @@ pub struct FileChange<'a> {
     pub new_size: Option<u64>,
 }
 
-/// Hands every file that differs between two saved folders to `each`, in the order of their
-/// whole paths, byte by byte (so `a.txt` comes before `a/b`). Folders are walked into, not
-/// listed. `old_root` is `None` when there is nothing to compare against.
-///
-/// No change is kept once `each` has seen it. What the walk holds is the one path it is at, and,
-/// for each folder on the way down to it, the names in that folder that differ and have not had
-/// their turn yet. An error from `each` ends the walk and is returned.
-///
-/// Folders the two saves share are not read. Each save is held to the limits of
-/// storage-format.md section 3 on its own (`MAX_SAVE_DEPTH` levels, `MAX_SAVE_ENTRIES` entries
-/// counted along every path); passing one gives `StoreError::SaveTooLarge`, but only when the
-/// walk gets there, after it has handed out the changes that came before. To know the saves are
-/// within the limits first, run [`count_changes`].
+/// Hands every file that differs between two saved folders to `each`, in whole-path byte order (so
+/// `a.txt` comes before `a/b`); `old_root` is `None` with nothing to compare. A save past the
+/// limits of storage-format.md section 3 gives `SaveTooLarge` once reached (see [`count_changes`]).
 pub fn for_each_change<E: From<StoreError>>(
     store: &Store,
     old_root: Option<Id>,
@@ -51,9 +41,8 @@ pub fn for_each_change<E: From<StoreError>>(
     walk(store, old_root, new_root, MAX_SAVE_ENTRIES, each)
 }
 
-/// How many files differ between the two saves, found by the walk of [`for_each_change`] with
-/// nothing done for each change. It stops at the same limits, so it also tells whether the saves
-/// can be walked, before anything is shown.
+/// How many files differ between the two saves. It is the walk of [`for_each_change`] with nothing
+/// done per change, so it stops at the same limits and tells whether the saves can be walked.
 pub fn count_changes(
     store: &Store,
     old_root: Option<Id>,
@@ -115,10 +104,9 @@ fn walk<E: From<StoreError>>(
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
         SaveLimits::new(MAX_SAVE_DEPTH, max_entries),
     );
-    // What is left to do waits here instead of in a call per folder level, so a save nested
-    // thousands of levels deep cannot overflow the stack (RT-6). Working a folder out puts its
-    // names that differ on top, the one whose paths come last first, so what is popped next is
-    // always the one whose paths come next. The roots go first.
+    // What is left to do waits here, not in a call per folder level, so a save nested thousands of
+    // levels deep cannot overflow the stack (RT-6). A folder's differing names are pushed last path
+    // first, so the next one popped is always the one whose paths come next.
     let mut todo = vec![Todo {
         name: String::new(),
         at: 0,
@@ -128,10 +116,9 @@ fn walk<E: From<StoreError>>(
             depth: 0,
         },
     }];
-    // The path of what is being worked on (`/` after every folder's name), which is the only
-    // path in memory. A waiting name carries only itself and the length of its folder's path:
-    // everything that was pushed after it is deeper, so when it is popped, the path up to that
-    // length is still its folder's.
+    // The path of what is being worked on (`/` after every folder's name) is the only path in
+    // memory. A waiting name carries just the length of its folder's path: what was pushed after it
+    // is deeper, so when it is popped, the path up to that length is still its folder's.
     let mut path = String::new();
     while let Some(Todo { name, at, step }) = todo.pop() {
         path.truncate(at);
@@ -524,9 +511,8 @@ mod tests {
         Folder(BTreeMap<String, Node>),
     }
 
-    /// Names that sort differently as a folder (`name/`) than as a file: they differ from each
-    /// other in bytes just below and just above `/`. Some are not ASCII, so that a byte is not a
-    /// character.
+    /// Names that sort differently as a folder (`name/`) than as a file: they differ in bytes just
+    /// below and just above `/`. Some are not ASCII, so a byte is not a character.
     fn name() -> impl Strategy<Value = String> {
         let names = vec![
             "a",

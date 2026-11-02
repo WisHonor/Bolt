@@ -30,9 +30,8 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
     })
 }
 
-/// A failed command's message and what to do about it. The text from outside Bolt in a message
-/// (a name, a path, a quotation) is already escaped by the error that made it; the lines Bolt
-/// writes itself are not.
+/// A failed command's message and what to do about it. Text from outside Bolt in a message is
+/// already escaped by the error that made it; the lines Bolt writes itself are not.
 pub struct Failure {
     pub message: String,
     pub hint: Option<String>,

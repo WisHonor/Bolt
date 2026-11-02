@@ -226,9 +226,8 @@ fn owner_allows(
     }
 }
 
-/// Checks the project folder `root` before anything inside its `.bolt` is looked at: `.bolt`, if
-/// there, must be a real folder, and `owner_check` must allow the folder and `.bolt`. Then the
-/// folders inside `.bolt` must be real too. `Ok(false)`: no `.bolt`.
+/// Checks `root` and its `.bolt` (a real folder, allowed by `owner_check`) before anything inside
+/// is looked at, then the folders inside `.bolt`. `Ok(false)`: no `.bolt`.
 fn check_bolt(
     root: &Path,
     owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
@@ -387,9 +386,8 @@ fn enclosing_project<'a>(
 }
 
 impl Repository {
-    /// Makes `root` a new project: the folders, then the first save (an empty listing) on line
-    /// `main`, then `.bolt/format` last. A `.bolt` without `format` is an interrupted start,
-    /// which this finishes.
+    /// Makes `root` a new project: the folders, the first save on line `main`, then `.bolt/format`
+    /// last. A `.bolt` without `format` is an interrupted start, which this finishes.
     pub fn init(root: &Path, who: &Person) -> Result<Repository, RepoError> {
         Repository::init_with(root, who, &check_owner)
     }
@@ -617,9 +615,8 @@ impl Repository {
         Ok((id, DiaryEntry::decode(&bytes)?))
     }
 
-    /// Takes the change lock, waiting for another changing command if needed. `on_wait` is
-    /// called once, with that command's lock information, before waiting. `command` must
-    /// already be redacted: it is written to `state/lock-info` as given.
+    /// Takes the change lock, waiting if another command holds it (`on_wait` gets its lock info
+    /// first). `command` must already be redacted: it is written to `state/lock-info` as given.
     pub fn lock_for_change(
         &mut self,
         command: &str,
@@ -655,12 +652,9 @@ impl Repository {
         Ok(ChangeLock { _file: file })
     }
 
-    /// Stores `entry` in `pack`, moves the pack into the store, then replaces `state/head`.
-    /// The command has happened exactly when the head is replaced (decision 010).
-    ///
-    /// An entry that would not decode is refused before anything is written. Note: an `Io`
-    /// error can come from the final folder sync after the head was already replaced, so
-    /// callers must not report "nothing changed" for an `Io` error.
+    /// Stores `entry` in `pack`, moves the pack into the store, then replaces `state/head`. The
+    /// command has happened exactly when the head is replaced (decision 010), so an `Io` error from
+    /// the final folder sync does not mean "nothing changed".
     pub fn commit(
         &mut self,
         _lock: &ChangeLock,
@@ -1097,8 +1091,7 @@ mod tests {
     }
 
     /// Some drives give a new folder another owner, or none. `bolt start` checks the `.bolt` it
-    /// made the way every command will, stops before making anything in it, and finishes when
-    /// run again once the folder is trusted.
+    /// made, stops before making anything in it, and finishes when run again once it is trusted.
     #[test]
     fn start_stops_when_it_may_not_use_the_bolt_folder_it_made() {
         for drive_says in [Owner::Unknown, Owner::Other] {

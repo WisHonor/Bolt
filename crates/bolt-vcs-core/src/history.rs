@@ -46,9 +46,6 @@ fn walk(repo: &Repository, start: Id) -> Result<Vec<(Id, Save)>, RepoError> {
 }
 
 /// The current line's saves (or the checked-out save's ancestors), newest first.
-///
-/// # Errors
-/// Fails if the repository can't be read.
 pub fn line_history(repo: &Repository) -> Result<Vec<(Id, Save)>, RepoError> {
     let (_, entry) = repo.current()?;
     let start = match &entry.state.position {
@@ -115,10 +112,8 @@ fn by_change_prefix(saves: &[(Id, Save)], text: &str) -> Result<Id, ResolveError
 }
 
 /// Finds a save from text: a line name, else a change-ID prefix (letters `k`-`z`, unique on
-/// the current line), else at least 8 hex digits of a fingerprint.
-///
-/// # Errors
-/// `NotFound`, `Ambiguous`, or a repository problem.
+/// the current line), else at least 8 hex digits of a fingerprint. Fails with `NotFound`,
+/// `Ambiguous`, or a repository problem.
 pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError> {
     let (_, entry) = repo.current()?;
     if let Some(id) = entry.state.lines.get(text) {

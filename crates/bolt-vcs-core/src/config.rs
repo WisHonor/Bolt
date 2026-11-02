@@ -1,8 +1,6 @@
-//! Settings: who the user is (name and email), from the environment or the user's own
-//! `config.toml`, and the folders whose projects the user trusts although another user account
-//! owns them (`safe-folders`, from the user's own `config.toml` only). A project's
-//! `.bolt/config.toml` is never asked: a project shared as a zip carries that file, so a stranger
-//! could make the user's saves claim to be from someone else (decision 025).
+//! Settings: who the user is (from the environment or the user's own `config.toml`) and the
+//! `safe-folders` they trust. A project's own `.bolt/config.toml` is never asked: a shared zip
+//! carries it, so a stranger could make the user's saves claim to be someone else (decision 025).
 
 use std::path::{Path, PathBuf};
 
@@ -57,8 +55,7 @@ struct ConfigFile {
     /// An identity for one folder; only the user's own file is asked for these.
     #[serde(default)]
     project: Vec<ProjectEntry>,
-    /// Folders to use although another user account owns them; only the user's own file is
-    /// asked for these.
+    /// Folders to use although another account owns them; only the user's own file is asked.
     #[serde(default, rename = "safe-folders")]
     safe_folders: Vec<String>,
 }
@@ -85,13 +82,9 @@ fn both(name: Option<String>, email: Option<String>) -> Option<Identity> {
     }
 }
 
-/// Whether `a` and `b` are one and the same folder: each is resolved (links, `.` and `..`, short
-/// names), and the results must be exactly equal. On Windows the resolved path spells every name
-/// as it is stored on disk, so `C:\WORK` and `C:\Work` still match. Nothing else is folded: two
-/// different folders can have names that only look alike (a KELVIN SIGN and a `K`), or that
-/// differ only in case inside a case-sensitive folder. A folder that can't be resolved (it doesn't
-/// exist, say) is never the same as anything: callers trust or customise a folder only when it
-/// matches, so no match is the safe answer.
+/// Whether `a` and `b` are one folder: each is resolved (links, `..`, short names) and the results
+/// must be exactly equal. Windows spells resolved names as stored, so `C:\WORK` matches `C:\Work`;
+/// nothing else is folded (a KELVIN SIGN is not a `K`). An unresolvable folder never matches.
 pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     let (Ok(a), Ok(b)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) else {
         return false;
@@ -99,9 +92,8 @@ pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     a == b
 }
 
-/// The `config.toml` file at `path`, or `None` if there is none. `read` is `safe_fs::read_capped`
-/// for a project's file, which never follows a link, and `safe_fs::read_capped_following_links`
-/// for the user's own.
+/// The `config.toml` at `path`, or `None` if there is none. `read` is `safe_fs::read_capped` for a
+/// project's file (never follows a link) and `safe_fs::read_capped_following_links` for the user's.
 fn read_file(
     path: &Path,
     read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
@@ -120,10 +112,9 @@ fn read_file(
         .map_err(|e| invalid(e.message().to_owned()))
 }
 
-/// The identity in a `config.toml` file, if it exists and names both: the `[[project]]` entry for
-/// `project_root` if the file has one (the last complete one, so a line added at the end of the
-/// file takes effect), else the `[user]` section. A project's own file is read with `None` for
-/// `project_root`, as it has no say in who the user is. `read` is as for `read_file`.
+/// The identity in a `config.toml`, if it exists and names both: the `[[project]]` entry for
+/// `project_root` (the last complete one, so a line added at the end takes effect), else `[user]`.
+/// A project's own file is read with `None` for `project_root`: it has no say in who the user is.
 fn from_file(
     path: &Path,
     read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
@@ -156,11 +147,8 @@ pub fn user_config_path() -> Option<PathBuf> {
 }
 
 /// The user's name and email, from the first of these that names both (decision 025):
-/// 1. `BOLT_USER_NAME` and `BOLT_USER_EMAIL`;
-/// 2. the `[[project]]` entry for `project_root` in the user's own `config.toml`;
-/// 3. the `[user]` section of the user's own `config.toml`.
-///
-/// The project's `.bolt/config.toml` is never one of them.
+/// `BOLT_USER_NAME` and `BOLT_USER_EMAIL`; the `[[project]]` entry for `project_root` in the user's
+/// own `config.toml`; its `[user]` section. The project's own `.bolt/config.toml` is never used.
 pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigError> {
     let env = |key| std::env::var(key).ok();
     identity_from(
@@ -188,10 +176,9 @@ fn identity_from(
     Err(ConfigError::MissingIdentity { path: user_config })
 }
 
-/// The identity the project's own `.bolt/config.toml` names, if Bolt did not use it: it differs
-/// from the one `load_identity` gives (which is none, if that fails). The file is read the way
-/// every file from a project is, never through a link and at most 1 MiB; one that can't be read
-/// names nobody.
+/// The identity the project's own `.bolt/config.toml` names, if Bolt did not use it (it differs
+/// from the one `load_identity` gives, which is none if that fails). Read like every project file:
+/// never through a link, at most 1 MiB; one that can't be read names nobody.
 #[must_use]
 pub fn ignored_project_identity(project_root: &Path) -> Option<Identity> {
     ignored_given(
@@ -209,17 +196,15 @@ fn ignored_given(project_root: &Path, used: Option<&Identity>) -> Option<Identit
     (used != Some(&named)).then_some(named)
 }
 
-/// What `save` adds when a project's settings name an identity that Bolt ignored: what was
-/// ignored, and the lines that would make it the user's choice for this folder, filled in
-/// (decision 025). Everything that came from the project is escaped for the terminal.
+/// What `save` adds when a project's settings name an identity Bolt ignored: what was ignored and
+/// the lines that would make it the user's choice here (decision 025). Project text is escaped.
 #[must_use]
 pub fn ignored_identity_note(ignored: &Identity, project_root: &Path) -> String {
     note_for(ignored, project_root, user_config_path().as_deref())
 }
 
-/// `text` as a TOML string for a line the user is shown to add to their settings. The TOML
-/// writer does the quoting, so no folder, name or email can break out of its line or start a
-/// table. Escaping first keeps it on its one line and valid TOML.
+/// `text` as a TOML string for a line the user is shown to add. The TOML writer quotes it and
+/// escaping comes first, so no folder, name or email can break out of its line or start a table.
 fn toml_string(text: &str) -> String {
     toml::Value::String(escape(text, false)).to_string()
 }
@@ -249,10 +234,9 @@ fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> S
     )
 }
 
-/// The folders whose projects the user trusts although another user account owns their `.bolt`
-/// folder (decision 025, T23): the `safe-folders` list in the user's own `config.toml`, never a
-/// project's. Each entry must be a full path; a relative one would name a different folder
-/// wherever a command runs. No settings file, or no list, trusts nothing.
+/// The folders whose projects the user trusts although another account owns their `.bolt` (decision
+/// 025, T23): the `safe-folders` list in the user's own `config.toml`, never a project's. Entries
+/// must be full paths, since a relative one names a different folder wherever a command runs.
 pub fn safe_folders() -> Result<Vec<PathBuf>, ConfigError> {
     user_config_path().map_or(Ok(Vec::new()), |path| safe_folders_in(&path))
 }
@@ -380,9 +364,7 @@ mod tests {
         assert!(p.tz_offset_min.abs() <= 26 * 60);
     }
 
-    // -----------------------------------------------------------------------------------------
     // Whose identity it is (RT-9, decision 025)
-    // -----------------------------------------------------------------------------------------
 
     fn person(name: &str, email: &str) -> Identity {
         Identity {
@@ -683,9 +665,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------------------------
     // Folders the user trusts although another account owns them (T23, decision 025)
-    // -----------------------------------------------------------------------------------------
 
     #[test]
     fn safe_folders_come_from_the_users_own_settings() {

@@ -1,8 +1,6 @@
-//! Which file names Bolt stores, and which it flags as non-portable (decision 004).
-//!
-//! The always-on rules ([`validate_name`]) refuse a name outright. The portability
-//! checks ([`name_problems`], [`folder_problems`]) describe names that work here but
-//! would break on another operating system.
+//! Which file names Bolt stores, and which it flags as non-portable (decision 004):
+//! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
+//! that work here but would break on another operating system.
 
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;

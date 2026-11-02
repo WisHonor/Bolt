@@ -2,14 +2,9 @@
 
 use std::fmt::Write as _;
 
-/// Makes text that came from outside Bolt safe to print: a file or folder name, a message, a
-/// settings file, a hostile repository. A control character (an escape sequence could drive the
-/// terminal) becomes a visible `\xNN`. So does anything else that changes what a terminal shows or
-/// where a line ends without showing anything itself: a bidi control, and a line or paragraph
-/// separator; those become `\u{NNNN}`. A newline stays when `keep_newlines`.
-///
-/// Escaping again changes nothing, so a message may be escaped piece by piece where it is built
-/// and once more when it is printed.
+/// Makes text from outside Bolt safe to print. Control characters (an escape sequence could drive
+/// the terminal) become `\xNN`; bidi controls and line or paragraph separators become `\u{NNNN}`.
+/// A newline stays when `keep_newlines`. Escaping again changes nothing.
 #[must_use]
 pub fn escape(text: &str, keep_newlines: bool) -> String {
     let mut out = String::with_capacity(text.len());
@@ -25,10 +20,9 @@ pub fn escape(text: &str, keep_newlines: bool) -> String {
     out
 }
 
-/// The characters that are not control characters but still make a terminal show a name other
-/// than the one it has: the bidi controls reorder the text around them (`invoice_\u{202e}fdp.exe`
-/// reads as `invoice_exe.pdf`), and the line and paragraph separators end a line. The joiners
-/// that emoji and many scripts need are not here: they change nothing but how letters join.
+/// Non-control characters that still make a terminal show a name other than the one it has:
+/// bidi controls reorder text (`invoice_\u{202e}fdp.exe` reads as `invoice_exe.pdf`) and separators
+/// end a line. Joiners are not here: emoji and many scripts need them, and they only join letters.
 fn reorders_or_splits(c: char) -> bool {
     matches!(
         c,

@@ -1,17 +1,14 @@
 //! Operating-system calls for Bolt.
 //!
-//! This is the only crate where `unsafe` is allowed, and only for operating-system calls.
-//! The owner reviews every line of it.
+//! The only crate where `unsafe` is allowed, and only for these calls.
 
 use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
-/// Makes `options` never follow a link at the last part of the path, so the caller can refuse
-/// it. Unix: opening a link fails (`O_NOFOLLOW`), and opening a named pipe doesn't wait for
-/// the other end (`O_NONBLOCK`; regular files ignore it). Windows: a link, junction or other
-/// reparse point opens as itself (`FILE_FLAG_OPEN_REPARSE_POINT`). Replaces any custom flags
-/// already set.
+/// Makes `options` never follow a link at the last part of the path, so the caller can refuse it.
+/// Unix: opening a link fails (`O_NOFOLLOW`); pipes don't block (`O_NONBLOCK`; files ignore it).
+/// Windows: a link, junction or other reparse point opens as itself. Replaces any custom flags.
 pub fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     {
@@ -36,6 +33,8 @@ pub fn hide_path(path: &Path) -> io::Result<()> {
         use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
 
         let attributes = std::fs::symlink_metadata(path)?.file_attributes();
+        // shortcut: no `\\?\` prefix, so paths over 260 characters fail with an error (never
+        // touch the wrong file); upgrade if projects that deep turn up.
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
         if wide.contains(&0) {
             return Err(io::Error::new(
@@ -44,8 +43,6 @@ pub fn hide_path(path: &Path) -> io::Result<()> {
             ));
         }
         wide.push(0);
-        // shortcut: no `\\?\` prefix, so paths over 260 characters fail with an error (never
-        // touch the wrong file); upgrade if projects that deep turn up.
         // SAFETY: `wide` is a NUL-terminated UTF-16 string with no other NULs, and it outlives
         // the call; SetFileAttributesW only reads it and keeps no pointer to it.
         let ok = unsafe { SetFileAttributesW(wide.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) };
@@ -91,9 +88,9 @@ pub enum Owner {
     Unknown,
 }
 
-/// Who owns the file or folder at `path`, so that a `.bolt` folder another user account planted
-/// above the user's work is refused (decisions 025 and 026, T23). A link or junction at the last
-/// part of `path` is not followed: its own owner is the answer. A missing `path` gives `NotFound`.
+/// Who owns `path`, so a `.bolt` that another account planted above the user's work is refused
+/// (decisions 025 and 026, T23). A link or junction at the end of `path` is not followed: its own
+/// owner is the answer. A missing `path` gives `NotFound`.
 pub fn owner_of(path: &Path) -> io::Result<Owner> {
     #[cfg(unix)]
     {
@@ -163,9 +160,8 @@ mod windows_owner {
         };
         match status {
             ERROR_SUCCESS => {}
-            // Windows can't tell the owner here (a file system or network share that records
-            // none). Not shown to be the user's, so Bolt refuses the folder unless the user lists
-            // it in safe-folders.
+            // A file system or network share that records no owner: not shown to be the user's,
+            // so Bolt refuses the folder unless the user lists it in safe-folders.
             ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION => return Ok(Owner::Unknown),
             _ => return Err(io::Error::from_raw_os_error(status as i32)),
         }
@@ -182,8 +178,7 @@ mod windows_owner {
         if unsafe { IsValidSid(owner) } == 0 {
             return Ok(Owner::Unknown);
         }
-        // FAT and exFAT record no owner, and Windows reports "Everyone" for them: can't tell
-        // (Git reads it the same way).
+        // FAT and exFAT record no owner and Windows reports "Everyone": can't tell (as Git does).
         // SAFETY: `owner` is a valid SID in the descriptor (checked above); IsWellKnownSid only
         // reads it.
         if unsafe { IsWellKnownSid(owner, WinWorldSid) } != 0 {
@@ -200,15 +195,14 @@ mod windows_owner {
             return Ok(Owner::User);
         }
 
-        // The Administrators group counts as the user when the user is an administrator: the
-        // group is in their token, enabled when elevated, "for deny only" when not. The brief's
-        // CheckTokenMembership counts enabled groups only, which would lock an administrator out
-        // of a project they started in an elevated terminal (review focus 5).
         // SAFETY: `owner` is a valid SID in the descriptor (checked above); IsWellKnownSid only
         // reads it.
         if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } == 0 {
             return Ok(Owner::Other);
         }
+        // The Administrators group counts as the user if it is in their token: enabled when
+        // elevated, "for deny only" when not. CheckTokenMembership counts enabled groups only and
+        // would lock an administrator out of a project started in an elevated terminal.
         let (group_buffer, groups_filled) = token_information(&token, TokenGroups)?;
         let groups = groups_in(&group_buffer, groups_filled)?;
         let in_group = groups.iter().any(|group| {
@@ -232,10 +226,9 @@ mod windows_owner {
         Ok(unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid })
     }
 
-    /// The groups in a TOKEN_GROUPS that Windows wrote into the first `filled` bytes of
-    /// `buffer`: a count, then that many SID_AND_ATTRIBUTES (the one-element array the type
-    /// declares runs on past its end). The slice borrows `buffer`, so the compiler keeps it from
-    /// outliving it.
+    /// The groups in a TOKEN_GROUPS that Windows wrote into the first `filled` bytes of `buffer`: a
+    /// count, then that many SID_AND_ATTRIBUTES (the type's one-element array runs past its end).
+    /// The slice borrows `buffer`, so it can't outlive it.
     fn groups_in(buffer: &[usize], filled: usize) -> io::Result<&[SID_AND_ATTRIBUTES]> {
         let first = offset_of!(TOKEN_GROUPS, Groups);
         if filled < first || filled > size_of_val(buffer) {
@@ -253,12 +246,9 @@ mod windows_owner {
         if end.is_none_or(|end| end > filled) {
             return Err(bad_token_information());
         }
-        // SAFETY: the `count` entries start at `first` and end within the filled part of
-        // `buffer` (checked just above), so they are in one allocation, initialised, and aligned
-        // for SID_AND_ATTRIBUTES (pointer-aligned, like `buffer`'s usizes). `&raw const` takes
-        // the list's address from `header`, which may reach the whole buffer, without making a
-        // reference to the one element the type declares. `buffer` is borrowed and can't change
-        // while the slice is alive.
+        // SAFETY: the `count` entries lie in the filled part of `buffer` (checked above): initialised,
+        // one allocation, aligned like its usizes. `&raw const` takes the address from `header`, which
+        // reaches the buffer, with no reference to the one declared element. `buffer` stays borrowed.
         Ok(unsafe {
             std::slice::from_raw_parts(
                 (&raw const (*header).Groups).cast::<SID_AND_ATTRIBUTES>(),
@@ -272,8 +262,7 @@ mod windows_owner {
         io::Error::other("Windows gave Bolt token information of an unexpected size")
     }
 
-    /// A security descriptor that Windows allocated for Bolt (with LocalAlloc). Dropping it frees
-    /// it.
+    /// A security descriptor Windows allocated for Bolt (with LocalAlloc); dropping it frees it.
     struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
     impl Drop for SecurityDescriptor {
@@ -316,10 +305,9 @@ mod windows_owner {
         }
         let mut buffer = vec![0_usize; (bytes as usize).div_ceil(size_of::<usize>())];
         let mut written = 0;
-        // SAFETY: `buffer` holds at least `bytes` bytes, and Windows writes at most the `bytes`
-        // it is given. `written` is a valid place for the length written. `token` is open for
-        // the call. If the information grew since the first call, this fails with
-        // ERROR_INSUFFICIENT_BUFFER, which is returned as an error.
+        // SAFETY: `buffer` holds at least `bytes` bytes and Windows writes at most that many;
+        // `written` is a valid place for the length; `token` is open for the call. If the information
+        // grew since the first call, this fails with ERROR_INSUFFICIENT_BUFFER, returned as an error.
         let ok = unsafe {
             GetTokenInformation(
                 token.as_raw_handle(),
