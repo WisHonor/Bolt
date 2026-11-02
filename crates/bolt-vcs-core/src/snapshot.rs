@@ -88,6 +88,14 @@ pub enum SaveError {
     Ignore { detail: String },
     #[error("This project is too large to save: {detail}.")]
     TooLarge { detail: String },
+    #[error(
+        "Bolt can't save {}: the last save has a folder there holding {}, which every save keeps \
+         as it was because this computer doesn't hold it as it is, and a save can't hold both \
+         under one name.",
+        escape(path, false),
+        escape(kept, false)
+    )]
+    InTheWay { path: String, kept: String },
     #[error("You are not on a line, so the save has nowhere to go.")]
     NotOnALine,
 }
@@ -125,6 +133,12 @@ impl SaveError {
         Some(
             match self {
                 SaveError::Repo(e) => return e.hint(),
+                SaveError::InTheWay { path, .. } => {
+                    return Some(format!(
+                        "Nothing was saved. Rename or move {}, then save again.",
+                        escape(path, false)
+                    ));
+                }
                 SaveError::Unreadable { .. } => {
                     "Nothing was saved. Let Bolt read it, or list it in .boltignore."
                 }
@@ -350,14 +364,23 @@ fn is_internal_folder(name: &str, ignores_case: bool) -> bool {
     name == ".bolt" || name == ".git" || (ignores_case && name.eq_ignore_ascii_case(".git"))
 }
 
+/// The project path of `name` in the folder `rel` (`""` for the top folder).
+fn path_in(rel: &str, name: &str) -> String {
+    if rel.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{rel}/{name}")
+    }
+}
+
 /// A project path as Git matches it: the bytes of its names, with `/` between them.
 fn path_bytes(rel: &Path) -> Vec<u8> {
     let names: Vec<&[u8]> = rel.iter().map(|c| c.as_encoded_bytes()).collect();
     names.join(&b'/')
 }
 
-/// The save a new one builds on. A walk reads its listings only along the folders it keeps, so
-/// the walk's depth limit holds them too.
+/// The save a new one builds on. A walk reads its listings along the folders it keeps, where the
+/// walk's depth limit holds them too, and through the folders gone from disk.
 struct Base<'a> {
     store: &'a Store,
     root: Id,
@@ -462,11 +485,7 @@ impl IgnoreRules {
         for (e, name) in listing.entries().iter().zip(&compared) {
             let one_file = seen.get(name.as_str()).is_some_and(|&n| n > 1);
             if e.kind == EntryKind::ProjectLink || !holdable_here(&e.name) || one_file {
-                let path = if rel.is_empty() {
-                    e.name.clone()
-                } else {
-                    format!("{rel}/{}", e.name)
-                };
+                let path = path_in(rel, &e.name);
                 let kept = Child {
                     name: e.name.clone(),
                     kind: Kind::Kept {
@@ -479,6 +498,80 @@ impl IgnoreRules {
                     executable: None,
                 };
                 self.untouched.insert(path, kept);
+            }
+        }
+    }
+
+    /// After the walk, which found `found`: looks through the base save's folders it didn't find
+    /// on disk for what is kept as it was there. Such an entry stays even when its folder is
+    /// gone (decisions 019 and 036).
+    fn note_gone(&mut self, base: &mut Base, found: &Folders) -> Result<(), SaveError> {
+        let mut gone = Vec::new();
+        for (rel, listing) in &self.old {
+            let inner = listing.iter().flat_map(Listing::entries);
+            for e in inner.filter(|e| e.kind == EntryKind::Folder) {
+                let path = path_in(rel, &e.name);
+                if !found.contains_key(&path) && !self.untouched.contains_key(&path) {
+                    gone.push((path, e.id));
+                }
+            }
+        }
+        // In path order, so a damaged base save is reported the same way every time.
+        gone.sort();
+        for (rel, id) in gone {
+            self.note_gone_tree(base, rel, id)?;
+        }
+        Ok(())
+    }
+
+    /// Notes what is kept as it was in the gone folder `rel` (listing `id`) and below it. As in
+    /// the diff walk, only the folders from `rel` down to the one being read are held, and one
+    /// goes into `old` only when something in or below it is kept.
+    fn note_gone_tree(&mut self, base: &mut Base, rel: String, id: Id) -> Result<(), SaveError> {
+        let depth = rel.split('/').count();
+        let mut path = rel;
+        // Each open folder's listing, the next of its entries to look at, and its path's length.
+        let mut open: Vec<(Listing, usize, usize)> = Vec::new();
+        // How many of the open folders, from the top, are in `old`.
+        let mut known = 0;
+        let mut read = Some(id);
+        loop {
+            // Past its limits a base save is invalid and nothing there can be kept, so the search
+            // ends and the save goes ahead, as one beside a save too large to compare does.
+            if let Some(id) = read.take()
+                && base.limits.check_depth(depth + open.len()).is_ok()
+            {
+                let listing = base.store.listing(&id)?;
+                if base.limits.add(listing.entries().len()).is_err() {
+                    return Ok(());
+                }
+                let kept = self.untouched.len();
+                self.note_untouched(&path, &listing);
+                open.push((listing, 0, path.len()));
+                if self.untouched.len() > kept {
+                    for (listing, _, end) in &open[known..] {
+                        self.old
+                            .insert(path[..*end].to_owned(), Some(listing.clone()));
+                    }
+                    known = open.len();
+                }
+            }
+            let Some((listing, next, end)) = open.last_mut() else {
+                return Ok(());
+            };
+            path.truncate(*end);
+            let Some(e) = listing.entries().get(*next) else {
+                open.pop();
+                known = known.min(open.len());
+                continue;
+            };
+            *next += 1;
+            if e.kind == EntryKind::Folder {
+                path.push('/');
+                path.push_str(&e.name);
+                if !self.untouched.contains_key(&path) {
+                    read = Some(e.id);
+                }
             }
         }
     }
@@ -741,12 +834,20 @@ fn scan_folder(
     if let Some(problem) = rules.problem.take() {
         return Err(problem);
     }
-    // shortcut: a kept folder counts as one entry, not with what it holds; count that too if
-    // saves come near the limit.
-    for (_, kept) in rules.untouched.drain() {
-        limits.add(1).map_err(too_large)?;
-        let up = kept.rel.rsplit_once('/').map_or("", |(up, _)| up);
-        folders.entry(up.to_owned()).or_default().push(kept);
+    rules.note_gone(&mut base, &folders)?;
+    // In path order, so a save that stops names the same entry every time.
+    let mut kept: Vec<Child> = rules.untouched.drain().map(|(_, c)| c).collect();
+    kept.sort_by(|a, b| a.rel.cmp(&b.rel));
+    for c in kept {
+        if let Kind::Kept {
+            kind: EntryKind::Folder,
+            id,
+            ..
+        } = c.kind
+        {
+            count_kept_folder(base.store, &mut limits, &c.rel, id)?;
+        }
+        put_back(root, &mut folders, &mut limits, c)?;
     }
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -756,6 +857,72 @@ fn scan_folder(
         old: std::mem::take(&mut rules.old),
         warnings: std::mem::take(&mut rules.warnings),
     })
+}
+
+/// Counts everything the kept folder `rel` holds, from its listing `id` down, against `limits`,
+/// one listing at a time: kept or not, a save holds no more than its format allows.
+fn count_kept_folder(
+    store: &Store,
+    limits: &mut SaveLimits,
+    rel: &str,
+    id: Id,
+) -> Result<(), SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    let mut todo = vec![(id, rel.split('/').count())];
+    while let Some((id, depth)) = todo.pop() {
+        limits.check_depth(depth).map_err(too_large)?;
+        let listing = store.listing(&id)?;
+        limits.add(listing.entries().len()).map_err(too_large)?;
+        let inner = listing
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::Folder);
+        todo.extend(inner.map(|e| (e.id, depth + 1)));
+    }
+    Ok(())
+}
+
+/// Puts an entry kept as it was into its folder. A folder above it that is gone from disk comes
+/// back holding only what is kept; if something else on disk now has its name, the save stops.
+fn put_back(
+    root: &Path,
+    folders: &mut Folders,
+    limits: &mut SaveLimits,
+    kept: Child,
+) -> Result<(), SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    let kept_path = kept.rel.clone();
+    let mut child = kept;
+    loop {
+        limits.add(1).map_err(too_large)?;
+        let (up, _) = child.rel.rsplit_once('/').unwrap_or_default();
+        let up = up.to_owned();
+        if let Some(children) = folders.get_mut(&up) {
+            // The walk never takes in a kept entry's own name, but a folder brought back can meet
+            // what it found.
+            if child.kind == Kind::Folder
+                && let Some(other) = children.iter().find(|c| c.name == child.name)
+            {
+                return Err(SaveError::InTheWay {
+                    path: other.rel.clone(),
+                    kept: kept_path,
+                });
+            }
+            children.push(child);
+            return Ok(());
+        }
+        let depth = up.split('/').count();
+        limits.check_depth(depth).map_err(too_large)?;
+        let name = up.rsplit('/').next().unwrap_or_default().to_owned();
+        folders.insert(up.clone(), vec![child]);
+        child = Child {
+            name,
+            kind: Kind::Folder,
+            path: root.join(&up),
+            rel: up,
+            executable: None,
+        };
+    }
 }
 
 /// An `ignore` error with paths shown as project paths.
@@ -1040,7 +1207,7 @@ mod tests {
 
     type Tree = BTreeMap<String, (EntryKind, Vec<u8>)>;
 
-    /// Every entry of a saved folder, by path; folders have no bytes.
+    /// Every entry of a saved folder, by path; folders and project links have no bytes.
     fn saved_tree(store: &Store, root: Id) -> Tree {
         fn walk(store: &Store, id: Id, prefix: &str, out: &mut Tree) {
             for e in store.listing(&id).unwrap().entries() {
@@ -1048,7 +1215,7 @@ mod tests {
                 let mut bytes = Vec::new();
                 if e.kind == EntryKind::Folder {
                     walk(store, e.id, &format!("{path}/"), out);
-                } else {
+                } else if e.kind != EntryKind::ProjectLink {
                     store.copy_content(&e.id, &mut bytes).unwrap();
                     assert_eq!(bytes.len() as u64, e.size, "{path}");
                 }
@@ -2334,6 +2501,157 @@ mod tests {
         assert_eq!(warnings_of(&again), warnings);
     }
 
+    /// The entry at `path` in the save whose top listing is `top`.
+    fn entry_at(repo: &Repository, top: &Listing, path: &str) -> Option<Entry> {
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let mut listing = top.clone();
+        for part in up.split('/').filter(|p| !p.is_empty()) {
+            listing = repo.store().listing(&listing.get(part)?.id).unwrap();
+        }
+        listing.get(name).cloned()
+    }
+
+    #[test]
+    fn a_project_link_stays_when_the_folders_above_it_are_gone() {
+        let (dir, mut repo) = project();
+        let base = plant_save(
+            &mut repo,
+            &[
+                ("gone/deep/sub", EntryKind::ProjectLink, COMMIT),
+                ("gone/deep/a.txt", EntryKind::File, b"x"),
+                ("vendor/libs/sub", EntryKind::ProjectLink, COMMIT),
+                ("vendor/libs/a.txt", EntryKind::File, b"x"),
+                ("vendor/old.txt", EntryKind::File, b"x"),
+            ],
+        );
+        // `gone` and `vendor/libs` were deleted, and `vendor` holds something new.
+        write(dir.path(), "vendor/new.txt", b"x");
+        let saved = saved_top(&mut repo);
+        let paths: Vec<String> = saved_tree(repo.store(), saved.id()).into_keys().collect();
+        // The folders leading to a link come back holding only the link.
+        assert_eq!(
+            paths,
+            [
+                "gone",
+                "gone/deep",
+                "gone/deep/sub",
+                "vendor",
+                "vendor/libs",
+                "vendor/libs/sub",
+                "vendor/new.txt"
+            ]
+        );
+        for link in ["gone/deep/sub", "vendor/libs/sub"] {
+            let was = entry_at(&repo, &base, link);
+            assert_eq!(entry_at(&repo, &saved, link), was, "{link}");
+        }
+    }
+
+    #[test]
+    fn names_this_computer_cant_hold_stay_when_their_folder_is_gone() {
+        let (dir, mut repo) = project();
+        let base = plant_save(
+            &mut repo,
+            &[
+                ("docs/README", EntryKind::File, b"upper"),
+                ("docs/readme", EntryKind::File, b"lower"),
+                ("docs/aux.txt", EntryKind::File, b"aux"),
+                ("docs/other.txt", EntryKind::File, b"other"),
+            ],
+        );
+        write(dir.path(), "new.txt", b"x");
+        let saved = saved_top(&mut repo);
+        // Kept: the two names where the drive takes them for one file, and `aux.txt` where this
+        // system can't hold it. Without any, `docs` is gone.
+        let mut kept = Vec::new();
+        if this_drive().ignores_case {
+            kept.extend(["docs/README", "docs/readme"]);
+        }
+        if cfg!(windows) {
+            kept.push("docs/aux.txt");
+        }
+        let mut want = kept.clone();
+        if !kept.is_empty() {
+            want.push("docs");
+        }
+        want.push("new.txt");
+        want.sort_unstable();
+        let paths: Vec<String> = saved_tree(repo.store(), saved.id()).into_keys().collect();
+        assert_eq!(paths, want);
+        for path in kept {
+            let was = entry_at(&repo, &base, path);
+            assert_eq!(entry_at(&repo, &saved, path), was, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_search_of_a_gone_folder_stops_at_the_limits_and_the_save_goes_on() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[("a/b/c/d/sub", EntryKind::ProjectLink, COMMIT)],
+        );
+        // None of it is on disk. `a/b/c/d` is four levels down, and the five listings from the
+        // top to it hold one entry each.
+        let found_within = |levels, entries| {
+            let base = Base {
+                limits: SaveLimits::new(levels, entries),
+                ..newest(&repo)
+            };
+            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive());
+            scan.unwrap().folders
+        };
+        assert!(found_within(4, 5).contains_key("a/b/c/d"));
+        // Past either limit the base save is invalid, so nothing there can be kept.
+        assert!(!found_within(3, 5).contains_key("a"));
+        assert!(!found_within(4, 4).contains_key("a"));
+    }
+
+    #[test]
+    fn something_in_the_way_of_a_kept_entry_stops_the_save() {
+        let (dir, mut repo) = project();
+        plant_save(&mut repo, &[("libs/sub", EntryKind::ProjectLink, COMMIT)]);
+        let head = repo.head().unwrap();
+        // The folder holding the link is a file now, and a save can't hold both.
+        write(dir.path(), "libs", b"x");
+        let err = save_now(&mut repo).unwrap_err();
+        let SaveError::InTheWay { path, kept } = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!((path.as_str(), kept.as_str()), ("libs", "libs/sub"));
+        let hint = err.hint().unwrap();
+        assert!(hint.contains("Rename or move libs"), "{hint}");
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn a_kept_folder_counts_with_everything_it_holds() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[
+                ("Docs/a", EntryKind::File, b"a"),
+                ("Docs/sub/b", EntryKind::File, b"b"),
+                ("docs/c", EntryKind::File, b"c"),
+            ],
+        );
+        // Where the drive ignores letter case both folders are kept, whatever this drive does:
+        // two entries at the top, and the four they hold.
+        let drive = Drive {
+            ignores_case: true,
+            composes_unicode: false,
+        };
+        let walk_under = |most| {
+            let limits = SaveLimits::new(MAX_SAVE_DEPTH, most);
+            walk(dir.path(), newest(&repo), limits, drive)
+        };
+        assert!(walk_under(6).is_ok());
+        let Err(SaveError::TooLarge { detail }) = walk_under(5) else {
+            panic!("6 entries were accepted under a limit of 5");
+        };
+        assert!(detail.contains("more than 5 "), "{detail}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn new_name_clashing_with_a_saved_name_is_refused() {
@@ -2452,9 +2770,23 @@ mod tests {
                 reason: "fine".into(),
             },
             SaveError::Ignore { detail: hostile() },
+            SaveError::InTheWay {
+                path: hostile(),
+                kept: "fine".into(),
+            },
+            SaveError::InTheWay {
+                path: "fine".into(),
+                kept: hostile(),
+            },
         ] {
             assert_hostile_text_escaped(&e.to_string());
         }
+        // This hint names the path too.
+        let e = SaveError::InTheWay {
+            path: hostile(),
+            kept: "fine".into(),
+        };
+        assert_hostile_text_escaped(&e.hint().unwrap());
         // The lines Bolt writes itself stay lines; the folders and names in them are escaped.
         let e = SaveError::NotPortable {
             problems: vec![
