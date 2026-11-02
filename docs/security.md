@@ -76,7 +76,28 @@ See [testing.md](testing.md) §3: fuzz targets for every decoder and parser, a m
 
 **Windows name rules.** Checked on 2026-11-01 against Microsoft's "Naming Files, Paths, and Namespaces" page (dated 2024-08-28): Bolt refuses everything on that list, plus the console devices `CONIN$` and `CONOUT$`, while `COM0` and `LPT0`, which are not on it, stay ordinary names. Bolt also refuses `.bolt`'s short names (`bolt~1` to `bolt~4`) and its stream syntax (`.bolt::$INDEX_ALLOCATION`), because Windows treats both as `.bolt`.
 
+**GitHub settings** (turned on by the owner on 2026-11-01):
+- **On:**
+  - dependency graph;
+  - Dependabot alerts, malware alerts and grouped security updates;
+  - Dependabot version updates, configured in `.github/dependabot.yml`;
+  - CodeQL code scanning (default setup) with Copilot Autofix suggestions;
+  - AI scans of the repository and of pull requests;
+  - secret scanning with push protection;
+  - private vulnerability reporting.
+- **Off on purpose:**
+  - agentic autofix: it spends AI credits and opens pull requests on its own;
+  - automatic dependency submission: GitHub reads `Cargo.lock` directly.
+- CI itself runs with read-only permissions, and its actions are pinned to exact commits ([testing.md](testing.md)).
+
 ## 7. Open items
+
+- Turn on branch protection for `main` once milestone 1's fixes are merged. Use a ruleset that:
+  - blocks force pushes and deletion;
+  - requires a pull request;
+  - requires the CI checks (`test` on all three systems, and `deny`) and CodeQL to pass.
+
+  From then on every change, including an agent's, reaches `main` only through a pull request whose checks are green.
 
 - Review Git's published vulnerabilities (path, symlink, case and submodule bugs) and add every relevant case to the corpus.
 - Write the server's threat model in detail before v0.3 (authentication, permissions, rate limits, audit log).
