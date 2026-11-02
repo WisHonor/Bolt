@@ -217,7 +217,6 @@ fn largest_message() -> String {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT2-1: fixed by Task 15 of the red-team fix branch"]
 fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -236,7 +235,6 @@ fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
 /// after the save is committed, so the save lands and then the command dies.
 #[cfg(unix)]
 #[test]
-#[ignore = "RT2-1: fixed by Task 15 of the red-team fix branch"]
 fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -257,7 +255,6 @@ fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing(
 // entry may hold 100,000 lines that all point at the same long chain.
 
 #[test]
-#[ignore = "RT2-2: fixed by Task 15 of the red-team fix branch"]
 fn rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line() {
     let env = Env::new();
     env.ok(&["start"]);
@@ -486,7 +483,6 @@ fn rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id() {
 // there is printed with the hint "Nothing was changed", although the save was made.
 
 #[test]
-#[ignore = "RT2-8: fixed by Task 15 of the red-team fix branch"]
 fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
     let env = Env::new();
     env.ok(&["start"]);

@@ -14,6 +14,7 @@ use ignore::{Match, WalkBuilder};
 
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
+use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems, validate_name};
@@ -40,6 +41,9 @@ pub enum SaveOutcome {
         save: Save,
         /// Files that differ from the save before; `None` if it can't be compared with this one.
         changed_files: Option<usize>,
+        /// The shortest form of the save's change ID, or why the line couldn't be read to work
+        /// it out. Either way the save is made.
+        short_change_id: Result<String, RepoError>,
     },
     /// The folder matches the line's current save, which is `current`.
     NothingChanged { current: Id },
@@ -196,6 +200,8 @@ pub fn save_folder(
     // Refuse a save that would not read back (an over-long message, say) before storing it.
     Save::decode(&encoded, false).map_err(StoreError::from)?;
     let save_id = pack.add_record(ObjectKind::Save, &encoded)?;
+    // Worked out before the commit, so that nothing after it can fail the save.
+    let short_change_id = history::short_change_id(repo, &save_id, &save.change_id);
     let mut state = entry.state.clone();
     state.lines.insert(line.clone(), save_id);
     let diary = DiaryEntry {
@@ -214,6 +220,7 @@ pub fn save_folder(
         save_id,
         save,
         changed_files,
+        short_change_id,
     })
 }
 
@@ -874,11 +881,16 @@ mod tests {
             save_id,
             save,
             changed_files,
+            short_change_id,
         } = save_now(&mut repo).unwrap()
         else {
             panic!("nothing was saved");
         };
         assert_eq!(changed_files, Some(1));
+        assert_eq!(
+            short_change_id.unwrap(),
+            history::short_change_id(&repo, &save_id, &save.change_id).unwrap()
+        );
         assert_eq!(save.line(), Some("main"));
         assert_eq!(save.author, who());
         let (head, entry) = repo.current().unwrap();
@@ -947,16 +959,7 @@ mod tests {
         let id = hash_content(licence);
         write(dir.path(), "LICENSE", licence);
         save_now(&mut repo).unwrap();
-        // Bit rot in Bolt's own pack: the only copy of the licence no longer matches.
-        for e in fs::read_dir(repo.packs_dir()).unwrap() {
-            let path = e.unwrap().path();
-            let found = PackReader::open(&path).unwrap().find(&id).copied();
-            if let Some(entry) = found {
-                let mut bytes = fs::read(&path).unwrap();
-                bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
-                fs::write(&path, bytes).unwrap();
-            }
-        }
+        damage_the_only_copy_of(&repo, &id);
         let mut repo = Repository::open(dir.path()).unwrap();
         assert!(matches!(
             save_now(&mut repo).unwrap(),
@@ -996,12 +999,55 @@ mod tests {
         else {
             panic!("nothing was saved");
         };
-        let history: Vec<Id> = crate::history::line_history(&open())
-            .unwrap()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        assert_eq!(history[..2], [second, saved[0]]);
+        let mut line = Vec::new();
+        history::for_each_on_line::<RepoError>(&open(), |id, _, _| {
+            line.push(*id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(line[..2], [second, saved[0]]);
+    }
+
+    /// Bit rot in the only copy of a save.
+    fn damage_the_only_copy_of(repo: &Repository, id: &Id) {
+        for e in fs::read_dir(repo.packs_dir()).unwrap() {
+            let path = e.unwrap().path();
+            let found = PackReader::open(&path).unwrap().find(id).copied();
+            if let Some(entry) = found {
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+                fs::write(&path, bytes).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_save_is_made_even_when_the_line_cant_be_read_to_shorten_its_id() {
+        let (dir, mut repo) = project();
+        let first = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        saved_root(save_now(&mut repo).unwrap());
+        damage_the_only_copy_of(&repo, &first);
+
+        let mut repo = Repository::open(dir.path()).unwrap();
+        write(dir.path(), "b.txt", b"b");
+        let SaveOutcome::Saved {
+            save_id,
+            save,
+            short_change_id,
+            ..
+        } = save_now(&mut repo).unwrap()
+        else {
+            panic!("nothing was saved");
+        };
+        assert!(
+            matches!(short_change_id, Err(RepoError::Damaged { .. })),
+            "{short_change_id:?}"
+        );
+        // The save is made all the same, and is the line's newest.
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(fresh.current().unwrap().1.state.lines["main"], save_id);
+        assert_eq!(saved_tree(fresh.store(), save.root), disk_tree(dir.path()));
     }
 
     #[test]

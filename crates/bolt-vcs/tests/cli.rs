@@ -543,6 +543,85 @@ fn save_warns_about_a_pack_holding_a_damaged_copy() {
     );
 }
 
+/// Bit rot in the only copy of a save: its first stored byte is flipped.
+fn damage_the_only_copy_of(root: &Path, id: &Id) {
+    use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
+    for e in std::fs::read_dir(root.join(".bolt/store/packs")).unwrap() {
+        let path = e.unwrap().path();
+        let found = PackReader::open(&path).unwrap().find(id).copied();
+        if let Some(entry) = found {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+            std::fs::write(&path, bytes).unwrap();
+        }
+    }
+}
+
+/// A started project with two saves, the first of which can no longer be read, and a file
+/// `mine.txt` to save next to them.
+fn project_whose_first_save_is_damaged() -> Env {
+    use bolt_core::repo::Repository;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let first = Repository::open(env.root())
+        .unwrap()
+        .current()
+        .unwrap()
+        .1
+        .state
+        .lines["main"];
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    env.bolt().args(["save", "one"]).assert().success();
+    damage_the_only_copy_of(env.root(), &first);
+    std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
+    env
+}
+
+/// A save that Bolt can't shorten the ID of is still a save: it exits 0 and says "Saved", names
+/// the whole change ID, and warns on its own line. It never says nothing was changed.
+#[test]
+fn save_is_reported_as_saved_when_the_line_cant_be_read_to_shorten_its_id() {
+    use bolt_core::repo::Repository;
+    let env = project_whose_first_save_is_damaged();
+    let before = Repository::open(env.root()).unwrap().head().unwrap();
+    let out = env.bolt().args(["save", "two"]).output().unwrap();
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_ne!(
+        Repository::open(env.root()).unwrap().head().unwrap(),
+        before
+    );
+    let shown = stdout.strip_prefix("Saved ").expect(&stdout);
+    let (id, rest) = shown.split_once("  ").expect(&stdout);
+    assert_eq!(id.len(), 32, "the whole change ID: {stdout:?}");
+    assert_eq!(rest, "\"two\"  (1 file)\n");
+    assert!(
+        stderr.contains(
+            "warning: The save was made, but Bolt couldn't read this line's older saves to \
+             shorten its ID."
+        ),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Nothing was changed") && !stderr.contains("error:"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn save_json_is_the_same_when_the_line_cant_be_read_to_shorten_its_id() {
+    let env = project_whose_first_save_is_damaged();
+    let out = env.bolt().args(["--json", "save", "two"]).output().unwrap();
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["result"], "saved", "{json}");
+    assert_eq!(json["save"]["change_id_short"], json["save"]["change_id"]);
+    assert_eq!(json["save"]["change_id"].as_str().unwrap().len(), 32);
+    assert!(stderr.contains("warning: The save was made"), "{stderr}");
+    assert!(!stderr.contains("Nothing was changed"), "{stderr}");
+}
+
 #[test]
 fn save_json_output() {
     let env = Env::new();
@@ -807,6 +886,24 @@ fn show_json_is_the_one_compact_line_serde_json_would_write() {
 }
 
 #[test]
+fn history_json_is_the_one_compact_line_serde_json_would_write() {
+    let env = project_with_two_saves();
+    // `history` writes the saves one at a time as it reads them, so it must still end up with the
+    // document it wrote when it held them all: one compact line, keys in order.
+    let raw = stdout_of(&env, &["--json", "history"]);
+    let history: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(raw, format!("{history}\n"));
+    assert_eq!(history["line"], "main");
+    let messages: Vec<&str> = history["saves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(messages, ["two", "one", "Start project"]);
+}
+
+#[test]
 fn commands_outside_a_project_explain_what_to_do() {
     let env = Env::new();
     let out = env.bolt().arg("history").output().unwrap();
@@ -1030,6 +1127,47 @@ fn plant_save(root: &Path, build: impl FnOnce(&mut PackWriter) -> Id) {
     repo.commit(&lock, pack, &diary).unwrap();
 }
 
+/// Commits, through Bolt's own library, `n` more saves on `main`, each the child of the last and
+/// with a random change ID; `shape` may change each one first. Returns their change IDs, oldest
+/// first.
+fn plant_history(
+    root: &Path,
+    n: usize,
+    mut shape: impl FnMut(&mut bolt_core::save::Save),
+) -> Vec<bolt_core::id::ChangeId> {
+    use bolt_core::diary::{Action, DiaryEntry};
+    use bolt_core::id::ChangeId;
+    use bolt_core::repo::Repository;
+
+    let mut repo = Repository::open(root).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut tip = entry.state.lines["main"];
+    let mut save = repo.store().save(&tip, false).unwrap();
+    let mut pack = repo.new_pack().unwrap();
+    let mut change_ids = Vec::new();
+    for _ in 0..n {
+        save.parents = vec![tip];
+        save.change_id = ChangeId::random().unwrap();
+        shape(&mut save);
+        change_ids.push(save.change_id);
+        tip = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    }
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), tip);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: save.author.clone(),
+        bolt_version: "0.1.0".into(),
+        state,
+        safety_copies: vec![],
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+    change_ids
+}
+
 /// A started project whose newest save has one level of folders more than a save may have, and
 /// a file `mine.txt` to save next to it.
 fn project_with_a_save_too_deep_to_walk() -> Env {
@@ -1223,4 +1361,83 @@ fn save_does_not_hold_every_long_path_of_the_save_before_it() {
     let want = format!("  \"my work\"  ({} files)\n", LONG_FILES + 1);
     let stdout = text(&out.stdout);
     assert!(stdout.ends_with(&want), "{stdout:?}");
+}
+
+/// Each change ID cut to the fewest letters, at least four, that no other ID starts with.
+fn shortest_unique(all: &[String]) -> Vec<String> {
+    all.iter()
+        .enumerate()
+        .map(|(k, mine)| {
+            let unique = |len: usize| {
+                let start = &mine[..len];
+                all.iter()
+                    .enumerate()
+                    .all(|(j, other)| j == k || !other.starts_with(start))
+            };
+            let len = (4..=mine.len()).find(|&len| unique(len));
+            mine[..len.unwrap_or(mine.len())].to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn history_shows_every_save_with_the_fewest_letters_that_keep_it_unique() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    // So many saves that some change IDs share their first four letters.
+    let planted = plant_history(env.root(), 1500, |_| {});
+    let history: serde_json::Value =
+        serde_json::from_str(&stdout_of(&env, &["--json", "history"])).unwrap();
+    let saves = history["saves"].as_array().unwrap();
+    let field = |key: &str| -> Vec<String> {
+        saves
+            .iter()
+            .map(|s| s[key].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let change_ids = field("change_id");
+    // Newest first: the planted saves, then the one `start` made.
+    let newest_first: Vec<String> = planted.iter().rev().map(|c| c.to_letters()).collect();
+    assert_eq!(change_ids.len(), 1501);
+    assert_eq!(change_ids[..1500], newest_first[..]);
+
+    let want = shortest_unique(&change_ids);
+    assert!(want.iter().any(|s| s.len() > 4), "no change IDs collided");
+    assert_eq!(field("change_id_short"), want);
+    let printed: Vec<String> = stdout_of(&env, &["history"])
+        .lines()
+        .map(|line| line.split("  ").next().unwrap().to_owned())
+        .collect();
+    assert_eq!(printed, want);
+}
+
+/// 150 messages of 1 MiB take a few hundred bytes each on disk but 150 MiB together, more than
+/// `bolt` is given here; one at a time they take a few MiB.
+#[cfg(unix)]
+#[test]
+fn history_show_and_save_hold_one_save_at_a_time() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let message = format!("Looks harmless\n{}", "A".repeat((1 << 20) - 15));
+    plant_history(env.root(), 150, |save| save.message.clone_from(&message));
+    std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
+    let commands: [&[&str]; 5] = [
+        &["history"],
+        &["--json", "history"],
+        &["show"],
+        &["--json", "show"],
+        &["save", "my work"],
+    ];
+    for args in commands {
+        let out = bolt_capped(&env, args)
+            .stdout(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
 }
