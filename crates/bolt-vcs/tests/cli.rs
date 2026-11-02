@@ -1249,7 +1249,7 @@ fn boltignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(
-        shown.contains("problem: sub/.boltignore: with the .boltignore files above it, "),
+        shown.contains("problem: sub/.boltignore: with the other ignore files in force at its "),
         "{shown:?}"
     );
     assert!(
@@ -1364,7 +1364,7 @@ fn unreadable_folder_is_reported_as_unreadable() {
     let err = text(&out.stderr);
     let message = err.lines().next().unwrap();
     assert!(message.starts_with("error: Can't read locked: "), "{err}");
-    assert!(!err.contains("A .boltignore file has a problem"), "{err}");
+    assert!(!err.contains("ignore file has a problem"), "{err}");
 }
 
 // Saves that no real folder tree could be (too deep, or paths far too long to hold together),

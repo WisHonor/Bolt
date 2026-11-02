@@ -198,8 +198,10 @@ fn save(
             }
             warnings
         }
-        SaveOutcome::NothingChanged { current } => {
-            let mut warnings = Vec::new();
+        SaveOutcome::NothingChanged {
+            current,
+            mut warnings,
+        } => {
             if json {
                 warnings.extend(repo.store().warnings());
                 let document = json!({

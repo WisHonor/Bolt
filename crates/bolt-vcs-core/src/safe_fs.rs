@@ -1,5 +1,5 @@
 //! The one way Bolt opens files it doesn't trust (everything in `.bolt/`, settings files and
-//! `.boltignore`): links are never followed (except to the user's own settings), only regular
+//! ignore files): links are never followed (except to the user's own settings), only regular
 //! files are accepted, and reads are capped (storage-format.md §10 and §12).
 
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -11,11 +11,12 @@ pub const MAX_FORMAT_BYTES: u64 = 4096;
 pub const MAX_HEAD_BYTES: u64 = 65;
 pub const MAX_LOCK_INFO_BYTES: u64 = 4096;
 pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
-pub const MAX_BOLTIGNORE_BYTES: u64 = 1 << 20;
-/// The `.boltignore` files in force at one folder (its own and those above it), together.
-pub const MAX_BOLTIGNORE_IN_FORCE_BYTES: u64 = 1 << 20;
-/// All the `.boltignore` files one save reads, together.
-pub const MAX_BOLTIGNORE_SAVE_BYTES: u64 = 16 << 20;
+/// One `.gitignore` or `.boltignore`.
+pub const MAX_IGNORE_FILE_BYTES: u64 = 1 << 20;
+/// The ignore files in force at one folder (its own and those above it), together.
+pub const MAX_IGNORE_IN_FORCE_BYTES: u64 = 1 << 20;
+/// All the ignore files one save reads, together.
+pub const MAX_IGNORE_SAVE_BYTES: u64 = 16 << 20;
 
 /// Opens `path` with `options` (custom flags are replaced) without following a link at its
 /// last part, and only if it is a regular file. A link, folder, pipe or device gives
