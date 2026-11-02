@@ -1,6 +1,7 @@
 //! Which file names Bolt stores, and which it flags as non-portable (decision 004):
 //! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
-//! that work here but would break on another operating system.
+//! that work here but would break on another operating system. [`is_git_alias`] spots the
+//! spellings of `.git`, and [`holdable_here`] says whether this system can hold a name.
 
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
@@ -85,14 +86,43 @@ fn is_ignorable(c: char) -> bool {
     matches!(c, '\u{200C}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{206A}'..='\u{206F}' | '\u{FEFF}')
 }
 
+/// What NTFS takes a name to be: the part before a `:` (streams such as `::$INDEX_ALLOCATION`)
+/// or a path separator (a backslash starts a sub-path on Windows), without the trailing dots and
+/// spaces it drops. Git's `is_ntfs_dotgit` stops at the same places.
+fn ntfs_base(name: &str) -> &str {
+    let base = name.split([':', '/', '\\']).next().unwrap_or("");
+    base.trim_end_matches(['.', ' '])
+}
+
 fn is_bolt_spelling(name: &str) -> bool {
     let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
-    // NTFS ignores everything after ':' (streams such as `::$INDEX_ALLOCATION`), and a
-    // backslash starts a sub-path on Windows (Git's is_ntfs_dotgit stops at both).
-    let base = kept.split([':', '\\']).next().unwrap_or("");
-    let base = base.trim_end_matches(['.', ' ']).to_ascii_lowercase();
+    let base = ntfs_base(&kept).to_ascii_lowercase();
     // `bolt~1`..`bolt~4` are NTFS 8.3 short names of `.bolt` (Git accepts ~1..~4).
     base == ".bolt" || matches!(base.as_bytes(), [b'b', b'o', b'l', b't', b'~', b'1'..=b'4'])
+}
+
+/// Whether Windows or macOS would take `name` for Git's own folder, `.git`. This is Git's
+/// `is_ntfs_dotgit` and `is_hfs_dotgit`, plus the look its fsck takes at every part after a
+/// backslash, and it answers the same on every system.
+pub fn is_git_alias(name: &str) -> bool {
+    is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+}
+
+fn is_ntfs_dotgit(name: &str) -> bool {
+    let base = ntfs_base(name);
+    // `git~1` is the 8.3 short name `.git` gets.
+    base.eq_ignore_ascii_case(".git") || base.eq_ignore_ascii_case("git~1")
+}
+
+/// HFS+ skips the ignorable characters wherever they are and folds the case of ASCII letters only.
+/// Git's UTF-8 reader refuses U+FFFE and U+FFFF, and it takes such a character for the name's end.
+fn is_hfs_dotgit(name: &str) -> bool {
+    let mut chars = name.chars().filter(|&c| !is_ignorable(c));
+    chars.next() == Some('.')
+        && ['g', 'i', 't']
+            .into_iter()
+            .all(|g| chars.next().is_some_and(|c| c.eq_ignore_ascii_case(&g)))
+        && matches!(chars.next(), None | Some('/' | '\u{fffe}' | '\u{ffff}'))
 }
 
 fn is_reserved(name: &str) -> bool {
@@ -137,6 +167,13 @@ pub fn name_problems(name: &str) -> Vec<PortabilityProblem> {
         });
     }
     out
+}
+
+/// Whether this operating system can hold a file called `name` (a name `validate_name` accepts):
+/// decision 004's portability rules that apply here, which only Windows has. Names that clash on
+/// the drive are `drive::probe`'s business.
+pub fn holdable_here(name: &str) -> bool {
+    !cfg!(windows) || name_problems(name).is_empty()
 }
 
 /// Collisions among the names in one folder, plus each name's own problems.
@@ -314,6 +351,127 @@ mod tests {
         );
         assert!(folder_problems(&["a", "b", "A.txt"]).is_empty());
         assert!(!folder_problems(&["CON", "a"]).is_empty());
+    }
+
+    #[test]
+    fn git_aliases_match_gits_own_lists() {
+        // Git's t1014-read-tree-confusing.sh: the spellings its read-tree refuses, plus more of
+        // the same kind (a stream, trailing dots and spaces, invisible characters).
+        for name in [
+            ".git",
+            ".GIT",
+            "\u{200c}.Git",
+            ".gI\u{200c}T",
+            ".GiT\u{200c}",
+            "git~1",
+            "GIT~1",
+            ".git. ",
+            ".git.",
+            ".git ",
+            ".git. .",
+            ".\\.GIT\\foobar",
+            ".git\\foobar",
+            ".git...:alternate-stream",
+            ".git::$INDEX_ALLOCATION",
+            "git~1 . :$DATA",
+            ".g\u{200c}it",
+            "\u{feff}.git",
+        ] {
+            assert!(is_git_alias(name), "{name:?}");
+        }
+        // The trailing dots and spaces that Git's t0060-path-utils.sh allows after `.gitmodules`.
+        for base in [".git", ".Git", "git~1", "GIT~1"] {
+            for tail in [
+                "", " ", ".", "  ", ". ", " .", "..", "   ", ".  ", " . ", "  .", ":$DATA",
+            ] {
+                let name = format!("{base}{tail}");
+                assert!(is_git_alias(&name), "{name:?}");
+            }
+        }
+        // `next_hfs_char` in Git's utf8.c: every character HFS+ ignores, and the ones just
+        // outside each range, which it does not.
+        let ignored = ('\u{200c}'..='\u{200f}')
+            .chain('\u{202a}'..='\u{202e}')
+            .chain('\u{206a}'..='\u{206f}')
+            .chain(['\u{feff}']);
+        for c in ignored {
+            assert!(is_git_alias(&format!(".g{c}it")), "{c:?}");
+        }
+        for c in [
+            '\u{200b}', '\u{2010}', '\u{2029}', '\u{202f}', '\u{2069}', '\u{2070}', '\u{fefe}',
+            '\u{ff00}',
+        ] {
+            assert!(!is_git_alias(&format!(".g{c}it")), "{c:?}");
+        }
+        // Git's UTF-8 reader refuses U+FFFE and U+FFFF, which ends the name after `.git`.
+        for name in [".git\u{fffe}", ".git\u{ffff}", ".git\u{200c}\u{fffe}"] {
+            assert!(is_git_alias(name), "{name:?}");
+        }
+        for name in ["\u{fffe}.git", ".g\u{fffe}it"] {
+            assert!(!is_git_alias(name), "{name:?}");
+        }
+        // Other names that begin like `.git`, and the ones `validate_name` refuses anyway.
+        for name in [
+            ".gitignore",
+            ".gitmodules",
+            "git",
+            ".git2",
+            "xgit~1",
+            ".bolt",
+            ".git x",
+            ".git .x",
+            " .git",
+            "..git",
+            ".gi",
+            ".git,:$DATA",
+            "git~2",
+            "git~10",
+            "a\\b",
+            "x\\.gitx",
+            ".",
+            "..",
+            "",
+        ] {
+            assert!(!is_git_alias(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn holdable_here_follows_this_systems_rules() {
+        // Windows can't hold these; the other systems can.
+        for name in [
+            "aux.txt",
+            "con",
+            "NUL",
+            "COM1",
+            "COM\u{b9}",
+            "lpt\u{b3}.txt",
+            "name.",
+            "name ",
+            "a:b",
+            "a\\b",
+            "a?b",
+            "a*b",
+            "a|b",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a\u{1}b",
+        ] {
+            assert_eq!(holdable_here(name), !cfg!(windows), "{name:?}");
+        }
+        for name in [
+            "Player.cs",
+            "console.txt",
+            "COM10",
+            "COM0",
+            "aux_data",
+            "\u{e9}",
+            "名前",
+            ".gitignore",
+        ] {
+            assert!(holdable_here(name), "{name:?}");
+        }
     }
 
     #[test]

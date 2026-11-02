@@ -22,10 +22,16 @@ pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
     Ok((file, path))
 }
 
-/// Whether `name` is one `create_temp` makes: `tmp-` and 16 lowercase hex digits.
+/// What `drive::probe` adds to a temp name: `-e` and a separate accent, which a drive may not tell
+/// from `-é`.
+pub(crate) const ACCENTED_SUFFIX: &str = "-e\u{301}";
+
+/// Whether `name` is one Bolt makes: `tmp-` and 16 lowercase hex digits, as `create_temp` names a
+/// file, and then `ACCENTED_SUFFIX` as well when `drive::probe` has renamed it.
 pub fn is_temp_name(name: &OsStr) -> bool {
     name.to_str()
         .and_then(|n| n.strip_prefix("tmp-"))
+        .map(|rest| rest.strip_suffix(ACCENTED_SUFFIX).unwrap_or(rest))
         .is_some_and(|hex| {
             hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         })
@@ -189,6 +195,30 @@ mod tests {
         write_atomic(root.path(), &dest, b"new").unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn temp_names_are_the_ones_bolt_makes() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, made) = create_temp(root.path()).unwrap();
+        assert!(is_temp_name(made.file_name().unwrap()));
+        let hex = "0123456789abcdef";
+        let probe_name = format!("tmp-{hex}{ACCENTED_SUFFIX}");
+        assert_eq!(probe_name, format!("tmp-{hex}-e\u{301}"));
+        assert!(is_temp_name(OsStr::new(&probe_name)));
+        for other in [
+            format!("tmp-{hex}-\u{e9}"),
+            format!("tmp-{hex}-e"),
+            format!("tmp-{hex}-e\u{301}x"),
+            format!("tmp-{hex}{ACCENTED_SUFFIX}{ACCENTED_SUFFIX}"),
+            format!("{hex}{ACCENTED_SUFFIX}"),
+            format!("tmp-{}", hex.to_uppercase()),
+            format!("tmp-{}", &hex[1..]),
+            format!("tmp-{ACCENTED_SUFFIX}"),
+            "notes.txt".to_owned(),
+        ] {
+            assert!(!is_temp_name(OsStr::new(&other)), "{other:?}");
+        }
     }
 
     #[test]

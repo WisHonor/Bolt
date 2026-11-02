@@ -4,6 +4,7 @@
 pub mod config;
 pub mod diary;
 pub mod diff;
+pub mod drive;
 pub mod encoding;
 pub mod fsio;
 pub mod history;

@@ -6,6 +6,7 @@ fuzz_target!(|data: &[u8]| {
         let names: Vec<&str> = text.split('\n').collect();
         for n in &names {
             let _ = bolt_core::names::validate_name(n);
+            let _ = bolt_core::names::is_git_alias(n);
         }
         let _ = bolt_core::names::folder_problems(&names);
     }
