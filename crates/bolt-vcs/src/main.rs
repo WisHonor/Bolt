@@ -103,11 +103,11 @@ impl From<std::io::Error> for Failure {
     }
 }
 
-fn start(json: bool) -> Result<(), Failure> {
+fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
     // The user's own settings may name this folder, so the first save is theirs too.
     let who = now_person(&load_identity(Some(&root))?);
-    let repo = Repository::init(&root, &who)?;
+    let repo: &Repository = opened.insert(Repository::init(&root, &who)?);
     let (_, entry) = repo.current()?;
     let id = entry.state.lines.get("main").ok_or_else(|| Failure {
         message: "The new project has no line main.".into(),
@@ -115,7 +115,7 @@ fn start(json: bool) -> Result<(), Failure> {
         printed: false,
     })?;
     let save = repo.store().save(id, repo.signatures_allowed())?;
-    let short = &short_change_id(&repo, id, &save.change_id)?;
+    let short = &short_change_id(repo, id, &save.change_id)?;
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
         .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
         .into_iter()
@@ -143,7 +143,11 @@ fn start(json: bool) -> Result<(), Failure> {
     Ok(())
 }
 
-fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
+fn save(
+    json: bool,
+    message: Option<String>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
     let message = message.unwrap_or_default();
     if message.trim().is_empty() {
         return Err(Failure {
@@ -152,7 +156,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
             printed: false,
         });
     }
-    let mut repo = Repository::discover(&std::env::current_dir()?)?;
+    let repo = opened.insert(Repository::discover(&std::env::current_dir()?)?);
     let who = now_person(&load_identity(Some(repo.root()))?);
     // A project's own settings never say who the user is; if they try, the user is told.
     let ignored = ignored_project_identity(repo.root());
@@ -161,7 +165,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
         who: &who,
         command: "save",
     };
-    let outcome = save_folder(&mut repo, &req, &mut |_| {
+    let outcome = save_folder(repo, &req, &mut |_| {
         eprintln!("Waiting for another Bolt command to finish...");
     })?;
     let warnings = match outcome {
@@ -206,7 +210,7 @@ fn save(json: bool, message: Option<String>) -> Result<(), Failure> {
                 println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
-                let short = short_or_whole(&repo, &current, &last.change_id, &mut warnings);
+                let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
                 println!("Nothing to save: no changes since your last save ({short}).");
             }
@@ -256,36 +260,29 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn history(json: bool) -> Result<(), Failure> {
-    let repo = Repository::discover(&std::env::current_dir()?)?;
+fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(Repository::discover(&std::env::current_dir()?)?);
     if json {
         let line = match &repo.current()?.1.state.position {
             bolt_core::diary::Position::OnLine(name) => json!(name),
             bolt_core::diary::Position::AtSave(_) => json!(null),
         };
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
-        // Its opening goes out with the first save, so a line that can't be read prints no half.
-        let mut before = format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":[");
-        let mut begun = false;
-        let streamed = for_each_on_line(&repo, |id, save, short| {
-            print!("{before}{}", output::save_json(id, save, short));
-            before = ",".to_owned();
-            begun = true;
-            Ok::<(), Failure>(())
-        });
-        return match streamed {
-            Err(failure) if !begun => Err(failure),
-            // Once saves are printed, the document ends with the error, still as one document.
-            result => {
-                let warnings = repo.store().warnings();
-                let ended = output::end_document(json!({}), &warnings, result);
-                output::print_warnings(&warnings);
-                ended
-            }
-        };
+        let warnings = output::stream_document(
+            &mut std::io::stdout(),
+            &format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":["),
+            |each| {
+                for_each_on_line(repo, |id, save, short| {
+                    each(&output::save_json(id, save, short))
+                })
+            },
+            || (json!({}), repo.store().warnings()),
+        )?;
+        output::print_warnings(&warnings);
+        return Ok(());
     }
     let now = now_ms();
-    for_each_on_line(&repo, |_, s, short| {
+    for_each_on_line(repo, |_, s, short| {
         let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
         let title = s.message.lines().next().unwrap_or_default();
         println!(
@@ -299,11 +296,11 @@ fn history(json: bool) -> Result<(), Failure> {
     Ok(())
 }
 
-fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
-    let repo = Repository::discover(&std::env::current_dir()?)?;
+fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(Repository::discover(&std::env::current_dir()?)?);
     let id = match text {
-        Some(t) => resolve(&repo, t)?,
-        None => current_save(&repo)?,
+        Some(t) => resolve(repo, t)?,
+        None => current_save(repo)?,
     };
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
@@ -315,38 +312,44 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
     // printed, so a save that can't be listed prints only the error. The changes are then
     // printed as the walk finds them, and none is kept.
     let count = count_changes(store, old_root, save.root)?;
-    let mut warnings = Vec::new();
-    let short = short_or_whole(&repo, &id, &save.change_id, &mut warnings);
     if json {
         // The document `json!` would make, in pieces: serde_json writes an object's keys in
         // alphabetical order, so `changes` comes between `bolt_json` and `save`.
-        print!("{{\"bolt_json\":{BOLT_JSON},\"changes\":[");
-        let mut comma = "";
-        let walked = for_each_change(store, old_root, save.root, |c| {
-            print!(
-                "{comma}{}",
-                json!({
-                    "path": c.path,
-                    "change": match c.change {
-                        ChangeKind::Added => "added",
-                        ChangeKind::Removed => "removed",
-                        ChangeKind::Modified => "modified",
-                        ChangeKind::KindChanged => "kind-changed",
-                    },
-                    "kind": c.kind.as_str(),
-                    "old_size": c.old_size,
-                    "new_size": c.new_size,
+        let warnings = output::stream_document(
+            &mut std::io::stdout(),
+            &format!("{{\"bolt_json\":{BOLT_JSON},\"changes\":["),
+            |each| {
+                for_each_change(store, old_root, save.root, |c| {
+                    each(&json!({
+                        "path": c.path,
+                        "change": match c.change {
+                            ChangeKind::Added => "added",
+                            ChangeKind::Removed => "removed",
+                            ChangeKind::Modified => "modified",
+                            ChangeKind::KindChanged => "kind-changed",
+                        },
+                        "kind": c.kind.as_str(),
+                        "old_size": c.old_size,
+                        "new_size": c.new_size,
+                    }))
                 })
-            );
-            comma = ",";
-            Ok::<(), Failure>(())
-        });
-        warnings.extend(store.warnings());
-        let more = json!({"save": output::save_json(&id, &save, &short)});
-        let ended = output::end_document(more, &warnings, walked);
+            },
+            || {
+                // Shortened after the walk: if it fails first, only the store has warnings to give.
+                let mut warnings = Vec::new();
+                let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
+                warnings.extend(store.warnings());
+                (
+                    json!({"save": output::save_json(&id, &save, &short)}),
+                    warnings,
+                )
+            },
+        )?;
         output::print_warnings(&warnings);
-        return ended;
+        return Ok(());
     }
+    let mut warnings = Vec::new();
+    let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
     println!(
         "Save {short} · {} · {when}",
@@ -391,16 +394,20 @@ fn show(json: bool, text: Option<&str>) -> Result<(), Failure> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The project a command opens is kept here, so that if the command fails, the error can list
+    // what the project's store had noticed by then.
+    let mut opened = None;
     let result = match cli.command {
-        Command::Start => start(cli.json),
-        Command::Save { message } => save(cli.json, message),
-        Command::History => history(cli.json),
-        Command::Show { save } => show(cli.json, save.as_deref()),
+        Command::Start => start(cli.json, &mut opened),
+        Command::Save { message } => save(cli.json, message, &mut opened),
+        Command::History => history(cli.json, &mut opened),
+        Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
-            output::print_error(cli.json, &failure);
+            let noticed = opened.map_or_else(Vec::new, |repo| repo.store().warnings());
+            output::print_error(cli.json, &failure, &noticed);
             ExitCode::from(1)
         }
     }

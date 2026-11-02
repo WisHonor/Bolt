@@ -94,7 +94,7 @@ Folders are not listed; the files in them are.
 
 ## 4. Warnings
 
-`warnings` is in every document but the error-only one of §5, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. People see each one on stderr as `warning: <message>`.
+`warnings` is in every document, the one for a failed command included, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. When a command finishes, people see each one on stderr as `warning: <message>`. A command that fails lists the warnings it had found before it failed in its document, and people are shown only the error.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -103,7 +103,7 @@ Folders are not listed; the files in them are.
 
 | `kind` | Where | What it says |
 |---|---|---|
-| `damaged_pack` | any command that reads | A pack held a copy of something that failed its check. Bolt didn't use that copy and went on with another one. Ask for help before trying to repair the project. |
+| `damaged_pack` | any command that reads | A pack held a copy of something that failed its check. If another copy was good, Bolt went on with that one. If none was, the command fails and `error` says so, and the warning still names the pack. Ask for help before trying to repair the project. |
 | `copy_unreadable` | any command that reads | A stored copy couldn't be read for a reason other than damage, such as a disk error, although another copy could. A failing disk can cause it. |
 | `change_id_not_shortened` | `save`, `show` | Bolt couldn't read the line's older saves to work out the short form of a change ID, so the whole ID is given as `change_id_short`. |
 | `changed_files_not_counted` | `save` | The save was made, but `changed_files` is `null`. The message says why. |
@@ -111,16 +111,17 @@ Folders are not listed; the files in them are.
 
 ## 5. Errors
 
-A command that fails before it has printed anything gives only this, with exit code 1:
+A command that fails before it has printed anything gives a document of just this, with exit code 1:
 
 ```json
-{"bolt_json":1,"error":{"hint":"Run `bolt start` to make this folder a Bolt project.","message":"Not inside a Bolt project."}}
+{"bolt_json":1,"error":{"hint":"Run `bolt start` to make this folder a Bolt project.","message":"Not inside a Bolt project."},"warnings":[]}
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
-| `message` | string | What happened and why. |
-| `hint` | string or `null` | What to do next, if there is something to say. |
+| `error.message` | string | What happened and why. |
+| `error.hint` | string or `null` | What to do next, if there is something to say. |
+| `warnings` | list | What the command had found before it failed, such as a damaged pack its store noted while reading: §4. `[]` if nothing. |
 
 `history` and `show` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves` or `changes`.
 

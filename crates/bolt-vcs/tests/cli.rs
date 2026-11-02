@@ -465,6 +465,8 @@ fn json_errors_go_to_stdout() {
         json["error"]["message"],
         "This folder is already a Bolt project."
     );
+    // Present even here, where the project was never opened and nothing was noted.
+    assert_eq!(json.get("warnings"), Some(&serde_json::json!([])), "{json}");
 }
 
 #[test]
@@ -631,16 +633,16 @@ fn damage_the_only_copy_of(root: &Path, id: &Id) {
     }
 }
 
-/// Writes `00.pack`, which sorts before Bolt's own packs, holding a copy of the save `id` with one
-/// bit flipped. The save's own copy is fine, so reads pass the damaged one over.
-fn plant_damaged_copy_of_save(root: &Path, id: &Id) {
+/// Writes `00.pack`, which sorts before Bolt's own packs, holding a copy of the record `id` (of
+/// `kind`) with one bit flipped. The record's own copy is fine, so reads pass the damaged one over.
+fn plant_damaged_copy_of(root: &Path, id: &Id, kind: ObjectKind) {
     use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
     use bolt_core::repo::Repository;
     let repo = Repository::open(root).unwrap();
-    let record = repo.store().read_record(id, ObjectKind::Save).unwrap();
+    let record = repo.store().read_record(id, kind).unwrap();
     let made = tempfile::tempdir().unwrap();
     let mut w = PackWriter::create(made.path()).unwrap();
-    w.add_record(ObjectKind::Save, &record).unwrap();
+    w.add_record(kind, &record).unwrap();
     let path = w.finish(made.path()).unwrap().unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     let entry = PackReader::open(&path).unwrap().find(id).copied().unwrap();
@@ -1086,8 +1088,10 @@ fn every_json_document_has_warnings() {
     }
 }
 
-/// A save nobody can read ends a command, but never in a half document: whatever `--json` prints
-/// is one JSON document, with the error in it.
+/// The failed command's own document. `history` and `show` read every save before they print
+/// anything, so a save that can't be read gives the document of a failed command, not a cut-off
+/// one: `error`, none of `saves` or `changes`, and the `warnings` the store noted on the way (the
+/// damaged pack). Ending a document after output began is tested in output.rs.
 #[test]
 fn history_json_stays_valid_when_a_save_is_unreadable() {
     let env = project_with_two_saves();
@@ -1107,6 +1111,10 @@ fn history_json_stays_valid_when_a_save_is_unreadable() {
             doc.get("saves").is_none() && doc.get("changes").is_none(),
             "{doc}"
         );
+        // The pack with the damaged save was noted while it was read, before the command failed.
+        assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{command}: {doc}");
+        let said = doc["warnings"][0]["message"].as_str().unwrap();
+        assert!(said.contains("is damaged"), "{command}: {said}");
     }
 }
 
@@ -1120,7 +1128,7 @@ fn history_and_show_json_carry_a_damaged_pack_warning() {
             .unwrap(),
     )
     .unwrap();
-    plant_damaged_copy_of_save(env.root(), &first);
+    plant_damaged_copy_of(env.root(), &first, ObjectKind::Save);
     for command in ["history", "show"] {
         let out = env.bolt().args(["--json", command]).output().unwrap();
         let stderr = text(&out.stderr);
@@ -1270,6 +1278,25 @@ fn plant_two_non_portable_names(root: &Path) {
             std::fs::write(folder.join(name), "x").unwrap();
         }
     }
+}
+
+/// A refused save as JSON: the error, with the warnings the store gave before the save was refused.
+/// Here the first save's folder listing has a damaged copy, which is read first and passed over.
+#[test]
+fn save_json_error_lists_the_warnings_found_before_it_failed() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let empty = Listing::empty().id();
+    plant_damaged_copy_of(env.root(), &empty, ObjectKind::FolderListing);
+    plant_two_non_portable_names(env.root());
+    let out = env.bolt().args(["--json", "save", "x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let error = doc["error"]["message"].as_str().unwrap();
+    assert!(error.contains("would not work on every system"), "{doc}");
+    assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{doc}");
+    // People are shown the error alone, which the document has too.
+    assert_eq!(text(&out.stderr), "");
 }
 
 /// RT-11: the problems of a save that is refused are on lines of their own.
@@ -1465,6 +1492,7 @@ fn show_of_a_save_too_deep_to_walk_prints_only_the_error() {
         "{json}"
     );
     assert!(json.get("changes").is_none(), "{json}");
+    assert_eq!(json.get("warnings"), Some(&serde_json::json!([])), "{json}");
 }
 
 #[test]
