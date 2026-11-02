@@ -1320,7 +1320,7 @@ mod tests {
         write(root, "keep.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
         // Git sets core.ignorecase on Windows and macOS; on Linux a pattern matches exactly.
-        let want: &[&str] = if cfg!(any(windows, target_os = "macos")) {
+        let want: &[&str] = if IGNORE_CASE {
             &[".boltignore", "keep.txt"]
         } else {
             &[
