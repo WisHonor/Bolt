@@ -272,42 +272,128 @@ fn is_internal_folder(name: &str) -> bool {
     name == ".bolt" || name == ".git" || (IGNORE_CASE && name.eq_ignore_ascii_case(".git"))
 }
 
-/// `line` with its braces made plain: Git reads `{a,b}` as ordinary characters, and `ignore`
-/// takes it for a choice. A brace that is escaped, or inside a `[...]` class, means itself already.
-fn literal_braces(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    // A `[` with no `]` after it is a plain character, and so is every `[` after that one. Each is
-    // escaped, so `ignore` never reads on from it as if a class had begun.
-    let mut classes = true;
-    while let Some(c) = rest.chars().next() {
-        let mut len = c.len_utf8();
-        match c {
-            '\\' => len += rest[len..].chars().next().map_or(0, char::len_utf8),
-            '[' if classes => match class_len(&rest[len..]) {
-                Some(n) => len += n,
-                None => {
-                    classes = false;
-                    out.push('\\');
-                }
-            },
-            '[' | '{' | '}' => out.push('\\'),
-            _ => {}
-        }
-        out.push_str(&rest[..len]);
-        rest = &rest[len..];
-    }
-    out
+/// The lines of a `.boltignore` as Git splits them: without a byte order mark at the start, at
+/// each LF, with one CR before it dropped.
+fn git_lines(text: &str) -> impl Iterator<Item = &str> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
-/// The length of a class after its `[`, through its `]`, if it has one: an optional `!` or `^`,
-/// a first member that may itself be a `]`, then up to the next `]`.
-fn class_len(after: &str) -> Option<usize> {
-    let members = after.strip_prefix(['!', '^']).unwrap_or(after);
-    let mut chars = members.chars();
-    let first = chars.next()?;
-    let end = chars.as_str().find(']')?;
-    Some(after.len() - members.len() + first.len_utf8() + end + 1)
+/// `line` without the spaces at its end that no `\` escapes, trimmed as Git trims it.
+fn trim_trailing_spaces(line: &str) -> &str {
+    let (mut cut, mut escaped) = (None, false);
+    for (i, c) in line.char_indices() {
+        if c == ' ' && !escaped {
+            cut.get_or_insert(i);
+        } else {
+            cut = None;
+        }
+        escaped = !escaped && c == '\\';
+    }
+    &line[..cut.unwrap_or(line.len())]
+}
+
+// What to change in a pattern Bolt can't yet read the way Git does (storage-format.md §12).
+const BLANK_AT_END: &str = "Remove the tab or other blank at its end";
+const BACKSLASH_AT_END: &str = "Remove the \\ at its end (or before its final /)";
+const NEVER_CLOSED: &str = "Close the [ with a ], or write \\[ for a plain [";
+const NEGATED: &str = "Rewrite it without [!…] or [^…], or list the names one per line";
+const NOT_SIMPLE: &str = "Inside [ ], use only letters, digits, . and _, and ranges from low to \
+                          high such as a-z or 0-9; or list the names one per line";
+const CAPITAL_ESCAPED: &str =
+    "Here Git ignores letter case, but not after a \\: remove the \\ before the capital letter";
+const CAPITAL_IN_CLASS: &str = "Here Git ignores letter case, but not for a capital letter in [ ] \
+                                without its small letter: add the small letter, as in [Bb]";
+
+/// Whether Bolt's matcher reads `pattern` (a line already trimmed) exactly as Git does; if not,
+/// what to change. Only forms where the two agree are allowed (storage-format.md §12).
+fn like_git(pattern: &str) -> Result<(), &'static str> {
+    if pattern.ends_with(|c: char| c.is_whitespace() && c != ' ') {
+        return Err(BLANK_AT_END);
+    }
+    // Git drops a final `/` before it matches, so `foo\/` ends in a `\` that escapes nothing.
+    if pattern.ends_with("\\/") {
+        return Err(BACKSLASH_AT_END);
+    }
+    let mut rest = pattern;
+    while let Some(c) = rest.chars().next() {
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '\\' => {
+                let escaped = rest.chars().next().ok_or(BACKSLASH_AT_END)?;
+                if IGNORE_CASE && escaped.is_ascii_uppercase() {
+                    return Err(CAPITAL_ESCAPED);
+                }
+                rest = &rest[escaped.len_utf8()..];
+            }
+            '[' => rest = &rest[simple_class(rest)?..],
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The length of a simple class after its `[`, through its `]`: letters, digits, `.` and `_`,
+/// and ranges between two digits, two small letters or two capitals, lower end first.
+fn simple_class(after: &str) -> Result<usize, &'static str> {
+    let close = after.find(']').ok_or(NEVER_CLOSED)?;
+    let members = &after.as_bytes()[..close];
+    if members.starts_with(b"!") || members.starts_with(b"^") {
+        return Err(NEGATED);
+    }
+    let same_kind = |a: u8, b: u8| {
+        a <= b
+            && (a.is_ascii_digit() && b.is_ascii_digit()
+                || a.is_ascii_lowercase() && b.is_ascii_lowercase()
+                || a.is_ascii_uppercase() && b.is_ascii_uppercase())
+    };
+    let (mut singles, mut ranges) = (Vec::new(), Vec::new());
+    let mut rest = members;
+    while let Some((&lo, after_lo)) = rest.split_first() {
+        if !(lo.is_ascii_alphanumeric() || lo == b'.' || lo == b'_') {
+            return Err(NOT_SIMPLE);
+        }
+        match after_lo {
+            [b'-', hi, more @ ..] if same_kind(lo, *hi) => {
+                ranges.push(lo..=*hi);
+                rest = more;
+            }
+            [b'-', ..] => return Err(NOT_SIMPLE),
+            _ => {
+                singles.push(lo);
+                rest = after_lo;
+            }
+        }
+    }
+    if singles.is_empty() && ranges.is_empty() {
+        return Err(NOT_SIMPLE);
+    }
+    // Git folds the name's letter case but not the class's: a capital alone matches nothing.
+    let has = |c: u8| singles.contains(&c) || ranges.iter().any(|r| r.contains(&c));
+    if IGNORE_CASE
+        && singles
+            .iter()
+            .any(|c| c.is_ascii_uppercase() && !has(c.to_ascii_lowercase()))
+    {
+        return Err(CAPITAL_IN_CLASS);
+    }
+    Ok(close + 1)
+}
+
+/// `pattern` with its braces escaped: Git reads `{a,b}` as plain characters, and `ignore` would
+/// take it for a choice. Classes hold no braces (`like_git` sees to that).
+fn literal_braces(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut escaped = false;
+    for c in pattern.chars() {
+        if !escaped && matches!(c, '{' | '}') {
+            out.push('\\');
+        }
+        escaped = !escaped && c == '\\';
+        out.push(c);
+    }
+    out
 }
 
 /// The bytes of `.boltignore` a walk has taken (storage-format.md §12).
@@ -376,20 +462,24 @@ fn boltignore_rules(
     builder
         .case_insensitive(IGNORE_CASE)
         .map_err(|e| ignore(format!("{rel}: {e}")))?;
-    let mut bad = Vec::new();
-    for (i, line) in text.lines().enumerate() {
-        // Like Git, a byte order mark at the start is not part of the first pattern.
-        let line = if i == 0 {
-            line.trim_start_matches('\u{feff}')
-        } else {
-            line
-        };
-        if let Err(e) = builder.add_line(Some(file.clone()), &literal_braces(line)) {
-            bad.push(format!("{rel}: line {}: {e}", i + 1));
+    for (i, line) in git_lines(text).enumerate() {
+        let pattern = trim_trailing_spaces(line);
+        if line.starts_with('#') || pattern.is_empty() {
+            continue;
         }
-    }
-    if !bad.is_empty() {
-        return Err(ignore(bad.join("; ")));
+        let at = format!("{rel}, line {}", i + 1);
+        like_git(pattern).map_err(|change| {
+            let mut quoted: String = line.chars().take(80).collect();
+            if quoted.len() < line.len() {
+                quoted.push('…');
+            }
+            ignore(format!(
+                "{at}: Bolt can't yet read \"{quoted}\" the way Git does. {change}"
+            ))
+        })?;
+        builder
+            .add_line(Some(file.clone()), &literal_braces(pattern))
+            .map_err(|e| ignore(format!("{at}: {e}")))?;
     }
     let rules = builder.build().map_err(|_| {
         ignore(format!(
@@ -443,9 +533,12 @@ impl IgnoreRules {
     }
 
     /// Whether the walk keeps `path`, as `ignore` decides: the nearest `.boltignore` with a
-    /// matching pattern wins, and within it the last matching pattern. A folder whose `.boltignore`
-    /// fails is not entered, and the problem is kept.
+    /// matching pattern wins, and within it the last matching pattern. After a `.boltignore`
+    /// fails, the problem is kept and nothing more is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
+        if self.problem.is_some() {
+            return false;
+        }
         // The walk is depth first, so the rules of folders `path` is not in are done with.
         while let Some(level) = self.stack.pop_if(|level| !path.starts_with(&level.dir)) {
             self.spent.in_force -= level.bytes;
@@ -1383,38 +1476,20 @@ mod tests {
         let patterns = [
             "{prod,dev}.env", // not a choice
             "\\{kept\\}.txt", // already escaped: still one brace each
-            "[{]a.txt",       // a class that holds a brace
-            "[a-{]z.txt",     // a range that ends at a brace
             "x{y",            // an unclosed brace is no error
             "}",
         ];
         write(root, ".boltignore", patterns.join("\n").as_bytes());
-        for name in [
-            "{prod,dev}.env",
-            "{kept}.txt",
-            "{a.txt",
-            "{z.txt",
-            "bz.txt",
-            "x{y",
-            "}",
-        ] {
+        for name in ["{prod,dev}.env", "{kept}.txt", "x{y", "}"] {
             write(root, name, b"ignored");
         }
-        for name in ["prod.env", "dev.env", "kept.txt", "a.txt", "5z.txt", "xy"] {
+        for name in ["prod.env", "dev.env", "kept.txt", "xy"] {
             write(root, name, b"kept");
         }
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
-            [
-                ".boltignore",
-                "5z.txt",
-                "a.txt",
-                "dev.env",
-                "kept.txt",
-                "prod.env",
-                "xy"
-            ]
+            [".boltignore", "dev.env", "kept.txt", "prod.env", "xy"]
         );
     }
 
@@ -1424,42 +1499,161 @@ mod tests {
             ("{a,b}.env", "\\{a,b\\}.env"),
             ("*.{png,jpg}", "*.\\{png,jpg\\}"),
             ("!{a}", "!\\{a\\}"),
+            ("[ab]{", "[ab]\\{"),
             ("no braces at all", "no braces at all"),
             // Already escaped: left alone. After an escaped backslash (`\\`) a brace is bare.
             ("\\{a\\}", "\\{a\\}"),
             ("\\\\{a", "\\\\\\{a"),
-            ("trailing\\", "trailing\\"),
-            // In a class (a `]` first is a member), braces are members already.
-            ("[{}]x", "[{}]x"),
-            ("[]{]x", "[]{]x"),
-            ("[!{]x{", "[!{]x\\{"),
-            ("[é{]{", "[é{]\\{"),
-            // A `[` that opens no class is escaped, so `ignore` can't read a class into the rest.
-            ("[{", "\\[\\{"),
-            ("[[{", "\\[\\[\\{"),
-            ("[a]{[}", "[a]\\{\\[\\}"),
-            ("[a-{b}", "\\[a-\\{b\\}"),
         ] {
             assert_eq!(literal_braces(line), want, "{line}");
         }
     }
 
     #[test]
-    fn a_line_of_open_brackets_is_made_literal_in_linear_time() {
-        let line = "[".repeat(1 << 20);
+    fn boltignore_lines_are_split_and_trimmed_as_git_does() {
+        let lines: Vec<&str> = git_lines("\u{feff}\u{feff}a\r\nb\r\r\n\nc\r").collect();
+        assert_eq!(lines, ["\u{feff}a", "b\r", "", "c"]);
+        for (line, want) in [
+            ("foo  ", "foo"),
+            ("foo\\ ", "foo\\ "),
+            ("foo\\\\ ", "foo\\\\"),
+            ("foo\\  ", "foo\\ "),
+            ("foo \\ ", "foo \\ "),
+            ("trail\\", "trail\\"),
+            ("foo\t ", "foo\t"),
+            ("   ", ""),
+        ] {
+            assert_eq!(trim_trailing_spaces(line), want, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn patterns_bolt_cant_yet_read_like_git_are_refused() {
+        for (pattern, why) in [
+            ("secret.txt\t", BLANK_AT_END),
+            ("foo\\\t", BLANK_AT_END),
+            ("a\u{a0}", BLANK_AT_END),
+            ("trail\\", BACKSLASH_AT_END),
+            ("foo\\/", BACKSLASH_AT_END),
+            ("foo\\\\/", BACKSLASH_AT_END),
+            ("bar[", NEVER_CLOSED),
+            ("[a-{b}", NEVER_CLOSED),
+            ("*.py[!c]", NEGATED),
+            ("[^a]x", NEGATED),
+            ("[]", NOT_SIMPLE),
+            ("[]a]", NOT_SIMPLE),
+            ("a[/]b", NOT_SIMPLE),
+            ("[\\]]", NOT_SIMPLE),
+            ("[[]", NOT_SIMPLE),
+            ("[[:alpha:]]", NOT_SIMPLE),
+            ("[{a}]", NOT_SIMPLE),
+            ("[a,b]", NOT_SIMPLE),
+            ("[a-]", NOT_SIMPLE),
+            ("[-a]", NOT_SIMPLE),
+            ("[ä]", NOT_SIMPLE),
+            ("x[z-a]", NOT_SIMPLE),
+            ("[a-Z]", NOT_SIMPLE),
+            ("[0-9a-c-e]", NOT_SIMPLE),
+            ("ok[ab]then[!c]", NEGATED),
+        ] {
+            assert_eq!(like_git(pattern), Err(why), "{pattern:?}");
+        }
+        // Where letter case is ignored, Git leaves these capitals alone, so they match nothing.
+        for (pattern, why) in [
+            ("\\B.txt", CAPITAL_ESCAPED),
+            ("[B].txt", CAPITAL_IN_CLASS),
+            ("[Ab]", CAPITAL_IN_CLASS),
+        ] {
+            let want = if IGNORE_CASE { Err(why) } else { Ok(()) };
+            assert_eq!(like_git(pattern), want, "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn common_patterns_are_read_like_git() {
+        for pattern in [
+            "*.py[cod]",
+            "[Bb]in/",
+            "[Dd]ebug/",
+            "*.sw[a-p]",
+            "[._]*.s[a-v][a-z]",
+            "*.[oa]",
+            "[0-9]*.log",
+            "foo\\ ",
+            "\\#notes",
+            "!keep.txt",
+            "[A-Z]*.md",
+            "[Ba-z]x",
+            "\\[x]",
+            "{a,b}",
+            "x\\b",
+        ] {
+            assert_eq!(like_git(pattern), Ok(()), "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_of_open_brackets_is_refused_in_linear_time() {
         let started = std::time::Instant::now();
-        assert_eq!(literal_braces(&line), "\\[".repeat(1 << 20));
+        assert_eq!(like_git(&"[".repeat(1 << 20)), Err(NEVER_CLOSED));
+        assert_eq!(like_git(&"[a]".repeat(1 << 18)), Ok(()));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
-    fn an_unclosed_bracket_before_a_brace_is_not_read_as_a_class() {
-        // Unescaped, `ignore` would read `[a-\{b\}` as a class from `a` to a backslash: no range.
+    fn a_pattern_bolt_cant_yet_read_like_git_stops_the_save_at_the_first_such_line() {
         let (dir, mut repo) = project();
-        write(dir.path(), ".boltignore", b"[a-{b}\n");
         write(dir.path(), "keep.txt", b"x");
+        write(dir.path(), ".boltignore", b"keep.txt\n*.py[!c]\nbar[\n");
+        let detail = assert_ignore_problem(&mut repo);
+        assert_eq!(
+            detail,
+            ".boltignore, line 2: Bolt can't yet read \"*.py[!c]\" the way Git does. Rewrite it \
+             without [!…] or [^…], or list the names one per line"
+        );
+        // A long line is quoted only in part.
+        let long = format!("{}[!c]\n", "x".repeat(200));
+        write(dir.path(), ".boltignore", long.as_bytes());
+        let detail = assert_ignore_problem(&mut repo);
+        assert!(
+            detail.contains(&format!("\"{}…\"", "x".repeat(80))),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn the_scan_stops_at_the_first_boltignore_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "a/.boltignore", b"[!x]\n");
+        write(root, "b/.boltignore", b"\xff\n");
+        let mut rules = IgnoreRules::new(root).unwrap();
+        assert!(!rules.keeps(&root.join("a"), true));
+        // Past the first problem nothing is kept, and no other .boltignore is read.
+        assert!(!rules.keeps(&root.join("b"), true));
+        assert!(!rules.keeps(&root.join("c.txt"), false));
+        let Some(SaveError::Ignore { detail }) = rules.problem else {
+            panic!("no problem kept");
+        };
+        assert!(detail.starts_with("a/.boltignore, line 1: "), "{detail}");
+        assert_eq!(rules.spent.read, 5);
+    }
+
+    #[test]
+    fn a_question_mark_or_letter_case_never_spans_a_character_beyond_ascii() {
+        // As in Git, which matches bytes and folds only ASCII letters.
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", "?.txt\nä.md\n".as_bytes());
+        write(root, "a.txt", b"x");
+        write(root, "ä.txt", b"x");
+        write(root, "one/ä.md", b"x");
+        write(root, "two/Ä.md", b"x");
         let saved = save_now(&mut repo).unwrap();
-        assert_eq!(saved_paths(&repo, saved), [".boltignore", "keep.txt"]);
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".boltignore", "one", "two", "two/Ä.md", "ä.txt"]
+        );
     }
 
     #[test]
@@ -1482,7 +1676,6 @@ mod tests {
         let (dir, mut repo) = project();
         let head = repo.head().unwrap();
         write(dir.path(), "secret.key", b"x");
-        // `a[` would be fine: like Git, `ignore` reads an unclosed `[` literally.
         write(dir.path(), ".boltignore", b"secret.key\n[z-a]\n");
         match save_now(&mut repo) {
             Err(SaveError::Ignore { detail }) => {

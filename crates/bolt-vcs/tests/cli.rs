@@ -1016,13 +1016,13 @@ fn text_quoted_in_an_error_is_shown_escaped() {
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(!shown.contains('\u{202e}'), "{shown:?}");
-    assert!(shown.contains("'[z-a]\\u{202e}'"), "{shown:?}");
+    assert!(shown.contains("\"[z-a]\\u{202e}\""), "{shown:?}");
     // The message is for people in JSON too, so it is just as safe to print.
     let out = env.bolt().args(["--json", "save", "x"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let message = json["error"]["message"].as_str().unwrap();
     assert!(!message.contains('\u{202e}'), "{message:?}");
-    assert!(message.contains("'[z-a]\\u{202e}'"), "{message:?}");
+    assert!(message.contains("\"[z-a]\\u{202e}\""), "{message:?}");
 }
 
 /// Two names that would not work on every system, so the error has two lines of problems. Where
