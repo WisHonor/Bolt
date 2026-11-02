@@ -77,10 +77,235 @@ pub fn is_hidden(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Whether the file or folder at `path` belongs to the user running Bolt, so that a `.bolt`
+/// folder another user account planted above the user's work is refused (decision 025, T23). A
+/// link or junction at the last part of `path` is not followed: its own owner is the answer. A
+/// missing `path` gives `NotFound`.
+///
+/// Unix: the owner is the effective user. Windows: the owner is the user's own account, or the
+/// Administrators group when the user is an administrator, elevated or not.
+pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::symlink_metadata(path)?.uid();
+        // SAFETY: geteuid takes no arguments, cannot fail, and only returns a number.
+        Ok(owner == unsafe { libc::geteuid() })
+    }
+    #[cfg(windows)]
+    {
+        windows_owner::is_owned_by_current_user(path)
+    }
+}
+
+/// The Windows half of `is_owned_by_current_user`.
+#[cfg(windows)]
+mod windows_owner {
+    use std::fs::OpenOptions;
+    use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::path::Path;
+    use std::ptr::null_mut;
+
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_SUCCESS, LocalFree,
+    };
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
+        TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenUser, WinBuiltinAdministratorsSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    pub fn is_owned_by_current_user(path: &Path) -> io::Result<bool> {
+        // Opened only to read its security information (READ_CONTROL). BACKUP_SEMANTICS lets a
+        // folder open; OPEN_REPARSE_POINT opens a link or junction itself, not what it points
+        // to. std adds the `\\?\` prefix, so long paths work.
+        let file = OpenOptions::new()
+            .access_mode(READ_CONTROL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+
+        let mut owner: PSID = null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: `file` is an open handle with READ_CONTROL access, and stays open for the whole
+        // call. `owner` and `descriptor` are valid places for Windows to write one pointer each.
+        // The three null pointers ask for no group, DACL or SACL.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut descriptor,
+            )
+        };
+        match status {
+            ERROR_SUCCESS => {}
+            // Windows can't tell the owner here (a file system or network share that records
+            // none). Not shown to be the user's, so it isn't: Bolt refuses the folder, and the
+            // user can list it in safe-folders.
+            ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION => return Ok(false),
+            _ => return Err(io::Error::from_raw_os_error(status as i32)),
+        }
+        // Frees the descriptor when this function returns, on every path. `owner` points into
+        // it, so it must not be used after that.
+        let _descriptor = SecurityDescriptor(descriptor);
+        // No owner recorded: refused the same way. (FAT and exFAT report "Everyone" as the
+        // owner, which is neither the user nor Administrators, so the checks below refuse it.)
+        if owner.is_null() {
+            return Ok(false);
+        }
+
+        let token = process_token()?;
+        let user = token_information(&token, TokenUser)?;
+        // SAFETY: GetTokenInformation(TokenUser) filled `user` with a TOKEN_USER. The buffer is
+        // aligned for the pointer in it (it is a Vec<usize>), and is not written again. This
+        // copies out the SID pointer, which points into `user`; `user` lives until the function
+        // returns.
+        let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        // SAFETY: `owner` points to a valid SID in the descriptor and `user_sid` to one in
+        // `user`; both stay allocated for the call, and EqualSid only reads them.
+        if unsafe { EqualSid(owner, user_sid) } != 0 {
+            return Ok(true);
+        }
+
+        // The Administrators group counts as the user when the user is an administrator: the
+        // group is in their token, enabled when elevated, "for deny only" when not. The brief's
+        // CheckTokenMembership counts enabled groups only, which would lock an administrator out
+        // of a project they started in an elevated terminal (review focus 5).
+        // SAFETY: `owner` points to a valid SID in the descriptor; IsWellKnownSid only reads it.
+        if unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid) } == 0 {
+            return Ok(false);
+        }
+        let group_buffer = token_information(&token, TokenGroups)?;
+        let header = group_buffer.as_ptr().cast::<TOKEN_GROUPS>();
+        // SAFETY: GetTokenInformation(TokenGroups) filled `group_buffer` with a TOKEN_GROUPS: a
+        // count, then that many SID_AND_ATTRIBUTES (the declared one-element array runs on past
+        // its end), all inside the buffer. The buffer is aligned for their pointers (it is a
+        // Vec<usize>), and is neither written nor freed while `groups` is used. `&raw const`
+        // takes the array's address without making a reference to its declared one element.
+        let groups: &[SID_AND_ATTRIBUTES] = unsafe {
+            std::slice::from_raw_parts(
+                (&raw const (*header).Groups).cast::<SID_AND_ATTRIBUTES>(),
+                (*header).GroupCount as usize,
+            )
+        };
+        Ok(groups.iter().any(|group| {
+            // SAFETY: the group's SID points to a valid SID in `group_buffer`, and `owner` to one
+            // in the descriptor; both stay allocated for the call, and EqualSid only reads them.
+            unsafe { EqualSid(group.Sid, owner) != 0 }
+        }))
+    }
+
+    /// A security descriptor that Windows allocated for Bolt (with LocalAlloc). Dropping it frees
+    /// it.
+    struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl Drop for SecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from a successful GetSecurityInfo, which leaves it to the
+            // caller to free with LocalFree (which ignores a null pointer). Only this guard holds
+            // it, and drop runs once.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    /// This process's access token, opened for queries. Dropping the handle closes it.
+    fn process_token() -> io::Result<OwnedHandle> {
+        let mut token = null_mut();
+        // SAFETY: GetCurrentProcess returns a stand-in handle for this process that is always
+        // valid and is never closed. `token` is a valid place for Windows to write the new handle.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: OpenProcessToken succeeded, so `token` is an open handle that nothing else
+        // holds. OwnedHandle closes it exactly once, when dropped.
+        Ok(unsafe { OwnedHandle::from_raw_handle(token) })
+    }
+
+    /// The `class` information of `token` (a TOKEN_USER or TOKEN_GROUPS), in a buffer aligned
+    /// for the pointers it holds: these structures hold pointers, so the buffer is made of
+    /// `usize`s, never bytes.
+    fn token_information(
+        token: &OwnedHandle,
+        class: TOKEN_INFORMATION_CLASS,
+    ) -> io::Result<Vec<usize>> {
+        // First ask for the size alone: with no buffer, the call fails with
+        // ERROR_INSUFFICIENT_BUFFER and writes the size it needs to `bytes`.
+        let mut bytes = 0;
+        // SAFETY: a null buffer with a length of 0 asks Windows to write nothing but the size,
+        // and `bytes` is a valid place for it. `token` is open for the call.
+        unsafe { GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut bytes) };
+        if bytes == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buffer = vec![0_usize; (bytes as usize).div_ceil(size_of::<usize>())];
+        let mut written = 0;
+        // SAFETY: `buffer` holds at least `bytes` bytes, and Windows writes at most the `bytes`
+        // it is given. `written` is a valid place for the length written. `token` is open for
+        // the call. If the information grew since the first call, this fails with
+        // ERROR_INSUFFICIENT_BUFFER, which is returned as an error.
+        let ok = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                bytes,
+                &mut written,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(buffer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn own_temp_folder_is_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(is_owned_by_current_user(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn system_folder_is_not_owned() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Whoever runs the tests owns the folders they make. When that is root, `/` is
+            // theirs too, and there is no folder of someone else's to try.
+            let me = std::fs::metadata(tempfile::tempdir().unwrap().path())
+                .unwrap()
+                .uid();
+            if std::fs::metadata("/").unwrap().uid() == me {
+                return;
+            }
+            assert!(!is_owned_by_current_user(Path::new("/")).unwrap());
+        }
+        #[cfg(windows)]
+        assert!(!is_owned_by_current_user(Path::new(r"C:\Windows")).unwrap());
+    }
+
+    #[test]
+    fn missing_path_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = is_owned_by_current_user(&dir.path().join("missing")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn hiding_a_folder() {

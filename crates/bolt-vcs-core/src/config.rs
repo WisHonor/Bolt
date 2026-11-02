@@ -1,6 +1,8 @@
 //! Settings: who the user is (name and email), from the environment or the user's own
-//! `config.toml`. A project's `.bolt/config.toml` is never asked: a project shared as a zip carries
-//! that file, so a stranger could make the user's saves claim to be from someone else (decision 025).
+//! `config.toml`, and the folders whose projects the user trusts although another user account
+//! owns them (`safe-folders`, from the user's own `config.toml` only). A project's
+//! `.bolt/config.toml` is never asked: a project shared as a zip carries that file, so a stranger
+//! could make the user's saves claim to be from someone else (decision 025).
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +57,10 @@ struct ConfigFile {
     /// An identity for one folder; only the user's own file is asked for these.
     #[serde(default)]
     project: Vec<ProjectEntry>,
+    /// Folders to use although another user account owns them; only the user's own file is
+    /// asked for these.
+    #[serde(default, rename = "safe-folders")]
+    safe_folders: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -95,17 +101,13 @@ pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
             ))
 }
 
-/// The identity in a `config.toml` file, if it exists and names both: the `[[project]]` entry for
-/// `project_root` if the file has one (the last complete one, so a line added at the end of the
-/// file takes effect), else the `[user]` section. A project's own file is read with `None` for
-/// `project_root`, as it has no say in who the user is. `read` is `safe_fs::read_capped` for a
-/// project's file, which never follows a link, and `safe_fs::read_capped_following_links` for the
-/// user's own.
-fn from_file(
+/// The `config.toml` file at `path`, or `None` if there is none. `read` is `safe_fs::read_capped`
+/// for a project's file, which never follows a link, and `safe_fs::read_capped_following_links`
+/// for the user's own.
+fn read_file(
     path: &Path,
     read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
-    project_root: Option<&Path>,
-) -> Result<Option<Identity>, ConfigError> {
+) -> Result<Option<ConfigFile>, ConfigError> {
     let invalid = |detail: String| ConfigError::Invalid {
         path: path.to_owned(),
         detail,
@@ -115,7 +117,23 @@ fn from_file(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(invalid(e.to_string())),
     };
-    let file: ConfigFile = toml::from_slice(&bytes).map_err(|e| invalid(e.message().to_owned()))?;
+    toml::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| invalid(e.message().to_owned()))
+}
+
+/// The identity in a `config.toml` file, if it exists and names both: the `[[project]]` entry for
+/// `project_root` if the file has one (the last complete one, so a line added at the end of the
+/// file takes effect), else the `[user]` section. A project's own file is read with `None` for
+/// `project_root`, as it has no say in who the user is. `read` is as for `read_file`.
+fn from_file(
+    path: &Path,
+    read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
+    project_root: Option<&Path>,
+) -> Result<Option<Identity>, ConfigError> {
+    let Some(file) = read_file(path, read)? else {
+        return Ok(None);
+    };
     let for_folder = project_root.and_then(|root| {
         file.project.into_iter().rev().find_map(|entry| {
             let folder = entry.folder?;
@@ -201,17 +219,21 @@ pub fn ignored_identity_note(ignored: &Identity, project_root: &Path) -> String 
     note_for(ignored, project_root, user_config_path().as_deref())
 }
 
+/// `text` as a TOML string for a line the user is shown to add to their settings. The TOML
+/// writer does the quoting, so no folder, name or email can break out of its line or start a
+/// table. Escaping first keeps it on its one line and valid TOML.
+fn toml_string(text: &str) -> String {
+    toml::Value::String(escape(text, false)).to_string()
+}
+
 /// `ignored_identity_note`, given the path of the user's `config.toml`.
 fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> String {
     let (name, email) = (escape(&ignored.name, false), escape(&ignored.email, false));
-    // The TOML writer does the quoting, so no folder, name or email can break out of its line or
-    // start a table. Escaping first keeps the snippet to its four lines and valid TOML.
-    let quoted = |text: &str| toml::Value::String(escape(text, false)).to_string();
     let snippet = format!(
         "[[project]]\nfolder = {}\nname = {}\nemail = {}",
-        quoted(&project_root.to_string_lossy()),
-        quoted(&ignored.name),
-        quoted(&ignored.email),
+        toml_string(&project_root.to_string_lossy()),
+        toml_string(&ignored.name),
+        toml_string(&ignored.email),
     );
     let place = match config {
         Some(path) => format!(
@@ -226,6 +248,56 @@ fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> S
          hint: To save as them in this project, {place}\n{}",
         // The lines are Bolt's own, so their newlines stay.
         escape(&snippet, true)
+    )
+}
+
+/// The folders whose projects the user trusts although another user account owns their `.bolt`
+/// folder (decision 025, T23): the `safe-folders` list in the user's own `config.toml`, never a
+/// project's. Each entry must be a full path; a relative one would name a different folder
+/// wherever a command runs. No settings file, or no list, trusts nothing.
+pub fn safe_folders() -> Result<Vec<PathBuf>, ConfigError> {
+    user_config_path().map_or(Ok(Vec::new()), |path| safe_folders_in(&path))
+}
+
+/// `safe_folders`, from the user's `config.toml` at `path`.
+fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
+    let Some(file) = read_file(path, safe_fs::read_capped_following_links)? else {
+        return Ok(Vec::new());
+    };
+    file.safe_folders
+        .into_iter()
+        .map(|entry| {
+            let folder = PathBuf::from(&entry);
+            if folder.is_absolute() {
+                Ok(folder)
+            } else {
+                Err(ConfigError::Invalid {
+                    path: path.to_owned(),
+                    detail: format!("safe-folders must list full paths, not \"{entry}\""),
+                })
+            }
+        })
+        .collect()
+}
+
+/// What the user can do about a project another user account owns: the line that trusts its
+/// folder `root`, and where it goes (decision 025).
+#[must_use]
+pub fn trust_hint(root: &Path) -> String {
+    trust_hint_for(root, user_config_path().as_deref())
+}
+
+/// `trust_hint`, given the path of the user's `config.toml`.
+fn trust_hint_for(root: &Path, config: Option<&Path>) -> String {
+    let place = config.map_or_else(
+        || "your Bolt settings file".to_owned(),
+        |path| escape(&path.display().to_string(), false),
+    );
+    // "At the top": a key written below a `[user]` line would belong to that section instead.
+    format!(
+        "If you trust it, add its folder to safe-folders at the top of {place}:\n\
+         safe-folders = [{}]",
+        toml_string(&root.to_string_lossy())
     )
 }
 
@@ -610,6 +682,89 @@ mod tests {
             assert_eq!(entry["email"].as_str(), Some(email), "{note}");
             assert_eq!(snippet(&note).lines().count(), 4, "{note}");
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Folders the user trusts although another account owns them (T23, decision 025)
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn safe_folders_come_from_the_users_own_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // No settings file, or one with no list, trusts nothing.
+        assert!(safe_folders_in(&path).unwrap().is_empty());
+        std::fs::write(&path, "[user]\nname = \"Ada\"\n").unwrap();
+        assert!(safe_folders_in(&path).unwrap().is_empty());
+        // Full paths, as decision 025 writes them, at the top of the file.
+        let (work, play) = (dir.path().join("work"), dir.path().join("play"));
+        let text = format!(
+            "safe-folders = [{}, {}]\n[user]\nname = \"Ada\"\n",
+            quoted(&work.display().to_string()),
+            quoted(&play.display().to_string())
+        );
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(safe_folders_in(&path).unwrap(), [work, play]);
+    }
+
+    #[test]
+    fn safe_folders_must_be_full_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // A relative entry would name a different folder wherever a command runs. The last two
+        // are relative on Windows too: no drive, and a drive with no root.
+        for entry in ["work", "../work", "", r"\work", "C:work"] {
+            std::fs::write(&path, format!("safe-folders = [{}]\n", quoted(entry))).unwrap();
+            match safe_folders_in(&path) {
+                Err(ConfigError::Invalid { detail, .. }) => {
+                    assert!(detail.contains("full paths"), "{entry:?}: {detail}");
+                }
+                other => panic!("{entry:?}: {other:?}"),
+            }
+        }
+        // Not a list of text.
+        for text in ["safe-folders = '/work'\n", "safe-folders = [1]\n"] {
+            std::fs::write(&path, text).unwrap();
+            let got = safe_folders_in(&path);
+            assert!(matches!(got, Err(ConfigError::Invalid { .. })), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_trust_hint_offers_the_line_to_add() {
+        let cfg = Path::new("/home/me/.config/bolt/config.toml");
+        assert_eq!(
+            trust_hint_for(Path::new("/srv/shared/work"), Some(cfg)),
+            "If you trust it, add its folder to safe-folders at the top of \
+             /home/me/.config/bolt/config.toml:\nsafe-folders = [\"/srv/shared/work\"]"
+        );
+        // Decision 025's form for a Windows folder; and with no known settings file, the words.
+        let hint = trust_hint_for(Path::new(r"C:\Shared\Work"), None);
+        assert_eq!(
+            hint,
+            "If you trust it, add its folder to safe-folders at the top of your Bolt settings \
+             file:\nsafe-folders = ['C:\\Shared\\Work']"
+        );
+        // The line stays valid TOML that names the folder exactly, however it is spelt.
+        for folder in [
+            r"C:\Users\o'brien\Work",
+            "/tmp/''' and \"\"\"",
+            "/tmp/ends with a quote'",
+            "/tmp/café 日本語",
+        ] {
+            let hint = trust_hint_for(Path::new(folder), None);
+            let line = hint.lines().nth(1).unwrap();
+            let parsed: toml::Table = toml::from_str(line).unwrap();
+            assert_eq!(parsed["safe-folders"][0].as_str(), Some(folder), "{hint}");
+            assert_eq!(hint.lines().count(), 2, "{hint}");
+        }
+        // Nothing in the folder's name or the settings path can drive the terminal or add a line.
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let hint = trust_hint_for(Path::new(HOSTILE), Some(Path::new(HOSTILE)));
+        assert_hostile_text_escaped(&hint);
+        assert_eq!(hint.lines().count(), 2, "{hint}");
+        let sneaky = trust_hint_for(Path::new("/x']\n[user]\nname = 'Mallory"), None);
+        assert_eq!(sneaky.lines().count(), 2, "{sneaky}");
     }
 
     #[test]

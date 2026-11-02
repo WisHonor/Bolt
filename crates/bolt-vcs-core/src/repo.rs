@@ -7,6 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::{self, ConfigError};
 use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point, write_atomic};
@@ -34,6 +35,11 @@ pub enum RepoError {
     )]
     InsideAnotherProject { root: PathBuf },
     #[error(
+        "The project at {} belongs to another user account.",
+        escape(&path.display().to_string(), false)
+    )]
+    NotYours { path: PathBuf },
+    #[error(
         "This project uses {}, which this version of Bolt doesn't understand.",
         escape(detail, false)
     )]
@@ -48,6 +54,8 @@ pub enum RepoError {
     Pack(PackError),
     #[error(transparent)]
     Decode(#[from] DecodeError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
 }
 
 impl RepoError {
@@ -60,6 +68,7 @@ impl RepoError {
                 RepoError::InsideAnotherProject { .. } => {
                     "Run Bolt commands there, or pick a folder outside it."
                 }
+                RepoError::NotYours { path } => return Some(config::trust_hint(path)),
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
@@ -137,6 +146,39 @@ fn check_shape(bolt: &Path) -> Result<(), RepoError> {
         }
     }
     Ok(())
+}
+
+/// Refuses the project at `root` if another user account owns its `.bolt` folder and the user
+/// has not listed `root` in their safe-folders: a `.bolt` planted above the user's work
+/// (`C:\.bolt`, `/tmp/.bolt`) must not capture their commands (decision 025, T23). With no `.bolt`
+/// there is no project.
+fn check_owner(root: &Path) -> Result<(), RepoError> {
+    let is_own = match bolt_platform::is_owned_by_current_user(&root.join(".bolt")) {
+        Ok(is_own) => is_own,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RepoError::NotAProject),
+        Err(e) => return Err(e.into()),
+    };
+    // The user's settings are read only for a folder that isn't theirs, so a mistake in them
+    // never stops the user's own projects.
+    let safe = if is_own {
+        Vec::new()
+    } else {
+        config::safe_folders()?
+    };
+    if owner_allows(is_own, root, &safe) {
+        Ok(())
+    } else {
+        Err(RepoError::NotYours {
+            path: root.to_owned(),
+        })
+    }
+}
+
+/// Whether Bolt may use the project at `root`: its `.bolt` folder is the user's own (`is_own`),
+/// or the user's safe-folders (`safe`) list this very folder. A folder listed above it trusts
+/// nothing below.
+fn owner_allows(is_own: bool, root: &Path, safe: &[PathBuf]) -> bool {
+    is_own || safe.iter().any(|folder| config::same_folder(folder, root))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,10 +285,16 @@ impl Repository {
         // Before anything is created: creating a folder through a planted link would write
         // outside the project.
         check_shape(&bolt)?;
+        // Finishing an interrupted start uses that `.bolt`, so it must be the user's too (T23).
+        if bolt.try_exists()? {
+            check_owner(root)?;
+        }
         if format_path(root).try_exists()? {
             return Err(already());
         }
         if let Some(outer) = root.ancestors().skip(1).find(|a| format_path(a).is_file()) {
+            // One planted above by another account (`C:\.bolt`) is named as such.
+            check_owner(outer)?;
             return Err(RepoError::InsideAnotherProject {
                 root: outer.to_owned(),
             });
@@ -324,8 +372,10 @@ impl Repository {
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
         let bolt = root.join(".bolt");
-        // Nothing in `.bolt` is read before its folders are known to be real folders.
+        // Nothing in `.bolt` is read before its folders are known to be real folders, and
+        // before `.bolt` is known to be the user's own or trusted (T23).
         check_shape(&bolt)?;
+        check_owner(root)?;
 
         let text = match safe_fs::read_capped(&bolt.join("format"), safe_fs::MAX_FORMAT_BYTES) {
             Ok(bytes) => {
@@ -770,6 +820,26 @@ mod tests {
     }
 
     #[test]
+    fn owner_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, sibling) = (dir.path().join("project"), dir.path().join("sibling"));
+        for folder in [&root, &sibling] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        // The user's own `.bolt`: used, whatever the list says.
+        assert!(owner_allows(true, &root, &[]));
+        // Another account's: refused, unless the user listed this very folder.
+        assert!(!owner_allows(false, &root, &[]));
+        assert!(owner_allows(false, &root, std::slice::from_ref(&root)));
+        // The same folder written another way still counts.
+        let roundabout = sibling.join("..").join("project");
+        assert!(owner_allows(false, &root, &[roundabout]));
+        // A folder above it, or beside it, trusts nothing else.
+        assert!(!owner_allows(false, &root, &[dir.path().to_owned()]));
+        assert!(!owner_allows(false, &root, &[sibling]));
+    }
+
+    #[test]
     fn hidden_bolt_folder_is_a_real_folder() {
         let dir = tempfile::tempdir().unwrap();
         Repository::init(dir.path(), &entry(0).who).unwrap();
@@ -793,6 +863,15 @@ mod tests {
         let e = RepoError::Damaged { detail: "x".into() };
         assert_eq!(e.to_string(), "This project's Bolt data looks damaged: x.");
         assert!(e.hint().unwrap().contains("Nothing was changed"));
+        let e = RepoError::NotYours {
+            path: PathBuf::from("/srv/work"),
+        };
+        assert_eq!(
+            e.to_string(),
+            "The project at /srv/work belongs to another user account."
+        );
+        let hint = e.hint().unwrap();
+        assert!(hint.ends_with("\nsafe-folders = [\"/srv/work\"]"), "{hint}");
     }
 
     #[test]
@@ -807,6 +886,9 @@ mod tests {
             },
             RepoError::InsideAnotherProject {
                 root: PathBuf::from(HOSTILE),
+            },
+            RepoError::NotYours {
+                path: PathBuf::from(HOSTILE),
             },
             // The path of a damaged pack has the project folder's name in it.
             PackError::Corrupt {

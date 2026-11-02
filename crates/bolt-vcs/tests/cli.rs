@@ -66,6 +66,18 @@ fn start_creates_a_project() {
     assert!(text(&out.stdout).contains("Started a Bolt project"));
 }
 
+/// The check that refuses another account's project (T23) must never refuse the user's own,
+/// including where an elevated administrator's folders belong to the Administrators group, as on
+/// the Windows CI runners (review focus 5).
+#[test]
+fn start_and_save_work_in_a_normal_folder() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    env.bolt().args(["save", "first"]).assert().success();
+    env.bolt().arg("history").assert().success();
+}
+
 #[test]
 fn start_twice_is_refused() {
     let env = Env::new();
