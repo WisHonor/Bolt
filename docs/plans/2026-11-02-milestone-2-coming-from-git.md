@@ -482,10 +482,15 @@ fn matching_takes_time_proportional_to_its_input() {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
     #[test]
-    fn bolt_ignores_exactly_what_git_ignores(tree in ignore_tree()) {
-        // writes the .gitignore files and paths into a fresh git repository; asks
-        // `git -c core.excludesFile= -c core.ignorecase=<probe> check-ignore --no-index -v -n --stdin`;
-        // compares each path's verdict with Matcher::decide through a save's walk
+    fn bolt_keeps_exactly_the_files_git_keeps(tree in ignore_tree()) {
+        // writes each rule file twice, as .gitignore for Git and .boltignore for Bolt, plus the paths,
+        // into a fresh git repository; Git's real walk is the reference:
+        // `git -c core.excludesFile= -c core.ignorecase=<probe> ls-files --others --exclude-standard -z`;
+        // the files a Bolt save keeps must be exactly those
+    }
+    #[test]
+    fn single_path_verdicts_match_check_ignore(tree in ignore_tree()) {
+        // `git ... check-ignore --no-index -v -n --stdin` against Matcher::decide, path by path
     }
 }
 #[test]
@@ -592,10 +597,12 @@ Decisions 031, 033 and 039.
 
 **Files:**
 - Create: `crates/bolt-vcs-core/src/git/{mod.rs,config.rs,refs.rs,craft.rs}`.
-- Modify: `crates/bolt-vcs-core/src/lib.rs` (`pub mod git;`), `crates/bolt-vcs-core/Cargo.toml` (feature `test-support = []`; `git::craft` is `#[cfg(any(test, feature = "test-support"))]`), `crates/bolt-vcs/Cargo.toml` (dev-dependency enables `test-support`).
+- Modify: `crates/bolt-vcs-core/src/lib.rs` (`pub mod git;`), `crates/bolt-vcs-core/Cargo.toml` (feature `test-support = []`; `git::craft` is `#[cfg(any(test, feature = "test-support"))]`; the dependencies `miniz_oxide`, `sha1-checked` and `sha2`, which `craft` needs to write and hash objects), `crates/bolt-vcs/Cargo.toml` (dev-dependency enables `test-support`).
 
 **Interfaces:**
 ```rust
+pub enum ObjectType { Commit, Tree, Blob, Tag }
+pub fn object_id(kind: ObjectType, data: &[u8], hash: HashKind) -> GitId;   // "<type> <len>\0" + data; SHA-1 with collision detection, or SHA-256
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum HashKind { Sha1, Sha256 }                         // len(): 20 or 32
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -710,21 +717,21 @@ Decision 031.
 
 **Files:**
 - Create: `crates/bolt-vcs-core/src/git/{odb.rs,pack.rs}`.
-- Modify: `crates/bolt-vcs-core/Cargo.toml` (`miniz_oxide`, `sha1-checked`, `sha2`) and `git/craft.rs` (packs).
+- Modify: `git/craft.rs` (packs). The dependencies arrived with Task 9.
 - Run `cargo deny check` locally.
 
 **Interfaces:**
 ```rust
-pub enum ObjectType { Commit, Tree, Blob, Tag }
-pub struct Object { pub kind: ObjectType, pub data: Vec<u8> }
+pub struct Object { pub kind: ObjectType, pub data: Vec<u8> }   // ObjectType comes from Task 9
 pub const MAX_IN_MEMORY_OBJECT: u64 = 512 << 20;
 pub const MAX_DELTA_DEPTH: u32 = 4096;
 pub const DELTA_BASE_CACHE: u64 = 256 << 20;
 impl Repo {
     pub fn header(&self, id: &GitId) -> Result<(ObjectType, u64), GitError>;     // without reading the data
     pub fn read(&self, id: &GitId) -> Result<Object, GitError>;                  // up to MAX_IN_MEMORY_OBJECT, ID checked
-    pub fn copy_blob(&self, id: &GitId, out: &mut dyn Write) -> Result<u64, GitError>;  // streams objects stored whole
+    pub fn blob_reader(&self, id: &GitId) -> Result<BlobReader<'_>, GitError>;   // impl Read: objects stored whole stream; deltified ones read from memory
 }
+pub struct BlobReader<'r> { /* … */ }   // checks the ID as the data ends; a mismatch fails that last read
 // craft.rs
 pub enum PackEntry { Whole(ObjectType, Vec<u8>), OfsDelta { base: usize, delta: Vec<u8> },
                      RefDelta { base: GitId, delta: Vec<u8> }, Raw(Vec<u8>) }
@@ -758,7 +765,7 @@ pub fn delta(base: &[u8], result: &[u8]) -> Vec<u8>;               // a valid de
 
 **IDs:**
 - Every object read is checked against its ID: SHA-1 through `sha1-checked`, where a detected collision attack is `Broken`, or SHA-256.
-- `copy_blob` checks at the end of the stream.
+- `blob_reader` checks at the end of the stream, so a reader that fails stores nothing in `PackSet::add_content_from`.
 
 **Errors:**
 - An object found nowhere is `Broken`: "missing object `<hex>`".
@@ -771,7 +778,8 @@ pub fn delta(base: &[u8], result: &[u8]) -> Vec<u8>;               // a valid de
 #[test] fn packed_objects_read_back_whole_and_through_both_kinds_of_delta() {}
 #[test] fn sha256_objects_read_back() {}
 #[test] fn large_offsets_are_followed() { /* a crafted idx using the 64-bit table */ }
-#[test] fn blobs_stored_whole_are_streamed() { /* copy_blob into a counting writer: bytes and size match */ }
+#[test] fn blobs_stored_whole_are_streamed() { /* read blob_reader to the end in small reads: bytes and size match */ }
+#[test] fn a_streamed_blob_with_the_wrong_id_fails_its_last_read() {}
 #[test] fn a_huge_declared_size_is_refused_before_allocating() {
     craft.raw_loose(&hex, &deflate(b"blob 99999999999\0x"));
     assert!(matches!(repo.read(&id), Err(GitError::Broken { .. })));
@@ -817,7 +825,7 @@ pub fn parse_tag(data: &[u8], hash: HashKind) -> Result<TagObject<'_>, GitError>
 pub fn is_lfs_pointer(data: &[u8]) -> bool;
 pub fn parse_person(line: &[u8]) -> Person;      // best effort, never fails; exactness comes from git-header
 pub fn rebuild_commit(save: &Save, tree: &GitId, parents: &[GitId]) -> Vec<u8>;   // storage-format §4
-pub fn object_id(kind: ObjectType, data: &[u8], hash: HashKind) -> GitId;       // "<type> <len>\0" + data
+// object_id comes from Task 9
 // save.rs
 pub const EXTRA_GIT_COMMIT: &str = "git-commit";
 pub const EXTRA_GIT_HEADER: &str = "git-header";
@@ -899,7 +907,7 @@ pub enum ImportError { Git(GitError), Repo(RepoError), Store(StoreError), Pack(P
 - A memo maps each Git ID to (content ID, size).
 - Blobs of at most 1,024 bytes are read and tested with `is_lfs_pointer`. A pointer stops the import, naming the commit and path (decision 037).
 - Blobs up to 64 MiB are read whole: Bolt computes its ID, checks the store with `has_good_copy`, and stores with `add_content`.
-- Bigger blobs are streamed twice: `copy_blob` into a hasher, then `copy_blob` into `PackSet::add_content_from` with the expected ID.
+- Bigger blobs are streamed twice: one `blob_reader` into a hasher, then a second `blob_reader` into `PackSet::add_content_from` with the expected ID.
 
 **Trees:**
 - Converted with an explicit stack.
