@@ -91,15 +91,14 @@ See [testing.md](testing.md) §3: fuzz targets for every decoder and parser, a m
   - agentic autofix: it spends AI credits and opens pull requests on its own;
   - automatic dependency submission: GitHub reads `Cargo.lock` directly.
 - CI itself runs with read-only permissions, and its actions are pinned to exact commits ([testing.md](testing.md)).
+- **Branch protection** (on since 2026-11-02, the ruleset "Protect main"):
+  - force pushes to `main` and its deletion are blocked;
+  - every change needs a pull request;
+  - the CI checks (`test` on all three systems, and `deny`) and CodeQL must pass.
+
+  Nobody can bypass it, the owner included, so every change, an agent's too, reaches `main` only through a pull request whose checks are green.
 
 ## 7. Open items
-
-- Turn on branch protection for `main` once milestone 1's fixes are merged. Use a ruleset that:
-  - blocks force pushes and deletion;
-  - requires a pull request;
-  - requires the CI checks (`test` on all three systems, and `deny`) and CodeQL to pass.
-
-  From then on every change, including an agent's, reaches `main` only through a pull request whose checks are green.
 
 - Review Git's published vulnerabilities (path, symlink, case and submodule bugs) and add every relevant case to the corpus.
 - Write the server's threat model in detail before v0.3 (authentication, permissions, rate limits, audit log).
