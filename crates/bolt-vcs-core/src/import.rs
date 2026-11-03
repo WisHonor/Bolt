@@ -26,8 +26,8 @@ mod names;
 
 pub use convert::{Converter, Counts, TagOutcome};
 use convert::{
-    MAX_LISTED, TagBudget, at, bug, check_tag_chain, check_tag_object, expect_kind, shown_path,
-    tag_message, tree_and_parents,
+    MAX_EXTRA_PARENTS, MAX_LISTED, TagBudget, at, bug, check_tag_chain, check_tag_object,
+    expect_kind, shown_path, tag_message, tree_and_parents,
 };
 use names::{Named, Names};
 // For tests that check an import's names against Git's refs.
@@ -262,8 +262,8 @@ struct Plan {
     /// The first refs left out, and how many there are.
     skipped_refs: Vec<String>,
     skipped_ref_count: u64,
-    /// Every commit to convert, after its parents, with its parents in its own order.
-    order: Vec<(GitId, Vec<GitId>)>,
+    /// Every commit to convert, each after its parents.
+    order: Vec<GitId>,
     /// The line of Git's current branch, if `HEAD` is on one, and `HEAD`'s commit.
     head_line: Option<String>,
     head_commit: GitId,
@@ -295,7 +295,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
     if let Some(name) = tracked_bolt(&git, &head_commit)? {
         return Err(tracked_stop(&name));
     }
-    let order = in_order(&git, &roots)?;
+    let order = in_order(&git, &roots, MAX_EXTRA_PARENTS)?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -331,12 +331,8 @@ fn carry_out(
     let mut packs = repo.new_packs()?;
     let mut converter = Converter::new(&git, repo.store(), &mut packs);
     let total = order.len() as u64;
-    for (done, (id, parents)) in (1..).zip(&order) {
-        let parent_saves = parents
-            .iter()
-            .map(|parent| saved(&converter, parent))
-            .collect::<Result<Vec<_>, _>>()?;
-        converter.commit(id, &parent_saves)?;
+    for (done, id) in (1..).zip(&order) {
+        converter.commit(id)?;
         (req.progress)(done, total);
     }
     converter.finish()?;
@@ -358,7 +354,7 @@ fn carry_out(
     }
     let position = match head_line {
         Some(line) => Position::OnLine(line),
-        None => Position::AtSave(saved(&converter, &head_commit)?),
+        None => Position::AtSave(converter.save_of(&head_commit)?),
     };
     let counts = converter.counts().clone();
 
@@ -584,55 +580,127 @@ fn roots(
     Ok(roots)
 }
 
-/// Every commit `roots` reach, each after its parents, with its parents in its own order: pass 1,
-/// which reads each commit once before anything is written. It walks with a stack of its own,
-/// into roots and parents in the order of their Git IDs, so the order is the same every time.
+/// Every commit `roots` reach, each after its parents: pass 1, which reads each commit once
+/// before anything is written. It walks with a stack of its own, into roots and parents in the
+/// order of their Git IDs, so the order is the same every time, and it stops once the commits
+/// have more than `most_extra` parents beyond each one's first. Pass 2 reads each commit's
+/// parents again, so none are kept here.
 fn in_order(
     git: &git::Repo,
     roots: &BTreeSet<GitId>,
-) -> Result<Vec<(GitId, Vec<GitId>)>, ImportError> {
-    let mut order = Vec::new();
-    let mut seen = HashSet::new();
-    // Each commit on the way down, its parents, and those still to go into.
-    let mut stack: Vec<(GitId, Vec<GitId>, std::vec::IntoIter<GitId>)> = Vec::new();
-    let enter = |id: GitId, stack: &mut Vec<_>| -> Result<(), ImportError> {
-        let (_, parents) = tree_and_parents(git, &id)?;
-        let mut next = parents.clone();
-        next.sort();
-        stack.push((id, parents, next.into_iter()));
-        Ok(())
+    most_extra: u64,
+) -> Result<Vec<GitId>, ImportError> {
+    let mut walk = FirstPass {
+        git,
+        most_extra,
+        ids: Vec::new(),
+        by_id: HashMap::new(),
+        entered: Vec::new(),
+        stack: Vec::new(),
+        todo: Vec::new(),
+        extra: 0,
     };
+    let mut order = Vec::new();
     for root in roots {
-        if !seen.insert(*root) {
-            continue;
-        }
-        enter(*root, &mut stack)?;
-        while let Some((_, _, next)) = stack.last_mut() {
-            match next.next() {
-                Some(parent) => {
-                    if seen.insert(parent) {
-                        enter(parent, &mut stack)?;
-                    }
-                }
-                None => {
-                    if let Some((id, parents, _)) = stack.pop() {
-                        order.push((id, parents));
-                    }
-                }
+        let root = walk.index_of(*root)?;
+        walk.enter(root)?;
+        while let Some(&(top, start)) = walk.stack.last() {
+            if walk.todo.len() > start
+                && let Some(parent) = walk.todo.pop()
+            {
+                walk.enter(parent)?;
+            } else {
+                walk.stack.pop();
+                order.push(walk.id(top)?);
             }
         }
     }
     Ok(order)
 }
 
-/// The save the converter made of `commit`, which `in_order` put before whatever needs it.
-fn saved(converter: &Converter<'_>, commit: &GitId) -> Result<Id, ImportError> {
-    converter.save_of(commit).ok_or_else(|| {
-        bug(format!(
-            "Bolt needed the save of commit `{}` before it made it",
-            commit.to_hex()
-        ))
-    })
+/// Pass 1's walk. Each commit met gets an index into one table of IDs, which stands for it on the
+/// stack: a commit on the way down costs 4 bytes for each parent it still has to go into.
+struct FirstPass<'g> {
+    git: &'g git::Repo,
+    most_extra: u64,
+    /// Each commit met, by its index.
+    ids: Vec<GitId>,
+    by_id: HashMap<GitId, u32>,
+    /// Whether each commit, by its index, has been gone into.
+    entered: Vec<bool>,
+    /// Each commit on the way down, with where its parents start in `todo`.
+    stack: Vec<(u32, usize)>,
+    /// The parents still to go into of the commits on the stack, each commit's smallest ID last.
+    todo: Vec<u32>,
+    /// Parents met beyond each commit's first.
+    extra: u64,
+}
+
+impl FirstPass<'_> {
+    /// The index of the commit `id`, which it gets when first met.
+    fn index_of(&mut self, id: GitId) -> Result<u32, ImportError> {
+        if let Some(&index) = self.by_id.get(&id) {
+            return Ok(index);
+        }
+        let index = u32::try_from(self.ids.len()).map_err(|_| ImportError::Stop {
+            what: "This Git history has more commits than Bolt can count in one import.".to_owned(),
+            hint: None,
+        })?;
+        self.ids.push(id);
+        self.entered.push(false);
+        self.by_id.insert(id, index);
+        Ok(index)
+    }
+
+    fn id(&self, index: u32) -> Result<GitId, ImportError> {
+        self.ids.get(index as usize).copied().ok_or_else(|| {
+            bug(format!(
+                "Bolt lost track of commit {index} of its first pass"
+            ))
+        })
+    }
+
+    /// Goes into the commit `index` unless it was gone into before: reads it, counts its
+    /// parents, and puts it on the stack and its parents on `todo`.
+    fn enter(&mut self, index: u32) -> Result<(), ImportError> {
+        let id = self.id(index)?;
+        match self.entered.get_mut(index as usize) {
+            Some(entered) if !*entered => *entered = true,
+            _ => return Ok(()),
+        }
+        let (_, mut parents) = tree_and_parents(self.git, &id)?;
+        self.extra = self
+            .extra
+            .saturating_add((parents.len() as u64).saturating_sub(1));
+        if self.extra > self.most_extra {
+            return Err(too_many_parents(self.most_extra));
+        }
+        // Taken from the end, so the smallest ID is gone into first.
+        parents.sort_unstable_by(|a, b| b.cmp(a));
+        self.stack.push((index, self.todo.len()));
+        for parent in parents {
+            let parent = self.index_of(parent)?;
+            self.todo.push(parent);
+        }
+        Ok(())
+    }
+}
+
+/// The stop for a history whose commits have more than `most` parents beyond each one's first.
+fn too_many_parents(most: u64) -> ImportError {
+    ImportError::Stop {
+        what: format!(
+            "This Git history's merges have more than {} parents beyond their first, and Bolt \
+             takes at most that many in one import, since each save keeps all of its parents. \
+             Real histories have far fewer: Linux's has about 80,000 merges.",
+            thousands(most)
+        ),
+        hint: Some(
+            "Nothing was changed. If this history is real and you need all of it in Bolt, \
+             please report it, with this message."
+                .to_owned(),
+        ),
+    }
 }
 
 /// The lines `refs` become: each name with the save of its commit.
@@ -641,7 +709,7 @@ fn lines_of(
     refs: &[Named],
 ) -> Result<BTreeMap<String, Id>, ImportError> {
     refs.iter()
-        .map(|line| Ok((line.bolt.clone(), saved(converter, &line.target)?)))
+        .map(|line| Ok((line.bolt.clone(), converter.save_of(&line.target)?)))
         .collect()
 }
 
@@ -982,6 +1050,44 @@ mod tests {
             other => panic!("{:?}", other.map(|_| ())),
         }
         assert!(!dir.path().join(".bolt").exists());
+    }
+
+    /// Pass 1 puts each commit after its parents, smallest Git ID first, and stops once the
+    /// commits have more parents beyond each one's first than its limit, before anything is
+    /// written.
+    #[test]
+    fn the_first_pass_orders_commits_and_counts_their_extra_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        let tree = git.tree(&[]);
+        let commit = |parents: &[GitId], message: &str| {
+            let mut raw = format!("tree {}\n", tree.to_hex());
+            for parent in parents {
+                let _ = writeln!(raw, "parent {}", parent.to_hex());
+            }
+            raw += "author A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\n";
+            git.commit((raw + message).as_bytes())
+        };
+        let (a, b, c) = (commit(&[], "a\n"), commit(&[], "b\n"), commit(&[], "c\n"));
+        // Three parents past its first, one of them a parent twice.
+        let merge = commit(&[c, a, b, a], "merge\n");
+        let tip = commit(&[merge], "tip\n");
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let roots = BTreeSet::from([tip]);
+        let mut want = vec![a, b, c];
+        want.sort();
+        want.extend([merge, tip]);
+        assert_eq!(in_order(&repo, &roots, 3).unwrap(), want);
+        let e = in_order(&repo, &roots, 2).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("more than 2 parents beyond their first"),
+            "{e}"
+        );
+        assert!(
+            e.hint().unwrap().starts_with("Nothing was changed."),
+            "{e:?}"
+        );
     }
 
     /// Decision 033's limits on lines, read from a real `packed-refs`, stop the import before

@@ -390,7 +390,6 @@ fn dir_size(dir: &Path) -> u64 {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT3-2: red-team proof, run once its fix is in"]
 fn rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory() {
     let env = Env::new();
     let git_bytes = octopus_chain(env.root(), 8_000);

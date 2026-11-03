@@ -36,6 +36,10 @@ const MAX_WHOLE_BLOB: u64 = 64 << 20;
 /// (decision 032).
 const MAX_COMMIT_BYTES: u64 = MAX_EXTRA_VALUE_BYTES as u64 + 1 + MAX_MESSAGE_BYTES as u64;
 
+/// Parents an import may add beyond each commit's first, all commits together: a save keeps its
+/// parents whole, so a few kilobytes of Git merges could otherwise fill the disk (decision 043).
+pub(super) const MAX_EXTRA_PARENTS: u64 = 1_000_000;
+
 /// How many of a kind of thing an import leaves out, or warns about, it lists: skipped entries,
 /// names that aren't UTF-8, refs and `.bolt` folders. The rest are counted.
 pub(super) const MAX_LISTED: usize = 100;
@@ -354,10 +358,14 @@ impl<'r> Converter<'r> {
         &self.counts
     }
 
-    /// The save of the commit `id`, if it is converted already.
-    #[must_use]
-    pub fn save_of(&self, id: &GitId) -> Option<Id> {
-        self.saves.get(id).copied()
+    /// The save of the commit `id`, which must be converted already.
+    pub fn save_of(&self, id: &GitId) -> Result<Id, ImportError> {
+        self.saves.get(id).copied().ok_or_else(|| {
+            bug(format!(
+                "Bolt needed the save of commit `{}` before it made it",
+                id.to_hex()
+            ))
+        })
     }
 
     /// Stops the import if any name met so far isn't UTF-8 (decision 019). The converter leaves
@@ -373,9 +381,10 @@ impl<'r> Converter<'r> {
         })
     }
 
-    /// Stores the save of the commit `id`, with its snapshot, given its parents' saves in the
-    /// commit's own order (decision 032). A commit converted already gives the same save.
-    pub fn commit(&mut self, id: &GitId, parent_saves: &[Id]) -> Result<Id, ImportError> {
+    /// Stores the save of the commit `id`, with its snapshot (decision 032). Its parents must be
+    /// converted already: their saves are taken from what this converter made, in the commit's
+    /// own order. A commit converted already gives the same save.
+    pub fn commit(&mut self, id: &GitId) -> Result<Id, ImportError> {
         if let Some(save) = self.saves.get(id) {
             return Ok(*save);
         }
@@ -384,27 +393,12 @@ impl<'r> Converter<'r> {
         let c = parse_commit(&object.data, self.git.hash())
             .map_err(|e| at(e, || format!("commit `{hex}`")))?;
         keepable(&c, &hex)?;
-        if parent_saves.len() != c.parents.len() {
-            return Err(bug(format!(
-                "Bolt was given {} saves for the {} parents of commit `{hex}`",
-                parent_saves.len(),
-                c.parents.len()
-            )));
-        }
-        // Another commit's save in a parent's place would export as another commit.
-        for (save, git) in parent_saves.iter().zip(&c.parents) {
-            if self.saves.get(git).is_some_and(|own| own != save) {
-                return Err(bug(format!(
-                    "Bolt was given another save than its own for parent `{}` of commit `{hex}`",
-                    git.to_hex()
-                )));
-            }
-        }
         // Git may list a parent twice and a save can't; `git-header` keeps the commit exact.
         let (mut parents, mut git_parents) = (Vec::new(), Vec::new());
-        for (save, git) in parent_saves.iter().zip(&c.parents) {
-            if !parents.contains(save) {
-                parents.push(*save);
+        for git in &c.parents {
+            let save = self.save_of(git)?;
+            if !parents.contains(&save) {
+                parents.push(save);
                 git_parents.push(*git);
             }
         }
@@ -1126,8 +1120,8 @@ mod tests {
         );
         let second = commit_of(&git, &[(b"100644", b"big-renamed", big_id)]);
         let (save, store) = convert(dir.path(), "a", |c| {
-            let save = c.commit(&first, &[]).unwrap();
-            c.commit(&second, &[]).unwrap();
+            let save = c.commit(&first).unwrap();
+            c.commit(&second).unwrap();
             save
         });
         let root = store
@@ -1142,7 +1136,7 @@ mod tests {
         assert_eq!(entry("small-again").id, entry("small").id);
         assert_eq!(stored(dir.path(), "a", ObjectKind::Content), 2);
         // A store that holds them already gets neither again.
-        convert(dir.path(), "a", |c| c.commit(&first, &[]).unwrap());
+        convert(dir.path(), "a", |c| c.commit(&first).unwrap());
         assert_eq!(stored(dir.path(), "a", ObjectKind::Content), 2);
     }
 
@@ -1167,7 +1161,7 @@ mod tests {
                 ],
             );
             let ((save, counts), store) = convert(dir.path(), "a", |c| {
-                let save = c.commit(&id, &[]).unwrap();
+                let save = c.commit(&id).unwrap();
                 c.finish().unwrap();
                 (save, c.counts().clone())
             });
@@ -1215,7 +1209,7 @@ mod tests {
         let old = git.tree(&[(b"100664", b"file", text), (b"040000", b"folder", empty)]);
         let id = commit_of(&git, &[(b"40000", b"old", old)]);
         let ((save, counts), store) = convert(dir.path(), "a", |c| {
-            (c.commit(&id, &[]).unwrap(), c.counts().clone())
+            (c.commit(&id).unwrap(), c.counts().clone())
         });
         let root = store
             .listing(&store.save(&save, false).unwrap().root)
@@ -1255,8 +1249,8 @@ mod tests {
         let both = git.tree(&[(b"40000", b"x", bad), (b"40000", b"y", bad)]);
         let second = git.commit(&commit_bytes(&both, &[], "", b"m\n"));
         let ((save, counts), store) = convert(dir.path(), "a", |c| {
-            let save = c.commit(&first, &[]).unwrap();
-            c.commit(&second, &[]).unwrap();
+            let save = c.commit(&first).unwrap();
+            c.commit(&second).unwrap();
             (save, c.counts().clone())
         });
         let root = store
@@ -1290,7 +1284,7 @@ mod tests {
         ]);
         let id = commit_of(&git, &[(b"40000", b"game", game)]);
         let ((save, counts), store) = convert(dir.path(), "a", |c| {
-            (c.commit(&id, &[]).unwrap(), c.counts().clone())
+            (c.commit(&id).unwrap(), c.counts().clone())
         });
         let root = store
             .listing(&store.save(&save, false).unwrap().root)
@@ -1325,9 +1319,7 @@ mod tests {
         let too_long = "x".repeat(256);
         let deep = git.tree(&[(b"100644", too_long.as_bytes(), file)]);
         let id = commit_of(&git, &[(b"40000", b"deep", deep)]);
-        let ((fine, long), _) = convert(dir.path(), "a", |c| {
-            (c.commit(&fine, &[]), c.commit(&id, &[]))
-        });
+        let ((fine, long), _) = convert(dir.path(), "a", |c| (c.commit(&fine), c.commit(&id)));
         assert!(fine.is_ok(), "{fine:?}");
         // The name is shown cut, so a hostile one can't flood the message.
         let shown = format!("deep/{}...", "x".repeat(255));
@@ -1354,9 +1346,9 @@ mod tests {
         let third_top = git.tree(&[(b"40000", b"old", top)]);
         let third = git.commit(&commit_bytes(&third_top, &[second], "", b"third\n"));
         let ((saves, counts, finished), store) = convert(dir.path(), "a", |c| {
-            let one = c.commit(&first, &[]).unwrap();
-            let two = c.commit(&second, &[one]).unwrap();
-            let three = c.commit(&third, &[two]).unwrap();
+            let one = c.commit(&first).unwrap();
+            let two = c.commit(&second).unwrap();
+            let three = c.commit(&third).unwrap();
             ([one, two, three], c.counts().clone(), c.finish())
         });
         match finished {
@@ -1392,7 +1384,7 @@ mod tests {
             .collect();
         let id = commit_of(&git, &entries);
         let (e, _) = convert(dir.path(), "b", |c| {
-            c.commit(&id, &[]).unwrap();
+            c.commit(&id).unwrap();
             c.finish().unwrap_err()
         });
         match &e {
@@ -1426,9 +1418,9 @@ mod tests {
         };
         let (skipped, bad, too_long) = (deep(&slashed), deep(&not_utf8), deep(&long));
         let ((counts, finished, stopped), _) = convert(dir.path(), "a", |c| {
-            c.commit(&skipped, &[]).unwrap();
-            c.commit(&bad, &[]).unwrap();
-            (c.counts().clone(), c.finish(), c.commit(&too_long, &[]))
+            c.commit(&skipped).unwrap();
+            c.commit(&bad).unwrap();
+            (c.counts().clone(), c.finish(), c.commit(&too_long))
         });
         // The end of a path is kept, after `…/`, and a name is cut at 255 bytes.
         let small = |path: &str| {
@@ -1458,7 +1450,7 @@ mod tests {
         let header = format!("commit {size}\0");
         let compressed = miniz_oxide::deflate::compress_to_vec_zlib(header.as_bytes(), 6);
         git.raw_loose(&id.to_hex(), &compressed);
-        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
+        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id));
         match result {
             Err(e @ ImportError::Git(GitError::Unimportable { .. })) => {
                 let message = e.to_string();
@@ -1485,7 +1477,7 @@ mod tests {
         }
         let id = git.commit(&commit_bytes(&tree, &[], "", b"m\n"));
         let started = Instant::now();
-        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
+        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id));
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "{:?}",
@@ -1522,9 +1514,9 @@ mod tests {
             .spawn(move || {
                 convert(&path, "a", |c| {
                     // Read level by level the first time, then from what was converted since.
-                    let fresh = c.commit(&past, &[]).map(drop);
-                    let fine = c.commit(&at_limit, &[]).map(drop);
-                    (fresh, fine, c.commit(&past, &[]).map(drop))
+                    let fresh = c.commit(&past).map(drop);
+                    let fine = c.commit(&at_limit).map(drop);
+                    (fresh, fine, c.commit(&past).map(drop))
                 })
                 .0
             })
@@ -1549,9 +1541,9 @@ mod tests {
             b"Merge\n\nBody.\n",
         ));
         let (saves, store) = convert(dir.path(), "a", |c| {
-            let first = c.commit(&first, &[]).unwrap();
-            let other = c.commit(&other, &[]).unwrap();
-            [first, other, c.commit(&merge, &[first, other]).unwrap()]
+            let first = c.commit(&first).unwrap();
+            let other = c.commit(&other).unwrap();
+            [first, other, c.commit(&merge).unwrap()]
         });
         let save = store.save(&saves[2], false).unwrap();
         assert_eq!(save.parents, [saves[0], saves[1]]);
@@ -1591,29 +1583,23 @@ mod tests {
     }
 
     #[test]
-    fn parent_saves_must_be_the_parents_own() {
+    fn a_parent_must_be_converted_first() {
         let (dir, git) = repo(Sha1);
         let tree = git.tree(&[]);
         let first = git.commit(&commit_bytes(&tree, &[], "", b"first\n"));
-        let other = git.commit(&commit_bytes(&tree, &[], "", b"other\n"));
         let child = git.commit(&commit_bytes(&tree, &[first], "", b"child\n"));
-        // Another commit's save in a parent's place would export as another commit.
-        let (wrong, _) = convert(dir.path(), "a", |c| {
-            c.commit(&first, &[]).unwrap();
-            let other = c.commit(&other, &[]).unwrap();
-            c.commit(&child, &[other])
-        });
-        match wrong {
+        let (early, _) = convert(dir.path(), "a", |c| c.commit(&child));
+        match early {
             Err(ImportError::Stop { what, .. }) => {
-                assert!(what.contains(&child.to_hex()), "{what}");
                 assert!(what.contains(&first.to_hex()), "{what}");
                 assert!(what.contains("report"), "{what}");
             }
             other => panic!("{other:?}"),
         }
-        // A parent this converter hasn't met is taken as given.
-        let (unknown, _) = convert(dir.path(), "b", |c| c.commit(&child, &[Id([7; 32])]));
-        assert!(unknown.is_ok(), "{unknown:?}");
+        let (saves, store) = convert(dir.path(), "b", |c| {
+            [c.commit(&first).unwrap(), c.commit(&child).unwrap()]
+        });
+        assert_eq!(store.save(&saves[1], false).unwrap().parents, [saves[0]]);
     }
 
     #[test]
@@ -1626,7 +1612,7 @@ mod tests {
         // Two objects a pack: the first listing's pack is in the store by the second tree. (Not
         // one: a pack of the listing alone again would have the same name, and replace it.)
         let (saves, store) = convert_in_packs_of(2, dir.path(), "a", |c| {
-            [standard, group_writable].map(|id| c.commit(&id, &[]).unwrap())
+            [standard, group_writable].map(|id| c.commit(&id).unwrap())
         });
         assert_eq!(stored(dir.path(), "a", ObjectKind::FolderListing), 1);
         let roots = saves.map(|save| store.save(&save, false).unwrap().root);
@@ -1651,12 +1637,12 @@ mod tests {
         );
         let jj_id = git.commit(&jj);
         let (saves, store) = convert(dir.path(), "a", |c| {
-            let plain = c.commit(&plain, &[]).unwrap();
+            let plain = c.commit(&plain).unwrap();
             [
                 plain,
-                c.commit(&signed_id, &[plain]).unwrap(),
-                c.commit(&twice_id, &[plain, plain]).unwrap(),
-                c.commit(&jj_id, &[]).unwrap(),
+                c.commit(&signed_id).unwrap(),
+                c.commit(&twice_id).unwrap(),
+                c.commit(&jj_id).unwrap(),
             ]
         });
         let save = |n: usize| store.save(&saves[n], false).unwrap();
@@ -1729,7 +1715,7 @@ mod tests {
             let others: Vec<GitId> = ["p\n", "q\n", "r\n"]
                 .map(|m| git.commit(&commit_bytes(&tree, &[], "", m.as_bytes())))
                 .to_vec();
-            let mut commits: Vec<(&str, GitId, &[usize])> = Vec::new();
+            let mut commits: Vec<(&str, GitId)> = Vec::new();
             for case in &cases {
                 let parents: Vec<GitId> = case.parents.iter().map(|&i| others[i]).collect();
                 let raw = raw_commit(
@@ -1739,7 +1725,7 @@ mod tests {
                     case.headers,
                     case.message,
                 );
-                commits.push((case.what, git.commit(&raw), case.parents));
+                commits.push((case.what, git.commit(&raw)));
             }
             // A tree written in capitals, which Git reads too.
             let upper = raw_commit(
@@ -1749,20 +1735,17 @@ mod tests {
                 "",
                 b"m\n",
             );
-            commits.push(("a tree ID in capitals", git.commit(&upper), &[]));
+            commits.push(("a tree ID in capitals", git.commit(&upper)));
             let (saves, store) = convert(dir.path(), "a", |c| {
-                let other_saves: Vec<Id> =
-                    others.iter().map(|o| c.commit(o, &[]).unwrap()).collect();
+                for other in &others {
+                    c.commit(other).unwrap();
+                }
                 commits
                     .iter()
-                    .map(|(what, id, parents)| {
-                        let parents: Vec<Id> = parents.iter().map(|&i| other_saves[i]).collect();
-                        c.commit(id, &parents)
-                            .unwrap_or_else(|e| panic!("{what}: {e}"))
-                    })
+                    .map(|(what, id)| c.commit(id).unwrap_or_else(|e| panic!("{what}: {e}")))
                     .collect::<Vec<Id>>()
             });
-            for ((what, id, _), save) in commits.iter().zip(&saves) {
+            for ((what, id), save) in commits.iter().zip(&saves) {
                 let save = store.save(save, false).unwrap();
                 // As an export would: each parent's commit from its save.
                 let parents: Vec<GitId> = save
@@ -1791,7 +1774,7 @@ mod tests {
         ]
         .map(|(headers, message)| git.commit(&commit_bytes(&tree, &[], headers, message)));
         let (saves, store) = convert(dir.path(), "a", |c| {
-            commits.map(|id| c.commit(&id, &[]).unwrap())
+            commits.map(|id| c.commit(&id).unwrap())
         });
         let save = |n: usize| store.save(&saves[n], false).unwrap();
         let original = |n: usize| save(n).extra.get(EXTRA_GIT_ORIGINAL_MESSAGE).cloned();
@@ -1830,7 +1813,7 @@ mod tests {
                 too_large_latin1,
                 huge_header,
             ]
-            .map(|id| c.commit(&id, &[]))
+            .map(|id| c.commit(&id))
         });
         let [
             largest_r,
@@ -1871,7 +1854,7 @@ mod tests {
             let (dir, git) = repo(Sha1);
             let assets = git.tree(&[(b"100644", b"hero.psd", blob(&git, bytes.as_bytes()))]);
             let id = commit_of(&git, &[(b"40000", b"assets", assets)]);
-            let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
+            let (result, _) = convert(dir.path(), "a", |c| c.commit(&id));
             let e = result.unwrap_err();
             match &e {
                 ImportError::LfsPointer {
@@ -1940,7 +1923,7 @@ mod tests {
             &tag(&commit, "commit", "big", &vec![b'b'; 1 << 20]),
         );
         let ((save, done, refused), _) = convert(dir.path(), "a", |c| {
-            let save = c.commit(&commit, &[]).unwrap();
+            let save = c.commit(&commit).unwrap();
             let done = [
                 ("light", commit),
                 ("v1", signed_id),
@@ -2015,7 +1998,7 @@ mod tests {
         let signed = git.object(ObjectType::Tag, &raw);
         let missing = GitId::from_hex(Sha1, &"ee".repeat(20)).unwrap();
         let ((first, again, refused, unread), _) = convert(dir.path(), "a", |c| {
-            c.commit(&commit, &[]).unwrap();
+            c.commit(&commit).unwrap();
             let before = c.tags.used;
             let first = c.tag("v1", &signed).unwrap();
             // Room for one more tag of the same chain, not two: each ref keeps its bytes.
@@ -2169,10 +2152,10 @@ mod tests {
             ));
             let merge = git.commit(&commit_bytes(&bin, &[main, side], "", b"Merge\n"));
             let run = |c: &mut Converter<'_>| {
-                let r = c.commit(&root, &[]).unwrap();
-                let s = c.commit(&side, &[r]).unwrap();
-                let m = c.commit(&main, &[r]).unwrap();
-                [r, s, m, c.commit(&merge, &[m, s]).unwrap()]
+                let r = c.commit(&root).unwrap();
+                let s = c.commit(&side).unwrap();
+                let m = c.commit(&main).unwrap();
+                [r, s, m, c.commit(&merge).unwrap()]
             };
             let (first, _) = convert(dir.path(), "a", run);
             let (second, _) = convert(dir.path(), "b", run);
@@ -2193,7 +2176,7 @@ mod tests {
         let folder_is_a_file = commit_of(&git, &[(b"40000", b"docs", file)]);
         let a_tree = git.tree(&[]);
         let (results, _) = convert(dir.path(), "a", |c| {
-            [lost, jumbled, tree_is_a_file, folder_is_a_file, a_tree].map(|id| c.commit(&id, &[]))
+            [lost, jumbled, tree_is_a_file, folder_is_a_file, a_tree].map(|id| c.commit(&id))
         });
         let [lost_r, jumbled_r, tree_r, folder_r, a_tree_r] = results;
         let in_file = format!("the file `src/gone.txt` of commit `{}`", lost.to_hex());
@@ -2251,7 +2234,7 @@ mod tests {
         let (dir, git) = repo(Sha1);
         let name = format!("{HOSTILE}{}", "x".repeat(300));
         let id = commit_of(&git, &[(b"100644", name.as_bytes(), blob(&git, b"x"))]);
-        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
+        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id));
         assert_hostile_text_escaped(&result.unwrap_err().to_string());
     }
 }
