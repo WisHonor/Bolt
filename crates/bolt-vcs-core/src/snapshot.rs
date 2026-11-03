@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
@@ -17,11 +18,12 @@ use crate::names::{PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
-use crate::save::{EXTRA_LINE, Person, Save};
+use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 
+mod endings;
 mod walk;
 
 use walk::{Base, Scan, walk};
@@ -31,6 +33,8 @@ pub struct SaveRequest<'a> {
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
+    /// Save files Git rewrote with CRLF as they are, without the stop after an import.
+    pub accept_crlf: bool,
 }
 
 // Made once per command, so boxing the save would buy nothing.
@@ -95,6 +99,12 @@ pub enum SaveError {
         escape(kept, false)
     )]
     InTheWay { path: String, kept: String },
+    #[error("{}", line_endings_changed(*count, first))]
+    LineEndingsChanged {
+        /// How many files, of which `first` names the first few by project path.
+        count: u64,
+        first: Vec<String>,
+    },
     #[error("You are not on a line, so the save has nowhere to go.")]
     NotOnALine,
 }
@@ -125,6 +135,28 @@ fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     text
 }
 
+/// What Git did, then the files named, one to a line, and how many more there are.
+fn line_endings_changed(count: u64, first: &[String]) -> String {
+    let mut text = if count == 1 {
+        "1 file differs from what Git stored only in line endings: Git turned LF into CRLF when \
+         it wrote it out (core.autocrlf)."
+            .to_owned()
+    } else {
+        format!(
+            "{count} files differ from what Git stored only in line endings: Git turned LF into \
+             CRLF when it wrote them out (core.autocrlf)."
+        )
+    };
+    for path in first {
+        let _ = write!(text, "\n  {}", escape(path, false));
+    }
+    let more = count.saturating_sub(first.len() as u64);
+    if more > 0 {
+        let _ = write!(text, "\n  and {more} more");
+    }
+    text
+}
+
 impl SaveError {
     /// What the user can do next, if there is something to say.
     #[must_use]
@@ -137,6 +169,12 @@ impl SaveError {
                         "Nothing was saved. Rename or move {}, then save again.",
                         escape(path, false)
                     ));
+                }
+                SaveError::LineEndingsChanged { .. } => {
+                    "To keep history as Git stored it, commit or stash your changes in Git, then \
+                     run `git config core.autocrlf false` and `git checkout -- .`, and save \
+                     again. To save the files with CRLF anyway: bolt save --accept-crlf \
+                     \"message\""
                 }
                 SaveError::Unreadable { .. } => {
                     "Nothing was saved. Let Bolt read it, or list it in .boltignore."
@@ -213,6 +251,10 @@ pub fn save_folder(
         mut warnings,
     } = walk(repo.root(), base, SaveLimits::default(), drive)?;
     check_names(&folders, &old)?;
+    // Before anything is stored, so that a stop leaves nothing behind (decision 039).
+    if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
+        endings::check(repo.store(), &folders, &old)?;
+    }
     let mut packs = repo.new_packs()?;
     for listing in &rebuilt {
         store_listing(repo.store(), &mut packs, listing)?;
@@ -481,6 +523,30 @@ fn store_link(packs: &mut PackSet, store: &Store, path: &Path) -> Result<(Id, u6
     Ok((id, target.len() as u64))
 }
 
+/// Opens a project file to read, without following a link at its name and only if it is a regular
+/// file. A link or special file here was swapped in since the scan, unless it is a Windows reparse
+/// point that isn't a link (a cloud placeholder, say), which the scan takes for a file.
+fn open_project_file(path: &Path) -> Result<File, SaveError> {
+    safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
+        let shown = path.display().to_string();
+        if e.kind() != io::ErrorKind::InvalidInput {
+            SaveError::Unreadable {
+                path: shown,
+                source: e,
+            }
+        } else if fs::symlink_metadata(path).is_ok_and(|m| safe_fs::is_reparse_file(&m)) {
+            SaveError::SpecialFile { path: shown }
+        } else {
+            SaveError::ChangedDuringSave { path: shown }
+        }
+    })
+}
+
+/// A file's size and modification time, to see whether it changed while it was read.
+fn stamp(file: &File) -> io::Result<(u64, Option<SystemTime>)> {
+    file.metadata().map(|m| (m.len(), m.modified().ok()))
+}
+
 /// Stores one file in two passes: hash it, then copy it into `packs` unless already held. A file
 /// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`; a
 /// Windows reparse point that isn't a link gives `SpecialFile`.
@@ -497,20 +563,7 @@ pub(crate) fn store_file(
     let changed = || SaveError::ChangedDuringSave {
         path: path.display().to_string(),
     };
-    let stamp = |f: &File| f.metadata().map(|m| (m.len(), m.modified().ok()));
-    // A link or special file here was swapped in since the scan, unless it is a Windows reparse
-    // point that isn't a link (a cloud placeholder, say), which the scan takes for a file.
-    let mut file = safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
-        if e.kind() != io::ErrorKind::InvalidInput {
-            unreadable(e)
-        } else if fs::symlink_metadata(path).is_ok_and(|m| safe_fs::is_reparse_file(&m)) {
-            SaveError::SpecialFile {
-                path: path.display().to_string(),
-            }
-        } else {
-            changed()
-        }
-    })?;
+    let mut file = open_project_file(path)?;
     let before = stamp(&file).map_err(unreadable)?;
     let mut hasher = ContentHasher::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -578,6 +631,7 @@ mod tests {
             message: "Change things",
             who: &who,
             command: "save",
+            accept_crlf: false,
         };
         save_folder(repo, &req, &mut |_| {})
     }
@@ -1131,6 +1185,10 @@ mod tests {
             SaveError::InTheWay {
                 path: "fine".into(),
                 kept: hostile(),
+            },
+            SaveError::LineEndingsChanged {
+                count: 2,
+                first: vec!["fine".into(), hostile()],
             },
         ] {
             assert_hostile_text_escaped(&e.to_string());

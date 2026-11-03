@@ -403,7 +403,7 @@ proptest! {
             .collect();
         let who = who();
         let mut repo = Repository::init(root, &who).unwrap();
-        let req = SaveRequest { message: "Save", who: &who, command: "save" };
+        let req = SaveRequest { message: "Save", who: &who, command: "save", accept_crlf: false };
         save_folder(&mut repo, &req, &mut |_| {}).unwrap();
         let mut got: Vec<String> =
             saved_files(&repo).iter().map(|p| as_git_reads(p, drive)).collect();

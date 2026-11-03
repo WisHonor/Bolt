@@ -91,6 +91,28 @@ impl Env {
         let state = repo.current().unwrap().1.state;
         (repo, state)
     }
+
+    /// `bolt save` with these arguments, whatever happens.
+    fn save(&self, args: &[&str]) -> std::process::Output {
+        self.bolt().arg("save").args(args).output().unwrap()
+    }
+
+    /// The newest diary entry and the packs in the store: a save that wrote nothing leaves both
+    /// as they were.
+    fn standing(&self) -> (Id, Vec<String>) {
+        let repo = Repository::open(self.root()).unwrap();
+        let mut packs: Vec<String> = std::fs::read_dir(repo.packs_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        packs.sort();
+        (repo.head().unwrap(), packs)
+    }
+
+    /// Writes `file` as it is, in the folder.
+    fn overwrite(&self, file: &str, contents: &str) {
+        std::fs::write(self.root().join(file), contents).unwrap();
+    }
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -533,4 +555,152 @@ fn import_json_output() {
         assert_eq!(warnings.remove(0)["kind"], "elevated_only");
     }
     insta::assert_json_snapshot!(json);
+}
+
+const CRLF_HINT: &str = "To keep history as Git stored it, commit or stash your changes in Git, \
+    then run `git config core.autocrlf false` and `git checkout -- .`, and save again. To save \
+    the files with CRLF anyway: bolt save --accept-crlf \"message\"";
+
+/// A repository as Git for Windows leaves it: stored with LF, written out with CRLF.
+fn converted_by_git() -> Env {
+    let env = Env::new();
+    env.commit("a.txt", "one\ntwo\n", "First");
+    env.commit("src/b.txt", "three\nfour\n", "Second");
+    env.commit("notes.txt", "five\nsix\n", "Third");
+    env.import();
+    env.overwrite("a.txt", "one\r\ntwo\r\n");
+    env.overwrite("src/b.txt", "three\r\nfour\r\n");
+    env
+}
+
+#[test]
+fn converted_line_endings_stop_the_first_save() {
+    let env = converted_by_git();
+    // An edit of the user's own is not what stops it.
+    env.overwrite("notes.txt", "five\nsix\nseven\n");
+    let before = env.standing();
+
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains(
+            "error: 2 files differ from what Git stored only in line endings: Git turned LF \
+             into CRLF when it wrote them out (core.autocrlf).\n  a.txt\n  src/b.txt\n"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("notes.txt"), "{err}");
+    assert!(err.contains(&format!("hint: {CRLF_HINT}\n")), "{err}");
+    // Nothing was written: not a save, not an object.
+    assert_eq!(env.standing(), before);
+    let history = env.bolt().arg("history").output().unwrap();
+    assert_eq!(text(&history.stdout).lines().count(), 3);
+
+    let out = env
+        .bolt()
+        .args(["--json", "save", "Save it"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["hint"], CRLF_HINT);
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("2 files differ from what Git stored only"),
+        "{message}"
+    );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn accept_crlf_saves_them() {
+    let env = converted_by_git();
+    let out = env.save(&["--accept-crlf", "Keep the CRLF"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(2 files)"),
+        "{}",
+        text(&out.stdout)
+    );
+
+    // Saved as they are: each line ending is a byte longer than it was.
+    let shown = env.bolt().args(["--json", "show"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let sizes: Vec<_> = json["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["path"].as_str().unwrap(), &c["old_size"], &c["new_size"]))
+        .collect();
+    assert_eq!(
+        sizes,
+        [
+            ("a.txt", &8.into(), &10.into()),
+            ("src/b.txt", &11.into(), &13.into())
+        ]
+    );
+}
+
+/// Each of these is the right size to be a conversion, and none is one.
+#[test]
+fn a_real_edit_is_not_mistaken_for_a_conversion() {
+    let env = Env::new();
+    for file in ["extra", "mixed", "edited", "cut"] {
+        env.commit(file, "one\ntwo\nthree\n", file);
+    }
+    // Saved with CRLF in Git already, so converting it again would double the CR.
+    env.commit("already", "a\r\nb\r\n", "already");
+    env.import();
+    env.overwrite("extra", "one\r\ntwo\r\nthree\r\nfour\r\n");
+    env.overwrite("mixed", "one\r\ntwo\nthree\r\n");
+    env.overwrite("edited", "ONE\r\ntwo\r\nthree\r\n");
+    env.overwrite("cut", "one\r\ntwo\r\nthree");
+    env.overwrite("already", "a\r\r\nb\r\r\n");
+
+    let out = env.save(&["Real changes"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(5 files)"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn later_saves_dont_check() {
+    let env = converted_by_git();
+    let first = env.save(&["--accept-crlf", "Keep the CRLF"]);
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    // The save before this one is Bolt's, not Git's.
+    env.overwrite("notes.txt", "five\r\nsix\r\n");
+    let out = env.save(&["Another"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(1 file)"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+/// Not bytes the tests wrote: a file as Git itself writes it out with `core.autocrlf`.
+#[test]
+fn a_file_git_wrote_with_crlf_is_found() {
+    let env = Env::new();
+    env.commit("a.txt", "one\ntwo\n", "First");
+    env.import();
+    std::fs::remove_file(env.root().join("a.txt")).unwrap();
+    env.git(&["-c", "core.autocrlf=true", "checkout", "--", "a.txt"]);
+    assert_eq!(
+        std::fs::read(env.root().join("a.txt")).unwrap(),
+        b"one\r\ntwo\r\n"
+    );
+
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("error: 1 file differs from what Git stored only in line endings"),
+        "{err}"
+    );
 }

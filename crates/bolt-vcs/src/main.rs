@@ -44,7 +44,12 @@ enum Command {
     /// Bring the Git repository in this folder into Bolt, with all its history.
     Import,
     /// Save the current state of your files.
-    Save { message: Option<String> },
+    Save {
+        message: Option<String>,
+        /// After an import, save files Git wrote with CRLF line endings as they are.
+        #[arg(long)]
+        accept_crlf: bool,
+    },
     /// List the saves on this line.
     History,
     /// Show one save.
@@ -203,6 +208,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
 fn save(
     json: bool,
     message: Option<String>,
+    accept_crlf: bool,
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let message = message.unwrap_or_default();
@@ -221,6 +227,7 @@ fn save(
         message: &message,
         who: &who,
         command: "save",
+        accept_crlf,
     };
     let outcome = save_folder(repo, &req, &mut |_| {
         eprintln!("Waiting for another Bolt command to finish...");
@@ -459,7 +466,10 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Start => start(cli.json, &mut opened),
         Command::Import => import(cli.json, &mut opened),
-        Command::Save { message } => save(cli.json, message, &mut opened),
+        Command::Save {
+            message,
+            accept_crlf,
+        } => save(cli.json, message, accept_crlf, &mut opened),
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
     };
