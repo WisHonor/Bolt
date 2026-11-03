@@ -430,7 +430,7 @@ fn has_project(
 
 /// Whether `root/.bolt` holds an entry named `format`, of any kind (`open` checks it), without
 /// following a link there.
-fn has_format(root: &Path) -> io::Result<bool> {
+pub(crate) fn has_format(root: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(format_path(root)) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),

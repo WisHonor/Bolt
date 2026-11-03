@@ -91,6 +91,12 @@ fn an_interrupted_import_can_be_run_again() {
             break;
         };
         assert!(!dir.path().join(".bolt/format").exists(), "fault {n}");
+        // Every fault point is met once `.bolt` is made, the first while `begin` takes the lock,
+        // so each stop says the folder is kept.
+        assert!(
+            matches!(stopped, ImportError::Unfinished(_)),
+            "fault {n}: {stopped:?}"
+        );
         between_packs |= stopped.to_string().ends_with("packs:rolled-over");
         // Running it again finishes the job, with the saves a clean import gives.
         import(dir.path()).unwrap();

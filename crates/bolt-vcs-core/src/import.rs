@@ -14,7 +14,8 @@ use crate::id::{Id, hash_record};
 use crate::listing::EntryKind;
 use crate::names::{NameError, is_git_alias, validate_name};
 use crate::pack::{ObjectKind, PackError, PackSet};
-use crate::repo::{ChangeLock, RepoError, Repository};
+use crate::repo::{self, ChangeLock, RepoError, Repository};
+use crate::safe_fs;
 use crate::save::Person;
 use crate::store::{Store, StoreError};
 use crate::text::{escape, thousands};
@@ -179,18 +180,48 @@ fn not_utf8_message(first: &[(String, String)], count: u64) -> String {
 /// 033, 034 and 040): every commit its branches, server branches, tags and `HEAD` reach becomes a
 /// save. Everything that only reads comes first, so most refusals come before `.bolt` is made.
 /// The project goes into `opened` as soon as it is begun, so a caller can show what its store
-/// noticed even if the import then fails. Nothing is committed unless all of it works, and running
-/// it again after a failure finishes the job, reusing what was stored once it is checked
-/// (decision 041).
+/// noticed even if the import then fails. Nothing is committed until the last step writes
+/// `.bolt/format`, and running it again after an earlier failure finishes the job, reusing what
+/// was stored once it is checked (decision 041).
 pub fn import_git(
     root: &Path,
     req: &mut ImportRequest,
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
     let plan = plan(root)?;
-    let (repo, lock) = Repository::begin(root).map_err(starting)?;
+    let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);
-    carry_out(plan, repo, &lock, req).map_err(|e| ImportError::Unfinished(Box::new(e)))
+    carry_out(plan, repo, &lock, req).map_err(|e| after_begin(root, e))
+}
+
+/// `begin`'s failure, as an import says it. A refusal says what is wrong with the folder, as
+/// before anything is made; any other failure comes once `.bolt` may be made.
+fn begun(root: &Path, e: RepoError) -> ImportError {
+    match e {
+        RepoError::AlreadyAProject { .. }
+        | RepoError::StartStopped { .. }
+        | RepoError::OtherToolsFolder { .. }
+        | RepoError::InsideAnotherProject { .. }
+        | RepoError::NotYours { .. }
+        | RepoError::AdminsNotElevated { .. }
+        | RepoError::OwnerUnknown { .. }
+        | RepoError::OwnerLookupFailed { .. }
+        | RepoError::Config(_) => starting(e),
+        other => after_begin(root, other.into()),
+    }
+}
+
+/// `e`, met once the project may be begun, as an import says it. While a real `.bolt` is there
+/// without `format`, nothing is committed and the folder stays for a run to finish. With
+/// `format`, the project was made and only the flush after it failed; with no `.bolt`, there is
+/// nothing to keep. Either way `e` is said as it is.
+fn after_begin(root: &Path, e: ImportError) -> ImportError {
+    let bolt = safe_fs::check_real_dir(&root.join(".bolt")).is_ok();
+    if bolt && matches!(repo::has_format(root), Ok(false)) {
+        ImportError::Unfinished(Box::new(e))
+    } else {
+        e
+    }
 }
 
 /// What the steps that only read worked out for the steps that write.
@@ -999,6 +1030,30 @@ mod tests {
             );
             assert_eq!(warnings[100].message, last);
         }
+    }
+
+    /// Once `.bolt` is begun, a stop says the folder is kept; but not when there's no `.bolt` to
+    /// keep, nor when `format` was written and only the flush after it failed, since then the
+    /// project is made.
+    #[test]
+    fn only_a_bolt_without_format_is_kept_for_a_run_to_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let stop = || ImportError::Stop {
+            what: "stopped".into(),
+            hint: None,
+        };
+        assert!(matches!(
+            after_begin(dir.path(), stop()),
+            ImportError::Stop { .. }
+        ));
+        std::fs::create_dir(dir.path().join(".bolt")).unwrap();
+        let kept = after_begin(dir.path(), stop());
+        assert!(matches!(kept, ImportError::Unfinished(_)), "{kept:?}");
+        std::fs::write(dir.path().join(".bolt/format"), crate::repo::FORMAT_TEXT).unwrap();
+        assert!(matches!(
+            after_begin(dir.path(), stop()),
+            ImportError::Stop { .. }
+        ));
     }
 
     /// Bolt keeps up to 16 packs open between reads, and goes on reading one it has open as it
