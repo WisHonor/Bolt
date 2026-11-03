@@ -191,6 +191,70 @@ pub(super) fn check_tag_object(name: &str, id: &GitId, size: u64) -> Result<(), 
     )))
 }
 
+/// What the tag list will hold so far, counted tag by tag, against the most it may: the limit of
+/// a record (decision 034), which tests lower. The import's first pass counts with one, and
+/// `Converter::tag` with another, so both stop at the same tag with the same words.
+#[derive(Clone, Copy)]
+pub(super) struct TagBudget {
+    used: u64,
+    most: u64,
+}
+
+impl TagBudget {
+    pub(super) fn new() -> TagBudget {
+        TagBudget {
+            used: TagList::head_len(MAX_TAGS),
+            most: MAX_RECORD_SIZE,
+        }
+    }
+
+    /// Stops before the tag `name` is read if even a tag of no message and no tag objects
+    /// wouldn't fit, so a spent budget reads no more tags.
+    pub(super) fn room_for(&self, name: &str) -> Result<(), ImportError> {
+        let least = TagList::tag_len_from(name.len(), 0, std::iter::empty());
+        self.check(name, self.used.saturating_add(least))
+    }
+
+    /// What the list holds so far, as counted.
+    #[cfg(test)]
+    pub(super) fn used(&self) -> u64 {
+        self.used
+    }
+
+    /// Counts the tag `name`, which takes `len` bytes of the list as `TagList::tag_len` says.
+    pub(super) fn add(&mut self, name: &str, len: u64) -> Result<(), ImportError> {
+        let total = self.used.saturating_add(len);
+        self.check(name, total)?;
+        self.used = total;
+        Ok(())
+    }
+
+    fn check(&self, name: &str, total: u64) -> Result<(), ImportError> {
+        if total <= self.most {
+            return Ok(());
+        }
+        Err(ImportError::Stop {
+            what: format!(
+                "Bolt's tag list can't hold the Git tags: with tag `{name}`, their names, \
+                 messages and tag objects come to more than the 512 MiB it holds."
+            ),
+            hint: Some(
+                "Nothing was changed. Delete tags you don't need with `git tag -d <name>`, then \
+                 run bolt import again."
+                    .to_owned(),
+            ),
+        })
+    }
+}
+
+/// The Bolt message of a Git tag object's message (decision 034): converted to UTF-8 as a
+/// commit's is, and cut to the 64 KiB a tag's message holds.
+pub(super) fn tag_message(bytes: &[u8]) -> String {
+    let mut message = message_text(bytes, None).into_owned();
+    message.truncate(message.floor_char_boundary(MAX_TAG_MESSAGE_BYTES));
+    message
+}
+
 /// One commit's snapshot as far as it has been walked.
 struct Walk<'c> {
     commit: &'c str,
@@ -257,10 +321,9 @@ pub struct Converter<'r> {
     not_utf8_count: u64,
     /// Where the chain from each Git tag object read ends.
     chains: HashMap<GitId, Chain>,
-    /// What the tag list will hold so far, at most, and the most it may: its record's limit,
-    /// which tests lower.
-    tag_bytes: u64,
-    tag_budget: u64,
+    /// What the tag list will hold so far. The import's first pass counts the same, so this
+    /// only guards against the two ever counting differently.
+    tags: TagBudget,
 }
 
 impl<'r> Converter<'r> {
@@ -279,8 +342,7 @@ impl<'r> Converter<'r> {
             not_utf8: Vec::new(),
             not_utf8_count: 0,
             chains: HashMap::new(),
-            tag_bytes: TagList::head_len(MAX_TAGS),
-            tag_budget: MAX_RECORD_SIZE,
+            tags: TagBudget::new(),
         }
     }
 
@@ -393,35 +455,10 @@ impl<'r> Converter<'r> {
     /// counts toward the 512 MiB one tag list holds, so the tags returned hold at most that, and
     /// reading holds one chain more, at most 16 MiB. The converter keeps no tag's bytes.
     pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
-        // The least this tag adds to the list: its name and save, without a message.
-        let lightweight = diary::Tag {
-            save: Id([0; 32]),
-            message: String::new(),
-            git_tags: Vec::new(),
-        };
-        let least = TagList::tag_len(name, &lightweight);
-        let full = || ImportError::Stop {
-            what: format!(
-                "Bolt's tag list can't hold the Git tags: with tag `{name}`, their names, \
-                 messages and tag objects come to more than the 512 MiB it holds."
-            ),
-            hint: Some(
-                "Nothing was changed. Delete tags you don't need with `git tag -d <name>`, then \
-                 run bolt import again."
-                    .to_owned(),
-            ),
-        };
-        // Checked before anything is read, so a spent budget reads no more tags.
-        if self.tag_bytes.saturating_add(least) > self.tag_budget {
-            return Err(full());
-        }
+        self.tags.room_for(name)?;
         let outcome = self.read_tag(name, target)?;
         if let TagOutcome::Tag(tag) = &outcome {
-            let total = self.tag_bytes.saturating_add(TagList::tag_len(name, tag));
-            if total > self.tag_budget {
-                return Err(full());
-            }
-            self.tag_bytes = total;
+            self.tags.add(name, TagList::tag_len(name, tag))?;
         }
         Ok(outcome)
     }
@@ -483,8 +520,7 @@ impl<'r> Converter<'r> {
             check_tag_object(name, &id, object.data.len() as u64)?;
             let tag = parse_tag(&object.data, self.git.hash()).map_err(|e| at(e, here))?;
             if read.is_empty() {
-                message = message_text(tag.message, None).into_owned();
-                message.truncate(message.floor_char_boundary(MAX_TAG_MESSAGE_BYTES));
+                message = tag_message(tag.message);
             }
             read.push(id);
             id = tag.object;
@@ -1947,15 +1983,15 @@ mod tests {
         let missing = GitId::from_hex(Sha1, &"ee".repeat(20)).unwrap();
         let ((first, again, refused, unread), _) = convert(dir.path(), "a", |c| {
             c.commit(&commit, &[]).unwrap();
-            let before = c.tag_bytes;
+            let before = c.tags.used;
             let first = c.tag("v1", &signed).unwrap();
             // Room for one more tag of the same chain, not two: each ref keeps its bytes.
-            let each = c.tag_bytes - before;
-            c.tag_budget = c.tag_bytes + each + each / 2;
+            let each = c.tags.used - before;
+            c.tags.most = c.tags.used + each + each / 2;
             let again = c.tag("v1-again", &signed).unwrap();
             let refused = c.tag("v1-third", &signed);
             // Once the budget is spent, nothing more is read, not even an object that's missing.
-            c.tag_budget = c.tag_bytes;
+            c.tags.most = c.tags.used;
             (first, again, refused, c.tag("v2", &missing))
         });
         assert_eq!(first, again);

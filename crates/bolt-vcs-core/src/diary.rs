@@ -362,13 +362,22 @@ impl TagList {
     /// What `encode` writes for the tag `name`, so a list's size can be known before it is built.
     #[must_use]
     pub fn tag_len(name: &str, tag: &Tag) -> u64 {
+        let objects = tag.git_tags.iter().map(Vec::len);
+        TagList::tag_len_from(name.len(), tag.message.len(), objects)
+    }
+
+    /// `tag_len` from lengths alone: the name's, the message's and each Git tag object's, so a
+    /// list's size can be known before even its tags are.
+    #[must_use]
+    pub fn tag_len_from(
+        name: usize,
+        message: usize,
+        objects: impl ExactSizeIterator<Item = usize>,
+    ) -> u64 {
         let bytes = |len: usize| varint_len(len as u64) + len as u64;
-        let objects: u64 = tag.git_tags.iter().map(|object| bytes(object.len())).sum();
-        bytes(name.len())
-            + tag.save.0.len() as u64
-            + bytes(tag.message.len())
-            + varint_len(tag.git_tags.len() as u64)
-            + objects
+        let count = varint_len(objects.len() as u64);
+        let save = size_of::<Id>() as u64;
+        bytes(name) + save + bytes(message) + count + objects.map(bytes).sum::<u64>()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<TagList, DecodeError> {

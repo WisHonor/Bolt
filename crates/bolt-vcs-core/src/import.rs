@@ -25,8 +25,8 @@ mod names;
 
 pub use convert::{Converter, Counts, TagOutcome};
 use convert::{
-    MAX_LISTED, at, bug, check_tag_chain, check_tag_object, expect_kind, shown_path,
-    tree_and_parents,
+    MAX_LISTED, TagBudget, at, bug, check_tag_chain, check_tag_object, expect_kind, shown_path,
+    tag_message, tree_and_parents,
 };
 use names::{Named, Names};
 
@@ -214,7 +214,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
     let git = git::Repo::open(root)?;
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
-    let roots = roots(&git, &refs, &names.tags)?;
+    let roots = roots(&git, &refs, &names.tags, &mut TagBudget::new())?;
     if roots.is_empty() {
         return Err(ImportError::Stop {
             what: "There's nothing to import: this Git repository has no commits. bolt start \
@@ -417,34 +417,50 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// What the first pass learned of a Git tag object.
+struct Seen {
+    /// Where the chain from it ends: a commit, or nothing Bolt can tag.
+    end: Option<GitId>,
+    /// The size of each tag object on the chain from it, it first.
+    objects: Vec<usize>,
+    /// How long its message is as a Bolt tag holds it.
+    message: usize,
+}
+
 /// The commits an import starts from (decision 033): those of the branches and the server
-/// branches, those the tags end at, and a detached `HEAD`'s. Tags are held to the limits
-/// `Converter::tag` holds them to, so a tag it would refuse stops the import before anything is
-/// written.
-fn roots(git: &git::Repo, refs: &Refs, tags: &[Named]) -> Result<BTreeSet<GitId>, ImportError> {
+/// branches, those the tags end at, and a detached `HEAD`'s. Tags are held to every limit
+/// `Converter::tag` holds them to, the size of the tag list they make included, so a tag it would
+/// refuse stops the import before anything is written. Each tag object is read once.
+fn roots(
+    git: &git::Repo,
+    refs: &Refs,
+    tags: &[Named],
+    budget: &mut TagBudget,
+) -> Result<BTreeSet<GitId>, ImportError> {
     let mut roots: BTreeSet<GitId> = refs.branches.iter().map(|(_, id)| *id).collect();
     roots.extend(refs.servers.iter().map(|(_, _, id)| *id));
     if let Head::Detached(id) = &refs.head {
         roots.insert(*id);
     }
-    // Where the chain from each tag object read ends (a commit, or nothing Bolt can tag), and how
-    // many tag objects it holds from there, that one included.
-    let mut ends: HashMap<GitId, (Option<GitId>, u64)> = HashMap::new();
+    let mut seen: HashMap<GitId, Seen> = HashMap::new();
     for tag in tags {
         let name = tag.bolt.as_str();
-        let mut read = Vec::new();
+        budget.room_for(name)?;
+        // Each tag object read for this tag, its size and its message's length.
+        let mut read: Vec<(GitId, usize, usize)> = Vec::new();
         let mut id = tag.target;
-        let (end, rest) = loop {
-            if let Some(&(end, objects)) = ends.get(&id) {
-                check_tag_chain(name, (read.len() as u64).saturating_add(objects))?;
-                break (end, objects);
+        let (end, rest, known) = loop {
+            if let Some(known) = seen.get(&id) {
+                let objects = read.len().saturating_add(known.objects.len());
+                check_tag_chain(name, objects as u64)?;
+                break (known.end, known.objects.clone(), Some(known.message));
             }
             let hex = id.to_hex();
             let here = || format!("tag `{name}`, at object `{hex}`");
             let (kind, size) = git.header(&id).map_err(|e| at(e, here))?;
             match kind {
-                ObjectType::Commit => break (Some(id), 0),
-                ObjectType::Tree | ObjectType::Blob => break (None, 0),
+                ObjectType::Commit => break (Some(id), Vec::new(), None),
+                ObjectType::Tree | ObjectType::Blob => break (None, Vec::new(), None),
                 ObjectType::Tag => {}
             }
             check_tag_object(name, &id, size)?;
@@ -452,16 +468,30 @@ fn roots(git: &git::Repo, refs: &Refs, tags: &[Named]) -> Result<BTreeSet<GitId>
             let object = git.read(&id).map_err(|e| at(e, here))?;
             expect_kind(object.kind, ObjectType::Tag, &id, here)?;
             check_tag_object(name, &id, object.data.len() as u64)?;
-            read.push(id);
-            id = parse_tag(&object.data, git.hash())
-                .map_err(|e| at(e, here))?
-                .object;
+            let parsed = parse_tag(&object.data, git.hash()).map_err(|e| at(e, here))?;
+            read.push((id, object.data.len(), tag_message(parsed.message).len()));
+            id = parsed.object;
         };
-        for (i, object) in read.iter().enumerate() {
-            let objects = (read.len().saturating_sub(i) as u64).saturating_add(rest);
-            ends.insert(*object, (end, objects));
+        // The whole chain from the ref: the tag objects read now, then those known before.
+        let objects: Vec<usize> = read.iter().map(|&(_, size, _)| size).chain(rest).collect();
+        for (i, &(object, _, message)) in read.iter().enumerate() {
+            let objects = objects.get(i..).unwrap_or_default().to_vec();
+            seen.insert(
+                object,
+                Seen {
+                    end,
+                    objects,
+                    message,
+                },
+            );
         }
-        roots.extend(end);
+        if let Some(commit) = end {
+            roots.insert(commit);
+            // A tag keeps the message of the first tag object on its chain, if there is one.
+            let message = read.first().map(|&(_, _, message)| message).or(known);
+            let len = TagList::tag_len_from(name.len(), message.unwrap_or(0), objects.into_iter());
+            budget.add(name, len)?;
+        }
     }
     Ok(roots)
 }
@@ -529,8 +559,8 @@ fn lines_of(
 
 /// Stores the record `encoded` of `kind`, a tag list or server lines, unless a good copy is there
 /// already. Their encoders don't check what they write, so `read_back` decodes it first. Their
-/// sizes were held to a record's limit before anything was written: tags by the converter, server
-/// lines by `Names::of`.
+/// sizes were held to a record's limit before anything was written: the tag list's by `roots`
+/// (and again, as a guard, by the converter), the server lines' by `Names::of`.
 fn put_record(
     store: &Store,
     packs: &mut PackSet,
@@ -798,6 +828,72 @@ mod tests {
             assert_eq!(hint.contains(rm), name == ".bolt", "{hint}");
             assert!(!dir.path().join(".bolt").exists(), "{name}");
         }
+    }
+
+    /// The first pass counts each tag as the converter will keep it, so its count is the size of
+    /// the tag list stored, but for the head, which it counts at its largest.
+    #[test]
+    fn the_first_pass_counts_the_tag_list_as_it_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let (git, commit) = one_commit(dir.path());
+        // Not UTF-8, so it is decoded, and cut to 64 KiB only once it is.
+        let long = [b"\xff".repeat(30_000), b"y".repeat(40_000)].concat();
+        let annotated = tag_object(&git, &commit, "commit", &long);
+        let nested = tag_object(&git, &annotated, "tag", b"Again\n");
+        let tree = git.tree(&[]);
+        let mut refs = String::new();
+        for (name, id) in [
+            ("refs/tags/annotated", annotated),
+            ("refs/tags/folder", tree),
+            ("refs/tags/light", commit),
+            ("refs/tags/nested", nested),
+            ("refs/tags/same", annotated),
+        ] {
+            let _ = writeln!(refs, "{} {name}", id.to_hex());
+        }
+        git.packed_refs(&refs);
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let refs = repo.refs().unwrap();
+        let names = Names::of(&refs).unwrap();
+        let mut budget = TagBudget::new();
+        roots(&repo, &refs, &names.tags, &mut budget).unwrap();
+        drop(repo);
+        let report = import(dir.path()).unwrap();
+        assert_eq!(report.tags, 4);
+        let project = Repository::open(dir.path()).unwrap();
+        let state = project.current().unwrap().1.state;
+        let list = project
+            .store()
+            .read_record(&state.tags.unwrap(), ObjectKind::TagList);
+        let stored = list.unwrap().len() as u64;
+        assert_eq!(
+            budget.used() - TagList::head_len(crate::diary::MAX_TAGS),
+            stored - TagList::head_len(report.tags)
+        );
+    }
+
+    /// One tag object just under 1 MiB, which 513 tags name. Each tag keeps the object's bytes, so
+    /// together they come to more than the 512 MiB a tag list holds, though the first pass reads
+    /// the object only once.
+    #[test]
+    fn a_tag_list_past_its_limit_stops_the_import_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (git, commit) = one_commit(dir.path());
+        let message = vec![b'x'; crate::diary::MAX_GIT_TAG_OBJECT_BYTES - 200];
+        let tag = tag_object(&git, &commit, "commit", &message);
+        let mut packed = "# pack-refs with: peeled fully-peeled sorted \n".to_owned();
+        for n in 0..513 {
+            let _ = writeln!(packed, "{} refs/tags/t{n:03}", tag.to_hex());
+        }
+        git.packed_refs(&packed);
+        match import(dir.path()) {
+            Err(e @ ImportError::Stop { .. }) => {
+                assert!(e.to_string().contains("tag list can't hold"), "{e}");
+                assert!(e.hint().unwrap().contains("git tag -d"), "{e:?}");
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert!(!dir.path().join(".bolt").exists());
     }
 
     /// Decision 033's limits on lines, read from a real `packed-refs`, stop the import before
