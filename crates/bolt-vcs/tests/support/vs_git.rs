@@ -16,7 +16,7 @@ use bolt_core::listing::EntryKind;
 use bolt_core::names::{is_git_alias, validate_name};
 use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
-use bolt_core::save::{EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER};
+use bolt_core::save::{EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, MAX_PERSON_FIELD_BYTES};
 use tempfile::TempDir;
 
 use super::{git, git_command, spawn, text};
@@ -111,7 +111,22 @@ pub fn assert_matches_git(dir: &Path) -> usize {
             text(&rebuilt),
             text(&raw)
         );
-        headers += usize::from(save.extra.contains_key(EXTRA_GIT_HEADER));
+        // The header rebuilds a commit whatever the save's people hold, so they are compared with
+        // Git's own lines. A commit rebuilt without it has every line in Git's form.
+        let kept = save.extra.contains_key(EXTRA_GIT_HEADER);
+        for (key, person) in [("author", &save.author), ("committer", &save.saver)] {
+            let saved = (
+                person.name.as_str(),
+                person.email.as_str(),
+                person.time_ms,
+                person.tz_offset_min,
+            );
+            match person_in(&raw, key) {
+                Some(git) => assert_eq!(saved, git, "the {key} of commit {hex}"),
+                None => assert!(kept, "the {key} line of commit {hex} isn't in Git's form"),
+            }
+        }
+        headers += usize::from(kept);
         trees.push((tree, save.root));
     }
 
@@ -346,6 +361,42 @@ fn tree_and_parents(raw: &[u8], hash: HashKind) -> (GitId, Vec<GitId>) {
     let tree = lines.next().and_then(|line| line.strip_prefix(b"tree "));
     let parents = lines.map_while(|line| line.strip_prefix(b"parent "));
     (id(tree.unwrap()), parents.map(id).collect())
+}
+
+/// The person on a commit's `key` line (`author` or `committer`), if Git wrote it in its own form,
+/// `name <email> seconds ±hhmm` in UTF-8: the name, the email, the time in milliseconds and the
+/// zone in minutes.
+fn person_in<'a>(raw: &'a [u8], key: &str) -> Option<(&'a str, &'a str, i64, i16)> {
+    let prefix = format!("{key} ");
+    let mut header = raw
+        .split(|&b| b == b'\n')
+        .take_while(|line| !line.is_empty());
+    let line = header.find_map(|line| line.strip_prefix(prefix.as_bytes()))?;
+    let (name, rest) = std::str::from_utf8(line).ok()?.split_once('<')?;
+    let name = name.strip_suffix(' ')?;
+    let (email, when) = rest.split_once('>')?;
+    let (seconds, zone) = when.strip_prefix(' ')?.split_once(' ')?;
+    let (sign, hhmm) = zone.split_at_checked(1)?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let fits = |s: &str| s.len() <= MAX_PERSON_FIELD_BYTES;
+    // Git's own whitespace, which it never leaves at a name's end.
+    if name.ends_with([' ', '\t', '\n', '\r'])
+        || !fits(name)
+        || !fits(email)
+        || !digits(seconds)
+        || hhmm.len() != 4
+        || !digits(hhmm)
+    {
+        return None;
+    }
+    let time_ms = seconds.parse::<i64>().ok()?.checked_mul(1000)?;
+    let minutes = hhmm[..2].parse::<i16>().ok()? * 60 + hhmm[2..].parse::<i16>().ok()?;
+    let zone = match sign {
+        "+" => minutes,
+        "-" => -minutes,
+        _ => return None,
+    };
+    Some((name, email, time_ms, zone))
 }
 
 /// A Git tree's entries, in its own order: each `<mode> <name>\0` and then the ID's bytes.

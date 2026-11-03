@@ -35,6 +35,9 @@ fn top_folder(dir: &Path) -> Listing {
 #[test]
 fn everyday_history_matches_git() {
     let env = Env::new();
+    // As on Windows, Git takes no `x` bits from the files, so the mode the index is given below
+    // stays in every later commit, on every system.
+    env.git(&["config", "core.fileMode", "false"]);
     env.commit("a.txt", "a\n", "First");
     env.commit("src/lib/util.rs", "fn util() {}\n", "Add folders");
     env.overwrite("run.sh", "#!/bin/sh\necho hi\n");
@@ -108,12 +111,40 @@ fn everyday_history_matches_git() {
     env.git(&["tag", "folder", "HEAD^{tree}"]);
     env.git(&["tag", "-a", "folder-note", "-m", "A folder", "HEAD^{tree}"]);
     env.git(&["tag", "file", "HEAD:b.txt"]);
+    // Two branches alike but for letter case, which only packed-refs can hold where the drive
+    // ignores case.
+    let packed = env.root().join(".git/packed-refs");
+    assert!(!packed.exists());
+    let twins = format!(
+        "# pack-refs with: peeled fully-peeled sorted \n{base} refs/heads/Release\n{base} \
+         refs/heads/release\n"
+    );
+    std::fs::write(packed, twins).unwrap();
 
     let detached = tempfile::tempdir().unwrap();
     copy_dir(env.root(), detached.path());
     env.import();
     // Git wrote every commit itself, so each save rebuilds its commit from its own fields.
     assert_eq!(assert_matches_git(env.root()), 0);
+    // The renaming rule, pinned: `+` becomes `-`, and of names alike but for letter case, the
+    // later one in byte order takes a suffix.
+    let (repo, state) = env.state();
+    let lines: Vec<&str> = state.lines.keys().map(String::as_str).collect();
+    let want = [
+        "Release",
+        "caf\u{e9}",
+        "feature-x",
+        "main",
+        "one",
+        "release-2",
+        "three",
+        "topic/deep/name",
+        "two",
+    ];
+    assert_eq!(lines, want);
+    let servers = repo.server_lines(&state).unwrap().servers;
+    let origin: Vec<&str> = servers["origin"].keys().map(String::as_str).collect();
+    assert_eq!(origin, ["fix-1", "main"]);
 
     // The same, with HEAD detached at a commit only it reaches.
     git(detached.path(), &["checkout", "-q", "--detach"]);
@@ -266,9 +297,16 @@ fn packed_and_loose_objects_match_git() {
 #[test]
 fn sha256_repositories_match_git() {
     let version = text(&git(&std::env::temp_dir(), &["version"]));
-    let number = version.split_whitespace().nth(2).unwrap_or_default();
-    let mut parts = number.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
-    if (parts.next(), parts.next()) < (Some(2), Some(29)) {
+    let mut parts = version
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or_default()
+        .split('.');
+    let mut number = || match parts.next().map(str::parse::<u32>) {
+        Some(Ok(n)) => n,
+        _ => panic!("can't read Git's version in {version:?}"),
+    };
+    if (number(), number()) < (2, 29) {
         println!(
             "Skipped: {} is older than 2.29, the first to make SHA-256 repositories.",
             version.trim()
@@ -416,6 +454,15 @@ fn a_link_git_wrote_keeps_its_target_when_saved() {
 #[ignore = "nightly: needs BOLT_DIFF_REPO, a full clone of a real repository"]
 fn a_real_repository_matches_git() {
     let clone = std::env::var_os("BOLT_DIFF_REPO").expect("BOLT_DIFF_REPO names a clone");
+    let shallow = text(&git(
+        Path::new(&clone),
+        &["rev-parse", "--is-shallow-repository"],
+    ));
+    assert_eq!(
+        shallow.trim(),
+        "false",
+        "BOLT_DIFF_REPO must be a full clone"
+    );
     // Its .git copied, so the clone stays as it was and the test can run again.
     let work = tempfile::tempdir().unwrap();
     copy_dir(&Path::new(&clone).join(".git"), &work.path().join(".git"));
