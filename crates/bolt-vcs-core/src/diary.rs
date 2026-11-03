@@ -427,6 +427,22 @@ impl ServerLines {
         w.into_bytes()
     }
 
+    /// What `encode` writes before the servers of a list of `count`: its version and the count.
+    #[must_use]
+    pub fn head_len(count: u64) -> u64 {
+        1 + varint_len(count)
+    }
+
+    /// What `encode` writes for the server `name` with lines named `lines`, so a list's size can
+    /// be known before its saves are.
+    #[must_use]
+    pub fn server_len<'a>(name: &str, lines: impl ExactSizeIterator<Item = &'a str>) -> u64 {
+        let bytes = |len: usize| varint_len(len as u64) + len as u64;
+        let count = varint_len(lines.len() as u64);
+        let saves = size_of::<Id>() as u64;
+        bytes(name.len()) + count + lines.map(|line| bytes(line.len()) + saves).sum::<u64>()
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<ServerLines, DecodeError> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 1 {
@@ -747,6 +763,27 @@ mod tests {
     }
 
     #[test]
+    fn server_lengths_are_what_encode_writes() {
+        // Counts and names whose lengths take one and two bytes to write.
+        let lines = |count: u8| -> BTreeMap<String, Id> {
+            (0..count)
+                .map(|n| (format!("{}{n:03}", "l".repeat(200)), Id([n; 32])))
+                .collect()
+        };
+        let servers = BTreeMap::from([("o".to_owned(), lines(1)), ("s".repeat(255), lines(130))]);
+        let lengths: u64 = servers
+            .iter()
+            .map(|(name, lines)| ServerLines::server_len(name, lines.keys().map(String::as_str)))
+            .sum();
+        let list = ServerLines { servers };
+        assert_eq!(
+            ServerLines::head_len(2) + lengths,
+            list.encode().len() as u64
+        );
+        assert_eq!(ServerLines::head_len(MAX_SERVERS), 2);
+    }
+
+    #[test]
     fn server_lines_bytes() {
         let list = ServerLines {
             servers: BTreeMap::from([(
@@ -958,6 +995,13 @@ mod tests {
             let bytes = list.encode();
             prop_assert_eq!(ServerLines::decode(&bytes).unwrap(), list.clone());
             prop_assert_eq!(list.id(), hash_record(Flavor::ServerLines, &bytes));
+            let lengths: u64 = list
+                .servers
+                .iter()
+                .map(|(name, lines)| ServerLines::server_len(name, lines.keys().map(String::as_str)))
+                .sum();
+            let head = ServerLines::head_len(list.servers.len() as u64);
+            prop_assert_eq!(head + lengths, bytes.len() as u64);
         }
 
         #[test]

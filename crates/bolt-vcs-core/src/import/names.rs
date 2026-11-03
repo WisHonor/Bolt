@@ -5,9 +5,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{ImportError, Renaming, lossy};
-use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS, is_line_name_char};
+use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS, ServerLines, is_line_name_char};
 use crate::git::{GitError, GitId, Refs, shown};
 use crate::names::MAX_NAME_BYTES;
+use crate::pack::MAX_RECORD_SIZE;
 
 /// A ref an import brings in: its Git name, the name it takes in Bolt, and what it points at.
 pub(super) struct Named {
@@ -95,6 +96,19 @@ impl Names {
                 ..line
             }));
             servers.insert(bolt, own);
+        }
+        // Saves' IDs are all 32 bytes, so the server-lines record's size is known already.
+        let size = servers.iter().fold(
+            ServerLines::head_len(servers.len() as u64),
+            |size, (server, own): (&String, &Vec<Named>)| {
+                let lines = own.iter().map(|line| line.bolt.as_str());
+                size.saturating_add(ServerLines::server_len(server, lines))
+            },
+        );
+        if size > MAX_RECORD_SIZE {
+            return Err(too_many(
+                "its server branches would take more than the 512 MiB Bolt's list of them holds",
+            ));
         }
         let tags = named(&refs.tags, Rules::Tag, "tag", &mut renamed);
         Ok(Names {

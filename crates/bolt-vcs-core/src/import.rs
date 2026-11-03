@@ -13,7 +13,7 @@ use crate::git::{self, GitError, GitId, Head, ObjectType, Refs, parse_tag, parse
 use crate::id::{Id, hash_record};
 use crate::listing::EntryKind;
 use crate::names::{NameError, is_git_alias, validate_name};
-use crate::pack::{MAX_RECORD_SIZE, ObjectKind, PackError, PackSet};
+use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::Person;
 use crate::store::{Store, StoreError};
@@ -462,7 +462,9 @@ fn lines_of(
 }
 
 /// Stores the record `encoded` of `kind`, a tag list or server lines, unless a good copy is there
-/// already. Their encoders don't check what they write, so `read_back` decodes it first.
+/// already. Their encoders don't check what they write, so `read_back` decodes it first. Their
+/// sizes were held to a record's limit before anything was written: tags by the converter, server
+/// lines by `Names::of`.
 fn put_record(
     store: &Store,
     packs: &mut PackSet,
@@ -475,19 +477,6 @@ fn put_record(
     } else {
         "server-lines list"
     };
-    if encoded.len() as u64 > MAX_RECORD_SIZE {
-        return Err(ImportError::Stop {
-            what: format!(
-                "Bolt's {what} can't hold this repository's refs: it would be more than the 512 \
-                 MiB a record holds."
-            ),
-            hint: Some(
-                "Nothing was changed. Delete refs you don't need, such as stale server branches \
-                 (`git remote prune <server>`), then run bolt import again."
-                    .to_owned(),
-            ),
-        });
-    }
     read_back(encoded).map_err(|e| bug(format!("Bolt made a {what} it can't read back ({e})")))?;
     let flavor = kind
         .flavor()
