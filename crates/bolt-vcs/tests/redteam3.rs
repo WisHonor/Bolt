@@ -408,9 +408,10 @@ fn rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory() {
     );
 }
 
-// RT3-3: miniz_oxide 0.9.1 ends some valid zlib streams early when they are inflated a piece at
-// a time, as Bolt's Inflater does: big, mostly-zero files (180 MiB and more in the sweep). The
-// size check stops the import, which then calls a valid repository damaged.
+// RT3-3: Bolt's Inflater lost bytes of some valid zlib streams of big, mostly-zero files. Given no
+// input, miniz_oxide 0.9.1 can still write the rest of a copy, and then says Buf; the Inflater took
+// Buf to mean nothing was written and dropped those bytes. The size check then stopped the import,
+// which called a valid repository damaged.
 
 #[test]
 fn rt3_3_a_valid_200_mib_file_of_zeros_imports() {

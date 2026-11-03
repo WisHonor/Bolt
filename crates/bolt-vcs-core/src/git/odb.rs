@@ -1494,7 +1494,7 @@ mod tests {
     #[test]
     fn a_stream_inflates_whole_where_miniz_oxide_says_buf_after_writing() {
         // The smallest stream of zeros found where, with 16 KiB of input a call, miniz_oxide
-        // 0.9.1 writes the rest of a copy given no input and says Buf (RT3-3).
+        // 0.9.1 writes the rest of a copy given no input and says Buf: those bytes must count.
         let zeros = vec![0u8; 52_864 << 10];
         let z = deflate(&zeros);
         for step in [CHUNK, 8192] {
@@ -1523,10 +1523,11 @@ mod tests {
         data
     }
 
-    /// RT3-3's sweep: the sizes and shapes where streams came out short. The data compressed is
-    /// what a sound inflater gives back, so each stream is checked against it byte for byte.
+    /// Big files of zeros and sparse data, 110 to 300 MiB, the sizes where Buf with bytes written
+    /// comes most often. The data compressed is what a sound inflater gives back, so each stream
+    /// is checked against it byte for byte.
     #[test]
-    #[ignore = "RT3-3 sweep: 120 streams of 110 to 300 MiB; run in release, a few minutes"]
+    #[ignore = "slow: 120 streams of 110 to 300 MiB, a few minutes in release; run nightly"]
     fn big_mostly_zero_streams_inflate_whole() {
         let mut wrong = Vec::new();
         for mib in (110..=300).step_by(10) {

@@ -65,6 +65,24 @@ jobs:
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" differential.txt
 
+  # Inflates zeros and sparse data of 110 to 300 MiB at three levels and checks every byte
+  # (testing.md §3). Too slow for every push, so it is ignored there and runs here.
+  inflate-sweep:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Inflate big, mostly-zero streams
+        shell: bash
+        run: |
+          cargo test --release -p bolt-vcs-core --lib -- --ignored --exact git::odb::tests::big_mostly_zero_streams_inflate_whole 2>&1 | tee sweep.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" sweep.txt
+
   # Evidence for the owner, not a gate (testing.md §3): Git for Windows writes the `/` in a link's
   # target as `\`, and this shows whether the first save after an import keeps the target Git
   # stored. GitHub's Windows runners can make links.
