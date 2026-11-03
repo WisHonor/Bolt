@@ -9,7 +9,7 @@ use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackSet, PackWriter}
 use crate::repo::Repository;
 use crate::save::Save;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One tag and one server line, both at a made-up save.
 pub(crate) fn sample_records() -> (TagList, ServerLines) {
@@ -175,6 +175,23 @@ pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]
         pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).expect("an offset")] ^= 1;
     }
     std::fs::write(packs.join("00.pack"), pack).expect("write the pack");
+}
+
+/// A folder other accounts can write to, as `trust_hint` sees one: the root of the C: drive on
+/// Windows; elsewhere `dir`, opened to everyone.
+pub(crate) fn open_to_all(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        PathBuf::from(r"C:\")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777))
+            .expect("open the folder to everyone");
+        dir.to_owned()
+    }
 }
 
 /// Text no terminal may be shown as it is: an escape sequence, a right-to-left override and a

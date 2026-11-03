@@ -108,9 +108,7 @@ impl RepoError {
                     ));
                 }
                 RepoError::StartStopped { refusal } => {
-                    return refusal
-                        .hint()
-                        .map(|hint| format!("{hint}\nThen run `bolt start` again to finish."));
+                    return refusal.hint_then("Then run `bolt start` again to finish.");
                 }
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
@@ -121,6 +119,25 @@ impl RepoError {
             }
             .to_owned(),
         )
+    }
+
+    /// `hint`, then `then`, for a refusal that stopped `bolt start` or `bolt import` after `.bolt`
+    /// was made. Where other accounts can write, the hint says to move the project instead, so
+    /// `then` is left off.
+    pub(crate) fn hint_then(&self, then: &str) -> Option<String> {
+        let hint = self.hint()?;
+        let moves = match self {
+            RepoError::NotYours { path }
+            | RepoError::OwnerUnknown { path }
+            | RepoError::OwnerLookupFailed { path, .. }
+            | RepoError::AdminsNotElevated { path } => config::others_can_write(path),
+            _ => false,
+        };
+        Some(if moves {
+            hint
+        } else {
+            format!("{hint}\n{then}")
+        })
     }
 }
 
@@ -2002,6 +2019,43 @@ mod tests {
                 .unwrap()
                 .ends_with("\nThen run `bolt start` again to finish.")
         );
+    }
+
+    /// Where other accounts can write, the hint says to move the project, so it can't also say
+    /// to come back and finish it in place.
+    #[test]
+    fn a_stopped_start_says_how_to_finish_only_where_the_folder_can_be_trusted() {
+        let refusals = |path: &Path| {
+            let path = path.to_owned();
+            [
+                RepoError::NotYours { path: path.clone() },
+                RepoError::OwnerUnknown { path: path.clone() },
+                RepoError::AdminsNotElevated { path: path.clone() },
+                RepoError::OwnerLookupFailed {
+                    path,
+                    source: io::Error::other("Access is denied."),
+                },
+            ]
+        };
+        let stopped = |refusal| RepoError::StartStopped {
+            refusal: Box::new(refusal),
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let open_to_all = crate::test_support::open_to_all(folder.path());
+        for refusal in refusals(Path::new("/srv/work")) {
+            let hint = stopped(refusal).hint().unwrap();
+            assert!(
+                hint.ends_with("\nThen run `bolt start` again to finish."),
+                "{hint}"
+            );
+        }
+        for refusal in refusals(&open_to_all) {
+            let hint = stopped(refusal).hint().unwrap();
+            assert!(
+                hint.ends_with("Move your project into a folder of your own."),
+                "{hint}"
+            );
+        }
     }
 
     #[test]

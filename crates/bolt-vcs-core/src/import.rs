@@ -477,9 +477,7 @@ fn starting(e: RepoError) -> ImportError {
         },
         // Its own hint says to run `bolt start` again, which would make an empty project.
         RepoError::StartStopped { refusal } => {
-            let hint = refusal
-                .hint()
-                .map(|hint| format!("{hint}\nThen run bolt import again to finish."));
+            let hint = refusal.hint_then("Then run bolt import again to finish.");
             let what = RepoError::StartStopped { refusal }.to_string();
             ImportError::Stop { what, hint }
         }
@@ -1085,6 +1083,35 @@ mod tests {
             after_begin(dir.path(), stop()),
             ImportError::Stop { .. }
         ));
+    }
+
+    /// Where other accounts can write, the hint says to move the project, so it can't also say
+    /// to come back and finish the import in place.
+    #[test]
+    fn a_stopped_start_says_how_to_finish_only_where_the_folder_can_be_trusted() {
+        let hint_for = |path: &Path| {
+            let refusal = RepoError::NotYours {
+                path: path.to_owned(),
+            };
+            let stopped = RepoError::StartStopped {
+                refusal: Box::new(refusal),
+            };
+            match starting(stopped) {
+                ImportError::Stop { hint, .. } => hint.unwrap(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let hint = hint_for(Path::new("/srv/work"));
+        assert!(
+            hint.ends_with("\nThen run bolt import again to finish."),
+            "{hint}"
+        );
+        let folder = tempfile::tempdir().unwrap();
+        let hint = hint_for(&crate::test_support::open_to_all(folder.path()));
+        assert!(
+            hint.ends_with("Move your project into a folder of your own."),
+            "{hint}"
+        );
     }
 
     /// Bolt keeps up to 16 packs open between reads, and goes on reading one it has open as it

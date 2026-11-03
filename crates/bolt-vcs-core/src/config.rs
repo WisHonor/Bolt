@@ -374,7 +374,7 @@ pub fn trust_hint(root: &Path) -> String {
 /// Whether other accounts can put a project in `folder`: on Unix, when anyone may write to it (the
 /// sticky bit of `/tmp` only stops them removing each other's files); on Windows, when it is a
 /// drive's root, where any account may make folders.
-fn others_can_write(folder: &Path) -> bool {
+pub(crate) fn others_can_write(folder: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
