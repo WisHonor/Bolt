@@ -15,27 +15,37 @@ use bolt_core::repo::Repository;
 use bolt_core::save::Person;
 use bolt_core::verify::verify_store;
 
-/// A Git repository of three commits on `main`, each with a file and a folder of its own.
+/// A Git repository of three commits on `main`, each with a file and a folder of its own, an
+/// annotated tag of the first and a server branch at the second, so the import stores a tag list
+/// and server lines as well.
 fn repository(dir: &Path) {
     let git = Craft::new(dir, HashKind::Sha1);
-    let mut parent: Option<GitId> = None;
+    let mut commits: Vec<GitId> = Vec::new();
     for i in 0..3u8 {
         let blob = git.object(ObjectType::Blob, &[b'0' + i]);
         let inner = git.tree(&[(b"100644", b"b.txt", blob)]);
         let tree = git.tree(&[(b"100644", b"a.txt", blob), (b"40000", b"sub", inner)]);
         let mut raw = format!("tree {}\n", tree.to_hex());
-        if let Some(parent) = parent {
+        if let Some(parent) = commits.last() {
             raw += &format!("parent {}\n", parent.to_hex());
         }
         raw += &format!(
             "author A <a@example.com> {i} +0000\ncommitter A <a@example.com> {i} +0000\n\nSave {i}\n"
         );
-        parent = Some(git.commit(raw.as_bytes()));
+        commits.push(git.commit(raw.as_bytes()));
     }
-    git.loose_ref(
-        "refs/heads/main",
-        &format!("{}\n", parent.unwrap().to_hex()),
+    let tag = format!(
+        "object {}\ntype commit\ntag v1\ntagger A <a@example.com> 3 +0000\n\nVersion 1\n",
+        commits[0].to_hex()
     );
+    let tag = git.object(ObjectType::Tag, tag.as_bytes());
+    for (name, id) in [
+        ("refs/heads/main", commits[2]),
+        ("refs/remotes/origin/main", commits[1]),
+        ("refs/tags/v1", tag),
+    ] {
+        git.loose_ref(name, &format!("{}\n", id.to_hex()));
+    }
 }
 
 fn import(dir: &Path) -> Result<ImportReport, ImportError> {
@@ -66,6 +76,8 @@ fn an_interrupted_import_can_be_run_again() {
     let clean = tempfile::tempdir().unwrap();
     repository(clean.path());
     import(clean.path()).unwrap();
+    let records = state(clean.path());
+    assert!(records.tags.is_some() && records.server_lines.is_some());
     let mut between_packs = false;
     for n in 1.. {
         assert!(n < 100, "the import never finished");
