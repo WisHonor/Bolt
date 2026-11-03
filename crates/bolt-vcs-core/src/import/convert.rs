@@ -67,6 +67,9 @@ pub(super) fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
         GitError::Unimportable { what } => GitError::Unimportable {
             what: format!("{what}, in {}", place()),
         },
+        GitError::EndedEarly { what } => GitError::EndedEarly {
+            what: format!("{what}, in {}", place()),
+        },
         other => other,
     }
     .into()

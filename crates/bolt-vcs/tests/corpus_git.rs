@@ -879,7 +879,7 @@ fn loose_objects_that_lie_about_their_size_are_refused_before_allocating() {
     for (stored, why) in [
         (
             zlib(b"blob 99999999999\0x"),
-            "holds 1 bytes, not the 99999999999 it says",
+            "ended after 1 of the 99999999999 bytes it says it holds",
         ),
         (bomb, "holds more than the 10 bytes it says"),
         (trailing, "has bytes after its compressed data"),

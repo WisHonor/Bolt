@@ -162,6 +162,10 @@ pub enum GitError {
     /// a folder does. Bolt reads none of them; `what` names it.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     NotPlain { what: String },
+    /// An object whose compressed data ended before the size it gives. Git doesn't write one, and
+    /// `git fsck` doesn't always notice one, so it is reported as a fault; `what` names it.
+    #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
+    EndedEarly { what: String },
     /// An object Git reads, but past a limit or a rule of Bolt's that Git doesn't have, so
     /// `git fsck` finds nothing wrong; `what` names the object and says why.
     #[error(
@@ -200,6 +204,10 @@ impl GitError {
                 GitError::Broken { .. } => {
                     "Nothing was changed. Check the repository with `git fsck`, or import a \
                      fresh clone of it."
+                }
+                GitError::EndedEarly { .. } => {
+                    "Nothing was changed. Git doesn't write objects that end early, so this may be \
+                     a fault in Bolt's reader: please report it, with this message."
                 }
                 GitError::NotPlain { .. } => {
                     "Nothing was changed. Bolt reads only plain files and real folders in a Git \
@@ -939,6 +947,9 @@ mod tests {
                 what: HOSTILE.into(),
             },
             GitError::NotPlain {
+                what: HOSTILE.into(),
+            },
+            GitError::EndedEarly {
                 what: HOSTILE.into(),
             },
             GitError::Unimportable {

@@ -570,7 +570,11 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
                     self.ended = true;
                     return Ok(result.bytes_written);
                 }
-                Ok(_) if result.bytes_written > 0 => return Ok(result.bytes_written),
+                // Given no input, miniz_oxide says Buf even after writing the rest of a copy it
+                // had begun: those bytes count as any others.
+                Ok(_) | Err(MZError::Buf) if result.bytes_written > 0 => {
+                    return Ok(result.bytes_written);
+                }
                 // It took all it was given: read more.
                 Ok(_) | Err(MZError::Buf) if self.start >= self.end => {
                     self.start = 0;
@@ -613,16 +617,22 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
             let part = chunk.get_mut(..want).unwrap_or_default();
             let got = self.read(part)?;
             if got == 0 {
-                return Err(broken(format!(
-                    "{} holds {} bytes, not the {size} it says",
-                    self.what(),
-                    data.len()
-                )));
+                return Err(self.ended_early(data.len() as u64, size));
             }
             data.extend_from_slice(part.get(..got).unwrap_or_default());
         }
         self.end(size)?;
         Ok(data)
+    }
+
+    /// The stream ended after `got` of the `size` bytes its object gives.
+    fn ended_early(&self, got: u64, size: u64) -> GitError {
+        GitError::EndedEarly {
+            what: format!(
+                "{} ended after {got} of the {size} bytes it says it holds",
+                self.what()
+            ),
+        }
     }
 
     /// Checks that the stream ends after its `size` bytes, and a loose object's file with it.
@@ -695,12 +705,8 @@ impl Stream<'_> {
         let buf = buf.get_mut(..want).unwrap_or_default();
         let got = self.inflater.read(buf)?;
         if got == 0 && self.left > 0 {
-            return Err(broken(format!(
-                "{} holds {} bytes, not the {} it says",
-                self.inflater.what(),
-                self.size.saturating_sub(self.left),
-                self.size
-            )));
+            let read = self.size.saturating_sub(self.left);
+            return Err(self.inflater.ended_early(read, self.size));
         }
         self.hasher.update(buf.get(..got).unwrap_or_default());
         self.left = self.left.saturating_sub(got as u64);
@@ -1078,8 +1084,28 @@ mod tests {
         }
         assert_eq!(repo.header(&largest).unwrap(), (Blob, 1 << 40));
         broken(repo.read(&largest));
-        assert!(broken(repo.read(&short)).contains("holds 4 bytes, not the 5"));
         assert!(broken(repo.read(&long_data)).contains("more than the 5 bytes"));
+        // Data that ends early is a fault to report, which `git fsck` may not see, read whole or
+        // streamed.
+        let streamed = read_all(repo.blob_reader(&short).unwrap(), 4096).unwrap_err();
+        let streamed = streamed
+            .into_inner()
+            .unwrap()
+            .downcast::<GitError>()
+            .unwrap();
+        for e in [repo.read(&short).unwrap_err(), *streamed] {
+            assert!(matches!(e, GitError::EndedEarly { .. }), "{e:?}");
+            let message = e.to_string();
+            assert!(
+                message.contains("ended after 4 of the 5 bytes"),
+                "{message}"
+            );
+            let hint = e.hint().unwrap();
+            assert!(
+                hint.contains("please report it") && !hint.contains("fsck"),
+                "{hint}"
+            );
+        }
     }
 
     #[test]
@@ -1282,6 +1308,78 @@ mod tests {
         )
         .unwrap();
         changed(repo.read(&moved));
+    }
+
+    /// What an `Inflater` gives for the zlib stream `z`, read `step` bytes at a time.
+    fn inflated(z: &[u8], step: usize) -> Result<Vec<u8>, GitError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stream");
+        fs::write(&path, z).unwrap();
+        let file = File::open(&path).unwrap();
+        let mut stream = Inflater::new(Input::new(file, path.as_path(), 0, z.len() as u64), None);
+        let mut out = Vec::new();
+        let mut buf = vec![0; step];
+        loop {
+            match stream.read(&mut buf)? {
+                0 => return Ok(out),
+                n => out.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_inflates_whole_where_miniz_oxide_says_buf_after_writing() {
+        // The smallest stream of zeros found where, with 16 KiB of input a call, miniz_oxide
+        // 0.9.1 writes the rest of a copy given no input and says Buf (RT3-3).
+        let zeros = vec![0u8; 52_864 << 10];
+        let z = deflate(&zeros);
+        for step in [CHUNK, 8192] {
+            let out = inflated(&z, step).unwrap();
+            assert_eq!(out.len(), zeros.len(), "{step}");
+            assert!(out == zeros, "{step}");
+        }
+    }
+
+    /// `len` bytes of zeros or, if `sparse`, of 1 MiB pages of zeros each ending in 4 KiB of
+    /// noise, as disk images and padded archives hold.
+    fn mostly_zeros(len: usize, sparse: bool) -> Vec<u8> {
+        let mut data = vec![0u8; len];
+        let mut seed = 1u64;
+        if sparse {
+            for page in data.chunks_mut(1 << 20) {
+                let at = page.len().saturating_sub(4096);
+                for byte in &mut page[at..] {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    *byte = (seed >> 56) as u8;
+                }
+            }
+        }
+        data
+    }
+
+    /// RT3-3's sweep: the sizes and shapes where streams came out short. The data compressed is
+    /// what a sound inflater gives back, so each stream is checked against it byte for byte.
+    #[test]
+    #[ignore = "RT3-3 sweep: 120 streams of 110 to 300 MiB; run in release, a few minutes"]
+    fn big_mostly_zero_streams_inflate_whole() {
+        let mut wrong = Vec::new();
+        for mib in (110..=300).step_by(10) {
+            for sparse in [false, true] {
+                let data = mostly_zeros(mib << 20, sparse);
+                for level in [1, 6, 9] {
+                    let z = miniz_oxide::deflate::compress_to_vec_zlib(&data, level);
+                    for step in [CHUNK, 8192] {
+                        match inflated(&z, step) {
+                            Ok(out) if out == data => {}
+                            other => wrong.push((mib, sparse, level, step, other.map(|o| o.len()))),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} wrong: {wrong:?}", wrong.len());
     }
 
     #[test]

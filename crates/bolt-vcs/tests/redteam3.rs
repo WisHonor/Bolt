@@ -413,7 +413,6 @@ fn rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory() {
 // size check stops the import, which then calls a valid repository damaged.
 
 #[test]
-#[ignore = "RT3-3: red-team proof, run once its fix is in"]
 fn rt3_3_a_valid_200_mib_file_of_zeros_imports() {
     let env = Env::new();
     let zeros = vec![0u8; 200 << 20];
