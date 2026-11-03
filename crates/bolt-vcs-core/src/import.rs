@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::diary::{
-    Action, DiaryEntry, MAX_GIT_TAG_OBJECT_BYTES, MAX_LINES, MAX_SERVERS, MAX_TAGS, Position,
-    ServerLines, State, TagList, is_line_name_char,
+    Action, DiaryEntry, MAX_LINES, MAX_SERVERS, MAX_TAGS, Position, ServerLines, State, TagList,
+    is_line_name_char,
 };
 use crate::encoding::DecodeError;
 use crate::git::{self, GitError, GitId, Head, ObjectType, Refs, parse_tag, parse_tree, shown};
@@ -25,7 +25,9 @@ use crate::warning::{self, Warning};
 mod convert;
 
 pub use convert::{Converter, Counts, TagOutcome};
-use convert::{at, bug, expect_kind, shown_path, tree_and_parents};
+use convert::{
+    at, bug, check_tag_chain, check_tag_object, expect_kind, shown_path, tree_and_parents,
+};
 
 /// How many folders named `.bolt` the import's warnings name; the rest are counted.
 const MAX_NAMED_BOLT_FOLDERS: usize = 100;
@@ -161,7 +163,7 @@ pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, 
     let git = git::Repo::open(root)?;
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
-    let roots = roots(&git, &refs)?;
+    let roots = roots(&git, &refs, &names.tags)?;
     if roots.is_empty() {
         return Err(ImportError::Stop {
             what: "There's nothing to import: this Git repository has no commits. bolt start \
@@ -510,42 +512,48 @@ fn cut(name: &str, max: usize) -> &str {
 }
 
 /// The commits an import starts from (decision 033): those of the branches and the server
-/// branches, those the tags end at, and a detached `HEAD`'s.
-fn roots(git: &git::Repo, refs: &Refs) -> Result<BTreeSet<GitId>, ImportError> {
+/// branches, those the tags end at, and a detached `HEAD`'s. Tags are held to the limits
+/// `Converter::tag` holds them to, so a tag it would refuse stops the import before anything is
+/// written.
+fn roots(git: &git::Repo, refs: &Refs, tags: &[Named]) -> Result<BTreeSet<GitId>, ImportError> {
     let mut roots: BTreeSet<GitId> = refs.branches.iter().map(|(_, id)| *id).collect();
     roots.extend(refs.servers.iter().map(|(_, _, id)| *id));
     if let Head::Detached(id) = &refs.head {
         roots.insert(*id);
     }
-    // Where the chain from each tag object read ends: at a commit, or at nothing Bolt can tag.
-    let mut ends: HashMap<GitId, Option<GitId>> = HashMap::new();
-    for (name, target) in &refs.tags {
+    // Where the chain from each tag object read ends (a commit, or nothing Bolt can tag), and how
+    // many tag objects it holds from there, that one included.
+    let mut ends: HashMap<GitId, (Option<GitId>, u64)> = HashMap::new();
+    for tag in tags {
+        let name = tag.bolt.as_str();
         let mut read = Vec::new();
-        let mut id = *target;
-        let end = loop {
-            if let Some(end) = ends.get(&id) {
-                break *end;
+        let mut id = tag.target;
+        let (end, rest) = loop {
+            if let Some(&(end, objects)) = ends.get(&id) {
+                check_tag_chain(name, (read.len() as u64).saturating_add(objects))?;
+                break (end, objects);
             }
             let hex = id.to_hex();
-            let here = || format!("tag `{}`, at object `{hex}`", shown(name));
+            let here = || format!("tag `{name}`, at object `{hex}`");
             let (kind, size) = git.header(&id).map_err(|e| at(e, here))?;
             match kind {
-                ObjectType::Commit => break Some(id),
-                ObjectType::Tree | ObjectType::Blob => break None,
-                // `Converter::tag` refuses it, saying why.
-                ObjectType::Tag if size > MAX_GIT_TAG_OBJECT_BYTES as u64 => break None,
+                ObjectType::Commit => break (Some(id), 0),
+                ObjectType::Tree | ObjectType::Blob => break (None, 0),
                 ObjectType::Tag => {}
             }
+            check_tag_object(name, &id, size)?;
+            check_tag_chain(name, (read.len() as u64).saturating_add(1))?;
             let object = git.read(&id).map_err(|e| at(e, here))?;
             expect_kind(object.kind, ObjectType::Tag, &id, here)?;
+            check_tag_object(name, &id, object.data.len() as u64)?;
             read.push(id);
-            // Never round a loop: each tag object's ID covers the ID of the next.
             id = parse_tag(&object.data, git.hash())
                 .map_err(|e| at(e, here))?
                 .object;
         };
-        for object in read {
-            ends.insert(object, end);
+        for (i, object) in read.iter().enumerate() {
+            let objects = (read.len().saturating_sub(i) as u64).saturating_add(rest);
+            ends.insert(*object, (end, objects));
         }
         roots.extend(end);
     }
@@ -856,6 +864,78 @@ mod tests {
                 other => panic!("{:?}", other.map(|_| ())),
             }
         }
+    }
+
+    /// A repository of one commit on `main`, as `Craft` writes it, and the commit.
+    fn one_commit(dir: &Path) -> (Craft, GitId) {
+        let git = Craft::new(dir, HashKind::Sha1);
+        let blob = git.object(ObjectType::Blob, b"a\n");
+        let tree = git.tree(&[(b"100644", b"a.txt", blob)]);
+        let raw = format!(
+            "tree {}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\n\
+             One\n",
+            tree.to_hex()
+        );
+        let commit = git.commit(raw.as_bytes());
+        git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
+        (git, commit)
+    }
+
+    /// A tag object of `target`, a `kind`, with `message`.
+    fn tag_object(git: &Craft, target: &GitId, kind: &str, message: &[u8]) -> GitId {
+        let head = format!(
+            "object {}\ntype {kind}\ntag t\ntagger T <t@example.com> 0 +0000\n\n",
+            target.to_hex()
+        );
+        git.object(ObjectType::Tag, &[head.as_bytes(), message].concat())
+    }
+
+    fn import(dir: &Path) -> Result<ImportReport, ImportError> {
+        import_git(
+            dir,
+            &mut ImportRequest {
+                who: &who(),
+                command: "import",
+                progress: &mut |_, _| {},
+            },
+        )
+    }
+
+    /// The converter would refuse these tags only after every commit was converted; the first
+    /// pass refuses them alike, before `.bolt` is made.
+    #[test]
+    fn tags_past_bolts_limits_stop_the_import_before_anything_is_written() {
+        // A chain of `objects` tag objects to `commit`, the one nearest it holding `message`.
+        let chain = |git: &Craft, commit: &GitId, objects: usize, message: &[u8]| {
+            let mut id = tag_object(git, commit, "commit", message);
+            for _ in 1..objects {
+                id = tag_object(git, &id, "tag", b"n\n");
+            }
+            id
+        };
+        let big = vec![b'x'; crate::diary::MAX_GIT_TAG_OBJECT_BYTES];
+        for (refusal, objects, message) in [
+            ("more than the 1 MiB Bolt keeps", 1, big.as_slice()),
+            ("more than 16 tag objects", 17, b"1\n"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (git, commit) = one_commit(dir.path());
+            let id = chain(&git, &commit, objects, message);
+            git.loose_ref("refs/tags/t", &format!("{}\n", id.to_hex()));
+            match import(dir.path()) {
+                Err(e @ ImportError::Git(GitError::Unimportable { .. })) => {
+                    assert!(e.to_string().contains(refusal), "{e}");
+                }
+                other => panic!("{refusal}: {:?}", other.map(|_| ())),
+            }
+            assert!(!dir.path().join(".bolt").exists(), "{refusal}");
+        }
+        // Sixteen tag objects are as many as Bolt keeps.
+        let dir = tempfile::tempdir().unwrap();
+        let (git, commit) = one_commit(dir.path());
+        let id = chain(&git, &commit, 16, b"1\n");
+        git.loose_ref("refs/tags/t", &format!("{}\n", id.to_hex()));
+        assert_eq!(import(dir.path()).unwrap().tags, 1);
     }
 
     /// Bolt keeps up to 16 packs open between reads, and goes on reading one it has open as it

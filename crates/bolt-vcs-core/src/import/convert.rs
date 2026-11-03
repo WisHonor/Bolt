@@ -164,6 +164,32 @@ fn skipped(end: ObjectType) -> TagOutcome {
     }
 }
 
+/// Stops at the tag `name` if its chain holds more tag objects than Bolt keeps (decision 034):
+/// `objects` is how many it holds at least. The import's first pass and `Converter::tag` both
+/// hold tags to this and `check_tag_object`, so they refuse the same tags alike.
+pub(super) fn check_tag_chain(name: &str, objects: u64) -> Result<(), ImportError> {
+    if objects <= MAX_GIT_TAG_OBJECTS {
+        return Ok(());
+    }
+    Err(unimportable(format!(
+        "tag `{name}` reaches its commit through more than {MAX_GIT_TAG_OBJECTS} tag objects, \
+         more than Bolt keeps"
+    )))
+}
+
+/// Stops at the tag `name` if its tag object `id`, of `size` bytes, is bigger than Bolt keeps of
+/// one (decision 034).
+pub(super) fn check_tag_object(name: &str, id: &GitId, size: u64) -> Result<(), ImportError> {
+    if size <= MAX_GIT_TAG_OBJECT_BYTES as u64 {
+        return Ok(());
+    }
+    Err(unimportable(format!(
+        "tag `{name}` has a tag object of {size} bytes (`{}`), more than the 1 MiB Bolt keeps \
+         of one",
+        id.to_hex()
+    )))
+}
+
 /// One commit's snapshot as far as it has been walked.
 struct Walk<'c> {
     commit: &'c str,
@@ -403,12 +429,6 @@ impl<'r> Converter<'r> {
     /// its chain ends: one that ends at a tree or blob isn't read again, and one that ends at a
     /// commit is, for the bytes the tag keeps.
     fn read_tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
-        let too_long = || {
-            unimportable(format!(
-                "tag `{name}` reaches its commit through more than {MAX_GIT_TAG_OBJECTS} tag \
-                 objects, more than Bolt keeps"
-            ))
-        };
         let mut id = *target;
         // The tag objects read so far, outermost first, and their bytes.
         let mut read: Vec<GitId> = Vec::new();
@@ -425,9 +445,7 @@ impl<'r> Converter<'r> {
             }
             let known = self.chains.get(&id).copied();
             if let Some(known) = known {
-                if (read.len() as u64).saturating_add(known.objects) > MAX_GIT_TAG_OBJECTS {
-                    return Err(too_long());
-                }
+                check_tag_chain(name, (read.len() as u64).saturating_add(known.objects))?;
                 if known.end != ObjectType::Commit {
                     self.remember(&read, known.objects, known.end);
                     return Ok(skipped(known.end));
@@ -436,12 +454,6 @@ impl<'r> Converter<'r> {
             let hex = id.to_hex();
             // The ref's own target may be a commit, or missing, as well as a tag object.
             let here = || format!("tag `{name}`, at object `{hex}`");
-            let too_big = |size: u64| {
-                unimportable(format!(
-                    "tag `{name}` has a tag object of {size} bytes (`{hex}`), more than the 1 \
-                     MiB Bolt keeps of one"
-                ))
-            };
             // A tag object known to lead to a commit was read before, and reading it checks it
             // again; anything else is looked at first. The header isn't checked against the ID.
             if known.is_none() {
@@ -462,18 +474,12 @@ impl<'r> Converter<'r> {
                         )));
                     }
                 }
-                if size > MAX_GIT_TAG_OBJECT_BYTES as u64 {
-                    return Err(too_big(size));
-                }
+                check_tag_object(name, &id, size)?;
             }
-            if read.len() as u64 >= MAX_GIT_TAG_OBJECTS {
-                return Err(too_long());
-            }
+            check_tag_chain(name, (read.len() as u64).saturating_add(1))?;
             let object = self.git.read(&id).map_err(|e| at(e, here))?;
             expect_kind(object.kind, ObjectType::Tag, &id, here)?;
-            if object.data.len() > MAX_GIT_TAG_OBJECT_BYTES {
-                return Err(too_big(object.data.len() as u64));
-            }
+            check_tag_object(name, &id, object.data.len() as u64)?;
             let tag = parse_tag(&object.data, self.git.hash()).map_err(|e| at(e, here))?;
             if read.is_empty() {
                 message = message_text(tag.message, None).into_owned();
