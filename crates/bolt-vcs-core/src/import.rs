@@ -12,7 +12,7 @@ use encoding_rs::{Encoding, UTF_8};
 
 use crate::diary::{self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES};
 use crate::git::{
-    self, Commit, GitError, GitId, Object, ObjectType, is_lfs_pointer, parse_commit, parse_person,
+    self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, parse_commit, parse_person,
     parse_tag, parse_tree, rebuild_commit, shown,
 };
 use crate::id::{ChangeId, ContentHasher, Id, hash_content, hash_record};
@@ -30,6 +30,10 @@ use crate::text::escape;
 
 /// Blobs up to this size are read whole; bigger ones stream through, twice.
 const MAX_WHOLE_BLOB: u64 = 64 << 20;
+
+/// The biggest commit a save can keep exactly: its header lines, the empty line and its message
+/// (decision 032).
+const MAX_COMMIT_BYTES: u64 = MAX_EXTRA_VALUE_BYTES as u64 + 1 + MAX_MESSAGE_BYTES as u64;
 
 /// How many skipped entries, or names that aren't UTF-8, are listed by path. The rest are counted.
 const MAX_LISTED: usize = 100;
@@ -137,20 +141,20 @@ fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
     .into()
 }
 
-/// Refuses an object of another kind than the one it was named as.
+/// Refuses an object found to be of another kind than the one it was named as.
 fn expect_kind(
-    object: &Object,
+    found: ObjectType,
     kind: ObjectType,
     id: &GitId,
     place: impl FnOnce() -> String,
 ) -> Result<(), ImportError> {
-    if object.kind == kind {
+    if found == kind {
         return Ok(());
     }
     let what = format!(
         "object `{}` is a {}, not a {}",
         id.to_hex(),
-        object.kind.name(),
+        found.name(),
         kind.name()
     );
     Err(at(GitError::Broken { what }, place))
@@ -313,8 +317,17 @@ impl<'r> Converter<'r> {
         }
         let hex = id.to_hex();
         let here = || format!("commit `{hex}`");
+        // The header isn't checked against the ID, but it bounds what reading would hold.
+        let (kind, size) = self.git.header(id).map_err(|e| at(e, here))?;
+        expect_kind(kind, ObjectType::Commit, id, here)?;
+        if size > MAX_COMMIT_BYTES {
+            return Err(unimportable(format!(
+                "commit `{hex}` is {size} bytes, more than any commit Bolt can keep (64 KiB of \
+                 header lines and 1 MiB of message)"
+            )));
+        }
         let object = self.git.read(id).map_err(|e| at(e, here))?;
-        expect_kind(&object, ObjectType::Commit, id, here)?;
+        expect_kind(object.kind, ObjectType::Commit, id, here)?;
         let c = parse_commit(&object.data, self.git.hash()).map_err(|e| at(e, here))?;
         keepable(&c, &hex)?;
         if parent_saves.len() != c.parents.len() {
@@ -416,7 +429,7 @@ impl<'r> Converter<'r> {
                 return Err(too_big(size));
             }
             let object = self.git.read(&id).map_err(|e| at(e, here))?;
-            expect_kind(&object, ObjectType::Tag, &id, here)?;
+            expect_kind(object.kind, ObjectType::Tag, &id, here)?;
             if object.data.len() > MAX_GIT_TAG_OBJECT_BYTES {
                 return Err(too_big(object.data.len() as u64));
             }
@@ -515,7 +528,7 @@ impl<'r> Converter<'r> {
             format!("{folder} (tree `{}`) of commit `{commit}`", id.to_hex())
         };
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
-        expect_kind(&object, ObjectType::Tree, &id, place)?;
+        expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
         let mut items = Vec::new();
         let mut exact = true;
@@ -633,7 +646,7 @@ impl<'r> Converter<'r> {
         let (_, size) = self.git.header(id).map_err(|e| at(e, place))?;
         let done = if size <= MAX_WHOLE_BLOB {
             let object = self.git.read(id).map_err(|e| at(e, place))?;
-            expect_kind(&object, ObjectType::Blob, id, place)?;
+            expect_kind(object.kind, ObjectType::Blob, id, place)?;
             if is_lfs_pointer(&object.data) {
                 return Err(ImportError::LfsPointer {
                     commit: commit.to_owned(),
@@ -1209,6 +1222,27 @@ mod tests {
         assert!(e.to_string().contains("101 names"), "{e}");
         assert!(e.to_string().contains("and 1 more"), "{e}");
         assert!(e.hint().unwrap().starts_with("Nothing was changed."));
+    }
+
+    #[test]
+    fn a_commit_too_big_to_keep_is_refused_before_it_is_read() {
+        let (dir, git) = repo(Sha1);
+        // It says it is a 3 MiB commit but holds nothing more: reading it would fail as damage,
+        // so a refusal naming its size shows it was never read.
+        let id = GitId::from_hex(Sha1, &"c0".repeat(20)).unwrap();
+        let size = 3 << 20;
+        let header = format!("commit {size}\0");
+        let compressed = miniz_oxide::deflate::compress_to_vec_zlib(header.as_bytes(), 6);
+        git.raw_loose(&id.to_hex(), &compressed);
+        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
+        match result {
+            Err(e @ ImportError::Git(GitError::Unimportable { .. })) => {
+                let message = e.to_string();
+                assert!(message.contains(&id.to_hex()), "{message}");
+                assert!(message.contains(&format!("{size} bytes")), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
