@@ -893,8 +893,9 @@ pub struct Converter<'r> { /* the Git repo, the store, the packs, memo tables, c
 impl<'r> Converter<'r> {
     pub fn new(git: &'r git::Repo, store: &'r Store, packs: &'r mut PackSet) -> Converter<'r>;
     pub fn commit(&mut self, id: &GitId, parent_saves: &[Id]) -> Result<Id, ImportError>;   // stores the save, its trees and blobs
-    pub fn tag(&mut self, target: &GitId) -> Result<TagOutcome, ImportError>;
+    pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError>;   // name: the Bolt tag name, counted in the tag list's budget
     pub fn counts(&self) -> &Counts;    // inexact commits; skipped entries (first 100, plus a count)
+    pub fn finish(&self) -> Result<(), ImportError>;   // NotUtf8Names for the whole import; call after the last commit, before committing
 }
 pub enum TagOutcome { Tag(diary::Tag), Skipped { reason: String } }
 pub enum ImportError { Git(GitError), Repo(RepoError), Store(StoreError), Pack(PackError),
@@ -1014,8 +1015,8 @@ impl Repository {
    - A `HEAD` branch with no commit stops: "Git's current branch `<name>` has no commits yet; switch to a branch with commits, or commit first."
    - No commits at all stops: "There's nothing to import: this Git repository has no commits. bolt start makes a new project here."
 5. **Pass 1** reads every commit's parents iteratively. They are ordered parents first, with ties broken by Git ID.
-6. **Pass 2** converts the commits in that order (Task 12), calling `progress(done, total)` after each.
-7. **Tags:** `Converter::tag` for each one.
+6. **Pass 2** converts the commits in that order (Task 12), calling `progress(done, total)` after each, then `Converter::finish()`.
+7. **Tags:** `Converter::tag` for each one, with its renamed Bolt name.
 8. **The state:**
    - the lines;
    - a `TagList` and a `ServerLines` record, if any, stored through the packs;
