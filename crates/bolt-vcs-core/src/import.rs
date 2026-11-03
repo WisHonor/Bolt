@@ -19,7 +19,7 @@ use crate::id::{ChangeId, ContentHasher, Id, hash_content, hash_record};
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{NameError, is_git_alias, validate_name};
-use crate::pack::{ObjectKind, PackError, PackSet};
+use crate::pack::{MAX_RECORD_SIZE, ObjectKind, PackError, PackSet};
 use crate::repo::RepoError;
 use crate::save::{
     EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_EXTRA_VALUE_BYTES,
@@ -40,6 +40,16 @@ const MAX_LISTED: usize = 100;
 
 /// About the most bytes of a path a list or message holds.
 const MAX_SHOWN_PATH: usize = 1024;
+
+/// The most bytes a varint takes (storage-format.md section 1).
+const MAX_VARINT_BYTES: u64 = 10;
+
+/// A tag list's version and count of tags, at most (storage-format.md section 9).
+const TAG_LIST_HEAD_BYTES: u64 = 1 + MAX_VARINT_BYTES;
+
+/// What one tag adds to a tag list besides its name, message and Git tag objects, at most: its
+/// save, and the lengths of its name and message and the count of its tag objects.
+const TAG_ENTRY_BYTES: u64 = 32 + 3 * MAX_VARINT_BYTES;
 
 const BUG_HINT: &str = "Nothing was changed. This is a bug in Bolt, not a problem with the \
                         repository.";
@@ -277,6 +287,12 @@ pub struct Converter<'r> {
     /// The first names met that aren't UTF-8, by commit (hex) and path, and how many in all.
     not_utf8: Vec<(String, String)>,
     not_utf8_count: u64,
+    /// What each tag ref's target became, so a chain many refs share is read once.
+    tags: HashMap<GitId, TagOutcome>,
+    /// What the tag list will hold so far, at most, and the most it may: its record's limit,
+    /// which tests lower.
+    tag_bytes: u64,
+    tag_budget: u64,
 }
 
 impl<'r> Converter<'r> {
@@ -293,6 +309,9 @@ impl<'r> Converter<'r> {
             counts: Counts::default(),
             not_utf8: Vec::new(),
             not_utf8_count: 0,
+            tags: HashMap::new(),
+            tag_bytes: TAG_LIST_HEAD_BYTES,
+            tag_budget: MAX_RECORD_SIZE,
         }
     }
 
@@ -386,10 +405,54 @@ impl<'r> Converter<'r> {
         Ok(save_id)
     }
 
-    /// What the Git tag at `target` becomes (decision 034): a commit is a lightweight tag;
-    /// annotated tags are followed to their commit, keeping each tag object, outermost first,
-    /// and the outermost's message. The commit must be converted already.
-    pub fn tag(&mut self, target: &GitId) -> Result<TagOutcome, ImportError> {
+    /// What the Git tag `name` (as Bolt's tag list will name it) at `target` becomes (decision
+    /// 034): a commit is a lightweight tag; annotated tags are followed to their commit, keeping
+    /// each tag object, outermost first, and the outermost's message. The commit must be
+    /// converted already. A target is read once however many tags share it, but each tag counts
+    /// toward what one tag list can hold.
+    pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
+        let fixed = TAG_ENTRY_BYTES.saturating_add(name.len() as u64);
+        let full = || ImportError::Stop {
+            what: format!(
+                "Bolt's tag list can't hold the Git tags: with tag `{name}`, their names, \
+                 messages and tag objects come to more than the 512 MiB it holds."
+            ),
+            hint: Some(
+                "Nothing was changed. Delete tags you don't need with `git tag -d <name>`, then \
+                 run bolt import again."
+                    .to_owned(),
+            ),
+        };
+        // Checked before anything is read, so a spent budget reads no more tags.
+        if self.tag_bytes.saturating_add(fixed) > self.tag_budget {
+            return Err(full());
+        }
+        let outcome = match self.tags.get(target) {
+            Some(outcome) => outcome.clone(),
+            None => {
+                let outcome = self.read_tag(name, target)?;
+                self.tags.insert(*target, outcome.clone());
+                outcome
+            }
+        };
+        if let TagOutcome::Tag(tag) = &outcome {
+            let objects = tag.git_tags.iter().map(|object| object.len() as u64);
+            let total = objects.fold(
+                self.tag_bytes
+                    .saturating_add(fixed)
+                    .saturating_add(tag.message.len() as u64),
+                |total, len| total.saturating_add(len).saturating_add(MAX_VARINT_BYTES),
+            );
+            if total > self.tag_budget {
+                return Err(full());
+            }
+            self.tag_bytes = total;
+        }
+        Ok(outcome)
+    }
+
+    /// Follows the tag `name` from `target` to what it tags, reading each tag object.
+    fn read_tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
         let mut id = *target;
         let mut git_tags: Vec<Vec<u8>> = Vec::new();
         let mut message = String::new();
@@ -402,7 +465,8 @@ impl<'r> Converter<'r> {
                 }));
             }
             let hex = id.to_hex();
-            let here = || format!("tag `{hex}`");
+            // The ref's own target may be a commit, or missing, as well as a tag object.
+            let here = || format!("tag `{name}`, at object `{hex}`");
             // Not checked against the ID, but a tag object is, when it is read.
             let (kind, size) = self.git.header(&id).map_err(|e| at(e, here))?;
             let skipped = |what: &str| TagOutcome::Skipped {
@@ -414,20 +478,20 @@ impl<'r> Converter<'r> {
                 ObjectType::Blob => return Ok(skipped("a file (a Git blob)")),
                 ObjectType::Commit => {
                     return Err(bug(format!(
-                        "Bolt was asked for a tag of commit `{hex}` before importing it"
+                        "Bolt was asked for tag `{name}` before importing its commit `{hex}`"
                     )));
                 }
             }
             if git_tags.len() as u64 >= MAX_GIT_TAG_OBJECTS {
                 return Err(unimportable(format!(
-                    "tag `{}` reaches its commit through more than {MAX_GIT_TAG_OBJECTS} tag \
-                     objects, more than Bolt keeps",
-                    target.to_hex()
+                    "tag `{name}` reaches its commit through more than {MAX_GIT_TAG_OBJECTS} \
+                     tag objects, more than Bolt keeps"
                 )));
             }
             let too_big = |size: u64| {
                 unimportable(format!(
-                    "tag `{hex}` is {size} bytes, more than the 1 MiB Bolt keeps of a tag"
+                    "tag `{name}` has a tag object of {size} bytes (`{hex}`), more than the 1 \
+                     MiB Bolt keeps of one"
                 ))
             };
             if size > MAX_GIT_TAG_OBJECT_BYTES as u64 {
@@ -1711,14 +1775,19 @@ mod tests {
         let ((save, done, refused), _) = convert(dir.path(), "a", |c| {
             let save = c.commit(&commit, &[]).unwrap();
             let done = [
-                commit, signed_id, outer_id, of_tree, file, chain[16], long_id, latin1,
+                ("light", commit),
+                ("v1", signed_id),
+                ("v1-again", outer_id),
+                ("snapshot", of_tree),
+                ("a-file", file),
+                ("t15", chain[16]),
+                ("long", long_id),
+                ("l", latin1),
             ]
-            .map(|target| c.tag(&target).unwrap());
-            (
-                save,
-                done,
-                [chain[17], big, later].map(|target| c.tag(&target)),
-            )
+            .map(|(name, target)| c.tag(name, &target).unwrap());
+            let refused = [("t16", chain[17]), ("big", big), ("later", later)]
+                .map(|(name, target)| c.tag(name, &target));
+            (save, done, refused)
         });
         let made = |message: &str, git_tags: Vec<Vec<u8>>| {
             TagOutcome::Tag(diary::Tag {
@@ -1755,8 +1824,8 @@ mod tests {
         };
         assert_eq!(converted.message, "caf\u{fffd}\n");
         let [seventeen, big_r, later_r] = refused;
-        assert_refused(seventeen, &[&chain[17].to_hex(), "16 tag objects"]);
-        assert_refused(big_r, &[&big.to_hex(), "1 MiB"]);
+        assert_refused(seventeen, &["tag `t16`", "16 tag objects"]);
+        assert_refused(big_r, &["tag `big`", &big.to_hex(), "1 MiB"]);
         match later_r {
             Err(ImportError::Stop { what, hint }) => {
                 assert!(
@@ -1766,6 +1835,51 @@ mod tests {
                 assert!(hint.unwrap().starts_with("Nothing was changed."));
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tag_chain_is_read_once_and_the_tags_bytes_budgeted() {
+        let (dir, git) = repo(Sha1);
+        let tree = git.tree(&[]);
+        let commit = git.commit(&commit_bytes(&tree, &[], "", b"m\n"));
+        let head = format!("object {}\ntype commit\ntag v1\n", commit.to_hex());
+        let raw = format!("{head}tagger T <t@x> 1 +0000\n\nRelease\n").into_bytes();
+        let signed = git.object(ObjectType::Tag, &raw);
+        let hex = signed.to_hex();
+        let loose = dir
+            .path()
+            .join(".git/objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        let missing = GitId::from_hex(Sha1, &"ee".repeat(20)).unwrap();
+        let ((first, again, refused, unread), _) = convert(dir.path(), "a", |c| {
+            c.commit(&commit, &[]).unwrap();
+            let before = c.tag_bytes;
+            let first = c.tag("v1", &signed).unwrap();
+            // Room for one more tag of the same chain, not two.
+            let each = c.tag_bytes - before;
+            c.tag_budget = c.tag_bytes + each + each / 2;
+            // Read once: the next ref to it is answered without its object.
+            fs::remove_file(&loose).unwrap();
+            let again = c.tag("v1-again", &signed).unwrap();
+            let refused = c.tag("v1-third", &signed);
+            // Once the budget is spent, nothing more is read, not even an object that's missing.
+            c.tag_budget = c.tag_bytes;
+            (first, again, refused, c.tag("v2", &missing))
+        });
+        assert_eq!(first, again);
+        for (result, name) in [(refused, "v1-third"), (unread, "v2")] {
+            match result {
+                Err(ImportError::Stop { what, hint }) => {
+                    assert!(what.contains(&format!("tag `{name}`")), "{what}");
+                    assert!(what.contains("tag list"), "{what}");
+                    let hint = hint.unwrap();
+                    assert!(hint.starts_with("Nothing was changed."), "{hint}");
+                    assert!(hint.contains("git tag -d"), "{hint}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
         }
     }
 
