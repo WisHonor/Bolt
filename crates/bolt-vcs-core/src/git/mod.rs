@@ -1,17 +1,23 @@
 //! Bolt's own read-only Git reader (decision 031). `Repo::open` checks a repository's format and
-//! refuses what Bolt can't import; `Repo::refs` reads its refs, and `Repo::read` its objects.
-//! Everything under `.git` is read through `safe_fs`, bounded, and treated as possibly hostile.
+//! refuses what Bolt can't import; `Repo::refs` reads its refs, `Repo::read` its objects, and
+//! `parse_commit`, `parse_tree` and `parse_tag` what those hold. Everything under `.git` is read
+//! through `safe_fs`, bounded, and treated as possibly hostile.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 mod config;
 #[cfg(any(test, feature = "test-support"))]
 pub mod craft;
 mod id;
+mod object;
 mod odb;
 mod pack;
 mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
+pub use object::{
+    Commit, TagObject, TreeEntry, is_lfs_pointer, parse_commit, parse_person, parse_tag,
+    parse_tree, rebuild_commit,
+};
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 pub use refs::{Head, Refs};
 
@@ -147,6 +153,13 @@ pub enum GitError {
     /// Damaged or hostile data; `what` names the file or object.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     Broken { what: String },
+    /// An object Git reads, but past a limit or a rule of Bolt's that Git doesn't have, so
+    /// `git fsck` finds nothing wrong; `what` names the object and says why.
+    #[error(
+        "Git reads this object, but Bolt can't import it as it is: {}.",
+        escape(what, false)
+    )]
+    Unimportable { what: String },
     /// More refs, or longer names, than Bolt reads; `what` names the limit.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     TooManyRefs { what: String },
@@ -175,6 +188,10 @@ impl GitError {
                 GitError::Broken { .. } => {
                     "Nothing was changed. Check the repository with `git fsck`, or import a \
                      fresh clone of it."
+                }
+                GitError::Unimportable { .. } => {
+                    "Nothing was changed. Rewrite the Git history that holds it, then run bolt \
+                     import again."
                 }
                 GitError::TooManyRefs { .. } => {
                     "Nothing was changed. Delete refs you don't need, such as stale server \
@@ -222,9 +239,33 @@ fn broken(what: impl Into<String>) -> GitError {
     GitError::Broken { what: what.into() }
 }
 
+fn unimportable(what: impl Into<String>) -> GitError {
+    GitError::Unimportable { what: what.into() }
+}
+
 /// Git's `isspace`: space, tab, LF and CR, but not vertical tab or form feed.
 fn is_git_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// `text` without Git's whitespace at its end, as `strbuf_rtrim` takes it off.
+fn trim_end(mut text: &[u8]) -> &[u8] {
+    while let Some((&last, rest)) = text.split_last()
+        && is_git_space(last)
+    {
+        text = rest;
+    }
+    text
+}
+
+/// `text` without Git's whitespace at its start.
+fn trim_start(mut text: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = text.split_first()
+        && is_git_space(first)
+    {
+        text = rest;
+    }
+    text
 }
 
 /// A `safe_fs` refusal (a link, special file or oversized file where Git keeps a plain one) is
@@ -839,6 +880,9 @@ mod tests {
         assert_hostile_text_escaped(&refused.to_string());
         for err in [
             GitError::Broken {
+                what: HOSTILE.into(),
+            },
+            GitError::Unimportable {
                 what: HOSTILE.into(),
             },
             GitError::TooManyRefs {

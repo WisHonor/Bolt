@@ -8,8 +8,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::id::hex_id;
 use super::{
     GitError, GitId, HashKind, broken, is_git_space, naming, read_error, read_optional, real_dir,
+    trim_end, trim_start,
 };
 use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS};
 use crate::names;
@@ -173,10 +175,6 @@ fn shown(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-fn hex_id(hash: HashKind, hex: &[u8]) -> Option<GitId> {
-    GitId::from_hex(hash, std::str::from_utf8(hex).ok()?)
-}
-
 fn read_head(git: &Path, hash: HashKind) -> Result<Head, GitError> {
     let path = git.join("HEAD");
     let text = read_optional(&path, MAX_REF_FILE_BYTES)?
@@ -221,26 +219,6 @@ fn parse_ref_file(text: &[u8], hash: HashKind) -> Option<Contents<'_>> {
         return None;
     }
     hex_id(hash, hex).map(Contents::Id)
-}
-
-/// `text` without the whitespace Git's `strbuf_rtrim` takes off its end.
-fn trim_end(mut text: &[u8]) -> &[u8] {
-    while let Some((&last, rest)) = text.split_last()
-        && is_git_space(last)
-    {
-        text = rest;
-    }
-    text
-}
-
-/// `text` without the whitespace Git skips after `ref:`.
-fn trim_start(mut text: &[u8]) -> &[u8] {
-    while let Some((&first, rest)) = text.split_first()
-        && is_git_space(first)
-    {
-        text = rest;
-    }
-    text
 }
 
 /// The loose refs under `.git/refs`, walked with a stack of folders, not recursion: each ref's ID,

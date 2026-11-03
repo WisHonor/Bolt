@@ -15,6 +15,12 @@ pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 pub const MAX_EXTRA_KEY_BYTES: usize = 256;
 pub const EXTRA_LINE: &str = "line";
+/// The Git commit an imported save came from, in hex.
+pub const EXTRA_GIT_COMMIT: &str = "git-commit";
+/// A commit's original header, kept when the standard form can't rebuild it (decision 032).
+pub const EXTRA_GIT_HEADER: &str = "git-header";
+/// A Git message's original bytes, kept when they aren't the save's message exactly.
+pub const EXTRA_GIT_ORIGINAL_MESSAGE: &str = "git-original-message";
 
 /// Who did something, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -85,6 +85,11 @@ impl GitId {
     }
 }
 
+/// The ID that hex `digits` in a Git file spell, as `GitId::from_hex` reads them.
+pub(super) fn hex_id(hash: HashKind, digits: &[u8]) -> Option<GitId> {
+    GitId::from_hex(hash, std::str::from_utf8(digits).ok()?)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ObjectType {
     Commit,
