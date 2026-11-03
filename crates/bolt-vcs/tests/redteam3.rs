@@ -5,6 +5,7 @@
 mod support;
 
 use std::fs;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -434,10 +435,9 @@ fn rt3_3_a_valid_200_mib_file_of_zeros_imports() {
 // never kept: every read of every commit on it rebuilds it, through every delta below it. Here
 // 16 commits sit on a 300 MiB object rebuilt through 8 deltas (a ~6 KB .git).
 
-#[test]
-fn rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time() {
-    let env = Env::new();
-    let git = Craft::new(env.root(), HashKind::Sha1);
+/// RT3-4's repository at `root`; returns how many commits it has.
+fn commits_on_one_huge_delta_base(root: &Path) -> usize {
+    let git = Craft::new(root, HashKind::Sha1);
     let (n, depth, size) = (16usize, 8u64, 300u64 << 20);
     let mut pack = PackOut::new((1 + depth + 1) as u32 + n as u32);
     // Made-up IDs for the big objects: only the commits are looked up by ID.
@@ -471,14 +471,55 @@ fn rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time() {
         pack.ofs_delta(at, &delta, id.as_bytes());
         tip = Some(id);
     }
-    pack.finish(env.root());
+    pack.finish(root);
     git.loose_ref("refs/heads/main", &format!("{}\n", tip.unwrap().to_hex()));
+    n
+}
+
+#[test]
+fn rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time() {
+    let env = Env::new();
+    let n = commits_on_one_huge_delta_base(env.root());
     let git_bytes = dir_size(&env.root().join(".git"));
     let end = run_limited(env.bolt(&["import"]), 20);
     assert!(
         !end.timed_out,
         "`bolt import` of {n} commits in a {git_bytes}-byte Git repository was still running \
          after 20 s: {end:?}"
+    );
+}
+
+// RT3-4b (review of RT3-4's fix): the work allowed for rebuilding grew with the packs' length,
+// which a hole supplies for free. A pack of no objects, its header, a hole and its checksum,
+// passes every check of a pack, so 64 MiB of hole raised the allowance from 4 GiB to 31 GiB: how
+// long that takes depends on the machine, so the stop's words show the allowance too.
+
+#[test]
+fn rt3_4b_an_empty_pack_full_of_hole_does_not_raise_the_work_allowed() {
+    let env = Env::new();
+    commits_on_one_huge_delta_base(env.root());
+    let checksum = [0xcd; 20];
+    let mut idx = b"\xfftOc".to_vec();
+    idx.extend_from_slice(&2u32.to_be_bytes());
+    idx.extend_from_slice(&[0; 1024]);
+    idx.extend_from_slice(&checksum);
+    let sum = digest(HashKind::Sha1, &idx);
+    idx.extend_from_slice(&sum);
+    let name = env
+        .root()
+        .join(".git/objects/pack")
+        .join(format!("pack-{}", "cd".repeat(20)));
+    fs::write(name.with_extension("idx"), &idx).unwrap();
+    let mut pack = fs::File::create(name.with_extension("pack")).unwrap();
+    pack.write_all(b"PACK\0\0\0\x02\0\0\0\0").unwrap();
+    pack.seek(SeekFrom::Start(12 + (64 << 20))).unwrap();
+    pack.write_all(&checksum).unwrap();
+    drop(pack);
+    let end = run_limited(env.bolt(&["import"]), 20);
+    assert!(
+        !end.timed_out && end.code == Some(1) && end.stderr.contains("more than 4 GiB of work"),
+        "with an empty pack of 64 MiB beside it, the import wasn't stopped at the 4 GiB of \
+         rebuilding a 6 KB pack allows: {end:?}"
     );
 }
 

@@ -74,6 +74,10 @@ pub(super) fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
         GitError::EndedEarly { what } => GitError::EndedEarly {
             what: format!("{what}, in {}", place()),
         },
+        // Where the allowance ran out, which isn't where the fault is.
+        GitError::TooMuchWork { what } => GitError::TooMuchWork {
+            what: format!("by {}, {what}", place()),
+        },
         other => other,
     }
     .into()

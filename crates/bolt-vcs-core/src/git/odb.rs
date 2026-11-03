@@ -28,9 +28,9 @@ pub const MAX_DELTA_DEPTH: u32 = 4096;
 pub const DELTA_BASE_CACHE: u64 = 256 << 20;
 /// Bytes an import may inflate and build to rebuild objects through deltas: at least this...
 const MIN_DELTA_WORK: u64 = 4 << 30;
-/// ...or this many for each byte of the repository's packs. git/git needs about 34, so this
-/// leaves it a margin of 14.
-const DELTA_WORK_PER_PACK_BYTE: u64 = 500;
+/// ...or this many for each compressed byte of the pack entries it has inflated, each counted
+/// once: data a hole in a file can't supply. git/git needs at most 46, a margin of 11.
+const DELTA_WORK_PER_INFLATED_BYTE: u64 = 500;
 /// The most a loose object may say it holds: 1 TiB.
 const MAX_LOOSE_SIZE: u64 = 1 << 40;
 /// A loose object's header fits in this many bytes with its NUL, as Git requires.
@@ -58,6 +58,8 @@ pub(super) struct Objects {
     cache: RefCell<BaseCache>,
     /// Bytes inflated and built so far to rebuild objects through deltas.
     work: Cell<u64>,
+    /// Compressed bytes of the pack entries inflated so far, each entry counted once.
+    inflated: Cell<u64>,
 }
 
 impl fmt::Debug for Objects {
@@ -105,10 +107,10 @@ impl Repo {
     /// A blob's bytes. A blob Git stored whole is inflated as it is read and checked against its
     /// ID as it ends; a deltified one is rebuilt in memory and checked first.
     pub fn blob_reader(&self, id: &GitId) -> Result<BlobReader<'_>, GitError> {
-        let (inflater, size) = match self.find(id)? {
+        let (inflater, size, entry) = match self.find(id)? {
             Place::Loose(loose) => {
                 is_blob(id, loose.kind)?;
-                (loose.stream, loose.size)
+                (loose.stream, loose.size, None)
             }
             Place::Packed(n, pack, at) => {
                 let file = self.open_pack(n, pack)?;
@@ -124,7 +126,7 @@ impl Repo {
                 is_blob(id, kind)?;
                 // The stream reads through this handle of its own until it is dropped.
                 let input = Input::new(file, pack.path.as_path(), entry.data, pack.entries_end());
-                (Inflater::new(input, Some(at)), entry.size)
+                (Inflater::new(input, Some(at)), entry.size, Some((pack, at)))
             }
         };
         Ok(BlobReader(Reading::Stream(Box::new(Stream {
@@ -133,6 +135,8 @@ impl Repo {
             id: *id,
             size,
             left: size,
+            entry,
+            inflated: &self.objects.inflated,
         }))))
     }
 
@@ -211,7 +215,7 @@ impl Repo {
                 }
                 Base {
                     kind,
-                    data: inflate_entry(pack, file, chain.bottom_at, &entry)?,
+                    data: self.inflate_entry(pack, file, chain.bottom_at, &entry)?,
                     depth: 0,
                 }
             }
@@ -219,7 +223,7 @@ impl Repo {
         let mut base_at = chain.bottom_at;
         for (delta_at, entry) in chain.deltas.into_iter().rev() {
             self.spend(entry.size)?;
-            let delta = inflate_entry(pack, file, delta_at, &entry)?;
+            let delta = self.inflate_entry(pack, file, delta_at, &entry)?;
             self.spend(delta_sizes(&delta).map_or(0, |(_, size)| size))?;
             let built = apply_delta(&base.data, &delta).map_err(|why| {
                 broken(format!(
@@ -244,22 +248,39 @@ impl Repo {
         })
     }
 
-    /// Counts `bytes` more inflated or built through deltas, stopping past the import's budget:
-    /// a delta of a few bytes can build hundreds of megabytes, again for each object read on it.
+    /// An entry's data inflated whole: exactly the size its header gives, at most
+    /// `MAX_IN_MEMORY_OBJECT`. What it took counts toward the work allowance, once.
+    fn inflate_entry(
+        &self,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+        entry: &Entry,
+    ) -> Result<Vec<u8>, GitError> {
+        let input = Input::new(file, pack.path.as_path(), entry.data, pack.entries_end());
+        let mut stream = Inflater::new(input, Some(at));
+        let data = stream.read_all(entry.size)?;
+        count_inflated(&self.objects.inflated, pack, at, stream.taken);
+        Ok(data)
+    }
+
+    /// Counts `bytes` more inflated or built through deltas, stopping past the import's
+    /// allowance: a delta of a few bytes can build hundreds of megabytes, again for each object
+    /// read on it.
     fn spend(&self, bytes: u64) -> Result<(), GitError> {
         // No step does more: it refuses a bigger claim itself, in its own words.
         let bytes = bytes.min(MAX_IN_MEMORY_OBJECT);
         let work = self.objects.work.get().saturating_add(bytes);
         self.objects.work.set(work);
-        let budget = delta_work_budget(self.packs()?.bytes);
-        if work <= budget {
+        let allowance = delta_work_allowance(self.objects.inflated.get());
+        if work <= allowance {
             return Ok(());
         }
         Err(GitError::TooMuchWork {
             what: format!(
                 "rebuilding its objects from Git's deltas would take more than {} GiB of work, so \
                  it looks built to make importing slow",
-                budget >> 30
+                allowance >> 30
             ),
         })
     }
@@ -286,9 +307,18 @@ fn packed_header(pack: &Pack, file: &File, at: u64) -> Result<(ObjectType, u64),
     Ok((kind, size))
 }
 
-/// The most an import may inflate and build through deltas, for packs of `bytes` in all.
-fn delta_work_budget(bytes: u64) -> u64 {
-    MIN_DELTA_WORK.max(DELTA_WORK_PER_PACK_BYTE.saturating_mul(bytes))
+/// The most an import may inflate and build through deltas once it has inflated `inflated`
+/// compressed bytes of pack entries.
+fn delta_work_allowance(inflated: u64) -> u64 {
+    MIN_DELTA_WORK.max(DELTA_WORK_PER_INFLATED_BYTE.saturating_mul(inflated))
+}
+
+/// Adds the `taken` compressed bytes the entry at `at` in `pack` inflated from to `total`, the
+/// first time only, so data read again can't raise the allowance.
+fn count_inflated(total: &Cell<u64>, pack: &Pack, at: u64, taken: u64) {
+    if pack.first_inflation(at) {
+        total.set(total.get().saturating_add(taken));
+    }
 }
 
 /// Checks that what `hasher` took is the object `id` names.
@@ -425,13 +455,6 @@ fn built_size(pack: &Pack, file: &File, at: u64, entry: &Entry) -> Result<u64, G
                 pack.path.display()
             ))
         })
-}
-
-/// An entry's data inflated whole: exactly the size its header gives, at most
-/// `MAX_IN_MEMORY_OBJECT`.
-fn inflate_entry(pack: &Pack, file: &File, at: u64, entry: &Entry) -> Result<Vec<u8>, GitError> {
-    let input = Input::new(file, pack.path.as_path(), entry.data, pack.entries_end());
-    Inflater::new(input, Some(at)).read_all(entry.size)
 }
 
 /// A loose object with its header read: the rest of its stream is its data.
@@ -572,6 +595,8 @@ struct Inflater<'p, F> {
     start: usize,
     end: usize,
     ended: bool,
+    /// Compressed bytes inflated so far.
+    taken: u64,
 }
 
 impl<'p, F: Borrow<File>> Inflater<'p, F> {
@@ -584,6 +609,7 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
             start: 0,
             end: 0,
             ended: false,
+            taken: 0,
         }
     }
 
@@ -605,6 +631,7 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
             let input = self.buf.get(self.start..self.end).unwrap_or_default();
             let result = inflate(&mut self.state, input, out, MZFlush::None);
             self.start = self.start.saturating_add(result.bytes_consumed);
+            self.taken = self.taken.saturating_add(result.bytes_consumed as u64);
             match result.status {
                 Ok(MZStatus::StreamEnd) => {
                     self.ended = true;
@@ -734,6 +761,9 @@ struct Stream<'r> {
     id: GitId,
     size: u64,
     left: u64,
+    /// Its pack and offset, if it is packed, and the repository's count of what was inflated.
+    entry: Option<(&'r Pack, u64)>,
+    inflated: &'r Cell<u64>,
 }
 
 impl Stream<'_> {
@@ -753,6 +783,9 @@ impl Stream<'_> {
         if self.left == 0 {
             self.inflater.end(self.size)?;
             verify(&self.id, self.hasher.clone())?;
+            if let Some((pack, at)) = self.entry {
+                count_inflated(self.inflated, pack, at, self.inflater.taken);
+            }
         }
         Ok(got)
     }
@@ -990,6 +1023,44 @@ mod tests {
     }
 
     #[test]
+    fn the_work_allowance_grows_only_with_data_inflated_once() {
+        let (dir, git) = craft(Sha1);
+        let objects = pack_with_deltas(&git);
+        let [(_, base), (_, second), (_, third), (_, tree)] = &objects[..] else {
+            unreachable!()
+        };
+        git.pack(&[PackEntry::Whole(Blob, b"streamed".to_vec())]);
+        // An empty pack padded with a megabyte of zeros, as a hole would leave it.
+        let (empty, _) = git.pack(&[]);
+        let bytes = fs::read(&empty).unwrap();
+        let (head, trailer) = bytes.split_at(12);
+        fs::write(&empty, [head, &vec![0; 1 << 20], trailer].concat()).unwrap();
+        let repo = open(&dir);
+        repo.read(&id(Blob, third, Sha1)).unwrap();
+        let chain = deflate(base).len()
+            + deflate(&delta(base, second)).len()
+            + deflate(&delta(second, third)).len();
+        assert_eq!(repo.objects.inflated.get(), chain as u64);
+        // Each entry counts once, however often it is inflated again.
+        repo.read(&id(Blob, base, Sha1)).unwrap();
+        *repo.objects.cache.borrow_mut() = BaseCache::default();
+        repo.read(&id(Blob, third, Sha1)).unwrap();
+        assert_eq!(repo.objects.inflated.get(), chain as u64);
+        // An entry read whole or streamed counts once it has been inflated.
+        repo.read(&id(Tree, tree, Sha1)).unwrap();
+        let reader = repo.blob_reader(&id(Blob, b"streamed", Sha1)).unwrap();
+        read_all(reader, 3).unwrap();
+        let more = deflate(tree).len() + deflate(b"streamed").len();
+        assert_eq!(repo.objects.inflated.get(), (chain + more) as u64);
+        // So a small repository has the least allowance, and only data read raises it.
+        assert_eq!(
+            delta_work_allowance(repo.objects.inflated.get()),
+            MIN_DELTA_WORK
+        );
+        assert!(delta_work_allowance(10 << 30) > MIN_DELTA_WORK);
+    }
+
+    #[test]
     fn rebuilding_stops_before_a_step_past_the_budget() {
         let (dir, git) = craft(Sha1);
         let objects = pack_with_deltas(&git);
@@ -997,10 +1068,7 @@ mod tests {
             unreachable!()
         };
         let repo = open(&dir);
-        let budget = delta_work_budget(repo.packs().unwrap().bytes);
-        // A small repository gets the least budget; a big one more for each byte of its packs.
-        assert_eq!(budget, MIN_DELTA_WORK);
-        assert!(delta_work_budget(10 << 30) > MIN_DELTA_WORK);
+        let budget = MIN_DELTA_WORK;
         // Room for the base and the delta, but not for what the delta builds.
         let room = base.len() + delta(base, second).len();
         repo.objects.work.set(budget - room as u64);

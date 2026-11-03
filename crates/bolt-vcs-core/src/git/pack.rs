@@ -4,6 +4,7 @@
 //! object in it is.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read};
@@ -16,8 +17,8 @@ use crate::safe_fs;
 
 /// Entries `objects/pack` may hold, of any kind: room for tens of thousands of packs.
 const MAX_PACK_FOLDER_ENTRIES: u64 = 100_000;
-/// Objects Bolt reads from all of a repository's packs, whose indexes it keeps in memory (28 to
-/// 40 bytes an object): git/git has about 0.4 million, and Linux about 10 million.
+/// Objects Bolt reads from all of a repository's packs, whose indexes it keeps in memory (32 to
+/// 44 bytes an object): git/git has about 0.4 million, and Linux about 10 million.
 pub(super) const MAX_GIT_OBJECTS: u64 = 1 << 24;
 /// Index entries read at a time.
 const ENTRIES_AT_A_TIME: usize = 2048;
@@ -34,8 +35,6 @@ pub(super) struct PackFolder {
     pub(super) listed: Vec<String>,
     /// The packs read, each checked against its index; one Git removed after the listing isn't.
     pub(super) packs: Vec<Pack>,
-    /// How many bytes those packs hold in all.
-    pub(super) bytes: u64,
 }
 
 /// A pack, checked against its index when the packs were listed.
@@ -48,6 +47,10 @@ pub(super) struct Pack {
     names: Vec<u8>,
     /// Each object's offset, in the order of `names`.
     offsets: Vec<u64>,
+    /// Places in `offsets`, in the order the entries come in the pack.
+    in_order: Vec<u32>,
+    /// One bit an entry, in that order: whether it has been inflated yet.
+    inflated: Vec<Cell<u64>>,
 }
 
 /// What a pack entry holds.
@@ -78,19 +81,14 @@ pub(super) fn load(folder: &Path, hash: HashKind) -> Result<PackFolder, GitError
 fn load_at_most(folder: &Path, hash: HashKind, max_objects: u64) -> Result<PackFolder, GitError> {
     let listed = list(folder)?;
     let mut packs: Vec<Pack> = Vec::new();
-    let (mut objects, mut bytes) = (0u64, 0u64);
+    let mut objects = 0u64;
     for name in &listed {
         if let Some(pack) = Pack::load(folder, name, hash, objects, max_objects)? {
             objects = objects.saturating_add(pack.offsets.len() as u64);
-            bytes = bytes.saturating_add(pack.len);
             packs.push(pack);
         }
     }
-    Ok(PackFolder {
-        listed,
-        packs,
-        bytes,
-    })
+    Ok(PackFolder { listed, packs })
 }
 
 /// The names of the packs in `folder`, sorted: every `pack-*.idx` that has its `.pack`. A file
@@ -150,15 +148,39 @@ impl Pack {
         let Some((file, len)) = open_measured(&path)? else {
             return Ok(None);
         };
+        let (in_order, inflated) = pack_order(&index.offsets, &path)?;
         let pack = Pack {
             path,
             len,
             hash,
             names: index.names,
             offsets: index.offsets,
+            in_order,
+            inflated,
         };
         pack.check(&file, index.count, &index.pack_checksum)?;
         Ok(Some(pack))
+    }
+
+    /// Marks the entry at `at` as inflated, and says whether this is the first time. An offset
+    /// the index doesn't list is never a first time.
+    pub(super) fn first_inflation(&self, at: u64) -> bool {
+        let found = self.in_order.binary_search_by_key(&at, |&place| {
+            self.offsets
+                .get(place as usize)
+                .copied()
+                .unwrap_or(u64::MAX)
+        });
+        let Ok(number) = found else {
+            return false;
+        };
+        let Some(word) = self.inflated.get(number / 64) else {
+            return false;
+        };
+        let bit = 1u64.wrapping_shl((number % 64) as u32);
+        let first = word.get() & bit == 0;
+        word.set(word.get() | bit);
+        first
     }
 
     /// Checks the pack's header and checksum against its index, and that every offset the index
@@ -310,6 +332,23 @@ fn open_measured(path: &Path) -> Result<Option<(File, u64)>, GitError> {
     Ok(Some((file, len)))
 }
 
+/// Places in `offsets` in the order their entries come in the pack, and a cleared bit for each.
+fn pack_order(offsets: &[u64], path: &Path) -> Result<(Vec<u32>, Vec<Cell<u64>>), GitError> {
+    let mut order: Vec<u32> = Vec::new();
+    order
+        .try_reserve_exact(offsets.len())
+        .map_err(|_| out_of_memory(path))?;
+    // The index's count is within the limit, so every place fits.
+    order.extend(0..u32::try_from(offsets.len()).unwrap_or(u32::MAX));
+    order.sort_unstable_by_key(|&place| offsets.get(place as usize).copied().unwrap_or(u64::MAX));
+    let words = offsets.len().div_ceil(64);
+    let mut bits = Vec::new();
+    bits.try_reserve_exact(words)
+        .map_err(|_| out_of_memory(path))?;
+    bits.resize_with(words, Cell::default);
+    Ok((order, bits))
+}
+
 /// Where `id` is among `names`, IDs of `N` bytes in order.
 fn search<const N: usize>(names: &[u8], id: &[u8]) -> Option<usize> {
     names
@@ -401,6 +440,7 @@ fn read_index(
         )));
     }
     // Each name must come after the one before it, checked before it is kept.
+    let listed = usize::try_from(objects.saturating_mul(hash_len)).unwrap_or(usize::MAX);
     let mut names: Vec<u8> = Vec::new();
     index.entries(objects, hash.len(), |name| {
         let last = names
@@ -410,9 +450,15 @@ fn read_index(
         if last.is_some_and(|last| last >= name) {
             return Err(damaged("lists its objects out of order".into()));
         }
-        names
-            .try_reserve(name.len())
-            .map_err(|_| out_of_memory(path))?;
+        if names.len() == names.capacity() {
+            // Doubling as the names pass, but never past what the index lists: no room is left
+            // over, so the table stays at 20 or 32 bytes an object.
+            let more = names.len().max(name.len());
+            let more = more.min(listed.saturating_sub(names.len()));
+            names
+                .try_reserve_exact(more)
+                .map_err(|_| out_of_memory(path))?;
+        }
         names.extend_from_slice(name);
         Ok(())
     })?;
@@ -868,11 +914,20 @@ mod tests {
             .iter()
             .map(|b| PackEntry::Whole(Blob, b.clone()))
             .collect();
-        let (_, idx) = git.pack(&entries);
+        let (pack, idx) = git.pack(&entries);
         let repo = open(&dir);
         for data in &blobs {
             assert_eq!(&repo.read(&id(Blob, data)).unwrap().data, data);
         }
+        // The names table holds them with no room to spare.
+        let folder = pack.parent().unwrap();
+        let name = list(folder).unwrap().remove(0);
+        let loaded = Pack::load(folder, &name, HashKind::Sha1, 0, MAX_GIT_OBJECTS).unwrap();
+        let names = loaded.unwrap().names;
+        assert_eq!(
+            (names.len(), names.capacity()),
+            (blobs.len() * 20, blobs.len() * 20)
+        );
         // The last name of the first buffer swapped with the first of the second.
         let at = 8 + 1024 + (ENTRIES_AT_A_TIME - 1) * 20;
         patch_index(&idx, |bytes| {
