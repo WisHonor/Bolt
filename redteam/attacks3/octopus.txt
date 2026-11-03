@@ -1,0 +1,11 @@
+N=1000 merges of 1,024 parents: .git 304 KB on disk
+  /tmp/t/release/bolt import: exit 0, 2.1 s, peak 85 MB
+  .bolt afterwards: 32548 KB
+N=5000 merges of 1,024 parents: .git 700 KB on disk
+  /tmp/t/release/bolt import: exit 0, 10.0 s, peak 403 MB
+  .bolt afterwards: 161568 KB
+N=20000 merges of 1,024 parents: .git 2188 KB on disk
+  /tmp/t/release/bolt import: exit 0, 37.1 s, peak 1599 MB
+  .bolt afterwards: 645412 KB
+N=52000 merges of 1,024 parents: .git 5396 KB on disk
+  /tmp/t/release/bolt import: exit killed by signal 9, 32.4 s, peak 4083 MB

@@ -1,0 +1,11 @@
+$ bolt import
+Imported 1 commit from Git: 1 line, 0 tags.
+You're on line main.
+$ bolt save "first"
+Saved rnzr  "first"  (2 files)
+$ bolt show
+Save rnzr · T · just now
+    first
+
+  removed   b.txt  (6 B)
+  removed   c.txt  (6 B)

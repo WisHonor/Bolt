@@ -1,0 +1,8 @@
+N=8 commits on a 300 MiB base under 1 delta(s): .git 44 KB on disk
+  /tmp/t/release/bolt import: exit 0, 3.4 s, peak 306 MB
+N=200 commits on a 300 MiB base under 1 delta(s): .git 76 KB on disk
+  /tmp/t/release/bolt import: exit 0, 68.2 s, peak 305 MB
+N=8 commits on a 300 MiB base under 8 delta(s): .git 44 KB on disk
+  /tmp/t/release/bolt import: exit 0, 28.6 s, peak 606 MB
+N=8 commits on a 300 MiB base under 64 delta(s): .git 48 KB on disk
+  /tmp/t/release/bolt import: exit 0, 253.9 s, peak 605 MB

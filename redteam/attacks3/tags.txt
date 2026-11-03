@@ -1,0 +1,16 @@
+chain, 10000 tag refs: .git 768 KB
+  /tmp/t/release/bolt import: exit 0, 3.9 s, peak 77 MB
+  .bolt: 60 KB
+chain, 100000 tag refs: .git 6040 KB
+  /tmp/t/release/bolt import: exit 0, 36.4 s, peak 723 MB
+  .bolt: 244 KB
+fat, 100 tag refs: .git 68 KB
+  /tmp/t/release/bolt import: exit 0, 0.6 s, peak 417 MB
+  .bolt: 44 KB
+fat, 500 tag refs: .git 92 KB
+  /tmp/t/release/bolt import: exit 1, 0.0 s, peak 10 MB
+    stderr: error: Bolt's tag list can't hold the Git tags: with tag `t0000481`, their names, messages and tag objects come to more than the 512 MiB it holds.
+  hint: Nothing was changed. Delete tags you don't need with `git tag -d <name>`, then run bolt import again.
+fat, 480 tag refs: .git 92 KB
+  /tmp/t/release/bolt import: exit 0, 3.3 s, peak 1985 MB
+  .bolt: 64 KB
