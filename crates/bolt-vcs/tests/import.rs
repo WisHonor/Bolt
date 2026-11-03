@@ -320,6 +320,32 @@ fn another_tools_bolt_folder_is_refused() {
     assert_eq!(std::fs::read_dir(&bolt).unwrap().count(), 1);
 }
 
+/// Git checks such a folder out where Bolt keeps the project, and Bolt never takes files Git
+/// wrote for its own, even when their names are the ones Bolt uses.
+#[test]
+fn a_bolt_folder_git_tracks_stops_the_import() {
+    let env = Env::new();
+    env.commit(
+        ".bolt/config.toml",
+        "[user]\nname = \"Mallory\"\n",
+        "Track it",
+    );
+    let err = env.refused_import();
+    assert!(
+        err.contains(
+            "Git tracks `.bolt` at the top of this project, and Bolt can't use it as its own \
+             .bolt folder."
+        ),
+        "{err}"
+    );
+    assert!(err.contains("git rm -r --cached .bolt"), "{err}");
+    // Nothing was made in it.
+    let inside: Vec<_> = std::fs::read_dir(env.root().join(".bolt"))
+        .unwrap()
+        .collect();
+    assert_eq!(inside.len(), 1);
+}
+
 #[test]
 fn import_inside_another_project_is_refused() {
     let env = Env::new();

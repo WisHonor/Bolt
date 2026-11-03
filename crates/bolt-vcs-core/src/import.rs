@@ -179,6 +179,18 @@ pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, 
         },
         Head::Detached(id) => (None, *id),
     };
+    if let Some(name) = tracked_bolt(&git, &head_commit)? {
+        return Err(ImportError::Stop {
+            what: format!(
+                "Git tracks `{name}` at the top of this project, and Bolt can't use it as its own \
+                 .bolt folder."
+            ),
+            hint: Some(format!(
+                "Nothing was changed. Take it out of Git with `git rm -r --cached {name}` and \
+                 commit, or move it, then run bolt import again."
+            )),
+        });
+    }
     let order = in_order(&git, &roots)?;
     let grafts = git.has_grafts()?;
 
@@ -488,9 +500,24 @@ fn put_record(
     Ok(id)
 }
 
+/// The name of an entry spelled `.bolt` at the top of the tree of `HEAD`'s commit, of any kind,
+/// if Git tracks one: Git checks it out where Bolt keeps the project, and Bolt never takes files
+/// Git wrote for its own.
+fn tracked_bolt(git: &git::Repo, head: &GitId) -> Result<Option<String>, ImportError> {
+    let (tree, _) = tree_and_parents(git, head)?;
+    let place = || format!("the top folder (tree `{}`) of `HEAD`", tree.to_hex());
+    let object = git.read(&tree).map_err(|e| at(e, place))?;
+    expect_kind(object.kind, ObjectType::Tree, &tree, place)?;
+    let entries = parse_tree(&object.data, git.hash()).map_err(|e| at(e, place))?;
+    Ok(entries.into_iter().find_map(|e| {
+        let name = std::str::from_utf8(e.name).ok()?;
+        (validate_name(name) == Err(NameError::BoltSpelling)).then(|| name.to_owned())
+    }))
+}
+
 /// A warning for each folder named `.bolt` that Git checked out below the top, from the tree of
 /// `HEAD`'s commit: Bolt left them out of history, but commands run inside one would take it for
-/// a project (decision 019).
+/// a project (decision 019). `tracked_bolt` found none at the top.
 fn bolt_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, ImportError> {
     let (tree, _) = tree_and_parents(git, head)?;
     let mut warnings = Vec::new();
@@ -505,10 +532,6 @@ fn bolt_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, I
             continue;
         };
         if is_bolt {
-            // At the top it is the project's own folder, checked before anything was made.
-            if stack.len() == 1 {
-                continue;
-            }
             count = count.saturating_add(1);
             if warnings.len() < MAX_LISTED {
                 let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, _)| n.as_str()).collect();
@@ -650,6 +673,41 @@ mod tests {
         assert_eq!(import(dir.path()).unwrap().tags, 1);
     }
 
+    /// Any spelling of `.bolt` the converter would leave out, of any kind, as long as Git tracks
+    /// it at the top: here nothing is checked out, so only the tree shows it.
+    #[test]
+    fn a_bolt_entry_git_tracks_at_the_top_stops_the_import() {
+        for (name, mode) in [
+            (".bolt", "100644"),
+            (".Bolt.", "40000"),
+            ("BOLT~1", "120000"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Craft::new(dir.path(), HashKind::Sha1);
+            let blob = git.object(ObjectType::Blob, b"a\n");
+            let inner = git.tree(&[(b"100644", b"config.toml", blob)]);
+            let id = if mode == "40000" { inner } else { blob };
+            let tree = git.tree(&[(mode.as_bytes(), name.as_bytes(), id)]);
+            let raw = format!(
+                "tree {}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 \
+                 +0000\n\nOne\n",
+                tree.to_hex()
+            );
+            let commit = git.commit(raw.as_bytes());
+            git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
+            match import(dir.path()) {
+                Err(e @ ImportError::Stop { .. }) => {
+                    let what = format!("Git tracks `{name}` at the top of this project");
+                    assert!(e.to_string().starts_with(&what), "{e}");
+                    let rm = format!("`git rm -r --cached {name}`");
+                    assert!(e.hint().unwrap().contains(&rm), "{e:?}");
+                }
+                other => panic!("{name}: {:?}", other.map(|_| ())),
+            }
+            assert!(!dir.path().join(".bolt").exists(), "{name}");
+        }
+    }
+
     /// Bolt keeps up to 16 packs open between reads, and goes on reading one it has open as it
     /// was, so the pack removed here is one the import hasn't read from yet.
     #[test]
@@ -671,14 +729,16 @@ mod tests {
         let (tree1, tree2) = (tree(id(Blob, &one)), tree(id(Blob, &two)));
         let first = commit(&tree1, None, "One\n");
         let second = commit(&tree2, Some(first.as_bytes()), "Two\n");
-        // Every commit, and what the first one holds, in one pack; the rest in another.
+        // All but the second commit's file in one pack, which the import reads before it writes
+        // anything; that file alone in another.
         git.pack(&[
             PackEntry::Whole(Commit, first.clone().into_bytes()),
             PackEntry::Whole(Commit, second.clone().into_bytes()),
             PackEntry::Whole(Tree, tree1),
             PackEntry::Whole(Blob, one),
+            PackEntry::Whole(Tree, tree2),
         ]);
-        let (later, _) = git.pack(&[PackEntry::Whole(Tree, tree2), PackEntry::Whole(Blob, two)]);
+        let (later, _) = git.pack(&[PackEntry::Whole(Blob, two)]);
         let head = id(Commit, second.as_bytes()).to_hex();
         git.loose_ref("refs/heads/main", &format!("{head}\n"));
         let mut progress = |done: u64, _: u64| {
