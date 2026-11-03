@@ -15,8 +15,8 @@ use crate::diary::{
 };
 use crate::encoding::DecodeError;
 use crate::git::{
-    self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, parse_commit, parse_person,
-    parse_tag, parse_tree, rebuild_commit, shown,
+    self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, looks_like_lfs_pointer,
+    parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit, shown,
 };
 use crate::id::{ChangeId, ContentHasher, Id, hash_content, hash_record};
 use crate::link::ProjectLink;
@@ -736,7 +736,7 @@ impl<'r> Converter<'r> {
     }
 
     /// A blob's content ID and size, stored the first time it is met. `path` says where, for
-    /// messages. A Git LFS pointer stops the import (decision 037).
+    /// messages. A Git LFS pointer, or a file that looks like one, stops the import (decision 037).
     fn blob(
         &mut self,
         id: &GitId,
@@ -752,10 +752,12 @@ impl<'r> Converter<'r> {
         let done = if size <= MAX_WHOLE_BLOB {
             let object = self.git.read(id).map_err(|e| at(e, place))?;
             expect_kind(object.kind, ObjectType::Blob, id, place)?;
-            if is_lfs_pointer(&object.data) {
+            let pointer = is_lfs_pointer(&object.data);
+            if pointer || looks_like_lfs_pointer(&object.data) {
                 return Err(ImportError::LfsPointer {
                     commit: commit.to_owned(),
                     path: path(),
+                    lookalike: !pointer,
                 });
             }
             let size = object.data.len() as u64;
@@ -1841,28 +1843,47 @@ mod tests {
     }
 
     #[test]
-    fn an_lfs_pointer_stops_the_import_naming_it() {
-        let (dir, git) = repo(Sha1);
-        let pointer = b"version https://git-lfs.github.com/spec/v1\noid \
-                        sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
-                        size 12345\n";
-        let assets = git.tree(&[(b"100644", b"hero.psd", blob(&git, pointer))]);
-        let id = commit_of(&git, &[(b"40000", b"assets", assets)]);
-        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
-        let e = result.unwrap_err();
-        match &e {
-            ImportError::LfsPointer { commit, path } => {
-                assert_eq!(
-                    (commit.as_str(), path.as_str()),
-                    (id.to_hex().as_str(), "assets/hero.psd")
-                );
+    fn an_lfs_pointer_or_a_lookalike_stops_the_import_naming_it() {
+        let pointer = "version https://git-lfs.github.com/spec/v1\noid \
+                       sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+                       size 12345\n";
+        // Git LFS reads nothing after `size`.
+        let lookalike = format!("{pointer}and more\n");
+        for (bytes, is_lookalike, says) in [
+            (
+                pointer,
+                false,
+                "holds a Git LFS pointer at `assets/hero.psd`",
+            ),
+            (
+                lookalike.as_str(),
+                true,
+                "holds a file at `assets/hero.psd` that looks like a Git LFS pointer",
+            ),
+        ] {
+            let (dir, git) = repo(Sha1);
+            let assets = git.tree(&[(b"100644", b"hero.psd", blob(&git, bytes.as_bytes()))]);
+            let id = commit_of(&git, &[(b"40000", b"assets", assets)]);
+            let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
+            let e = result.unwrap_err();
+            match &e {
+                ImportError::LfsPointer {
+                    commit,
+                    path,
+                    lookalike,
+                } => {
+                    assert_eq!(
+                        (commit.as_str(), path.as_str(), *lookalike),
+                        (id.to_hex().as_str(), "assets/hero.psd", is_lookalike)
+                    );
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
+            assert!(e.to_string().contains(says), "{e}");
+            let hint = e.hint().unwrap();
+            assert!(hint.contains("git lfs migrate export"), "{hint}");
+            assert_eq!(hint.contains("If it isn't,"), is_lookalike, "{hint}");
         }
-        assert!(e.to_string().contains("assets/hero.psd"), "{e}");
-        assert!(e.to_string().contains("milestone 5"), "{e}");
-        let hint = e.hint().unwrap();
-        assert!(hint.contains("git lfs migrate export"), "{hint}");
     }
 
     #[test]
@@ -2204,6 +2225,12 @@ mod tests {
             ImportError::LfsPointer {
                 commit: HOSTILE.into(),
                 path: HOSTILE.into(),
+                lookalike: false,
+            },
+            ImportError::LfsPointer {
+                commit: HOSTILE.into(),
+                path: HOSTILE.into(),
+                lookalike: true,
             },
         ] {
             assert_hostile_text_escaped(&e.to_string());

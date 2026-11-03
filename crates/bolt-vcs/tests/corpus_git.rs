@@ -1104,34 +1104,39 @@ fn speed_up_files_are_ignored() {
 
 // Decision 037
 #[test]
-fn an_lfs_pointer_stops_the_import_and_a_lookalike_does_not() {
+fn lfs_pointers_and_files_that_look_like_one_stop_the_import() {
     let pointer = "version https://git-lfs.github.com/spec/v1\noid \
                    sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
                    size 12345\n";
-    let (env, git) = repo();
-    let art = git.tree(&[(b"100644", b"big.psd", git.object(Blob, pointer.as_bytes()))]);
-    let id = main_of(&git, &[(b"40000", b"art", art)]);
-    let err = stopped(&env);
-    let stop = format!(
-        "error: Commit `{}` holds a Git LFS pointer at `art/big.psd`, and this version of Bolt \
-         can't import Git LFS files yet: Git LFS repositories come in milestone 5.\n",
-        id.to_hex()
-    );
-    assert!(err.contains(&stop), "{err}");
+    for (file, stop) in [
+        // Git LFS reads an extension line before `version`, so this is a pointer.
+        (
+            format!("ext-0-foo sha256:{}\n{pointer}", "f".repeat(64)),
+            "holds a Git LFS pointer at `art/big.psd`, and this version of Bolt can't import Git \
+             LFS files yet: Git LFS repositories come in milestone 5.",
+        ),
+        // Git LFS rejects a line after `size`, but the file still looks like a pointer.
+        (
+            format!("{pointer}and then some\n"),
+            "holds a file at `art/big.psd` that looks like a Git LFS pointer, though Git LFS \
+             wouldn't read it as one; Bolt stops rather than guess whether it is a Git LFS file.",
+        ),
+    ] {
+        let (env, git) = repo();
+        let art = git.tree(&[(b"100644", b"big.psd", git.object(Blob, file.as_bytes()))]);
+        let id = main_of(&git, &[(b"40000", b"art", art)]);
+        let err = stopped(&env);
+        let stop = format!("error: Commit `{}` {stop}\n", id.to_hex());
+        assert!(err.contains(&stop), "{err}");
+    }
 
-    // Git LFS reads nothing after `size`, so this is an ordinary file.
+    // A file that only quotes a pointer is an ordinary file.
     let (env, git) = repo();
-    let lookalike = format!("{pointer}and then some\n");
-    main_of(
-        &git,
-        &[(
-            b"100644",
-            b"notes.txt",
-            git.object(Blob, lookalike.as_bytes()),
-        )],
-    );
+    let notes = format!("Our big files use Git LFS:\n{pointer}");
+    let notes_id = git.object(Blob, notes.as_bytes());
+    main_of(&git, &[(b"100644", b"notes.txt", notes_id)]);
     env.import();
-    assert_eq!(content(&env, "notes.txt"), lookalike.as_bytes());
+    assert_eq!(content(&env, "notes.txt"), notes.as_bytes());
 }
 
 /// A name that climbs into `.git`, an address that is an option, a command to run on update, and

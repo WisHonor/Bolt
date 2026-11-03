@@ -15,8 +15,8 @@ mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
 pub use object::{
-    Commit, TagObject, TreeEntry, is_lfs_pointer, parse_commit, parse_person, parse_tag,
-    parse_tree, rebuild_commit,
+    Commit, TagObject, TreeEntry, is_lfs_pointer, looks_like_lfs_pointer, parse_commit,
+    parse_person, parse_tag, parse_tree, rebuild_commit,
 };
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 // For the delta fuzz target.

@@ -104,14 +104,14 @@ pub enum ImportError {
         first: Vec<(String, String)>,
         count: u64,
     },
-    /// A Git LFS pointer (decision 037), in the commit `commit` (hex) at `path`.
-    #[error(
-        "Commit `{}` holds a Git LFS pointer at `{}`, and this version of Bolt can't import Git \
-         LFS files yet: Git LFS repositories come in milestone 5.",
-        escape(commit, false),
-        escape(path, false)
-    )]
-    LfsPointer { commit: String, path: String },
+    /// A Git LFS pointer (decision 037) in the commit `commit` (hex) at `path`, or, when
+    /// `lookalike`, a file that only looks like one, which stops the import too.
+    #[error("{}", lfs_message(commit, path, *lookalike))]
+    LfsPointer {
+        commit: String,
+        path: String,
+        lookalike: bool,
+    },
     /// The import stopped after it began the project: nothing is committed, and the `.bolt` it
     /// began stays, so running the import again can finish the job (decision 041).
     #[error(transparent)]
@@ -150,13 +150,42 @@ impl ImportError {
                  bolt import again."
                     .to_owned(),
             ),
-            ImportError::LfsPointer { .. } => Some(
-                "Nothing was changed. To import now, turn the Git LFS files back into ordinary \
-                 Git files in a copy of the repository with `git lfs migrate export --everything \
-                 --include=\"*\"`, which rewrites its history, then run bolt import in that copy."
-                    .to_owned(),
-            ),
+            ImportError::LfsPointer { lookalike, .. } => Some(lfs_hint(*lookalike)),
         }
+    }
+}
+
+/// What an import says of the Git LFS pointer at `path` in `commit`, or of a file there that
+/// only looks like one.
+fn lfs_message(commit: &str, path: &str, lookalike: bool) -> String {
+    let (commit, path) = (escape(commit, false), escape(path, false));
+    if lookalike {
+        format!(
+            "Commit `{commit}` holds a file at `{path}` that looks like a Git LFS pointer, though \
+             Git LFS wouldn't read it as one; Bolt stops rather than guess whether it is a Git LFS \
+             file."
+        )
+    } else {
+        format!(
+            "Commit `{commit}` holds a Git LFS pointer at `{path}`, and this version of Bolt \
+             can't import Git LFS files yet: Git LFS repositories come in milestone 5."
+        )
+    }
+}
+
+/// What to do about a Git LFS pointer, or about a file that only looks like one.
+fn lfs_hint(lookalike: bool) -> String {
+    let export = "turn the Git LFS files back into ordinary Git files in a copy of the \
+                  repository with `git lfs migrate export --everything --include=\"*\"`, which \
+                  rewrites its history, then run bolt import in that copy";
+    if lookalike {
+        format!(
+            "Nothing was changed. If it is a Git LFS file, {export}. If it isn't, rewrite the Git \
+             history that holds it so that it no longer looks like one, then run bolt import \
+             again."
+        )
+    } else {
+        format!("Nothing was changed. To import now, {export}.")
     }
 }
 

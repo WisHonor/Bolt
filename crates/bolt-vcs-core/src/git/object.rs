@@ -377,12 +377,14 @@ fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
 /// Most bytes a Git LFS pointer may have (decision 037).
 const MAX_LFS_POINTER_BYTES: usize = 1024;
 
-/// The `version` values Git LFS reads: its own, its pre-release's and its alpha's.
-const LFS_VERSIONS: [&str; 3] = [
+/// The `version` values of Git LFS's pointers: its own and its pre-release's.
+const LFS_SPECS: [&str; 2] = [
     "https://git-lfs.github.com/spec/v1",
     "https://hawser.github.com/spec/v1",
-    "http://git-media.io/v/2",
 ];
+
+/// The `version` of Git LFS's alpha, which it reads too.
+const LFS_ALPHA: &str = "http://git-media.io/v/2";
 
 /// Whether a blob is a Git LFS pointer, by the test Git LFS's own parser applies (`DecodeFrom`
 /// in its lfs/pointer.go): `version`, `oid` and `size` lines in that order, extension lines
@@ -417,11 +419,34 @@ pub fn is_lfs_pointer(data: &[u8]) -> bool {
         return false;
     };
     let priorities: BTreeSet<_> = extensions.keys().map(|key| key.as_bytes().get(4)).collect();
-    LFS_VERSIONS.contains(&version)
+    (LFS_SPECS.contains(&version) || version == LFS_ALPHA)
         && is_lfs_oid(oid)
         && size.parse::<i64>().is_ok_and(|size| size >= 0)
         && extensions.values().all(|oid| is_lfs_oid(oid))
         && priorities.len() == extensions.len()
+}
+
+/// Whether a blob looks like a Git LFS pointer, whether or not Git LFS would read it as one
+/// (decision 037): not empty and at most 1,024 bytes, a first line that starts with `version` and
+/// one of Git LFS's specs, a line that is `oid sha256:` and 64 hex digits, and a line that starts
+/// with `size `, in any order, among any other lines.
+#[must_use]
+pub fn looks_like_lfs_pointer(data: &[u8]) -> bool {
+    if data.is_empty() || data.len() > MAX_LFS_POINTER_BYTES {
+        return false;
+    }
+    let text = String::from_utf8_lossy(data);
+    let version = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("version "));
+    let oid = |line: &str| {
+        line.strip_prefix("oid sha256:")
+            .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    version.is_some_and(|version| LFS_SPECS.iter().any(|spec| version.starts_with(spec)))
+        && text.lines().any(oid)
+        && text.lines().any(|line| line.starts_with("size "))
 }
 
 /// An extension's key: `ext-`, a digit, `-` and a word character, then anything (Git LFS's
@@ -1485,6 +1510,92 @@ mod tests {
         .concat();
         assert!(is_lfs_pointer(&raw));
         assert!(!is_lfs_pointer(&[b"\xff", pointer.as_bytes()].concat()));
+    }
+
+    #[test]
+    fn files_that_look_like_lfs_pointers() {
+        let oid = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
+        let v1 = "version https://git-lfs.github.com/spec/v1\n";
+        let pointer = format!("{v1}oid sha256:{oid}\nsize 12345\n");
+        let padded = format!("{pointer}{}", "\n".repeat(1024 - pointer.len()));
+        for (what, data, want) in [
+            ("a pointer", pointer.clone(), true),
+            (
+                "the pre-release version",
+                pointer.replace("git-lfs.github.com", "hawser.github.com"),
+                true,
+            ),
+            // Git LFS reads neither of these as a pointer.
+            (
+                "a line after the size",
+                format!("{pointer}and more\n"),
+                true,
+            ),
+            (
+                "keys out of order",
+                format!("{v1}size 12345\noid sha256:{oid}\n"),
+                true,
+            ),
+            (
+                "an oid in capitals",
+                pointer.replace(oid, &oid.to_uppercase()),
+                true,
+            ),
+            (
+                "more after the version",
+                pointer.replace("v1\n", "v1.5 \n"),
+                true,
+            ),
+            (
+                "a size that isn't a number",
+                pointer.replace("12345", "big"),
+                true,
+            ),
+            ("CRLF", pointer.replace('\n', "\r\n"), true),
+            ("1,024 bytes", padded.clone(), true),
+            ("an empty file", String::new(), false),
+            ("1,025 bytes", format!("{padded}\n"), false),
+            // Git LFS's alpha's pointers are its own test's to find.
+            (
+                "the alpha version",
+                pointer.replace(
+                    "https://git-lfs.github.com/spec/v1",
+                    "http://git-media.io/v/2",
+                ),
+                false,
+            ),
+            (
+                "another version",
+                pointer.replace("git-lfs.github.com", "example.com"),
+                false,
+            ),
+            ("the version on a later line", format!("\n{pointer}"), false),
+            (
+                "an extension before the version",
+                format!("ext-0-foo sha256:{}\n{pointer}", "f".repeat(64)),
+                false,
+            ),
+            ("no oid", format!("{v1}size 12345\n"), false),
+            ("a short oid", pointer.replace(oid, &oid[1..]), false),
+            (
+                "more after the oid",
+                pointer.replace(oid, &format!("{oid} ")),
+                false,
+            ),
+            (
+                "an oid of another kind",
+                pointer.replace("sha256:", "sha512:"),
+                false,
+            ),
+            ("no size", format!("{v1}oid sha256:{oid}\n"), false),
+            (
+                "no space after size",
+                pointer.replace("size ", "size="),
+                false,
+            ),
+        ] {
+            assert_eq!(looks_like_lfs_pointer(data.as_bytes()), want, "{what}");
+        }
     }
 
     /// What the importer makes of a commit, without storing it: people and message as they
