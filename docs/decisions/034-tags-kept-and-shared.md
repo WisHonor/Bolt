@@ -4,6 +4,7 @@
 - **Date:** 2026-11-02
 - **Agenda topic:** none (milestone 2 planning, question 4)
 - **Refines:** [decision 010](010-operation-log.md) (what a diary entry holds) and [decision 012](012-lines.md) (tags)
+- **Corrected:** 2026-11-03. The last consequence is wrong: repositories made before this change still open. Milestone 1 could make no tags and no remotes, so each of its entries has a zero where the tag count was and another where the remote count was, and the new layout reads both as "none". The text below stays as it was written.
 
 ## Context
 
