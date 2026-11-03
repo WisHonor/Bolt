@@ -5,9 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::Path;
 
-use super::{GitError, GitId, HashKind, broken, is_git_space, read_error, read_optional, real_dir};
+use super::{
+    GitError, GitId, HashKind, broken, is_git_space, naming, read_error, read_optional, real_dir,
+};
 use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS};
 use crate::names;
 use crate::safe_fs;
@@ -16,9 +19,59 @@ use crate::safe_fs;
 const MAX_REF_FILE_BYTES: u64 = 4096;
 /// `packed-refs`: room for millions of refs, at some 70 bytes a line.
 const MAX_PACKED_REFS_BYTES: u64 = 512 << 20;
-/// Most refs Bolt reads, loose and packed together: every one decision 033's limits let an
-/// import bring in (lines, each server's lines, tags), and a million more it only lists.
-pub(super) const MAX_REFS: u64 = MAX_LINES * (1 + MAX_SERVERS) + MAX_TAGS + 1_000_000;
+
+/// How much reading refs may take: entries (folders and files under `.git/refs`, and refs in
+/// `packed-refs`), and bytes of the names and paths it keeps meanwhile.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Limits {
+    pub(super) entries: u64,
+    pub(super) bytes: u64,
+}
+
+/// Room for every ref decision 033's limits let an import bring in (lines, each server's lines,
+/// tags) and a million more it only lists, with names taking as much as packed-refs may.
+pub(super) const LIMITS: Limits = Limits {
+    entries: MAX_LINES * (1 + MAX_SERVERS) + MAX_TAGS + 1_000_000,
+    bytes: MAX_PACKED_REFS_BYTES,
+};
+
+/// What reading refs has taken so far, against `limits`.
+struct Taken {
+    limits: Limits,
+    entries: u64,
+    bytes: u64,
+}
+
+impl Taken {
+    /// One more entry read.
+    fn entry(&mut self) -> Result<(), GitError> {
+        self.entries = self.entries.saturating_add(1);
+        if self.entries > self.limits.entries {
+            return Err(GitError::TooManyRefs {
+                what: format!(
+                    "its .git/refs and packed-refs hold more than {} entries",
+                    self.limits.entries
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// `bytes` more of names and paths kept.
+    fn keep(&mut self, bytes: usize) -> Result<(), GitError> {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.bytes > self.limits.bytes {
+            return Err(GitError::TooManyRefs {
+                what: format!(
+                    "the names of its refs and their folders take more than {} bytes",
+                    self.limits.bytes
+                ),
+            });
+        }
+        Ok(())
+    }
+}
 
 /// Where Git's `HEAD` points.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,16 +102,28 @@ enum Contents<'a> {
     Symbolic(&'a [u8]),
 }
 
-/// The refs of the repository whose `.git` is `git`, reading at most `max` of them.
-pub(super) fn read(git: &Path, hash: HashKind, max: u64) -> Result<Refs, GitError> {
+/// The refs of the repository whose `.git` is `git`, taking at most `limits`.
+pub(super) fn read(git: &Path, hash: HashKind, limits: Limits) -> Result<Refs, GitError> {
     let head = read_head(git, hash)?;
-    let mut count = 0;
+    let mut taken = Taken {
+        limits,
+        entries: 0,
+        bytes: 0,
+    };
     // Loose refs first: `git pack-refs` writes packed-refs before it deletes the loose ones, so
     // in this order no ref is missed while it moves.
-    let loose = read_loose(git, hash, max, &mut count)?;
-    let packed = match read_optional(&git.join("packed-refs"), MAX_PACKED_REFS_BYTES)? {
-        Some(text) => read_packed(&text, hash, max, &mut count)?,
-        None => BTreeMap::new(),
+    let loose = read_loose(git, hash, &mut taken)?;
+    let path = git.join("packed-refs");
+    let packed = match safe_fs::read_capped(&path, MAX_PACKED_REFS_BYTES) {
+        Ok(text) => read_packed(&text, hash, &mut taken)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        // Past the cap: only millions of refs, or padding, make it that large.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(GitError::TooManyRefs {
+                what: naming(&path, &e),
+            });
+        }
+        Err(e) => return Err(read_error(&path, e)),
     };
     let mut all: BTreeMap<Vec<u8>, Option<GitId>> = packed
         .into_iter()
@@ -122,7 +187,8 @@ fn read_head(git: &Path, hash: HashKind) -> Result<Head, GitError> {
 /// `HEAD` names a branch, or holds the commit it is detached at.
 fn parse_head(text: &[u8], hash: HashKind) -> Result<Head, GitError> {
     let points_at = match parse_ref_file(text, hash) {
-        Some(Contents::Id(id)) => return Ok(Head::Detached(id)),
+        // The all-zero ID names no commit.
+        Some(Contents::Id(id)) if !id.is_zero() => return Ok(Head::Detached(id)),
         Some(Contents::Symbolic(target)) => {
             if let Some(branch) = target.strip_prefix(b"refs/heads/")
                 && is_valid_ref_name(target)
@@ -131,7 +197,7 @@ fn parse_head(text: &[u8], hash: HashKind) -> Result<Head, GitError> {
             }
             target
         }
-        None => trim_end(text),
+        _ => trim_end(text),
     };
     Err(broken(format!(
         "Git's HEAD points at `{}`, which isn't a branch",
@@ -179,12 +245,12 @@ fn trim_start(mut text: &[u8]) -> &[u8] {
 
 /// The loose refs under `.git/refs`, walked with a stack of folders, not recursion: each ref's ID,
 /// or `None` for a symbolic ref. Each folder must be a real one and each ref a regular file; names
-/// Git skips (`.` first, `.lock` last) are skipped. Every entry counts toward `max`.
+/// Git skips (`.` first, `.lock` last) are skipped. Every entry counts, and every name and path
+/// kept.
 fn read_loose(
     git: &Path,
     hash: HashKind,
-    max: u64,
-    count: &mut u64,
+    taken: &mut Taken,
 ) -> Result<BTreeMap<Vec<u8>, Option<GitId>>, GitError> {
     let root = git.join("refs");
     if !real_dir(&root)? {
@@ -196,7 +262,7 @@ fn read_loose(
         safe_fs::check_real_dir(&folder).map_err(|e| read_error(&folder, e))?;
         for entry in fs::read_dir(&folder).map_err(|e| read_error(&folder, e))? {
             let entry = entry.map_err(|e| read_error(&folder, e))?;
-            counted(count, max)?;
+            taken.entry()?;
             let file_name = entry.file_name();
             let name = file_name.as_encoded_bytes();
             if name.starts_with(b".") || name.ends_with(b".lock") {
@@ -217,6 +283,8 @@ fn read_loose(
                 .map_err(|e| read_error(&path, e))?
                 .is_dir()
             {
+                // Its path and name wait on the stack until the walk gets to it.
+                taken.keep(path.as_os_str().len().saturating_add(full.len()))?;
                 folders.push((path, full));
                 continue;
             }
@@ -229,6 +297,13 @@ fn read_loose(
             let text = safe_fs::read_capped(&path, MAX_REF_FILE_BYTES)
                 .map_err(|e| read_error(&path, e))?;
             let id = match parse_ref_file(&text, hash) {
+                // Git takes a loose ref holding it for a broken one.
+                Some(Contents::Id(id)) if id.is_zero() => {
+                    return Err(broken(format!(
+                        "the ref `{}` holds the all-zero ID, which names no commit",
+                        shown(&full)
+                    )));
+                }
                 Some(Contents::Id(id)) => Some(id),
                 Some(Contents::Symbolic(_)) => None,
                 None => {
@@ -238,20 +313,11 @@ fn read_loose(
                     )));
                 }
             };
+            taken.keep(full.len())?;
             refs.insert(full, id);
         }
     }
     Ok(refs)
-}
-
-fn counted(count: &mut u64, max: u64) -> Result<(), GitError> {
-    *count = count.saturating_add(1);
-    if *count > max {
-        return Err(broken(format!(
-            "it has more than {max} refs, more than Bolt reads"
-        )));
-    }
-    Ok(())
 }
 
 /// `packed-refs`: an optional `# pack-refs with:` line, then `<id> <name>` lines, each maybe
@@ -259,8 +325,7 @@ fn counted(count: &mut u64, max: u64) -> Result<(), GitError> {
 fn read_packed(
     text: &[u8],
     hash: HashKind,
-    max: u64,
-    count: &mut u64,
+    taken: &mut Taken,
 ) -> Result<BTreeMap<Vec<u8>, GitId>, GitError> {
     let mut refs = BTreeMap::new();
     if text.is_empty() {
@@ -297,7 +362,9 @@ fn read_packed(
                 shown(name)
             )));
         }
-        counted(count, max)?;
+        taken.entry()?;
+        taken.keep(name.len())?;
+        // An all-zero ID stays: Git's packed-refs reader takes it as it is, unlike a loose one.
         if refs.insert(name.to_vec(), id).is_some() {
             return Err(broken(format!(
                 "the ref `{}` is in .git/packed-refs twice",
@@ -533,6 +600,7 @@ mod tests {
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
     const D: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const ZERO: &str = "0000000000000000000000000000000000000000";
 
     fn id(hex: &str) -> GitId {
         GitId::from_hex(HashKind::Sha1, hex).unwrap()
@@ -595,6 +663,10 @@ mod tests {
         let refs = refs_of(&dir).unwrap();
         let main = GitId::from_hex(HashKind::Sha256, &long).unwrap();
         assert_eq!(refs.branches, [(b"main".to_vec(), main)]);
+        // Git's packed-refs reader takes an all-zero ID as it is; so does Bolt's.
+        let (dir, git) = repo();
+        git.packed_refs(&format!("{ZERO} refs/tags/zero\n"));
+        assert_eq!(refs_of(&dir).unwrap().tags, named(&[("zero", ZERO)]));
     }
 
     #[test]
@@ -739,6 +811,8 @@ mod tests {
             ("refs/heads/main\n".into(), "refs/heads/main".into()),
             (format!("{A}x\n"), format!("{A}x")),
             (format!("{long}\n"), long.clone()),
+            // The all-zero ID names no commit.
+            (format!("{ZERO}\n"), ZERO.to_owned()),
             (
                 "ref: refs/heads/main\0\n".into(),
                 "ref: refs/heads/main\0".into(),
@@ -824,6 +898,8 @@ mod tests {
             ("refs/heads/x", "garbage\n".to_owned()),
             ("refs/heads/x", format!("{A}\0\n")),
             ("refs/heads/x", "x".repeat(4097)),
+            // Git takes a loose ref holding the all-zero ID for a broken one.
+            ("refs/heads/x", format!("{ZERO}\n")),
         ] {
             let (dir, git) = repo();
             git.loose_ref(name, &text);
@@ -832,6 +908,15 @@ mod tests {
                 matches!(err, Some(GitError::Broken { .. })),
                 "{name} {text:?}: {err:?}"
             );
+        }
+        let (dir, git) = repo();
+        git.loose_ref("refs/heads/x", &format!("{ZERO}\n"));
+        match refs_of(&dir) {
+            Err(GitError::Broken { what }) => assert_eq!(
+                what,
+                "the ref `refs/heads/x` holds the all-zero ID, which names no commit"
+            ),
+            other => panic!("{other:?}"),
         }
         // A linked folder or file under refs/.
         let (dir, git) = repo();
@@ -863,18 +948,33 @@ mod tests {
             git.loose_ref(&format!("refs/heads/{name}"), &format!("{A}\n"));
         }
         let path = dir.path().join(".git");
+        let read_with = |entries, bytes| read(&path, HashKind::Sha1, Limits { entries, bytes });
         // Every entry counts, folders too: heads, tags, a and b.
-        assert!(read(&path, HashKind::Sha1, 4).is_ok());
+        assert!(read_with(4, u64::MAX).is_ok());
         assert!(matches!(
-            read(&path, HashKind::Sha1, 3),
-            Err(GitError::Broken { .. })
+            read_with(3, u64::MAX),
+            Err(GitError::TooManyRefs { .. })
         ));
         git.packed_refs(&format!("{A} refs/heads/c\n"));
-        assert!(read(&path, HashKind::Sha1, 5).is_ok());
-        let err = read(&path, HashKind::Sha1, 4).err().unwrap();
-        assert!(err.to_string().contains("more than 4 refs"), "{err}");
-        // design.md §5.16 gives this number.
-        assert_eq!(MAX_REFS, 7_600_000);
+        assert!(read_with(5, u64::MAX).is_ok());
+        let err = read_with(4, u64::MAX).err().unwrap();
+        assert!(err.to_string().contains("more than 4 entries"), "{err}");
+        assert!(err.hint().unwrap().contains("git remote prune"), "{err}");
+        // So do the bytes kept: each folder's path and name while it waits, and each ref's name.
+        let refs = path.join("refs");
+        let folders: usize = ["heads", "tags"]
+            .iter()
+            .map(|f| refs.join(f).as_os_str().len() + "refs/".len() + f.len())
+            .sum();
+        let names = "refs/heads/a".len() + "refs/heads/b".len() + "refs/heads/c".len();
+        let need = u64::try_from(folders + names).unwrap();
+        assert!(read_with(u64::MAX, need).is_ok());
+        let err = read_with(u64::MAX, need - 1).err().unwrap();
+        assert!(matches!(err, GitError::TooManyRefs { .. }), "{err:?}");
+        let want = format!("take more than {} bytes", need - 1);
+        assert!(err.to_string().contains(&want), "{err}");
+        // design.md §5.16 gives these numbers.
+        assert_eq!((LIMITS.entries, LIMITS.bytes), (7_600_000, 512 << 20));
     }
 
     /// Windows opens a device, not the file listed, for a name like `NUL`; the walk must refuse

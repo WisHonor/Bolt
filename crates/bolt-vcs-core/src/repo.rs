@@ -206,18 +206,21 @@ fn check_owner_with(
         owner => owners.push(owner),
     }
     // Read only when needed, so a mistake in them never stops the user's own projects.
-    let theirs = |owner: &io::Result<Owner>| {
-        matches!(
-            owner,
-            Ok(Owner::User | Owner::Administrators { elevated: true })
-        )
-    };
-    let safe = if owners.iter().all(theirs) {
+    let safe = if owners.iter().all(counts_as_users) {
         Vec::new()
     } else {
         safe_folders()?
     };
     owner_allows(owners, root, &safe)
+}
+
+/// Whether `owner` is the user's: their own account, or the Administrators group while it is
+/// switched on in this terminal.
+pub(crate) fn counts_as_users(owner: &io::Result<Owner>) -> bool {
+    matches!(
+        owner,
+        Ok(Owner::User | Owner::Administrators { elevated: true })
+    )
 }
 
 /// Whether Bolt may use the project at `root`, given who owns the folder and its `.bolt` (or why

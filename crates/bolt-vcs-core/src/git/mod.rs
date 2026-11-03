@@ -73,6 +73,11 @@ impl GitId {
         self.bytes.get(..self.kind.len()).unwrap_or_default()
     }
 
+    /// The all-zero ID, which names no object.
+    fn is_zero(&self) -> bool {
+        self.bytes.iter().all(|&b| b == 0)
+    }
+
     /// The ID in lowercase hex, as Git writes it.
     #[must_use]
     pub fn to_hex(&self) -> String {
@@ -168,6 +173,11 @@ pub enum Refusal {
     )]
     Reftable,
     #[error(
+        "This Git repository keeps its refs at a path its config names (extensions.refStorage), \
+         which Bolt doesn't follow."
+    )]
+    RefsElsewhere,
+    #[error(
         "This Git repository is a partial clone: some of its history was never downloaded, and \
          Bolt needs all of it."
     )]
@@ -215,6 +225,10 @@ impl Refusal {
                 "Convert it with `git refs migrate --ref-storage-format=files`, then run bolt \
                  import again."
             }
+            Refusal::RefsElsewhere => {
+                "Import a fresh clone made with `git clone`, which keeps its refs in its .git \
+                 folder."
+            }
             Refusal::PartialClone => {
                 "Clone the repository again without `--filter`, and run bolt import in the new \
                  clone."
@@ -252,14 +266,18 @@ pub enum GitError {
     NotAGitFolder,
     #[error(transparent)]
     Refused(Refusal),
-    /// The `.git` folder isn't the user's: another account owns it, Bolt can't tell who does, or
-    /// the safe-folders that would allow it can't be read. The refusal is the one a Bolt project
-    /// gets (decisions 025 to 027 and 030).
-    #[error(transparent)]
-    NotYours(RepoError),
-    /// Damaged or hostile data, or more than Bolt reads; `what` names the file or object.
+    /// The `.git` folder `git` isn't the user's: another account owns it, Bolt can't tell who
+    /// does, or the safe-folders that would allow it can't be read. `refusal` is the one a Bolt
+    /// project at the work tree gets (decisions 025 to 027 and 030), so its hint trusts the work
+    /// tree, which is what safe-folders lists.
+    #[error("{}", owner_message(git, refusal))]
+    NotYours { git: PathBuf, refusal: RepoError },
+    /// Damaged or hostile data; `what` names the file or object.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     Broken { what: String },
+    /// More refs, or longer names, than Bolt reads; `what` names the limit.
+    #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
+    TooManyRefs { what: String },
     #[error(
         "Git changed the repository while Bolt read it: {}.",
         escape(what, false)
@@ -277,19 +295,54 @@ impl GitError {
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
-        match self {
-            GitError::NotAGitFolder | GitError::Io { .. } => None,
-            GitError::Refused(refusal) => Some(refusal.hint()),
-            GitError::NotYours(refusal) => refusal.hint(),
-            GitError::Broken { .. } => Some(
-                "Nothing was changed. Check the repository with `git fsck`, or import a fresh \
-                 clone of it."
-                    .to_owned(),
-            ),
-            GitError::Changed { .. } => {
-                Some("Nothing was changed. Run bolt import again once Git has finished.".to_owned())
+        Some(
+            match self {
+                GitError::NotAGitFolder => return None,
+                GitError::Refused(refusal) => return Some(refusal.hint()),
+                GitError::NotYours { refusal, .. } => return refusal.hint(),
+                GitError::Broken { .. } => {
+                    "Nothing was changed. Check the repository with `git fsck`, or import a \
+                     fresh clone of it."
+                }
+                GitError::TooManyRefs { .. } => {
+                    "Nothing was changed. Delete refs you don't need, such as stale server \
+                     branches (`git remote prune <server>`) or old tags (`git tag -d <tag>`), \
+                     then run bolt import again."
+                }
+                GitError::Changed { .. } => {
+                    "Nothing was changed. Run bolt import again once Git has finished."
+                }
+                GitError::Io { .. } => {
+                    "Nothing was changed. Check that your account may read it and that no other \
+                     program has it locked, then run bolt import again."
+                }
             }
+            .to_owned(),
+        )
+    }
+}
+
+/// A `NotYours` message: it names the `.git` folder, whose owner was asked.
+fn owner_message(git: &Path, refusal: &RepoError) -> String {
+    let git = escape(&git.display().to_string(), false);
+    match refusal {
+        RepoError::NotYours { .. } => {
+            format!("The Git repository at {git} belongs to another user account.")
         }
+        RepoError::AdminsNotElevated { .. } => format!(
+            "The Git repository at {git} belongs to the Administrators group, and this terminal \
+             isn't running as administrator."
+        ),
+        RepoError::OwnerUnknown { .. } => format!(
+            "Bolt can't tell who owns the Git repository at {git}: this drive doesn't record who \
+             owns folders."
+        ),
+        RepoError::OwnerLookupFailed { source, .. } => format!(
+            "Bolt couldn't find out who owns the Git repository at {git}: {}",
+            escape(&source.to_string(), false)
+        ),
+        // The user's settings, which hold safe-folders, can't be read.
+        other => other.to_string(),
     }
 }
 
@@ -303,10 +356,10 @@ fn is_git_space(c: u8) -> bool {
 }
 
 /// A `safe_fs` refusal (a link, special file or oversized file where Git keeps a plain one) is
-/// `Broken`, a file gone while Bolt read is `Changed`, anything else `Io`.
+/// `Broken`, a file gone while Bolt read is `Changed`, anything else `Io`. Each names `path`.
 fn read_error(path: &Path, e: io::Error) -> GitError {
     match e.kind() {
-        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => broken(e.to_string()),
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => broken(naming(path, &e)),
         io::ErrorKind::NotFound => GitError::Changed {
             what: format!("{} went away", path.display()),
         },
@@ -314,6 +367,16 @@ fn read_error(path: &Path, e: io::Error) -> GitError {
             path: path.to_owned(),
             source: e,
         },
+    }
+}
+
+/// `e`'s message, naming `path`: safe_fs's own messages name it already, the system's don't.
+fn naming(path: &Path, e: &io::Error) -> String {
+    let (shown, message) = (path.display().to_string(), e.to_string());
+    if message.contains(&shown) {
+        message
+    } else {
+        format!("{shown}: {message}")
     }
 }
 
@@ -394,7 +457,7 @@ impl Repo {
 
     /// `HEAD`, the loose refs and `packed-refs`.
     pub fn refs(&self) -> Result<Refs, GitError> {
-        refs::read(&self.git, self.hash, refs::MAX_REFS)
+        refs::read(&self.git, self.hash, refs::LIMITS)
     }
 }
 
@@ -406,12 +469,18 @@ fn check_owner(
     owner_of: &dyn Fn(&Path) -> io::Result<Owner>,
     safe_folders: &dyn Fn() -> Result<Vec<PathBuf>, ConfigError>,
 ) -> Result<(), GitError> {
-    if repo::owner_allows([owner_of(git)], work_tree, &[]).is_ok() {
-        return Ok(());
-    }
+    let refused = |refusal| GitError::NotYours {
+        git: git.to_owned(),
+        refusal,
+    };
+    let owner = owner_of(git);
     // Read only when needed, so a mistake in them never stops the user's own repositories.
-    let safe = safe_folders().map_err(|e| GitError::NotYours(RepoError::Config(e)))?;
-    repo::owner_allows([owner_of(git)], work_tree, &safe).map_err(GitError::NotYours)
+    let safe = if repo::counts_as_users(&owner) {
+        Vec::new()
+    } else {
+        safe_folders().map_err(|e| refused(RepoError::Config(e)))?
+    };
+    repo::owner_allows([owner], work_tree, &safe).map_err(refused)
 }
 
 /// The repository's hash, after refusing a format, extension or sparse checkout Bolt can't import.
@@ -648,7 +717,7 @@ mod tests {
             (
                 "refs kept outside .git",
                 |d| Craft::new(d, Sha1).config(&v1("\trefStorage = files:///elsewhere\n")),
-                Refusal::UnknownExtension("refstorage = files:///elsewhere".into()),
+                Refusal::RefsElsewhere,
             ),
             (
                 "format version 2",
@@ -816,101 +885,125 @@ mod tests {
     fn a_dot_git_owned_by_another_account_is_refused() {
         let (dir, _git) = repo(HashKind::Sha1);
         let root = dir.path();
+        let git = root.join(".git");
+        // Who owns the folder, then how many times the reader asked.
+        let asked = std::cell::Cell::new(0);
         let open_as = |owner: Owner, safe: &[PathBuf]| {
             let safe = safe.to_vec();
-            Repo::open_with(root, &|_| Ok(owner), &move || Ok(safe.clone()))
+            let owner_of = |path: &Path| {
+                assert_eq!(path, git);
+                asked.set(asked.get() + 1);
+                Ok(owner)
+            };
+            Repo::open_with(root, &owner_of, &move || Ok(safe.clone()))
         };
         match open_as(Owner::Other, &[]) {
-            Err(e @ GitError::NotYours(RepoError::NotYours { .. })) => {
-                let GitError::NotYours(RepoError::NotYours { path }) = &e else {
-                    unreachable!()
-                };
-                assert_eq!(path, root);
-                assert!(e.hint().unwrap().contains("safe-folders"), "{e}");
+            Err(
+                e @ GitError::NotYours {
+                    refusal: RepoError::NotYours { .. },
+                    ..
+                },
+            ) => {
+                // The message names the `.git` folder, whose owner was asked; the hint lists
+                // the work tree, which is what safe-folders trusts.
+                let shown = |path: &Path| escape(&path.display().to_string(), false);
+                assert!(e.to_string().starts_with("The Git repository at "), "{e}");
+                assert!(e.to_string().contains(&shown(&git)), "{e}");
+                let hint = e.hint().unwrap();
+                assert_eq!(hint, crate::config::trust_hint(root), "{hint}");
             }
             other => panic!("{other:?}"),
         }
-        // Each reason keeps its own message, as for a Bolt project.
+        assert_eq!(asked.get(), 1);
+        // Each reason keeps its own message, about the `.git` folder.
         let admins = open_as(Owner::Administrators { elevated: false }, &[]);
-        assert!(
-            matches!(
-                admins,
-                Err(GitError::NotYours(RepoError::AdminsNotElevated { .. }))
-            ),
-            "{admins:?}"
-        );
         let unknown = open_as(Owner::Unknown, &[]);
-        assert!(
-            matches!(
-                unknown,
-                Err(GitError::NotYours(RepoError::OwnerUnknown { .. }))
-            ),
-            "{unknown:?}"
-        );
         let failed = Repo::open_with(
             root,
             &|_| Err(io::Error::other("Access is denied.")),
             &|| Ok(Vec::new()),
         );
-        assert!(
-            matches!(
-                failed,
-                Err(GitError::NotYours(RepoError::OwnerLookupFailed { .. }))
-            ),
-            "{failed:?}"
-        );
+        for (result, reason) in [
+            (admins, "Administrators group"),
+            (unknown, "can't tell who owns"),
+            (failed, "Access is denied."),
+        ] {
+            match result {
+                Err(e @ GitError::NotYours { .. }) => {
+                    assert!(e.to_string().contains(reason), "{e}");
+                    assert!(e.to_string().contains("Git repository"), "{e}");
+                    assert!(e.hint().unwrap().contains("safe-folders"), "{e}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
         // Listing the work tree in safe-folders trusts its `.git`.
+        asked.set(0);
         assert!(open_as(Owner::Other, &[root.to_owned()]).is_ok());
-        // The user's own `.git` opens without reading safe-folders, even broken ones; the owner
-        // asked about is the `.git` folder's.
+        assert_eq!(asked.get(), 1);
+        // The user's own `.git` opens without reading safe-folders, even broken ones.
         let broken = || -> Result<Vec<PathBuf>, ConfigError> {
             Err(ConfigError::Invalid {
                 path: PathBuf::from("config.toml"),
                 detail: "broken".into(),
             })
         };
-        let owner_of = |path: &Path| {
-            assert_eq!(path, root.join(".git"));
-            Ok(Owner::User)
-        };
-        assert!(Repo::open_with(root, &owner_of, &broken).is_ok());
-        let elevated = Repo::open_with(
-            root,
-            &|_| Ok(Owner::Administrators { elevated: true }),
-            &broken,
-        );
-        assert!(elevated.is_ok());
+        for owner in [Owner::User, Owner::Administrators { elevated: true }] {
+            assert!(Repo::open_with(root, &|_| Ok(owner), &broken).is_ok());
+        }
         // Another account's, with safe-folders unreadable: the settings' own error.
-        let unreadable = Repo::open_with(root, &|_| Ok(Owner::Other), &broken);
-        assert!(
-            matches!(unreadable, Err(GitError::NotYours(RepoError::Config(_)))),
-            "{unreadable:?}"
-        );
+        match Repo::open_with(root, &|_| Ok(Owner::Other), &broken) {
+            Err(
+                e @ GitError::NotYours {
+                    refusal: RepoError::Config(_),
+                    ..
+                },
+            ) => assert!(
+                e.to_string().contains("not a valid Bolt settings file"),
+                "{e}"
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
-    /// A refusal from `safe_fs` is damage, a file gone mid-read is Git at work, the rest is I/O.
+    /// A refusal from `safe_fs` is damage, a file gone mid-read is Git at work, the rest is I/O;
+    /// each names the path once.
     #[test]
     fn read_errors_are_told_apart() {
         let path = Path::new("refs/heads/main");
         let kind = |kind| read_error(path, io::Error::from(kind));
-        assert!(matches!(
-            kind(io::ErrorKind::InvalidInput),
-            GitError::Broken { .. }
-        ));
-        assert!(matches!(
-            kind(io::ErrorKind::InvalidData),
-            GitError::Broken { .. }
-        ));
+        for k in [io::ErrorKind::InvalidInput, io::ErrorKind::InvalidData] {
+            // As the system gives it: no path in its message, so Bolt adds it.
+            match kind(k) {
+                GitError::Broken { what } => {
+                    assert!(what.starts_with("refs/heads/main: "), "{what}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // As safe_fs gives it: the path is in the message already.
+        let named = io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refs/heads/main is not a regular file",
+        );
+        match read_error(path, named) {
+            GitError::Broken { what } => assert_eq!(what, "refs/heads/main is not a regular file"),
+            other => panic!("{other:?}"),
+        }
         match kind(io::ErrorKind::NotFound) {
             e @ GitError::Changed { .. } => {
-                assert!(e.hint().unwrap().contains("bolt import again"))
+                assert!(e.to_string().contains("refs/heads/main"), "{e}");
+                assert!(e.hint().unwrap().contains("bolt import again"));
             }
             other => panic!("{other:?}"),
         }
-        assert!(matches!(
-            kind(io::ErrorKind::PermissionDenied),
-            GitError::Io { .. }
-        ));
+        match kind(io::ErrorKind::PermissionDenied) {
+            e @ GitError::Io { .. } => {
+                assert!(e.to_string().contains("refs/heads/main"), "{e}");
+                assert!(e.hint().unwrap().contains("may read it"), "{e}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -920,6 +1013,20 @@ mod tests {
         for err in [
             GitError::Broken {
                 what: HOSTILE.into(),
+            },
+            GitError::TooManyRefs {
+                what: HOSTILE.into(),
+            },
+            GitError::NotYours {
+                git: HOSTILE.into(),
+                refusal: RepoError::NotYours { path: "x".into() },
+            },
+            GitError::NotYours {
+                git: "x".into(),
+                refusal: RepoError::OwnerLookupFailed {
+                    path: "x".into(),
+                    source: io::Error::other(HOSTILE),
+                },
             },
             GitError::Changed {
                 what: HOSTILE.into(),

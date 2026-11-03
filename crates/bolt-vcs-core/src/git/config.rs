@@ -47,7 +47,8 @@ struct Found {
     hash: Option<HashKind>,
     worktree_config: bool,
     partial_clone: bool,
-    reftable: bool,
+    /// What the last `extensions.refstorage` makes Bolt refuse, if anything.
+    ref_storage: Option<Refusal>,
     /// Extensions Git reads only in format version 1.
     v1_only: Vec<String>,
     unknown: Vec<String>,
@@ -110,15 +111,13 @@ impl Found {
             Some(at) => value.split_at_checked(at)?,
             None => (value, &b""[..]),
         };
-        match format {
-            b"files" if payload.is_empty() => {}
-            // The payload keeps the refs somewhere else, where Bolt doesn't follow.
-            b"files" => self
-                .unknown
-                .push(format!("refstorage = {}", String::from_utf8_lossy(value))),
-            b"reftable" => self.reftable = true,
+        self.ref_storage = match format {
+            b"files" if payload.is_empty() => None,
+            // The payload is a path for the refs, which Bolt doesn't follow.
+            b"files" => Some(Refusal::RefsElsewhere),
+            b"reftable" => Some(Refusal::Reftable),
             _ => return None,
-        }
+        };
         Some(())
     }
 
@@ -155,8 +154,8 @@ impl Found {
                 });
             }
         }
-        if self.reftable {
-            return Err(GitError::Refused(Refusal::Reftable));
+        if let Some(refusal) = self.ref_storage {
+            return Err(GitError::Refused(refusal));
         }
         if self.partial_clone {
             return Err(GitError::Refused(Refusal::PartialClone));
@@ -777,6 +776,21 @@ mod tests {
         assert!(matches!(
             format("[core]\n\trepositoryformatversion = -1\n"),
             Err(GitError::Broken { .. })
+        ));
+        // The last refStorage counts, as in Git.
+        let storage = |values: &str| {
+            format(&format!(
+                "[core]\n\trepositoryformatversion = 1\n[extensions]\n{values}"
+            ))
+        };
+        assert!(storage("\trefStorage = reftable\n\trefStorage = files\n").is_ok());
+        assert!(matches!(
+            storage("\trefStorage = files\n\trefStorage = files://../refs\n"),
+            Err(GitError::Refused(Refusal::RefsElsewhere))
+        ));
+        assert!(matches!(
+            storage("\trefStorage = files:///x\n\trefStorage = reftable://y\n"),
+            Err(GitError::Refused(Refusal::Reftable))
         ));
         // Keys Bolt doesn't keep are still read, so a bad line among them refuses.
         assert!(format("[remote \"origin\"]\n\turl = \"x\n").is_err());
