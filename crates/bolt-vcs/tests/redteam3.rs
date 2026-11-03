@@ -568,7 +568,6 @@ fn rt3_9_storing_a_tag_list_takes_at_most_twice_its_size() {
 // `bolt show` can't pick either by it: its hint says to type more of an ID that is already whole.
 
 #[test]
-#[ignore = "RT3-10: red-team proof, run once its fix is in"]
 fn rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows() {
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);

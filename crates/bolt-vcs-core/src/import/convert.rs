@@ -110,6 +110,9 @@ pub struct Counts {
     pub skipped_entries: Vec<(String, String)>,
     /// Every entry skipped, the listed ones included.
     pub skipped_entry_count: u64,
+    /// Commits whose `change-id` header gives a change ID another commit has too, so their saves
+    /// took their own commits' change IDs instead (decision 043).
+    pub duplicate_change_ids: u64,
 }
 
 /// What a Git tag becomes.
@@ -330,11 +333,21 @@ pub struct Converter<'r> {
     /// What the tag list will hold so far. The import's first pass counts the same, so this
     /// only guards against the two ever counting differently.
     tags: TagBudget,
+    /// Change IDs no `change-id` header may give: those a header gave already, and those that
+    /// commits' own IDs give (decision 043).
+    change_ids: HashSet<ChangeId>,
 }
 
 impl<'r> Converter<'r> {
+    /// A converter into `packs`. `own_change_ids` are the change IDs that commits' own IDs give
+    /// and some commit's `change-id` header gives too, as the import's first pass finds them.
     #[must_use]
-    pub fn new(git: &'r git::Repo, store: &'r Store, packs: &'r mut PackSet) -> Converter<'r> {
+    pub fn new(
+        git: &'r git::Repo,
+        store: &'r Store,
+        packs: &'r mut PackSet,
+        own_change_ids: HashSet<ChangeId>,
+    ) -> Converter<'r> {
         Converter {
             git,
             store,
@@ -349,6 +362,7 @@ impl<'r> Converter<'r> {
             not_utf8_count: 0,
             chains: HashMap::new(),
             tags: TagBudget::new(),
+            change_ids: own_change_ids,
         }
     }
 
@@ -407,13 +421,24 @@ impl<'r> Converter<'r> {
         if message.as_bytes() != c.message {
             extra.insert(EXTRA_GIT_ORIGINAL_MESSAGE.to_owned(), c.message.to_vec());
         }
+        let own = ChangeId::from_git_commit(id.as_bytes(), None);
+        // A header's change ID goes to one save only, so no two saves share one (decision 043).
+        let change_id = match c.change_id.and_then(ChangeId::from_jujutsu) {
+            Some(wanted) if self.change_ids.insert(wanted) => wanted,
+            Some(_) => {
+                let counts = &mut self.counts;
+                counts.duplicate_change_ids = counts.duplicate_change_ids.saturating_add(1);
+                own
+            }
+            None => own,
+        };
         let mut save = Save {
             root: root.listing,
             parents,
             author: parse_person(c.author),
             saver: parse_person(c.committer),
             message: message.into_owned(),
-            change_id: ChangeId::from_git_commit(id.as_bytes(), c.change_id),
+            change_id,
             move_notes: Vec::new(),
             signature: Vec::new(),
             extra,
@@ -885,18 +910,27 @@ fn read_commit(git: &git::Repo, id: &GitId) -> Result<git::Object, ImportError> 
     Ok(object)
 }
 
-/// The tree and the parents (in the commit's own order) of the commit `id`, once it is known a
-/// save can keep it: what an import reads of every commit before it writes anything.
-pub(super) fn tree_and_parents(
-    git: &git::Repo,
-    id: &GitId,
-) -> Result<(GitId, Vec<GitId>), ImportError> {
+/// What an import reads of every commit before it writes anything.
+pub(super) struct Outline {
+    pub(super) tree: GitId,
+    /// In the commit's own order.
+    pub(super) parents: Vec<GitId>,
+    /// The change ID its `change-id` header gives, if it gives one.
+    pub(super) change_id: Option<ChangeId>,
+}
+
+/// The outline of the commit `id`, once it is known a save can keep it.
+pub(super) fn outline(git: &git::Repo, id: &GitId) -> Result<Outline, ImportError> {
     let hex = id.to_hex();
     let object = read_commit(git, id)?;
     let c =
         parse_commit(&object.data, git.hash()).map_err(|e| at(e, || format!("commit `{hex}`")))?;
     keepable(&c, &hex)?;
-    Ok((c.tree, c.parents))
+    Ok(Outline {
+        tree: c.tree,
+        parents: c.parents,
+        change_id: c.change_id.and_then(ChangeId::from_jujutsu),
+    })
 }
 
 /// Stops at a commit a save can't keep exactly (decision 032), before its people are read or its
@@ -974,7 +1008,12 @@ mod tests {
         fs::create_dir_all(&packs_dir).unwrap();
         let store = Store::open(&packs_dir).unwrap();
         let mut packs = PackSet::with_limit(&tmp, &packs_dir, limit).unwrap();
-        let result = run(&mut Converter::new(&git, &store, &mut packs));
+        let result = run(&mut Converter::new(
+            &git,
+            &store,
+            &mut packs,
+            HashSet::new(),
+        ));
         packs.finish().unwrap();
         (result, Store::open(&packs_dir).unwrap())
     }
@@ -1656,6 +1695,29 @@ mod tests {
         assert_eq!(save(2).extra.get(EXTRA_GIT_HEADER).cloned(), header(&twice));
         assert_eq!(save(3).extra.get(EXTRA_GIT_HEADER).cloned(), header(&jj));
         assert_eq!(save(3).change_id.0[..2], [0x01, 0x23]);
+    }
+
+    /// A header's change ID goes to the first commit converted that has it; the others take their
+    /// own commits' change IDs, and are counted (decision 043).
+    #[test]
+    fn a_change_id_header_gives_its_id_to_one_save() {
+        let (dir, git) = repo(Sha1);
+        let tree = git.tree(&[]);
+        let header = "change-id zyxwvutsrqponmlkzyxwvutsrqponmlk\n";
+        let first = git.commit(&commit_bytes(&tree, &[], header, b"first\n"));
+        let again = git.commit(&commit_bytes(&tree, &[first], header, b"again\n"));
+        let ((saves, counts), store) = convert(dir.path(), "a", |c| {
+            let saves = [c.commit(&first).unwrap(), c.commit(&again).unwrap()];
+            (saves, c.counts().clone())
+        });
+        let change_id = |n: usize| store.save(&saves[n], false).unwrap().change_id;
+        let wanted = ChangeId::from_jujutsu(b"zyxwvutsrqponmlkzyxwvutsrqponmlk").unwrap();
+        assert_eq!(change_id(0), wanted);
+        assert_eq!(
+            change_id(1),
+            ChangeId::from_git_commit(again.as_bytes(), None)
+        );
+        assert_eq!(counts.duplicate_change_ids, 1);
     }
 
     #[test]

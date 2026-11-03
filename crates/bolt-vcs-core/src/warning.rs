@@ -23,6 +23,9 @@ pub const FIRST_SAVE_NOT_READ: &str = "first_save_not_read";
 pub const NESTED_BOLT_FOLDER: &str = "nested_bolt_folder";
 /// The Git repository has a grafts file, which the import ignored.
 pub const GRAFTS_IGNORED: &str = "grafts_ignored";
+/// Imported commits whose `change-id` header gives a change ID another commit has too took their
+/// own commits' change IDs instead.
+pub const DUPLICATE_CHANGE_ID: &str = "duplicate_change_id";
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

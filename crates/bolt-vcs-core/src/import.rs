@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{self, GitError, GitId, Head, ObjectType, Refs, parse_tag, parse_tree, shown};
-use crate::id::{Id, hash_record};
+use crate::id::{ChangeId, Id, hash_record};
 use crate::listing::EntryKind;
 use crate::names::{NameError, is_git_alias, validate_name};
 use crate::pack::{ObjectKind, PackError, PackSet};
@@ -27,7 +27,7 @@ mod names;
 pub use convert::{Converter, Counts, TagOutcome};
 use convert::{
     MAX_EXTRA_PARENTS, MAX_LISTED, TagBudget, at, bug, check_tag_chain, check_tag_object,
-    expect_kind, shown_path, tag_message, tree_and_parents,
+    expect_kind, outline, shown_path, tag_message,
 };
 use names::{Named, Names};
 // For tests that check an import's names against Git's refs.
@@ -264,6 +264,8 @@ struct Plan {
     skipped_ref_count: u64,
     /// Every commit to convert, each after its parents.
     order: Vec<GitId>,
+    /// The change IDs that commits' own IDs give and some `change-id` header gives too.
+    own_change_ids: HashSet<ChangeId>,
     /// The tag list's size as the first pass counted it, with room for its longest head.
     tag_list_len: u64,
     /// The line of Git's current branch, if `HEAD` is on one, and `HEAD`'s commit.
@@ -298,7 +300,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
     if let Some(name) = tracked_bolt(&git, &head_commit)? {
         return Err(tracked_stop(&name));
     }
-    let order = in_order(&git, &roots, MAX_EXTRA_PARENTS)?;
+    let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS)?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -307,6 +309,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
         git,
         names,
         order,
+        own_change_ids,
         tag_list_len: tag_budget.used(),
         head_line,
         head_commit,
@@ -328,13 +331,14 @@ fn carry_out(
         skipped_refs,
         skipped_ref_count,
         order,
+        own_change_ids,
         tag_list_len,
         head_line,
         head_commit,
         grafts,
     } = plan;
     let mut packs = repo.new_packs()?;
-    let mut converter = Converter::new(&git, repo.store(), &mut packs);
+    let mut converter = Converter::new(&git, repo.store(), &mut packs, own_change_ids);
     let total = order.len() as u64;
     for (done, id) in (1..).zip(&order) {
         converter.commit(id)?;
@@ -397,6 +401,9 @@ fn carry_out(
             warning::GRAFTS_IGNORED,
             "Git's grafts file was ignored; Bolt imported the commits as they are.",
         ));
+    }
+    if counts.duplicate_change_ids > 0 {
+        warnings.push(duplicate_change_ids(counts.duplicate_change_ids));
     }
     let mut report = ImportReport {
         commits: total,
@@ -591,12 +598,13 @@ fn roots(
 /// before anything is written. It walks with a stack of its own, into roots and parents in the
 /// order of their Git IDs, so the order is the same every time, and it stops once the commits
 /// have more than `most_extra` parents beyond each one's first. Pass 2 reads each commit's
-/// parents again, so none are kept here.
+/// parents again, so none are kept here. Also gives the change IDs that commits' own IDs give
+/// and some commit's `change-id` header gives too, which no header may give (decision 043).
 fn in_order(
     git: &git::Repo,
     roots: &BTreeSet<GitId>,
     most_extra: u64,
-) -> Result<Vec<GitId>, ImportError> {
+) -> Result<(Vec<GitId>, HashSet<ChangeId>), ImportError> {
     let mut walk = FirstPass {
         git,
         most_extra,
@@ -606,6 +614,7 @@ fn in_order(
         stack: Vec::new(),
         todo: Vec::new(),
         extra: 0,
+        headers: HashSet::new(),
     };
     let mut order = Vec::new();
     for root in roots {
@@ -622,7 +631,12 @@ fn in_order(
             }
         }
     }
-    Ok(order)
+    let own_change_ids = order
+        .iter()
+        .map(|id| ChangeId::from_git_commit(id.as_bytes(), None))
+        .filter(|own| walk.headers.contains(own))
+        .collect();
+    Ok((order, own_change_ids))
 }
 
 /// Pass 1's walk. Each commit met gets an index into one table of IDs, which stands for it on the
@@ -641,6 +655,8 @@ struct FirstPass<'g> {
     todo: Vec<u32>,
     /// Parents met beyond each commit's first.
     extra: u64,
+    /// The change IDs commits' `change-id` headers give.
+    headers: HashSet<ChangeId>,
 }
 
 impl FirstPass<'_> {
@@ -675,7 +691,9 @@ impl FirstPass<'_> {
             Some(entered) if !*entered => *entered = true,
             _ => return Ok(()),
         }
-        let (_, mut parents) = tree_and_parents(self.git, &id)?;
+        let commit = outline(self.git, &id)?;
+        let mut parents = commit.parents;
+        self.headers.extend(commit.change_id);
         self.extra = self
             .extra
             .saturating_add((parents.len() as u64).saturating_sub(1));
@@ -708,6 +726,25 @@ fn too_many_parents(most: u64) -> ImportError {
                 .to_owned(),
         ),
     }
+}
+
+/// The warning for `count` commits whose `change-id` header gives a change ID another commit has
+/// too, so their saves took their own commits' change IDs.
+fn duplicate_change_ids(count: u64) -> Warning {
+    let message = if count == 1 {
+        "A commit has a change-id header (Jujutsu's) giving a change ID another commit in this \
+         history has too, so its save took the change ID of its own commit instead, as a commit \
+         without that header does. Two saves never share a change ID."
+            .to_owned()
+    } else {
+        format!(
+            "{} commits have change-id headers (Jujutsu's) giving change IDs other commits in \
+             this history have too, so their saves took the change IDs of their own commits \
+             instead, as commits without that header do. Two saves never share a change ID.",
+            thousands(count)
+        )
+    };
+    Warning::new(warning::DUPLICATE_CHANGE_ID, message)
 }
 
 /// The lines `refs` become: each name with the save of its commit.
@@ -775,7 +812,7 @@ fn tracked_stop(name: &str) -> ImportError {
 /// if Git tracks one: Git checks it out where Bolt keeps the project, and Bolt never takes files
 /// Git wrote for its own.
 fn tracked_bolt(git: &git::Repo, head: &GitId) -> Result<Option<String>, ImportError> {
-    let (tree, _) = tree_and_parents(git, head)?;
+    let tree = outline(git, head)?.tree;
     let place = || format!("the top folder (tree `{}`) of `HEAD`", tree.to_hex());
     let object = git.read(&tree).map_err(|e| at(e, place))?;
     expect_kind(object.kind, ObjectType::Tree, &tree, place)?;
@@ -790,7 +827,7 @@ fn tracked_bolt(git: &git::Repo, head: &GitId) -> Result<Option<String>, ImportE
 /// `HEAD`'s commit: Bolt left them out of history, but commands run inside one would take it for
 /// a project (decision 019). `tracked_bolt` found none at the top.
 fn bolt_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, ImportError> {
-    let (tree, _) = tree_and_parents(git, head)?;
+    let tree = outline(git, head)?.tree;
     let mut warnings = Vec::new();
     let mut count = 0u64;
     // Each tree is looked at once, so a folder Git holds at two paths is named at the first.
@@ -1085,7 +1122,7 @@ mod tests {
         let mut want = vec![a, b, c];
         want.sort();
         want.extend([merge, tip]);
-        assert_eq!(in_order(&repo, &roots, 3).unwrap(), want);
+        assert_eq!(in_order(&repo, &roots, 3).unwrap().0, want);
         let e = in_order(&repo, &roots, 2).unwrap_err();
         assert!(
             e.to_string()
@@ -1095,6 +1132,53 @@ mod tests {
         assert!(
             e.hint().unwrap().starts_with("Nothing was changed."),
             "{e:?}"
+        );
+    }
+
+    /// No two saves share a change ID: a `change-id` header that another commit's own ID gives
+    /// is passed over even when its commit comes first, and a warning counts it.
+    #[test]
+    fn a_header_never_takes_the_change_id_another_commits_own_id_gives() {
+        let dir = tempfile::tempdir().unwrap();
+        let (git, first) = one_commit(dir.path());
+        let own = ChangeId::from_git_commit(first.as_bytes(), None);
+        // The same ID in Jujutsu's letters, which run from `z` for 0.
+        let letters: String = own
+            .to_letters()
+            .bytes()
+            .map(|c| char::from(b'k' + b'z' - c))
+            .collect();
+        let tree = git.tree(&[]);
+        // A root on another branch, made to come before `main`'s in the import's order.
+        let side = (0..)
+            .map(|n| {
+                let raw = format!(
+                    "tree {}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 \
+                     +0000\nchange-id {letters}\n\nSide {n}\n",
+                    tree.to_hex()
+                );
+                git.commit(raw.as_bytes())
+            })
+            .find(|side| *side < first)
+            .unwrap();
+        git.loose_ref("refs/heads/side", &format!("{}\n", side.to_hex()));
+        let report = import(dir.path()).unwrap();
+        let project = Repository::open(dir.path()).unwrap();
+        let lines = project.current().unwrap().1.state.lines;
+        let change_id = |line: &str| project.store().save(&lines[line], false).unwrap().change_id;
+        assert_eq!(change_id("main"), own);
+        assert_eq!(
+            change_id("side"),
+            ChangeId::from_git_commit(side.as_bytes(), None)
+        );
+        let warning = report
+            .warnings
+            .iter()
+            .find(|w| w.kind == warning::DUPLICATE_CHANGE_ID);
+        let message = &warning.unwrap().message;
+        assert!(
+            message.starts_with("A commit has a change-id header"),
+            "{message}"
         );
     }
 

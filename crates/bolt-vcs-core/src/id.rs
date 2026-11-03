@@ -125,12 +125,11 @@ impl ChangeId {
 
     /// An imported commit's change ID (storage-format.md section 5): its `change-id` header if
     /// that spells 16 bytes in Jujutsu's letters, else Jujutsu's rule for a commit without one,
-    /// the last 16 bytes of its ID, last first, with each byte's bits reversed.
+    /// the last 16 bytes of its ID, last first, with each byte's bits reversed. An import gives
+    /// a header's ID to one save only, so it passes a commit's header over when another has it.
     #[must_use]
     pub fn from_git_commit(commit_id: &[u8], change_id_header: Option<&[u8]>) -> ChangeId {
-        // Jujutsu's letters run the other way, `z` for 0, and it reads them in either case.
-        let jujutsu = |c: u8| b'z'.checked_sub(c.to_ascii_lowercase());
-        if let Some(id) = change_id_header.and_then(|letters| from_halves(letters, jujutsu)) {
+        if let Some(id) = change_id_header.and_then(ChangeId::from_jujutsu) {
             return id;
         }
         let mut out = [0u8; 16];
@@ -138,6 +137,13 @@ impl ChangeId {
             *o = b.reverse_bits();
         }
         ChangeId(out)
+    }
+
+    /// The change ID a `change-id` header gives, if it spells 16 bytes in Jujutsu's letters.
+    #[must_use]
+    pub fn from_jujutsu(letters: &[u8]) -> Option<ChangeId> {
+        // Jujutsu's letters run the other way, `z` for 0, and it reads them in either case.
+        from_halves(letters, |c| b'z'.checked_sub(c.to_ascii_lowercase()))
     }
 }
 
