@@ -286,6 +286,30 @@ fn an_empty_repository_stops_the_import() {
     assert!(!env.root().join(".bolt").exists());
 }
 
+/// Once `.bolt` is begun, "nothing was changed" isn't so: the hint says what became of it.
+#[test]
+fn an_import_that_stops_partway_says_its_bolt_folder_is_kept() {
+    let env = Env::new();
+    let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:\
+                   4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+    env.commit("art/big.psd", pointer, "Add a big file");
+    let err = env.refused_import();
+    assert!(
+        err.contains("holds a Git LFS pointer at `art/big.psd`"),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "Nothing was committed. Bolt kept the .bolt folder it began here, so that running \
+             bolt import again can finish the import from what it stored; or delete that folder."
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("Nothing was changed"), "{err}");
+    assert!(env.root().join(".bolt").is_dir());
+    assert!(!env.root().join(".bolt/format").exists());
+}
+
 #[test]
 fn a_second_import_is_refused() {
     let env = Env::new();

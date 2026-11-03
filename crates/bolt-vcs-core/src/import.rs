@@ -14,7 +14,7 @@ use crate::id::{Id, hash_record};
 use crate::listing::EntryKind;
 use crate::names::{NameError, is_git_alias, validate_name};
 use crate::pack::{ObjectKind, PackError, PackSet};
-use crate::repo::{RepoError, Repository};
+use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::store::{Store, StoreError};
 use crate::text::{escape, thousands};
@@ -108,13 +108,35 @@ pub enum ImportError {
         escape(path, false)
     )]
     LfsPointer { commit: String, path: String },
+    /// The import stopped after it began the project: nothing is committed, and the `.bolt` it
+    /// began stays, so running the import again can finish the job (decision 041).
+    #[error(transparent)]
+    Unfinished(Box<ImportError>),
 }
+
+/// How an import's hints begin when it stopped before it wrote anything.
+const NOTHING_CHANGED: &str = "Nothing was changed.";
 
 impl ImportError {
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
+            ImportError::Unfinished(e) => {
+                let kept = "Nothing was committed. Bolt kept the .bolt folder it began here, so \
+                            that running bolt import again can finish the import from what it \
+                            stored; or delete that folder.";
+                let advice = e
+                    .hint()
+                    .map(|hint| match hint.strip_prefix(NOTHING_CHANGED) {
+                        Some(rest) => rest.trim_start().to_owned(),
+                        None => hint,
+                    });
+                Some(match advice {
+                    Some(advice) if !advice.is_empty() => format!("{advice}\n{kept}"),
+                    _ => kept.to_owned(),
+                })
+            }
             ImportError::Git(e) => e.hint(),
             ImportError::Repo(e) => e.hint(),
             ImportError::Store(_) | ImportError::Pack(_) => None,
@@ -156,9 +178,38 @@ fn not_utf8_message(first: &[(String, String)], count: u64) -> String {
 /// Imports the Git repository whose work tree is `root` into a new Bolt project there (decisions
 /// 033, 034 and 040): every commit its branches, server branches, tags and `HEAD` reach becomes a
 /// save. Everything that only reads comes first, so most refusals come before `.bolt` is made.
-/// Nothing is committed unless all of it works, and running it again after a failure finishes the
-/// job, reusing what was stored once it is checked (decision 041).
-pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, ImportError> {
+/// The project goes into `opened` as soon as it is begun, so a caller can show what its store
+/// noticed even if the import then fails. Nothing is committed unless all of it works, and running
+/// it again after a failure finishes the job, reusing what was stored once it is checked
+/// (decision 041).
+pub fn import_git(
+    root: &Path,
+    req: &mut ImportRequest,
+    opened: &mut Option<Repository>,
+) -> Result<ImportReport, ImportError> {
+    let plan = plan(root)?;
+    let (repo, lock) = Repository::begin(root).map_err(starting)?;
+    let repo = opened.insert(repo);
+    carry_out(plan, repo, &lock, req).map_err(|e| ImportError::Unfinished(Box::new(e)))
+}
+
+/// What the steps that only read worked out for the steps that write.
+struct Plan {
+    git: git::Repo,
+    names: Names,
+    /// The first refs left out, and how many there are.
+    skipped_refs: Vec<String>,
+    skipped_ref_count: u64,
+    /// Every commit to convert, after its parents, with its parents in its own order.
+    order: Vec<(GitId, Vec<GitId>)>,
+    /// The line of Git's current branch, if `HEAD` is on one, and `HEAD`'s commit.
+    head_line: Option<String>,
+    head_commit: GitId,
+    grafts: bool,
+}
+
+/// The steps that only read, so that the refusals they make come before anything is written.
+fn plan(root: &Path) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(starting)?;
     let git = git::Repo::open(root)?;
     let refs = git.refs()?;
@@ -193,8 +244,37 @@ pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, 
     }
     let order = in_order(&git, &roots)?;
     let grafts = git.has_grafts()?;
+    let skipped_refs = refs.other.iter().take(MAX_LISTED);
+    Ok(Plan {
+        skipped_refs: skipped_refs.map(|name| lossy(name)).collect(),
+        skipped_ref_count: refs.other.len() as u64,
+        git,
+        names,
+        order,
+        head_line,
+        head_commit,
+        grafts,
+    })
+}
 
-    let (mut repo, lock) = Repository::begin(root).map_err(starting)?;
+/// The steps that write, into the project `repo` begun under `lock`: every commit, the tags, the
+/// records the state points to, and the first diary entry, committed last.
+fn carry_out(
+    plan: Plan,
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    req: &mut ImportRequest,
+) -> Result<ImportReport, ImportError> {
+    let Plan {
+        git,
+        names,
+        skipped_refs,
+        skipped_ref_count,
+        order,
+        head_line,
+        head_commit,
+        grafts,
+    } = plan;
     let mut packs = repo.new_packs()?;
     let mut converter = Converter::new(&git, repo.store(), &mut packs);
     let total = order.len() as u64;
@@ -274,13 +354,8 @@ pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, 
         tags: tag_list.tags.len() as u64,
         position: position.clone(),
         renamed: names.renamed,
-        skipped_refs: refs
-            .other
-            .iter()
-            .take(MAX_LISTED)
-            .map(|name| lossy(name))
-            .collect(),
-        skipped_ref_count: refs.other.len() as u64,
+        skipped_refs,
+        skipped_ref_count,
         skipped_tags,
         skipped_entries: counts.skipped_entries,
         skipped_entry_count: counts.skipped_entry_count,
@@ -302,7 +377,7 @@ pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, 
         },
         safety_copies: Vec::new(),
     };
-    repo.commit_first(&lock, packs, &entry)?;
+    repo.commit_first(lock, packs, &entry)?;
     report.warnings.extend(repo.store().warnings());
     Ok(report)
 }
@@ -627,6 +702,7 @@ mod tests {
                 command: "import",
                 progress: &mut |_, _| {},
             },
+            &mut None,
         )
     }
 
@@ -817,6 +893,7 @@ mod tests {
                 std::fs::remove_file(&later).unwrap();
             }
         };
+        let mut opened = None;
         let result = import_git(
             dir.path(),
             &mut ImportRequest {
@@ -824,12 +901,29 @@ mod tests {
                 command: "import",
                 progress: &mut progress,
             },
+            &mut opened,
         );
+        let Err(ImportError::Unfinished(e)) = result else {
+            panic!("{result:?}");
+        };
         assert!(
-            matches!(result, Err(ImportError::Git(GitError::Changed { .. }))),
-            "{result:?}"
+            matches!(*e, ImportError::Git(GitError::Changed { .. })),
+            "{e:?}"
         );
         assert!(!later.exists(), "the pack was removed");
         assert!(!dir.path().join(".bolt/format").exists());
+        // The `.bolt` begun stays, for a run to finish, and the hint says so instead of saying
+        // that nothing was changed. The caller holds the project, to show what its store noticed.
+        let hint = ImportError::Unfinished(e).hint().unwrap();
+        assert!(
+            hint.starts_with("Run bolt import again once Git has finished."),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("Bolt kept the .bolt folder it began"),
+            "{hint}"
+        );
+        assert!(!hint.contains("Nothing was changed"), "{hint}");
+        assert!(opened.is_some());
     }
 }

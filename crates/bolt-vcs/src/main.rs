@@ -157,7 +157,7 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     Ok(())
 }
 
-fn import(json: bool) -> Result<(), Failure> {
+fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
     let who = now_person(&load_identity(Some(&root))?);
     let mut progress = output::Progress::new("Importing commits");
@@ -168,6 +168,7 @@ fn import(json: bool) -> Result<(), Failure> {
             command: "import",
             progress: &mut |done, total| progress.update(done, total),
         },
+        opened,
     );
     progress.finish();
     let report = imported?;
@@ -184,9 +185,9 @@ fn import(json: bool) -> Result<(), Failure> {
             Position::OnLine(line) => format!("You're on line {}.", escape(line, false)),
             Position::AtSave(id) => {
                 // By change ID, as everywhere else; by fingerprint if the save can't be read now.
-                let short = Repository::open(&root).ok().and_then(|repo| {
+                let short = opened.as_ref().and_then(|repo| {
                     let save = repo.store().save(id, repo.signatures_allowed()).ok()?;
-                    Some(short_or_whole(&repo, id, &save.change_id, &mut warnings))
+                    Some(short_or_whole(repo, id, &save.change_id, &mut warnings))
                 });
                 let short = short.unwrap_or_else(|| id.to_hex());
                 format!("You're at save {short}, where Git's HEAD was detached.")
@@ -619,7 +620,7 @@ fn main() -> ExitCode {
     let mut opened = None;
     let result = match cli.command {
         Command::Start => start(cli.json, &mut opened),
-        Command::Import => import(cli.json),
+        Command::Import => import(cli.json, &mut opened),
         Command::Save { message } => save(cli.json, message, &mut opened),
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),

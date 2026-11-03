@@ -62,6 +62,7 @@ fn import(dir: &Path) -> Result<ImportReport, ImportError> {
             command: "import",
             progress: &mut |_, _| {},
         },
+        &mut None,
     )
 }
 
