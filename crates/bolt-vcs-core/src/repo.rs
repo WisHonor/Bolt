@@ -661,7 +661,11 @@ impl Repository {
                 return Err(damaged(format!(".bolt/{name} is missing")));
             }
         }
-        // These hold nothing worth keeping, so a missing one is made again.
+        // The head first: its pack was in the store before the head pointed at it.
+        let head = read_head(&bolt)?;
+        let store = Store::open(&packs)?;
+        // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
+        // project found damaged is left as it was.
         for dir in [&tmp, &bolt.join("cache")] {
             if let Err(e) = safe_fs::check_real_dir(dir)
                 && e.kind() == io::ErrorKind::NotFound
@@ -670,9 +674,6 @@ impl Repository {
                 safe_fs::check_real_dir(dir).map_err(refused)?;
             }
         }
-        // The head first: its pack was in the store before the head pointed at it.
-        let head = read_head(&bolt)?;
-        let store = Store::open(&packs)?;
         let repo = Repository {
             root: root.to_owned(),
             bolt,
@@ -936,6 +937,30 @@ mod tests {
             // The project works again: commands write through `tmp/`.
             let first = commit(&mut repo, &entry(1)).unwrap();
             assert_eq!(Repository::open(dir.path()).unwrap().head().unwrap(), first);
+        }
+    }
+
+    /// The hint for damage says nothing was changed, so a missing `tmp` or `cache` isn't made
+    /// before the project is found damaged.
+    #[test]
+    fn a_damaged_project_is_left_as_found() {
+        for spoil in ["state/head", "store/packs/00.pack"] {
+            let (dir, repo) = project();
+            drop(repo);
+            let bolt = dir.path().join(".bolt");
+            std::fs::write(bolt.join(spoil), b"not what Bolt wrote").unwrap();
+            for name in ["tmp", "cache"] {
+                std::fs::remove_dir_all(bolt.join(name)).unwrap();
+            }
+            let opened = Repository::open(dir.path());
+            assert!(
+                matches!(opened, Err(RepoError::Damaged { .. })),
+                "{spoil}: {:?}",
+                opened.map(|_| ())
+            );
+            for name in ["tmp", "cache"] {
+                assert!(!bolt.join(name).exists(), "{spoil}: {name} was made again");
+            }
         }
     }
 
