@@ -299,12 +299,13 @@ pub fn save_folder(
 fn kept_warning(count: usize) -> Warning {
     let message = if count == 1 {
         "Kept 1 entry as it was in the last save, because this computer can't hold it as it is \
-         (a project link, or a name it can't create)."
+         (a project link, a name it can't create, or a link Git wrote as a file)."
             .to_owned()
     } else {
         format!(
             "Kept {count} entries as they were in the last save, because this computer can't \
-             hold them as they are (project links, or names it can't create)."
+             hold them as they are (project links, names it can't create, or links Git wrote as \
+             files)."
         )
     };
     Warning::new(warning::KEPT_AS_THEY_WERE, message)

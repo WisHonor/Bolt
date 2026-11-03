@@ -1626,11 +1626,11 @@ mod tests {
         let warnings = warnings_of(&saved).to_vec();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].kind, "kept_as_they_were");
-        // It promises nothing a later version may or may not do.
+        // It names every kind it keeps, and promises nothing a later version may or may not do.
         assert_eq!(
             warnings[0].message,
             "Kept 3 entries as they were in the last save, because this computer can't hold them \
-             as they are (project links, or names it can't create)."
+             as they are (project links, names it can't create, or links Git wrote as files)."
         );
         // Said again when nothing changed, since they are still kept.
         let again = save_now(&mut repo).unwrap();
@@ -1904,6 +1904,28 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_folder_in_a_gone_folder_counts_its_depth_against_the_limit() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[
+                ("gone/Docs/a/x", EntryKind::File, b"x"),
+                ("gone/docs/y", EntryKind::File, b"y"),
+            ],
+        );
+        // None of it is on disk, and `gone/Docs/a` is three levels down.
+        let walk_within = |levels| {
+            let limits = SaveLimits::new(levels, MAX_SAVE_ENTRIES);
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+        };
+        assert!(walk_within(3).is_ok());
+        let Err(SaveError::TooLarge { detail }) = walk_within(2) else {
+            panic!("a kept folder three levels deep was accepted under a limit of 2");
+        };
+        assert!(detail.contains("more than 2 levels"), "{detail}");
+    }
+
+    #[test]
     fn a_damaged_listing_in_a_gone_folder_stops_the_save() {
         let (dir, mut repo) = project();
         let base = plant_save(&mut repo, &[("gone/x/sub", EntryKind::ProjectLink, COMMIT)]);
@@ -1933,6 +1955,25 @@ mod tests {
         let hint = err.hint().unwrap();
         assert!(hint.contains("Rename or move libs"), "{hint}");
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn something_in_the_way_further_down_is_named_with_its_whole_path() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[("vendor/libs/a/b/sub", EntryKind::ProjectLink, COMMIT)],
+        );
+        // `vendor` is still a folder; the folder that leads to the link is a file now.
+        write(dir.path(), "vendor/libs", b"x");
+        let err = save_now(&mut repo).unwrap_err();
+        let SaveError::InTheWay { path, kept } = &err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(
+            (path.as_str(), kept.as_str()),
+            ("vendor/libs", "vendor/libs/a/b/sub")
+        );
     }
 
     #[test]
