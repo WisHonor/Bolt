@@ -702,6 +702,34 @@ mod tests {
         }
     }
 
+    /// Decision 033's limits on lines, read from a real `packed-refs`, stop the import before
+    /// anything is written.
+    #[test]
+    fn more_lines_than_bolt_holds_stop_the_import_before_anything_is_written() {
+        for (prefix, refusal) in [
+            ("refs/heads/b", "more than 100,000 branches"),
+            (
+                "refs/remotes/origin/b",
+                "server `origin` has more than 100,000 branches",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (git, commit) = one_commit(dir.path());
+            let mut packed = "# pack-refs with: peeled fully-peeled sorted \n".to_owned();
+            for n in 0..=100_000 {
+                let _ = writeln!(packed, "{} {prefix}{n:06}", commit.to_hex());
+            }
+            git.packed_refs(&packed);
+            match import(dir.path()) {
+                Err(ImportError::Git(e @ GitError::TooManyRefs { .. })) => {
+                    assert!(e.to_string().contains(refusal), "{e}");
+                }
+                other => panic!("{refusal}: {:?}", other.map(|_| ())),
+            }
+            assert!(!dir.path().join(".bolt").exists(), "{refusal}");
+        }
+    }
+
     #[test]
     fn bolt_folders_past_the_first_100_are_counted() {
         for (folders, last) in [

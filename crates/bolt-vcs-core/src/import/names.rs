@@ -396,19 +396,31 @@ mod tests {
     #[test]
     fn refs_past_bolts_limits_stop_the_import() {
         let id = GitId::from_hex(HashKind::Sha1, &"1".repeat(40)).unwrap();
-        let refs = |servers: usize, tags: usize| Refs {
+        // So many branches, servers each with so many lines, and tags.
+        let refs = |branches: usize, servers: usize, lines: usize, tags: usize| Refs {
             head: Head::Detached(id),
-            branches: Vec::new(),
+            branches: (0..branches)
+                .map(|n| (format!("b{n:06}").into_bytes(), id))
+                .collect(),
             servers: (0..servers)
-                .map(|n| (format!("s{n:03}").into_bytes(), b"main".to_vec(), id))
+                .flat_map(|s| {
+                    let server = format!("s{s:03}").into_bytes();
+                    (0..lines).map(move |n| (server.clone(), format!("l{n:06}").into_bytes(), id))
+                })
                 .collect(),
             tags: (0..tags)
                 .map(|n| (format!("t{n:06}").into_bytes(), id))
                 .collect(),
             other: Vec::new(),
         };
-        assert!(Names::of(&refs(64, 100_000)).is_ok());
-        for (refs, limit) in [(refs(65, 0), "64"), (refs(0, 100_001), "100,000 tags")] {
+        assert!(Names::of(&refs(100_000, 64, 1, 100_000)).is_ok());
+        assert!(Names::of(&refs(0, 1, 100_000, 0)).is_ok());
+        for (refs, limit) in [
+            (refs(100_001, 0, 0, 0), "100,000 branches"),
+            (refs(0, 65, 1, 0), "64"),
+            (refs(0, 1, 100_001, 0), "100,000 lines for one server"),
+            (refs(0, 0, 0, 100_001), "100,000 tags"),
+        ] {
             match Names::of(&refs) {
                 Err(ImportError::Git(e @ GitError::TooManyRefs { .. })) => {
                     assert!(e.to_string().contains(limit), "{e}");
