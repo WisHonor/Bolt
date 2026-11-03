@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{GitId, HashKind, ObjectType, object_header, object_id};
+use super::id::object_header;
+use super::{GitId, HashKind, ObjectType, object_id};
 
 /// A Git repository a test is writing, at `<dir>/.git`.
 pub struct Craft {
