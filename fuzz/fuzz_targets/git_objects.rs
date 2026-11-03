@@ -1,5 +1,8 @@
 #![no_main]
-use bolt_core::git::{HashKind, is_lfs_pointer, parse_commit, parse_person, parse_tag, parse_tree};
+use bolt_core::git::{
+    HashKind, is_lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person, parse_tag,
+    parse_tree,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -10,4 +13,5 @@ fuzz_target!(|data: &[u8]| {
     }
     let _ = parse_person(data);
     let _ = is_lfs_pointer(data);
+    let _ = looks_like_lfs_pointer(data);
 });
