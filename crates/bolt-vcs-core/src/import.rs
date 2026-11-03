@@ -4,13 +4,14 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io;
 
 use encoding_rs::{Encoding, UTF_8};
 
 use crate::diary::{self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES};
+use crate::encoding::DecodeError;
 use crate::git::{
     self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, parse_commit, parse_person,
     parse_tag, parse_tree, rebuild_commit, shown,
@@ -268,9 +269,10 @@ impl io::Write for Hashing<'_> {
     }
 }
 
-/// Converts one Git repository's objects into one command's packs. The packs only know their own
-/// pack's objects and the store only what was committed before, so memo tables keep each Git
-/// object to one conversion.
+/// Converts one Git repository's objects into one command's packs. The packs only know the
+/// objects of the pack being written, and the store only what was committed before, so memo
+/// tables keep each Git object to one conversion, and a set of the records stored keeps a record
+/// two Git objects make alike to one copy.
 pub struct Converter<'r> {
     git: &'r git::Repo,
     store: &'r Store,
@@ -283,6 +285,8 @@ pub struct Converter<'r> {
     trees: HashMap<GitId, Folder>,
     /// Each commit's save.
     saves: HashMap<GitId, Id>,
+    /// Every record this converter stored, or found stored.
+    records: HashSet<Id>,
     counts: Counts,
     /// The first names met that aren't UTF-8, by commit (hex) and path, and how many in all.
     not_utf8: Vec<(String, String)>,
@@ -306,6 +310,7 @@ impl<'r> Converter<'r> {
             links: HashMap::new(),
             trees: HashMap::new(),
             saves: HashMap::new(),
+            records: HashSet::new(),
             counts: Counts::default(),
             not_utf8: Vec::new(),
             not_utf8_count: 0,
@@ -361,6 +366,15 @@ impl<'r> Converter<'r> {
                 c.parents.len()
             )));
         }
+        // Another commit's save in a parent's place would export as another commit.
+        for (save, git) in parent_saves.iter().zip(&c.parents) {
+            if self.saves.get(git).is_some_and(|own| own != save) {
+                return Err(bug(format!(
+                    "Bolt was given another save than its own for parent `{}` of commit `{hex}`",
+                    git.to_hex()
+                )));
+            }
+        }
         // Git may list a parent twice and a save can't; `git-header` keeps the commit exact.
         let (mut parents, mut git_parents) = (Vec::new(), Vec::new());
         for (save, git) in parent_saves.iter().zip(&c.parents) {
@@ -396,7 +410,11 @@ impl<'r> Converter<'r> {
         }
         let encoded = save.encode();
         // Refuse a save that wouldn't read back before storing it.
-        Save::decode(&encoded, false).map_err(StoreError::from)?;
+        Save::decode(&encoded, false).map_err(|e| {
+            bug(format!(
+                "Bolt made a save of commit `{hex}` it can't read back ({e})"
+            ))
+        })?;
         let save_id = self.put(ObjectKind::Save, &encoded)?;
         if !root.exact {
             self.counts.inexact_commits = self.counts.inexact_commits.saturating_add(1);
@@ -659,9 +677,15 @@ impl<'r> Converter<'r> {
     /// Stores the listing of a folder whose entries are all converted, and remembers it for
     /// wherever its Git tree comes again.
     fn close(&mut self, frame: Frame) -> Result<(String, Folder), ImportError> {
-        let listing = Listing::new(frame.entries).map_err(StoreError::from)?;
+        let made = |e: DecodeError| {
+            bug(format!(
+                "Bolt made a listing of tree `{}` it can't read back ({e})",
+                frame.git.to_hex()
+            ))
+        };
+        let listing = Listing::new(frame.entries).map_err(made)?;
         let encoded = listing.encode();
-        Listing::decode(&encoded).map_err(StoreError::from)?;
+        Listing::decode(&encoded).map_err(made)?;
         let done = Folder {
             listing: self.put(ObjectKind::FolderListing, &encoded)?,
             total: frame.total,
@@ -693,7 +717,12 @@ impl<'r> Converter<'r> {
             return Ok(*id);
         }
         let encoded = ProjectLink::submodule(commit.as_bytes()).encode();
-        ProjectLink::decode(&encoded).map_err(StoreError::from)?;
+        ProjectLink::decode(&encoded).map_err(|e| {
+            bug(format!(
+                "Bolt made a link to submodule commit `{}` it can't read back ({e})",
+                commit.to_hex()
+            ))
+        })?;
         let id = self.put(ObjectKind::ProjectLink, &encoded)?;
         self.links.insert(*commit, id);
         Ok(id)
@@ -756,19 +785,28 @@ impl<'r> Converter<'r> {
         Ok((content, size))
     }
 
-    /// Stores an object unless this pack holds it or the store has a good copy, and returns its
-    /// ID.
+    /// Stores an object unless this converter stored it already, this pack holds it or the store
+    /// has a good copy, and returns its ID.
     fn put(&mut self, kind: ObjectKind, bytes: &[u8]) -> Result<Id, ImportError> {
         let id = match kind.flavor() {
             Some(flavor) => hash_record(flavor, bytes),
             None => hash_content(bytes),
         };
+        // Content is stored once through its blob's Git ID; a record can come from two Git
+        // objects, such as two trees whose modes Bolt reads alike.
+        let record = kind != ObjectKind::Content;
+        if record && self.records.contains(&id) {
+            return Ok(id);
+        }
         if !self.packs.contains(&id) && !self.store.has_good_copy(&id, kind, bytes.len() as u64)? {
-            if kind == ObjectKind::Content {
-                self.packs.add_content(bytes)?;
-            } else {
+            if record {
                 self.packs.add_record(kind, bytes)?;
+            } else {
+                self.packs.add_content(bytes)?;
             }
+        }
+        if record {
+            self.records.insert(id);
         }
         Ok(id)
     }
@@ -856,7 +894,7 @@ mod tests {
     use super::*;
     use crate::git::craft::{Craft, PackEntry};
     use crate::git::{HashKind, object_id};
-    use crate::pack::PackReader;
+    use crate::pack::{PackReader, WRITER_PACK_OBJECTS};
     use crate::save::Person;
     use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
     use std::fs;
@@ -874,12 +912,22 @@ mod tests {
     /// Runs `run` with a converter from the Git repository at `dir` into a fresh store at
     /// `dir/<name>`, and returns what it returned and the store holding what it wrote.
     fn convert<R>(dir: &Path, name: &str, run: impl FnOnce(&mut Converter<'_>) -> R) -> (R, Store) {
+        convert_in_packs_of(WRITER_PACK_OBJECTS, dir, name, run)
+    }
+
+    /// `convert`, starting a new pack every `limit` objects.
+    fn convert_in_packs_of<R>(
+        limit: u64,
+        dir: &Path,
+        name: &str,
+        run: impl FnOnce(&mut Converter<'_>) -> R,
+    ) -> (R, Store) {
         let git = git::Repo::open(dir).unwrap();
         let (tmp, packs_dir) = (dir.join(name).join("tmp"), dir.join(name).join("packs"));
         fs::create_dir_all(&tmp).unwrap();
         fs::create_dir_all(&packs_dir).unwrap();
         let store = Store::open(&packs_dir).unwrap();
-        let mut packs = PackSet::new(&tmp, &packs_dir).unwrap();
+        let mut packs = PackSet::with_limit(&tmp, &packs_dir, limit).unwrap();
         let result = run(&mut Converter::new(&git, &store, &mut packs));
         packs.finish().unwrap();
         (result, Store::open(&packs_dir).unwrap())
@@ -1488,6 +1536,49 @@ mod tests {
         assert_eq!(store.save(&saves[0], false).unwrap().root, save.root);
         let root = store.listing(&save.root).unwrap();
         assert_eq!(content(&store, &root.get("a").unwrap().id), b"a");
+    }
+
+    #[test]
+    fn parent_saves_must_be_the_parents_own() {
+        let (dir, git) = repo(Sha1);
+        let tree = git.tree(&[]);
+        let first = git.commit(&commit_bytes(&tree, &[], "", b"first\n"));
+        let other = git.commit(&commit_bytes(&tree, &[], "", b"other\n"));
+        let child = git.commit(&commit_bytes(&tree, &[first], "", b"child\n"));
+        // Another commit's save in a parent's place would export as another commit.
+        let (wrong, _) = convert(dir.path(), "a", |c| {
+            c.commit(&first, &[]).unwrap();
+            let other = c.commit(&other, &[]).unwrap();
+            c.commit(&child, &[other])
+        });
+        match wrong {
+            Err(ImportError::Stop { what, .. }) => {
+                assert!(what.contains(&child.to_hex()), "{what}");
+                assert!(what.contains(&first.to_hex()), "{what}");
+                assert!(what.contains("report"), "{what}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A parent this converter hasn't met is taken as given.
+        let (unknown, _) = convert(dir.path(), "b", |c| c.commit(&child, &[Id([7; 32])]));
+        assert!(unknown.is_ok(), "{unknown:?}");
+    }
+
+    #[test]
+    fn a_listing_two_trees_make_is_stored_once_across_packs() {
+        let (dir, git) = repo(Sha1);
+        let file = blob(&git, b"x");
+        // Two Git trees, one listing: Bolt reads both modes as a plain file.
+        let standard = commit_of(&git, &[(b"100644", b"a", file)]);
+        let group_writable = commit_of(&git, &[(b"100664", b"a", file)]);
+        // Two objects a pack: the first listing's pack is in the store by the second tree. (Not
+        // one: a pack of the listing alone again would have the same name, and replace it.)
+        let (saves, store) = convert_in_packs_of(2, dir.path(), "a", |c| {
+            [standard, group_writable].map(|id| c.commit(&id, &[]).unwrap())
+        });
+        assert_eq!(stored(dir.path(), "a", ObjectKind::FolderListing), 1);
+        let roots = saves.map(|save| store.save(&save, false).unwrap().root);
+        assert_eq!(roots[0], roots[1]);
     }
 
     #[test]
