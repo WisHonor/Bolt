@@ -39,6 +39,8 @@ The review of Git's published vulnerabilities (2026-11-02) also left write-out c
 | Milestone 3, before v0.1 | The 255-byte name limit ([decision 035](../decisions/035-git-names-bolt-cant-take.md)). Windows allows 255 UTF-16 units, up to 765 bytes in UTF-8, so a Windows project can hold names Bolt refuses, and an import stops at them. Decide it with the path-length limit above. |
 | When real projects need it | Opt-in line-ending conversion for chosen files ([decision 039](../decisions/039-first-save-after-import.md)). Until then the first save after an import stops at files Git converted, and `bolt save --accept-crlf` saves them as they are. |
 | Before v0.1 | The memory of an import's memo tables. An import remembers each Git object it has converted, so its memory grows with the repository. git/git (85,977 commits) peaked at 583 MiB on Linux ([testing.md](../testing.md) §3). Measure larger repositories, and build a disk-backed map if a real repository needs one. |
+| Before format 1 freezes at v0.1 | Store each Git tag object once and have tags refer to it ([decision 043](../decisions/043-red-team-m2-rulings.md)), a format change. Each tag keeps its tag objects' bytes today, so many tags through one big tag object fill the tag list's 512 MiB from a tiny repository; the import holds the list only once, but stores every tag's copy. |
+| Before v0.1 | Sparse checkouts set up where Bolt doesn't look ([decision 043](../decisions/043-red-team-m2-rulings.md)): through a config include, which only gets a warning, or in the user's own Git config. Checking the effect instead would cover every way: the first save after an import would stop when files of the imported save are missing from disk, as it stops for line endings. |
 
 ## For the owner to decide
 
