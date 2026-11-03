@@ -173,20 +173,19 @@ fn lfs_message(commit: &str, path: &str, lookalike: bool) -> String {
     }
 }
 
-/// What to do about a Git LFS pointer, or about a file that only looks like one.
+/// What to do about a Git LFS pointer, or about a file that only looks like one. `git lfs migrate
+/// export` reads files with the parser that rejects a lookalike, so it can't convert one.
 fn lfs_hint(lookalike: bool) -> String {
-    let export = "turn the Git LFS files back into ordinary Git files in a copy of the \
-                  repository with `git lfs migrate export --everything --include=\"*\"`, which \
-                  rewrites its history, then run bolt import in that copy";
     if lookalike {
-        format!(
-            "Nothing was changed. If it is a Git LFS file, {export}. If it isn't, rewrite the Git \
-             history that holds it so that it no longer looks like one, then run bolt import \
-             again."
-        )
+        "Nothing was changed. Git LFS won't convert it either, since it doesn't read it as a \
+         pointer: rewrite the Git history that holds it, with the real file in its place if it \
+         stands for one, then run bolt import again."
     } else {
-        format!("Nothing was changed. To import now, {export}.")
+        "Nothing was changed. To import now, turn the Git LFS files back into ordinary Git files \
+         in a copy of the repository with `git lfs migrate export --everything --include=\"*\"`, \
+         which rewrites its history, then run bolt import in that copy."
     }
+    .to_owned()
 }
 
 fn not_utf8_message(first: &[(String, String)], count: u64) -> String {

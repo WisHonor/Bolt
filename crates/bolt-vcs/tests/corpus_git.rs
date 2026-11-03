@@ -14,10 +14,12 @@ use bolt_core::diff::for_each_change;
 use bolt_core::git::craft::{Craft, PackEntry, delta, entry_header, zlib};
 use bolt_core::git::{GitError, GitId, HashKind, ObjectType, object_id};
 use bolt_core::history::current_save;
+use bolt_core::id::Id;
 use bolt_core::import::{ImportError, ImportReport, ImportRequest, import_git};
 use bolt_core::link::ProjectLink;
 use bolt_core::listing::EntryKind;
 use bolt_core::pack::ObjectKind;
+use bolt_core::repo::Repository;
 use bolt_core::save::Person;
 use bolt_core::store::StoreError;
 use bolt_core::text::escape;
@@ -112,12 +114,15 @@ fn import_here(dir: &Path) -> Result<ImportReport, ImportError> {
 /// `<kind> <path>`.
 fn saved(env: &Env) -> Vec<String> {
     let (repo, _) = env.state();
-    let save = repo
-        .store()
-        .save(&current_save(&repo).unwrap(), false)
-        .unwrap();
+    let save = current_save(&repo).unwrap();
+    files_of(&repo, &save)
+}
+
+/// `saved`, for the save `save`.
+fn files_of(repo: &Repository, save: &Id) -> Vec<String> {
+    let root = repo.store().save(save, false).unwrap().root;
     let mut paths = Vec::new();
-    for_each_change(repo.store(), None, save.root, |c| {
+    for_each_change(repo.store(), None, root, |c| {
         paths.push(format!("{} {}", c.kind.as_str(), c.path));
         Ok::<_, StoreError>(())
     })
@@ -172,10 +177,10 @@ fn assert_names(err: &str, before: &str, path: &Path, after: &str) {
 
 const BROKEN: &str = "Bolt can't import this Git repository: ";
 
-/// The hint for a link or special file in a Git repository, which `git fsck` wouldn't mind.
-const NOT_PLAIN: &str = "\nhint: Nothing was changed. Bolt never follows links in a Git \
-                         repository, nor reads special files there: put what a link points to \
-                         in its place, or import a fresh clone.\n";
+/// The hint for what isn't the plain file or real folder Git keeps in a repository.
+const NOT_PLAIN: &str = "\nhint: Nothing was changed. Bolt reads only plain files and real \
+                         folders in a Git repository, and never follows links there: put what a \
+                         link points to in its place, or import a fresh clone.\n";
 
 /// Makes `link` a link to the folder `target`: on Windows a junction, which needs no rights.
 fn link_folder(target: &Path, link: &Path) {
@@ -452,9 +457,7 @@ fn modes_git_no_longer_writes_are_imported_as_inexact() {
     assert_eq!(saved(&env), ["file shared.txt"]);
     let (repo, state) = env.state();
     let two = repo.store().save(&state.lines["main"], false).unwrap();
-    let one = repo.store().save(&two.parents[0], false).unwrap();
-    let old = repo.store().listing(&one.root).unwrap();
-    assert_eq!(old.get("old").unwrap().kind, EntryKind::Folder);
+    assert_eq!(files_of(&repo, &two.parents[0]), ["file old/inner.txt"]);
 }
 
 /// A pack of `levels` trees, each holding the one below as `a`; returns the top one.

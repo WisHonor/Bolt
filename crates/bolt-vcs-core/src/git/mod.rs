@@ -157,8 +157,9 @@ pub enum GitError {
     /// Damaged or hostile data; `what` names the file or object.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     Broken { what: String },
-    /// A link or special file where Git keeps a plain file or folder, or a file where it keeps a
-    /// folder, which Bolt never reads through and `git fsck` doesn't mind; `what` names it.
+    /// Something other than the plain file or real folder Git keeps there: a link, which `git
+    /// fsck` follows without a word, a special file, a folder where a file belongs or a file where
+    /// a folder does. Bolt reads none of them; `what` names it.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     NotPlain { what: String },
     /// An object Git reads, but past a limit or a rule of Bolt's that Git doesn't have, so
@@ -198,9 +199,9 @@ impl GitError {
                      fresh clone of it."
                 }
                 GitError::NotPlain { .. } => {
-                    "Nothing was changed. Bolt never follows links in a Git repository, nor reads \
-                     special files there: put what a link points to in its place, or import a \
-                     fresh clone."
+                    "Nothing was changed. Bolt reads only plain files and real folders in a Git \
+                     repository, and never follows links there: put what a link points to in its \
+                     place, or import a fresh clone."
                 }
                 GitError::Unimportable { .. } => {
                     "Nothing was changed. Rewrite the Git history that holds it, then run bolt \
@@ -292,9 +293,9 @@ fn trim_start(mut text: &[u8]) -> &[u8] {
     text
 }
 
-/// `safe_fs`'s refusal of a link or special file where Git keeps a plain one is `NotPlain`, and of
-/// a file past its cap `Broken`; a file gone while Bolt read is `Changed`, anything else `Io`.
-/// Each names `path`.
+/// `safe_fs`'s refusal of anything but the plain file or real folder Git keeps there (a link, a
+/// special file, a folder for a file or a file for a folder) is `NotPlain`, and of a file past its
+/// cap `Broken`; a file gone while Bolt read is `Changed`, anything else `Io`. Each names `path`.
 fn read_error(path: &Path, e: io::Error) -> GitError {
     match e.kind() {
         io::ErrorKind::InvalidInput => GitError::NotPlain {
@@ -346,7 +347,7 @@ fn exists(path: &Path) -> Result<bool, GitError> {
     }
 }
 
-/// Whether `path` is a real folder; `false` if nothing is there, `Broken` if a link or file is.
+/// Whether `path` is a real folder; `false` if nothing is there, `NotPlain` if a link or file is.
 fn real_dir(path: &Path) -> Result<bool, GitError> {
     match safe_fs::check_real_dir(path) {
         Ok(()) => Ok(true),
@@ -875,8 +876,9 @@ mod tests {
         }
     }
 
-    /// `safe_fs` refusing a link or special file is a file that isn't plain, and one past its cap
-    /// damage; a file gone mid-read is Git at work, the rest is I/O. Each names the path once.
+    /// `safe_fs` refusing what isn't the plain file or real folder Git keeps is `NotPlain`, and a
+    /// file past its cap damage; a file gone mid-read is Git at work, the rest is I/O. Each names
+    /// the path once.
     #[test]
     fn read_errors_are_told_apart() {
         let path = Path::new("refs/heads/main");

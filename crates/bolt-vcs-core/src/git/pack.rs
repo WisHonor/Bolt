@@ -988,7 +988,8 @@ mod tests {
             let message = broken(open(&dir).read(&id(Blob, b"one")));
             assert!(message.contains(expected), "{what}: {message}");
         }
-        // A pack that is a folder isn't damage `git fsck` would find.
+        // A folder where the pack belongs isn't a plain file, which Bolt refuses as it refuses a
+        // link there.
         let (dir, pack, _) = two();
         fs::remove_file(&pack).unwrap();
         fs::create_dir(&pack).unwrap();

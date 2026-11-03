@@ -1880,9 +1880,14 @@ mod tests {
                 other => panic!("{other:?}"),
             }
             assert!(e.to_string().contains(says), "{e}");
+            // Git LFS's own tools reject a lookalike as Git LFS does.
             let hint = e.hint().unwrap();
-            assert!(hint.contains("git lfs migrate export"), "{hint}");
-            assert_eq!(hint.contains("If it isn't,"), is_lookalike, "{hint}");
+            assert_eq!(
+                hint.contains("git lfs migrate export"),
+                !is_lookalike,
+                "{hint}"
+            );
+            assert_eq!(hint.contains("won't convert it"), is_lookalike, "{hint}");
         }
     }
 
