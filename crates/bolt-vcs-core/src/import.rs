@@ -211,8 +211,6 @@ struct Item {
 struct Walk<'c> {
     commit: &'c str,
     limits: SaveLimits,
-    not_utf8: Vec<(String, String)>,
-    not_utf8_count: u64,
 }
 
 impl Walk<'_> {
@@ -234,25 +232,6 @@ impl Walk<'_> {
             "commit `{}` can't become one save, because {why}",
             self.commit
         ))
-    }
-
-    fn not_utf8(&mut self, path: impl FnOnce() -> String) {
-        self.not_utf8_count = self.not_utf8_count.saturating_add(1);
-        if self.not_utf8.len() < MAX_LISTED {
-            self.not_utf8
-                .push((self.commit.to_owned(), escape(&path(), false)));
-        }
-    }
-
-    /// The walk's result, unless it met names that aren't UTF-8.
-    fn finish(self, done: Folder) -> Result<Folder, ImportError> {
-        if self.not_utf8_count > 0 {
-            return Err(ImportError::NotUtf8Names {
-                first: self.not_utf8,
-                count: self.not_utf8_count,
-            });
-        }
-        Ok(done)
     }
 }
 
@@ -286,6 +265,9 @@ pub struct Converter<'r> {
     /// Each commit's save.
     saves: HashMap<GitId, Id>,
     counts: Counts,
+    /// The first names met that aren't UTF-8, by commit (hex) and path, and how many in all.
+    not_utf8: Vec<(String, String)>,
+    not_utf8_count: u64,
 }
 
 impl<'r> Converter<'r> {
@@ -300,12 +282,27 @@ impl<'r> Converter<'r> {
             trees: HashMap::new(),
             saves: HashMap::new(),
             counts: Counts::default(),
+            not_utf8: Vec::new(),
+            not_utf8_count: 0,
         }
     }
 
     #[must_use]
     pub fn counts(&self) -> &Counts {
         &self.counts
+    }
+
+    /// Stops the import if any name met so far isn't UTF-8 (decision 019). The converter leaves
+    /// such names out of their folders and goes on, so that one stop lists them all: call this
+    /// after the last commit, and before committing anything.
+    pub fn finish(&self) -> Result<(), ImportError> {
+        if self.not_utf8_count == 0 {
+            return Ok(());
+        }
+        Err(ImportError::NotUtf8Names {
+            first: self.not_utf8.clone(),
+            count: self.not_utf8_count,
+        })
     }
 
     /// Stores the save of the commit `id`, with its snapshot, given its parents' saves in the
@@ -439,8 +436,6 @@ impl<'r> Converter<'r> {
         let mut walk = Walk {
             commit,
             limits: SaveLimits::default(),
-            not_utf8: Vec::new(),
-            not_utf8_count: 0,
         };
         let mut stack: Vec<Frame> = Vec::new();
         let mut done = self.enter(&mut stack, &mut walk, String::new(), root)?;
@@ -457,18 +452,17 @@ impl<'r> Converter<'r> {
                 }
                 None => {
                     if let Some(frame) = stack.pop() {
-                        let (name, folder) = self.close(frame, &walk)?;
+                        let (name, folder) = self.close(frame)?;
                         done = attach(&mut stack, name, folder);
                     }
                 }
             }
         }
-        match done {
-            Some(done) => walk.finish(done),
-            None => Err(bug(format!(
+        done.ok_or_else(|| {
+            bug(format!(
                 "Bolt lost track of the snapshot of commit `{commit}`"
-            ))),
-        }
+            ))
+        })
     }
 
     /// Goes into the folder `name`, the Git tree `id`: one converted before is attached to the
@@ -503,8 +497,9 @@ impl<'r> Converter<'r> {
     }
 
     /// Reads the Git tree of the folder on top of the stack and judges its names: those that
-    /// aren't UTF-8 are listed (decision 019), dangerous ones and spellings of `.bolt` skipped
-    /// (decisions 035 and 019), and one too long stops the import.
+    /// aren't UTF-8 are left out and listed, for `finish` to stop at (decision 019), dangerous
+    /// ones and spellings of `.bolt` skipped (decisions 035 and 019), and one too long stops the
+    /// import.
     fn read_folder(&mut self, stack: &mut [Frame], walk: &mut Walk<'_>) -> Result<(), ImportError> {
         let Some(id) = stack.last().map(|top| top.git) else {
             return Ok(());
@@ -527,7 +522,8 @@ impl<'r> Converter<'r> {
         for e in entries {
             exact &= e.standard_mode;
             let Ok(name) = std::str::from_utf8(e.name) else {
-                walk.not_utf8(|| path_of(stack, &[shown(e.name).as_str()]));
+                exact = false;
+                self.not_utf8(commit, || path_of(stack, &[shown(e.name).as_str()]));
                 continue;
             };
             match validate_name(name) {
@@ -569,9 +565,18 @@ impl<'r> Converter<'r> {
         }
     }
 
+    /// Notes a name that isn't UTF-8, listing the first ones by path.
+    fn not_utf8(&mut self, commit: &str, path: impl FnOnce() -> String) {
+        self.not_utf8_count = self.not_utf8_count.saturating_add(1);
+        if self.not_utf8.len() < MAX_LISTED {
+            self.not_utf8
+                .push((commit.to_owned(), escape(&path(), false)));
+        }
+    }
+
     /// Stores the listing of a folder whose entries are all converted, and remembers it for
     /// wherever its Git tree comes again.
-    fn close(&mut self, frame: Frame, walk: &Walk<'_>) -> Result<(String, Folder), ImportError> {
+    fn close(&mut self, frame: Frame) -> Result<(String, Folder), ImportError> {
         let listing = Listing::new(frame.entries).map_err(StoreError::from)?;
         let encoded = listing.encode();
         Listing::decode(&encoded).map_err(StoreError::from)?;
@@ -581,10 +586,7 @@ impl<'r> Converter<'r> {
             depth: frame.depth,
             exact: frame.exact,
         };
-        // Once a name that isn't UTF-8 was left out, the import stops: nothing is remembered.
-        if walk.not_utf8_count == 0 {
-            self.trees.insert(frame.git, done);
-        }
+        self.trees.insert(frame.git, done);
         Ok((frame.name, done))
     }
 
@@ -969,7 +971,9 @@ mod tests {
                 ],
             );
             let ((save, counts), store) = convert(dir.path(), "a", |c| {
-                (c.commit(&id, &[]).unwrap(), c.counts().clone())
+                let save = c.commit(&id, &[]).unwrap();
+                c.finish().unwrap();
+                (save, c.counts().clone())
             });
             let root = store
                 .listing(&store.save(&save, false).unwrap().root)
@@ -1138,29 +1142,50 @@ mod tests {
     fn names_that_arent_utf8_stop_with_a_list_of_all() {
         let (dir, git) = repo(Sha1);
         let file = blob(&git, b"x");
-        let inner = git.tree(&[(b"100644", b"na\xefve", file)]);
         let hidden = git.tree(&[(b"100644", b"in-\xff", file)]);
-        let id = commit_of(
-            &git,
-            &[
-                (b"100644", b"caf\xe9", file),
-                // Not looked into: its own name is listed.
-                (b"40000", b"d\xff", hidden),
-                (b"100644", b"ok", file),
-                (b"40000", b"sub", inner),
-            ],
-        );
-        let (result, _) = convert(dir.path(), "a", |c| c.commit(&id, &[]));
-        let hex = id.to_hex();
-        match result {
-            Err(ImportError::NotUtf8Names { first, count }) => {
-                let want = ["caf\u{fffd}", "d\u{fffd}", "sub/na\u{fffd}ve"]
-                    .map(|path| (hex.clone(), path.to_owned()));
-                assert_eq!(first, want);
+        let top = git.tree(&[
+            (b"100644", b"caf\xe9", file),
+            // Not looked into: its own name is listed.
+            (b"40000", b"d\xff", hidden),
+            (b"100644", b"ok", file),
+        ]);
+        let first = git.commit(&commit_bytes(&top, &[], "", b"first\n"));
+        // A later commit with another such name: the stop lists both commits' names.
+        let lib = git.tree(&[(b"100644", b"na\xefve", file)]);
+        let second_top = git.tree(&[(b"40000", b"lib", lib), (b"100644", b"ok", file)]);
+        let second = git.commit(&commit_bytes(&second_top, &[first], "", b"second\n"));
+        // The first commit's folder again: met before, so not listed again.
+        let third_top = git.tree(&[(b"40000", b"old", top)]);
+        let third = git.commit(&commit_bytes(&third_top, &[second], "", b"third\n"));
+        let ((saves, counts, finished), store) = convert(dir.path(), "a", |c| {
+            let one = c.commit(&first, &[]).unwrap();
+            let two = c.commit(&second, &[one]).unwrap();
+            let three = c.commit(&third, &[two]).unwrap();
+            ([one, two, three], c.counts().clone(), c.finish())
+        });
+        match finished {
+            Err(ImportError::NotUtf8Names {
+                first: listed,
+                count,
+            }) => {
+                let want = [
+                    (first, "caf\u{fffd}"),
+                    (first, "d\u{fffd}"),
+                    (second, "lib/na\u{fffd}ve"),
+                ]
+                .map(|(commit, path)| (commit.to_hex(), path.to_owned()));
+                assert_eq!(listed, want);
                 assert_eq!(count, 3);
             }
             other => panic!("{other:?}"),
         }
+        // Until then they are left out, and their commits count as inexact.
+        let root = store
+            .listing(&store.save(&saves[0], false).unwrap().root)
+            .unwrap();
+        let names: Vec<&str> = root.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["ok"]);
+        assert_eq!(counts.inexact_commits, 3);
         // Past the first 100, they are only counted.
         let names: Vec<Vec<u8>> = (0..101)
             .map(|i| [format!("{i:03}").as_bytes(), b"\xff"].concat())
@@ -1170,8 +1195,10 @@ mod tests {
             .map(|n| (&b"100644"[..], &n[..], file))
             .collect();
         let id = commit_of(&git, &entries);
-        let (result, _) = convert(dir.path(), "b", |c| c.commit(&id, &[]));
-        let e = result.unwrap_err();
+        let (e, _) = convert(dir.path(), "b", |c| {
+            c.commit(&id, &[]).unwrap();
+            c.finish().unwrap_err()
+        });
         match &e {
             ImportError::NotUtf8Names { first, count } => {
                 assert_eq!((first.len(), *count), (100, 101));
@@ -1182,19 +1209,6 @@ mod tests {
         assert!(e.to_string().contains("101 names"), "{e}");
         assert!(e.to_string().contains("and 1 more"), "{e}");
         assert!(e.hint().unwrap().starts_with("Nothing was changed."));
-        // A folder that lost such a name isn't remembered, so the next commit holding it stops too.
-        let lib = git.tree(&[(b"100644", b"caf\xe9", file), (b"100644", b"ok", file)]);
-        let first = commit_of(&git, &[(b"40000", b"lib", lib)]);
-        let again = commit_of(&git, &[(b"40000", b"vendor", lib)]);
-        let ((first, again), _) = convert(dir.path(), "c", |c| {
-            (c.commit(&first, &[]), c.commit(&again, &[]))
-        });
-        for result in [first, again] {
-            assert!(
-                matches!(result, Err(ImportError::NotUtf8Names { .. })),
-                "{result:?}"
-            );
-        }
     }
 
     #[test]
