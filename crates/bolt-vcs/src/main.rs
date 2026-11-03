@@ -11,10 +11,12 @@ use bolt_core::config::{
 };
 use bolt_core::diary::Position;
 use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
+use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note};
+use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
 use bolt_core::text::escape;
@@ -123,32 +125,57 @@ impl From<ImportError> for Failure {
     }
 }
 
+/// The first save of the project `start` has just made, read back: its ID, the save, and its
+/// change ID at its shortest.
+fn read_first_save(repo: &Repository) -> Result<(Id, Save, String), Failure> {
+    fault_point("start:read-back")?;
+    let (_, entry) = repo.current()?;
+    let id = *entry.state.lines.get("main").ok_or_else(|| Failure {
+        message: "The new project has no line main.".into(),
+        hint: None,
+        printed: false,
+    })?;
+    let save = repo.store().save(&id, repo.signatures_allowed())?;
+    let short = short_change_id(repo, &id, &save.change_id)?;
+    Ok((id, save, short))
+}
+
 fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
     // The user's own settings may name this folder, so the first save is theirs too.
     let who = now_person(&load_identity(Some(&root))?);
     let repo: &Repository = opened.insert(Repository::init(&root, &who)?);
-    let (_, entry) = repo.current()?;
-    let id = entry.state.lines.get("main").ok_or_else(|| Failure {
-        message: "The new project has no line main.".into(),
-        hint: None,
-        printed: false,
-    })?;
-    let save = repo.store().save(id, repo.signatures_allowed())?;
-    let short = &short_change_id(repo, id, &save.change_id)?;
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
         .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
         .into_iter()
         .collect();
+    // The project exists now, so a save that can't be read back is a warning, not a failure.
+    let first = match read_first_save(repo) {
+        Ok(first) => Some(first),
+        Err(problem) => {
+            warnings.push(Warning::new(
+                warning::FIRST_SAVE_NOT_READ,
+                format!(
+                    "The project was made, but Bolt couldn't read its first save back. {}\n\
+                     Run `bolt history` to check that the project reads.",
+                    problem.message
+                ),
+            ));
+            None
+        }
+    };
     warnings.extend(repo.store().warnings());
     if json {
+        let save = first.as_ref().map_or(json!(null), |(id, save, short)| {
+            output::save_json(id, save, short)
+        });
         println!(
             "{}",
             json!({
                 "bolt_json": BOLT_JSON,
                 "root": root.display().to_string(),
                 "line": "main",
-                "save": output::save_json(id, &save, short),
+                "save": save,
                 "warnings": output::warnings_json(&warnings),
             })
         );
@@ -156,8 +183,10 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         // The folder's name came from outside Bolt, like any name in a project.
         let shown = escape(&root.display().to_string(), false);
         println!("Started a Bolt project in {shown}.");
-        println!("Your first save is {short}, on line main.");
-        println!("Next: change some files, then run: bolt save \"describe your change\"");
+        if let Some((_, _, short)) = &first {
+            println!("Your first save is {short}, on line main.");
+            println!("Next: change some files, then run: bolt save \"describe your change\"");
+        }
     }
     output::print_warnings(&warnings);
     Ok(())

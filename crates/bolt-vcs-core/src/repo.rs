@@ -103,8 +103,7 @@ impl RepoError {
                 }
                 RepoError::AdminsNotElevated { path } => {
                     return Some(format!(
-                        "Open a terminal as administrator and run the command there, or use it \
-                         from this terminal:\n{}",
+                        "Open a terminal as administrator and run the command there.\n{}",
                         config::trust_hint(path)
                     ));
                 }
@@ -117,6 +116,7 @@ impl RepoError {
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
                 }
+                RepoError::Config(e) => return e.hint(),
                 _ => return None,
             }
             .to_owned(),
@@ -196,7 +196,7 @@ fn holds_only_bolts_own(bolt: &Path) -> Result<bool, RepoError> {
 }
 
 /// Refuses a `.bolt` whose fixed folders are links, junctions or files. A missing one passes:
-/// `init` creates them, and `open` reports one it needs as damage.
+/// `begin` creates them, and `open` makes `tmp` and `cache` again and reports the others as damage.
 fn check_shape(bolt: &Path) -> Result<(), RepoError> {
     for dir in fixed_folders(bolt) {
         match safe_fs::check_real_dir(&dir) {
@@ -290,7 +290,7 @@ fn elevated_only_note_with(
     (group_owns(root) || group_owns(&root.join(".bolt"))).then(|| {
         format!(
             "This project belongs to the Administrators group, so it opens only from an \
-             administrator terminal unless you add it to safe-folders:\n{}",
+             administrator terminal.\n{}",
             config::trust_hint(root)
         )
     })
@@ -654,15 +654,20 @@ impl Repository {
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
         // Every command needs these, so a missing one is damage, named as such.
-        for (dir, name) in [
-            (&tmp, "tmp"),
-            (&bolt.join("state"), "state"),
-            (&packs, "store/packs"),
-        ] {
+        for (dir, name) in [(&bolt.join("state"), "state"), (&packs, "store/packs")] {
             if let Err(e) = safe_fs::check_real_dir(dir)
                 && e.kind() == io::ErrorKind::NotFound
             {
                 return Err(damaged(format!(".bolt/{name} is missing")));
+            }
+        }
+        // These hold nothing worth keeping, so a missing one is made again.
+        for dir in [&tmp, &bolt.join("cache")] {
+            if let Err(e) = safe_fs::check_real_dir(dir)
+                && e.kind() == io::ErrorKind::NotFound
+            {
+                fsio::create_dir_durable(dir)?;
+                safe_fs::check_real_dir(dir).map_err(refused)?;
             }
         }
         // The head first: its pack was in the store before the head pointed at it.
@@ -902,7 +907,7 @@ mod tests {
 
     #[test]
     fn a_missing_fixed_folder_is_named_as_damage() {
-        for name in ["tmp", "state", "store/packs", "store"] {
+        for name in ["state", "store/packs", "store"] {
             let (dir, repo) = project();
             drop(repo);
             std::fs::remove_dir_all(dir.path().join(".bolt").join(name)).unwrap();
@@ -915,6 +920,22 @@ mod tests {
                 }
                 other => panic!("{name}: {:?}", other.map(|_| ())),
             }
+        }
+    }
+
+    /// Neither folder holds anything worth keeping, so losing one is no damage.
+    #[test]
+    fn a_missing_tmp_or_cache_is_recreated() {
+        for name in ["tmp", "cache"] {
+            let (dir, repo) = project();
+            drop(repo);
+            let folder = dir.path().join(".bolt").join(name);
+            std::fs::remove_dir_all(&folder).unwrap();
+            let mut repo = Repository::open(dir.path()).unwrap();
+            assert!(safe_fs::check_real_dir(&folder).is_ok(), "{name}");
+            // The project works again: commands write through `tmp/`.
+            let first = commit(&mut repo, &entry(1)).unwrap();
+            assert_eq!(Repository::open(dir.path()).unwrap().head().unwrap(), first);
         }
     }
 
@@ -1263,6 +1284,24 @@ mod tests {
         for owners in refused() {
             assert!(allows(owners, &[dir.path().to_owned(), sibling.clone()]).is_err());
         }
+    }
+
+    /// A refusal that needs the user's `safe-folders` is replaced by the mistake in it, with what
+    /// to do about that.
+    #[test]
+    fn a_misplaced_safe_folders_line_is_what_the_user_is_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let misplaced = || -> Result<Vec<PathBuf>, ConfigError> {
+            Err(ConfigError::SafeFoldersNotAtTop {
+                path: PathBuf::from("config.toml"),
+            })
+        };
+        let told = check_owner_with(dir.path(), &|_| Ok(Owner::Other), &misplaced).unwrap_err();
+        assert_eq!(
+            told.to_string(),
+            "safe-folders must be at the top of config.toml, before any [section]"
+        );
+        assert!(told.hint().unwrap().starts_with("Move that line above"));
     }
 
     #[test]

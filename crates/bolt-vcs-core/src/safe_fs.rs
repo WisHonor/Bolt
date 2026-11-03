@@ -21,6 +21,8 @@ pub const MAX_IGNORE_SAVE_BYTES: u64 = 16 << 20;
 /// Opens `path` with `options` (custom flags are replaced) without following a link at its
 /// last part, and only if it is a regular file. A link, folder, pipe or device gives
 /// `InvalidInput`; any other error from the open, `NotFound` included, comes back unchanged.
+/// Don't pass `truncate`: it acts when the file is opened, before a file that isn't a regular one
+/// is refused. No caller does.
 pub fn open_regular(path: &Path, options: &OpenOptions) -> io::Result<File> {
     let file = match bolt_platform::no_follow(&mut options.clone()).open(path) {
         Ok(file) => file,
@@ -57,7 +59,7 @@ pub fn read_capped(path: &Path, max: u64) -> io::Result<Vec<u8>> {
 /// Like `read_capped`, but follows links. Only for the user's own settings files, which dotfile
 /// managers keep as links; never for a file a project can bring. What the link reaches must
 /// still be a regular file.
-pub fn read_capped_following_links(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+pub(crate) fn read_capped_following_links(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     // Looked at before opening, because opening a named pipe waits for a writer.
     // shortcut: a pipe swapped in between the look and the open still waits, which needs write
     // access to the user's own files; open without blocking (platform crate) if that matters.

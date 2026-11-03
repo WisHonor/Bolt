@@ -183,6 +183,24 @@ fn start_without_a_name_explains_how_to_set_it() {
     assert!(!env.root().join(".bolt").exists());
 }
 
+/// The error says which file it is once, not in the message and again in the reason.
+#[test]
+fn a_settings_file_that_cant_be_read_is_named_once() {
+    let env = Env::new();
+    let settings = env.config.path().join("config.toml");
+    std::fs::create_dir(&settings).unwrap();
+    let out = env
+        .bolt_anonymous(env.root())
+        .arg("start")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert_eq!(err.matches("config.toml").count(), 1, "{err}");
+    assert!(err.contains("is not a valid Bolt settings file: it is not a regular file"));
+    assert!(!env.root().join(".bolt").exists());
+}
+
 /// Dotfile managers (stow, Nix home-manager) keep the user's own settings as links.
 #[cfg(unix)]
 #[test]
@@ -280,6 +298,39 @@ fn save_notes_an_ignored_project_identity() {
     let stdout = text(&out.stdout);
     assert!(stdout.starts_with("Nothing to save"), "{stdout}");
     assert_eq!(stdout.lines().nth(1), Some(MALLORY_NOTE), "{stdout}");
+}
+
+/// With both variables set they decide who the user is, so the lines the note offers would change
+/// nothing, and it says so. One alone names nobody: the user's settings still decide.
+#[test]
+fn the_note_says_when_the_environment_comes_first() {
+    let env = project_naming_mallory();
+    let out = env.bolt().args(["save", "my work"]).output().unwrap();
+    let stdout = text(&out.stdout);
+    let hint = stdout
+        .lines()
+        .find(|l| l.starts_with("hint:"))
+        .expect(&stdout);
+    assert!(
+        hint.starts_with("hint: BOLT_USER_NAME and BOLT_USER_EMAIL are set")
+            && hint.contains("take no effect until you unset them"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\n[[project]]\nfolder = "), "{stdout}");
+
+    std::fs::write(env.root().join("b.txt"), "b").unwrap();
+    let out = env
+        .bolt_anonymous(env.root())
+        .env("BOLT_USER_NAME", "Test")
+        .args(["save", "settings decide"])
+        .output()
+        .unwrap();
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("hint: To save as them in this project, add this to"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("BOLT_USER"), "{stdout}");
 }
 
 #[test]
@@ -517,6 +568,12 @@ fn interrupted_start_can_be_finished() {
             assert!(n > 1, "no fault point was reached");
             break;
         }
+        // The read-back comes after the project is made, so it is whole: only the report is lost.
+        if text(&out.stderr).contains("injected crash at start:read-back") {
+            assert!(env.root().join(".bolt/format").exists(), "fault {n}");
+            env.bolt().arg("history").assert().success();
+            continue;
+        }
         assert!(!env.root().join(".bolt/format").exists(), "fault {n}");
         let out = env.bolt().arg("start").output().unwrap();
         assert_eq!(
@@ -527,6 +584,57 @@ fn interrupted_start_can_be_finished() {
         );
         let report = bolt_core::verify::verify_store(&env.root().join(".bolt/store/packs"));
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
+    }
+}
+
+/// The project exists once `start` has committed, so a first save that can't be read back to show
+/// is a warning and the command still succeeds.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn start_reports_success_when_its_first_save_cannot_be_read_back() {
+    for json in [false, true] {
+        let env = Env::new();
+        let mut bolt = env.bolt();
+        if json {
+            bolt.arg("--json");
+        }
+        let out = bolt
+            .arg("start")
+            .env("BOLT_FAULT_FAIL", "start:read-back")
+            .output()
+            .unwrap();
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{stderr}");
+        assert!(
+            stderr.contains(
+                "warning: The project was made, but Bolt couldn't read its first save back. \
+                 injected fault at start:read-back\n\
+                 Run `bolt history` to check that the project reads.\n"
+            ),
+            "{stderr}"
+        );
+        if json {
+            let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(doc.get("save"), Some(&serde_json::Value::Null), "{doc}");
+            assert_eq!(doc["line"], "main");
+            assert!(
+                warning_kinds(&doc).contains(&"first_save_not_read"),
+                "{doc}"
+            );
+        } else {
+            assert!(stdout.contains("Started a Bolt project in"), "{stdout}");
+            assert!(!stdout.contains("first save is"), "{stdout}");
+        }
+        // The project is whole: it has its first save, and nothing is missing.
+        let history = env.bolt().args(["--json", "history"]).output().unwrap();
+        let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+        assert_eq!(
+            history["saves"].as_array().map(Vec::len),
+            Some(1),
+            "{history}"
+        );
+        let packs = env.root().join(".bolt/store/packs");
+        assert!(bolt_core::verify::verify_store(&packs).is_ok());
     }
 }
 

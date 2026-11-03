@@ -133,8 +133,8 @@ pub fn fault_point(label: &'static str) -> io::Result<()> {
     }
 }
 
-/// Fault injection for crash tests: per-thread errors (`arm`) or a process abort
-/// (`BOLT_FAULT_AT=N`).
+/// Fault injection for crash tests: per-thread errors (`arm`), a process abort
+/// (`BOLT_FAULT_AT=N`), or an error at one named point (`BOLT_FAULT_FAIL=label`).
 #[cfg(feature = "fault-injection")]
 pub mod fault {
     use std::cell::Cell;
@@ -164,6 +164,14 @@ pub mod fault {
         *AT.get_or_init(|| std::env::var("BOLT_FAULT_AT").ok()?.parse().ok())
     }
 
+    /// The label of the one point that fails every time it is reached, for a test that runs the
+    /// command in a process of its own and wants it to carry on after the error.
+    fn fails_at() -> Option<&'static str> {
+        static AT: OnceLock<Option<String>> = OnceLock::new();
+        AT.get_or_init(|| std::env::var("BOLT_FAULT_FAIL").ok())
+            .as_deref()
+    }
+
     pub(super) fn hit(label: &'static str) -> io::Result<()> {
         if let Some(n) = ARMED.get() {
             let count = COUNT.get() + 1;
@@ -171,6 +179,9 @@ pub mod fault {
             if count == n {
                 return Err(io::Error::other(format!("injected fault at {label}")));
             }
+        }
+        if fails_at() == Some(label) {
+            return Err(io::Error::other(format!("injected fault at {label}")));
         }
         if let Some(n) = crash_at()
             && PROCESS_COUNT.fetch_add(1, Ordering::SeqCst) + 1 == n

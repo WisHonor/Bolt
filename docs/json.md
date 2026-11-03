@@ -40,7 +40,7 @@
 | `bolt_json` | number | `1` |
 | `root` | string | The project's folder. |
 | `line` | string | The line the project starts on: always `"main"`. |
-| `save` | save | The first save, "Start project". |
+| `save` | save or `null` | The first save, "Start project". **`null` means Bolt made the project but couldn't read the save back.** The command still succeeds, and a `first_save_not_read` warning says why. |
 | `warnings` | list | See §4. |
 
 ### `bolt import --json`
@@ -130,6 +130,7 @@ Folders are not listed; the files in them are.
 | `gitignore_skipped` | `save`, unless the save stops | A `.gitignore` isn't a regular file (it is a link, folder or special file), so Bolt skipped it and its rules didn't apply, as Git skips a linked one. The message names the file. |
 | `kept_as_they_were` | `save`, unless the save stops | The save kept entries of the last save exactly as they were, because this computer can't hold them as they are: project links, names this system can't create and names that are one file on this drive, whatever the folder holds at their paths, and links Git wrote as files holding exactly their targets. The message counts them. |
 | `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
+| `first_save_not_read` | `start` | The project was made, but Bolt couldn't read its first save back, so `save` is `null`. The message says why, and to run `bolt history` to check that the project reads. |
 | `nested_bolt_folder` | `import` | Git checked out a folder named `.bolt` below the top of the project (one in its current commit). Bolt left it out of history, but Bolt commands run inside it would take it for a project. Each of the first 100 gets a warning naming it; one more warning counts the rest. A folder Git holds at two paths (one tree used twice) is named at the first only. |
 | `grafts_ignored` | `import` | The Git repository has a grafts file (`.git/info/grafts`), which changes the parents Git shows for some commits. Bolt ignored it and imported the commits as they are. |
 

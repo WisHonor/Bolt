@@ -31,7 +31,7 @@
 
 **Property tests.** An in-memory model tracks what the folder and history should contain. Each random action (create, change, move or delete files; save; goto; discard; undo; redo) is applied to both Bolt and the model. After every action: `status` matches the model, every save restores byte-identically, `undo` returns to the previous state, and nothing the model says exists is missing.
 
-**Crash tests.** Every disk write goes through one small layer that tests can make fail (return an error, or abort the process) at the N-th operation. For each N, a test runs a command, fails it at step N, then checks that the repository opens, `bolt verify` passes, no saved data is missing, and the next command finishes or rolls back the interrupted one. Separately, a loop kills real Bolt processes at random moments.
+**Crash tests.** Every disk write goes through one small layer that tests can make fail (return an error, or abort the process) at the N-th operation, or fail at one named point (`BOLT_FAULT_FAIL=start:read-back`) and let the command carry on. For each N, a test runs a command, fails it at step N, then checks that the repository opens, `bolt verify` passes, no saved data is missing, and the next command finishes or rolls back the interrupted one. Separately, a loop kills real Bolt processes at random moments.
 
 **Differential tests against Git.** `crates/bolt-vcs/tests/import_vs_git.rs` makes repositories with Git itself, runs `bolt import`, and then `assert_matches_git` (in `tests/support/`) compares the project with what Git holds, reading Git's objects through `git cat-file --batch`:
 
