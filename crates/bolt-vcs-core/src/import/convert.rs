@@ -780,8 +780,12 @@ impl<'r> Converter<'r> {
             Err(e) => PackError::Io(e).into(),
         };
         let mut hasher = ContentHasher::new();
-        let mut blob = self.git.blob_reader(id).map_err(|e| at(e, place))?;
-        let size = io::copy(&mut blob, &mut Hashing(&mut hasher)).map_err(failed)?;
+        // In a block of its own, so a blob rebuilt in memory is let go before the second pass
+        // rebuilds it.
+        let size = {
+            let mut blob = self.git.blob_reader(id).map_err(|e| at(e, place))?;
+            io::copy(&mut blob, &mut Hashing(&mut hasher)).map_err(failed)?
+        };
         let content = hasher.finish();
         if !self.packs.contains(&content)
             && !self
