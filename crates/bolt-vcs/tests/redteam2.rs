@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bolt_core::diary::{Action, DiaryEntry};
 use bolt_core::id::ChangeId;
@@ -13,6 +13,11 @@ use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_core::save::Save;
 use tempfile::TempDir;
+
+mod support;
+#[cfg(unix)]
+use support::bolt_capped;
+use support::run_limited;
 
 struct Env {
     work: TempDir,
@@ -55,86 +60,6 @@ impl Env {
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
-}
-
-/// How a command run under a time limit ended.
-#[derive(Debug)]
-#[allow(dead_code)] // the fields are read through Debug, in failure messages
-struct Ended {
-    /// `None`: killed by a signal (crash, abort, out of memory) or by us after the time limit.
-    code: Option<i32>,
-    timed_out: bool,
-    secs: f64,
-    /// Highest resident memory seen (Linux `/proc` only; 0 elsewhere).
-    peak_mb: u64,
-    stderr: String,
-}
-
-/// The process's peak resident memory so far, in MB (Linux only).
-fn peak_mb_of(pid: u32) -> u64 {
-    std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .and_then(|s| {
-            let line = s.lines().find(|l| l.starts_with("VmHWM:"))?.to_owned();
-            line.split_whitespace().nth(1)?.parse::<u64>().ok()
-        })
-        .map_or(0, |kb| kb / 1024)
-}
-
-/// Runs `cmd`, killing it after `secs` seconds.
-fn run_limited(mut cmd: Command, secs: u64) -> Ended {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let start = Instant::now();
-    let mut peak_mb = 0;
-    loop {
-        peak_mb = peak_mb.max(peak_mb_of(child.id()));
-        if let Some(status) = child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
-            stderr.truncate(600);
-            return Ended {
-                code: status.code(),
-                timed_out: false,
-                secs: start.elapsed().as_secs_f64(),
-                peak_mb,
-                stderr,
-            };
-        }
-        if start.elapsed() > Duration::from_secs(secs) {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            return Ended {
-                code: None,
-                timed_out: true,
-                secs: start.elapsed().as_secs_f64(),
-                peak_mb,
-                stderr: String::new(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// `bolt <args>` in `dir` with its address space capped at about 1.5 GB, so a runaway allocation
-/// aborts instead of taking the whole machine down.
-#[cfg(unix)]
-fn bolt_capped(env: &Env, dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg("ulimit -v 1500000 2>/dev/null; exec \"$0\" \"$@\"")
-        .arg(assert_cmd::cargo::cargo_bin("bolt"))
-        .args(args)
-        .current_dir(dir)
-        .env_remove("BOLT_FAULT_AT")
-        .env("BOLT_USER_NAME", "Test")
-        .env("BOLT_USER_EMAIL", "test@example.com")
-        .env("BOLT_CONFIG_DIR", env.config.path());
-    cmd
 }
 
 fn pack_bytes(root: &Path) -> u64 {
@@ -224,7 +149,10 @@ fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
     plant_chain(env.root(), 2000, 0, |s| s.message = message);
     let packs = pack_bytes(env.root());
     eprintln!("all packs together: {packs} bytes");
-    let end = run_limited(bolt_capped(&env, env.root(), &["history"]), 120);
+    let end = run_limited(
+        bolt_capped(env.config.path(), env.root(), &["history"]),
+        120,
+    );
     assert!(
         end.code == Some(0),
         "`bolt history` on a {packs}-byte repository failed under a 1.5 GB cap: {end:?}"
@@ -242,7 +170,10 @@ fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing(
     plant_chain(env.root(), 2000, 0, |s| s.message = message);
     let before = Repository::open(env.root()).unwrap().head().unwrap();
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
-    let end = run_limited(bolt_capped(&env, env.root(), &["save", "my work"]), 120);
+    let end = run_limited(
+        bolt_capped(env.config.path(), env.root(), &["save", "my work"]),
+        120,
+    );
     let after = Repository::open(env.root()).unwrap().head().unwrap();
     assert!(
         end.code == Some(0),
@@ -405,7 +336,10 @@ fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
         dir.push("d");
         std::fs::create_dir(&dir).unwrap();
     }
-    let end = run_limited(bolt_capped(&env, env.root(), &["save", "x"]), 300);
+    let end = run_limited(
+        bolt_capped(env.config.path(), env.root(), &["save", "x"]),
+        300,
+    );
     // The files in force at one folder may total 1 MiB, so the second one is refused: an ordinary
     // error that names it, not an abort for want of memory.
     assert!(

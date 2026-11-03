@@ -631,6 +631,30 @@ mod tests {
         }
     }
 
+    /// Streaming is what finds the only copy bad here, and it is the streaming that must say so
+    /// the second time, without reading the copy again.
+    #[test]
+    fn a_lone_bad_copy_is_damage_each_time_it_is_streamed() {
+        let (_root, _tmp, packs) = dirs();
+        let content = b"bytes with one copy, and a bad one".to_vec();
+        plant_damaged_copies(&packs, &[(ObjectKind::Content, &content)]);
+        let store = Store::open(&packs).unwrap();
+        let id = hash_content(&content);
+        let damage = |e: StoreError| {
+            let StoreError::Pack(PackError::Corrupt { path, .. }) = &e else {
+                panic!("{e:?}");
+            };
+            assert!(path.ends_with("00.pack"), "{e:?}");
+            assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
+        };
+        // What the first stream wrote is untrusted, as always.
+        damage(store.copy_content(&id, &mut Vec::new()).unwrap_err());
+        let mut again = Vec::new();
+        damage(store.copy_content(&id, &mut again).unwrap_err());
+        assert!(again.is_empty(), "a copy known to be bad was read again");
+        assert_eq!(store.damaged_packs().len(), 1);
+    }
+
     #[test]
     fn missing_object_is_an_error() {
         let (_root, _tmp, packs) = dirs();

@@ -1695,13 +1695,17 @@ mod tests {
                     drive_says
                 }
             };
-            match (drive_says, start_where(&root, owner, &[])) {
+            let started = start_where(&root, owner, &[]);
+            match (drive_says, &started) {
                 (Owner::Other, Err(RepoError::NotYours { path }))
                 | (Owner::Unknown, Err(RepoError::OwnerUnknown { path })) => {
-                    assert_eq!(path, root);
+                    assert_eq!(path, &root);
                 }
-                (_, other) => panic!("{drive_says:?}: {:?}", other.map(|_| ())),
+                (_, other) => panic!("{drive_says:?}: {:?}", other.as_ref().map(|_| ())),
             }
+            // The same way on as for a project that is already there.
+            let hint = started.err().and_then(|e| e.hint());
+            assert_eq!(hint, Some(config::trust_hint(&root)), "{drive_says:?}");
             assert!(!root.join(".bolt").exists(), "{drive_says:?}");
             start_where(&root, owner, std::slice::from_ref(&root)).unwrap();
         }

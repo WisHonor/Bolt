@@ -4,10 +4,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+#[cfg(windows)]
+use std::process::Stdio;
 
+use bolt_core::listing::{EntryKind, Listing};
+use bolt_core::pack::ObjectKind;
 use tempfile::TempDir;
+
+mod support;
+#[cfg(unix)]
+use support::bolt_capped;
+use support::{add_listing, plant_save, run_limited};
 
 struct Env {
     work: TempDir,
@@ -59,69 +67,10 @@ impl Env {
     }
 }
 
-/// How a command run under a time limit ended.
-#[derive(Debug)]
-#[allow(dead_code)] // some fields are only read through Debug, in failure messages
-struct Ended {
-    /// `None`: killed by a signal (crash, abort) or by us after the time limit.
-    code: Option<i32>,
-    timed_out: bool,
-    stderr: String,
-}
-
-/// Runs `cmd`, killing it after `secs` seconds.
-fn run_limited(mut cmd: Command, secs: u64) -> Ended {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let start = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
-            return Ended {
-                code: status.code(),
-                timed_out: false,
-                stderr,
-            };
-        }
-        if start.elapsed() > Duration::from_secs(secs) {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            return Ended {
-                code: None,
-                timed_out: true,
-                stderr: String::new(),
-            };
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 #[cfg(unix)]
 fn mkfifo(path: &Path) {
     let st = Command::new("mkfifo").arg(path).status().unwrap();
     assert!(st.success());
-}
-
-/// `bolt <args>` in `dir` with its address space capped at about 1.5 GB, so a runaway allocation
-/// aborts instead of taking the whole machine down.
-#[cfg(unix)]
-fn bolt_capped(env: &Env, dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg("ulimit -v 1500000 2>/dev/null; exec \"$0\" \"$@\"")
-        .arg(assert_cmd::cargo::cargo_bin("bolt"))
-        .args(args)
-        .current_dir(dir)
-        .env_remove("BOLT_FAULT_AT")
-        .env("BOLT_USER_NAME", "Test")
-        .env("BOLT_USER_EMAIL", "test@example.com")
-        .env("BOLT_CONFIG_DIR", env.config.path());
-    cmd
 }
 
 // RT-1: a symlinked `.bolt/tmp` makes ANY command delete files outside the project.
@@ -325,7 +274,7 @@ fn rt4_state_head_pointing_at_dev_zero_is_refused_not_read_forever() {
     let head = env.root().join(".bolt/state/head");
     std::fs::remove_file(&head).unwrap();
     std::os::unix::fs::symlink("/dev/zero", &head).unwrap();
-    let end = run_limited(bolt_capped(&env, env.root(), &["history"]), 60);
+    let end = run_limited(bolt_capped(env.config.path(), env.root(), &["history"]), 60);
     // Without the cap the process grows to 4 GB and is OOM-killed (redteam/attacks/rt4-*.sh).
     assert!(
         end.code == Some(1) && !end.stderr.contains("memory"),
@@ -340,7 +289,7 @@ fn rt4_project_config_pointing_at_dev_zero_is_refused_not_read_forever() {
     env.ok(&["start"]);
     std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    let mut cmd = bolt_capped(&env, env.root(), &["save", "add a"]);
+    let mut cmd = bolt_capped(env.config.path(), env.root(), &["save", "add a"]);
     cmd.env_remove("BOLT_USER_NAME")
         .env_remove("BOLT_USER_EMAIL");
     let end = run_limited(cmd, 60);
@@ -442,68 +391,6 @@ fn plant_deep_save(root: &Path, depth: usize) {
     });
 }
 
-use bolt_core::id::Id;
-use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackSet};
-
-/// A listing whose every entry has the same kind and points at the same object.
-fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id) -> Id {
-    let l = Listing::new(
-        names
-            .iter()
-            .map(|n| Entry {
-                name: n.clone(),
-                kind,
-                id,
-                size: 0,
-            })
-            .collect(),
-    )
-    .unwrap();
-    pack.add_record(ObjectKind::FolderListing, &l.encode())
-        .unwrap()
-}
-
-/// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
-fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
-    use bolt_core::diary::{Action, DiaryEntry};
-    use bolt_core::id::ChangeId;
-    use bolt_core::repo::Repository;
-    use bolt_core::save::Save;
-
-    let mut repo = Repository::open(root).unwrap();
-    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-    let (head, entry) = repo.current().unwrap();
-    let parent_id = entry.state.lines["main"];
-    let parent = repo.store().save(&parent_id, false).unwrap();
-    let mut pack = repo.new_packs().unwrap();
-    let id = build(&mut pack);
-    let save = Save {
-        root: id,
-        parents: vec![parent_id],
-        author: parent.author.clone(),
-        saver: parent.saver.clone(),
-        message: "Looks harmless".into(),
-        change_id: ChangeId::random().unwrap(),
-        move_notes: vec![],
-        signature: vec![],
-        extra: parent.extra.clone(),
-    };
-    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
-    let mut state = entry.state.clone();
-    state.lines.insert("main".into(), save_id);
-    let diary = DiaryEntry {
-        parent: Some(head),
-        action: Action::Command,
-        command: "save".into(),
-        who: parent.author.clone(),
-        bolt_version: "0.1.0".into(),
-        state,
-        safety_copies: vec![],
-    };
-    repo.commit(&lock, pack, &diary).unwrap();
-}
-
 #[test]
 fn rt6_deeply_nested_listings_do_not_crash_show() {
     let env = Env::new();
@@ -555,7 +442,7 @@ fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum();
     eprintln!("all packs together: {pack_bytes} bytes");
-    let end = run_limited(bolt_capped(&env, env.root(), &["show"]), 120);
+    let end = run_limited(bolt_capped(env.config.path(), env.root(), &["show"]), 120);
     assert!(
         matches!(end.code, Some(0 | 1)) && !end.stderr.contains("memory"),
         "`bolt show` on a ~{pack_bytes}-byte repository died or hung: {end:?}"

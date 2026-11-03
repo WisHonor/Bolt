@@ -3,11 +3,14 @@
 
 use assert_cmd::Command;
 use bolt_core::id::Id;
-use bolt_core::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH};
-use bolt_core::pack::{ObjectKind, PackSet, PackWriter};
+use bolt_core::listing::{EntryKind, Listing, MAX_SAVE_DEPTH};
+use bolt_core::pack::{ObjectKind, PackWriter};
 use bolt_core::repo::FORMAT_TEXT;
 use std::path::Path;
 use tempfile::TempDir;
+
+mod support;
+use support::{add_listing, plant_save, text};
 
 /// A folder to work in, and an empty folder for the user's config.
 struct Env {
@@ -49,10 +52,6 @@ impl Env {
     fn bolt(&self) -> Command {
         self.bolt_in(self.root())
     }
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 /// The `kind` of each warning in a `--json` document.
@@ -126,20 +125,23 @@ fn start_twice_is_refused() {
     );
 }
 
+/// However deep the folder is, `start` finds the project above it, names it, and makes nothing.
 #[test]
 fn start_inside_a_project_is_refused() {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
-    let sub = env.root().join("sub");
-    std::fs::create_dir(&sub).unwrap();
-    let out = env.bolt_in(&sub).arg("start").output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        text(&out.stderr).contains("inside a Bolt project"),
-        "{}",
-        text(&out.stderr)
-    );
-    assert!(!sub.join(".bolt").exists());
+    // The last part of the project's path, which every system shows the same way.
+    let project = env.root().file_name().unwrap().to_str().unwrap();
+    for sub in [env.root().join("sub"), env.root().join("a/b/c")] {
+        std::fs::create_dir_all(&sub).unwrap();
+        let out = env.bolt_in(&sub).arg("start").output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let err = text(&out.stderr);
+        let said = err.lines().next().unwrap();
+        assert!(said.contains("inside a Bolt project at "), "{err}");
+        assert!(said.ends_with(&format!("{project}.")), "{err}");
+        assert!(!sub.join(".bolt").exists());
+    }
 }
 
 /// bolt.new and other tools keep their own `.bolt` folders; Bolt never settles into one.
@@ -460,9 +462,9 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     env.bolt().arg("start").assert().success();
     std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    // The address space is capped at about 1.5 GB (as in redteam.rs), so a read of the link that
-    // did not stop could not take the machine down.
-    let cmd = bolt_capped_at(&env, 1_500_000, &["save", "my work"]);
+    // The address space is capped at about 1.5 GB, so a read of the link that did not stop could
+    // not take the machine down.
+    let cmd = support::bolt_capped(env.config.path(), env.root(), &["save", "my work"]);
     let (out, peak_kb) = run_noting_peak_memory(cmd, 30);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(
@@ -1503,61 +1505,6 @@ fn unreadable_folder_is_reported_as_unreadable() {
 // Saves that no real folder tree could be (too deep, or paths far too long to hold together),
 // planted through Bolt's own library.
 
-/// A listing whose every entry has the same kind and points at the same object.
-fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id) -> Id {
-    let entries = names
-        .iter()
-        .map(|name| Entry {
-            name: name.clone(),
-            kind,
-            id,
-            size: 0,
-        })
-        .collect();
-    let listing = Listing::new(entries).unwrap();
-    pack.add_record(ObjectKind::FolderListing, &listing.encode())
-        .unwrap()
-}
-
-/// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
-fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
-    use bolt_core::diary::{Action, DiaryEntry};
-    use bolt_core::id::ChangeId;
-    use bolt_core::repo::Repository;
-    use bolt_core::save::Save;
-
-    let mut repo = Repository::open(root).unwrap();
-    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-    let (head, entry) = repo.current().unwrap();
-    let parent_id = entry.state.lines["main"];
-    let parent = repo.store().save(&parent_id, false).unwrap();
-    let mut pack = repo.new_packs().unwrap();
-    let save = Save {
-        root: build(&mut pack),
-        parents: vec![parent_id],
-        author: parent.author.clone(),
-        saver: parent.saver.clone(),
-        message: "Planted".into(),
-        change_id: ChangeId::random().unwrap(),
-        move_notes: vec![],
-        signature: vec![],
-        extra: parent.extra.clone(),
-    };
-    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
-    let mut state = entry.state.clone();
-    state.lines.insert("main".into(), save_id);
-    let diary = DiaryEntry {
-        parent: Some(head),
-        action: Action::Command,
-        command: "save".into(),
-        who: parent.author.clone(),
-        bolt_version: "0.1.0".into(),
-        state,
-        safety_copies: vec![],
-    };
-    repo.commit(&lock, pack, &diary).unwrap();
-}
-
 /// Commits, through Bolt's own library, `n` more saves on `main`, each the child of the last and
 /// with a random change ID; `shape` may change each one first. Returns their change IDs, oldest
 /// first.
@@ -1722,7 +1669,7 @@ fn plant_long_paths(root: &Path) {
 /// enforced (macOS), the test passes without proving anything.
 #[cfg(unix)]
 fn bolt_capped(env: &Env, args: &[&str]) -> std::process::Command {
-    bolt_capped_at(env, CAP_KB, args)
+    support::bolt_capped_at(env.config.path(), env.root(), CAP_KB, args)
 }
 
 /// Runs `cmd` for at most `secs` seconds, then kills it, and returns its output with the peak
@@ -1762,24 +1709,6 @@ fn run_noting_peak_memory(
     // Does something only after the time limit; the output is then of a killed process.
     let _ = child.kill();
     (child.wait_with_output().unwrap(), peak_kb)
-}
-
-/// `bolt_capped`, with the address space given in KB.
-#[cfg(unix)]
-fn bolt_capped_at(env: &Env, cap_kb: u32, args: &[&str]) -> std::process::Command {
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg(format!(
-            "ulimit -v {cap_kb} 2>/dev/null; exec \"$0\" \"$@\""
-        ))
-        .arg(assert_cmd::cargo::cargo_bin("bolt"))
-        .args(args)
-        .current_dir(env.root())
-        .env_remove("BOLT_FAULT_AT")
-        .env("BOLT_USER_NAME", "Test")
-        .env("BOLT_USER_EMAIL", "test@example.com")
-        .env("BOLT_CONFIG_DIR", env.config.path());
-    cmd
 }
 
 #[cfg(unix)]

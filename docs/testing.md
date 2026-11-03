@@ -61,7 +61,7 @@ Measured on 2026-11-03 in release builds, on git/git as of 2026-11-01: 85,977 co
 
 ## 4. CI on GitHub
 
-- **Every push and pull request:** formatting check, clippy with warnings denied, every test on Windows, macOS and Linux (the differential tests against Git on small repositories among them), a build without features, and `cargo-deny` (which also checks the RustSec advisory database and that every crate comes from crates.io). On Windows, one more step runs the slow tests that save a project nested 4,096 folders deep and refuse one at 4,097; they are marked ignored, so only that step runs them.
+- **Every push and pull request:** formatting check, clippy with warnings denied, every test on Windows, macOS and Linux (the differential tests against Git on small repositories among them), a build without features, and `cargo-deny`, on the workspace and on the fuzz crate (it also checks the RustSec advisory database and that every crate comes from crates.io). On Windows, one more step runs the slow tests that save a project nested 4,096 folders deep and refuse one at 4,097; they are marked ignored, so only that step runs them.
 - **Nightly, and on every push to `main`:** fuzzing of every target, 5 minutes each nightly and 1 minute on pushes.
 - **Nightly, and when started by hand (not on pushes):** the differential test on a fresh full clone of git/git, on Linux in a release build, within an hour; its log must show the one test passed, and shows the import's time and peak memory (§3). Beside it, on Windows, the link test runs as evidence rather than a gate (§3). Benchmarks join, with results kept for comparison, once they exist.
 - The repository is public, so Actions minutes aren't a constraint ([design.md](design.md) §7).

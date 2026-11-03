@@ -847,6 +847,37 @@ mod tests {
         assert_eq!(saved_paths(&repo, saved), [".boltignore", "name", "sub"]);
     }
 
+    /// A line with a slash in it counts from the folder of its own file, not from the project, so
+    /// those in `sub` reach `sub/only.txt` and `sub/mid/dir.txt`, and nothing deeper or elsewhere.
+    #[test]
+    fn anchored_rules_in_a_nested_ignore_file_start_at_its_folder() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/.boltignore", b"/only.txt\nmid/dir.txt\n");
+        write(root, "sub/deeper/.boltignore", b"/here.txt\n");
+        let ignored = ["sub/only.txt", "sub/mid/dir.txt", "sub/deeper/here.txt"];
+        let kept = [
+            "only.txt",
+            "mid/dir.txt",
+            "here.txt",
+            "sub/deep/only.txt",
+            "sub/other/mid/dir.txt",
+            "sub/here.txt",
+            "sub/deeper/deep/here.txt",
+        ];
+        for path in ignored.iter().chain(&kept) {
+            write(root, path, b"x");
+        }
+        let saved = save_now(&mut repo).unwrap();
+        let saved = saved_paths(&repo, saved);
+        for path in ignored {
+            assert!(!saved.iter().any(|p| p == path), "{path} was saved");
+        }
+        for path in kept {
+            assert!(saved.iter().any(|p| p == path), "{path} was left out");
+        }
+    }
+
     /// Git doesn't look inside a folder it ignores, so no line, there or above, takes a name
     /// back from it.
     #[test]

@@ -10,14 +10,16 @@ pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command as Bolt;
-use bolt_core::diary::State;
+use bolt_core::diary::{Action, DiaryEntry, State};
 use bolt_core::history::current_save;
-use bolt_core::id::Id;
-use bolt_core::listing::Listing;
+use bolt_core::id::{ChangeId, Id};
+use bolt_core::listing::{Entry, EntryKind, Listing};
+use bolt_core::pack::{ObjectKind, PackSet};
 use bolt_core::repo::Repository;
-use bolt_core::save::EXTRA_GIT_COMMIT;
+use bolt_core::save::{EXTRA_GIT_COMMIT, Save};
 use tempfile::TempDir;
 
 /// `git args` in `dir`, with nothing from this computer's Git set-up: no system or user config,
@@ -129,6 +131,148 @@ pub fn copy_dir(from: &Path, to: &Path) {
         } else {
             std::fs::copy(entry.path(), target).unwrap();
         }
+    }
+}
+
+// Saves that no real folder tree could be, planted through Bolt's own library.
+
+/// A listing whose every entry has the same kind and points at the same object.
+pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id) -> Id {
+    let entries = names
+        .iter()
+        .map(|name| Entry {
+            name: name.clone(),
+            kind,
+            id,
+            size: 0,
+        })
+        .collect();
+    let listing = Listing::new(entries).unwrap();
+    pack.add_record(ObjectKind::FolderListing, &listing.encode())
+        .unwrap()
+}
+
+/// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
+pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
+    let mut repo = Repository::open(root).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let parent_id = entry.state.lines["main"];
+    let parent = repo.store().save(&parent_id, false).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    let save = Save {
+        root: build(&mut pack),
+        parents: vec![parent_id],
+        author: parent.author.clone(),
+        saver: parent.saver.clone(),
+        message: "Planted".into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: parent.extra.clone(),
+    };
+    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), save_id);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: parent.author.clone(),
+        bolt_version: "0.1.0".into(),
+        state,
+        safety_copies: vec![],
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+}
+
+// Commands that run under a limit: of time, or of memory.
+
+/// `bolt <args>` in `dir`, as the test user with its settings in `config`, with its address space
+/// capped at `cap_kb`, so a runaway allocation aborts instead of taking the whole machine down.
+/// Where the cap isn't enforced (macOS), a test that relies on it proves nothing.
+#[cfg(unix)]
+pub fn bolt_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!(
+            "ulimit -v {cap_kb} 2>/dev/null; exec \"$0\" \"$@\""
+        ))
+        .arg(assert_cmd::cargo::cargo_bin("bolt"))
+        .args(args)
+        .current_dir(dir)
+        .env_remove("BOLT_FAULT_AT")
+        .env("BOLT_USER_NAME", "Test")
+        .env("BOLT_USER_EMAIL", "test@example.com")
+        .env("BOLT_CONFIG_DIR", config);
+    cmd
+}
+
+/// `bolt_capped_at`, with about 1.5 GB.
+#[cfg(unix)]
+pub fn bolt_capped(config: &Path, dir: &Path, args: &[&str]) -> Command {
+    bolt_capped_at(config, dir, 1_500_000, args)
+}
+
+/// How a command run under a time limit ended.
+#[derive(Debug)]
+pub struct Ended {
+    /// `None`: killed by a signal (crash, abort, out of memory) or by us after the time limit.
+    pub code: Option<i32>,
+    pub timed_out: bool,
+    pub secs: f64,
+    /// Highest resident memory seen (Linux `/proc` only; 0 elsewhere).
+    pub peak_mb: u64,
+    pub stderr: String,
+}
+
+/// The process's peak resident memory so far, in MB (Linux only).
+fn peak_mb_of(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| {
+            let line = s.lines().find(|l| l.starts_with("VmHWM:"))?.to_owned();
+            line.split_whitespace().nth(1)?.parse::<u64>().ok()
+        })
+        .map_or(0, |kb| kb / 1024)
+}
+
+/// Runs `cmd`, killing it after `secs` seconds.
+pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    let mut peak_mb = 0;
+    loop {
+        peak_mb = peak_mb.max(peak_mb_of(child.id()));
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+            stderr.truncate(600);
+            return Ended {
+                code: status.code(),
+                timed_out: false,
+                secs: start.elapsed().as_secs_f64(),
+                peak_mb,
+                stderr,
+            };
+        }
+        if start.elapsed() > Duration::from_secs(secs) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            return Ended {
+                code: None,
+                timed_out: true,
+                secs: start.elapsed().as_secs_f64(),
+                peak_mb,
+                stderr: String::new(),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
