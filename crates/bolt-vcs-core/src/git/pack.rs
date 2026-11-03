@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn damaged_indexes_and_packs_are_refused() {
         type Damage = fn(&Path, &Path);
-        let cases: [(&str, Damage, &str); 12] = [
+        let cases: [(&str, Damage, &str); 11] = [
             (
                 "an index without its signature",
                 |_, idx| patch_index(idx, |b| b[0] = 0),
@@ -973,24 +973,30 @@ mod tests {
                 },
                 "version 4",
             ),
-            (
-                "a pack that is a folder",
-                |pack, _| {
-                    fs::remove_file(pack).unwrap();
-                    fs::create_dir(pack).unwrap();
-                },
-                "not a regular file",
-            ),
         ];
-        for (what, damage, expected) in cases {
+        let two = || {
             let (dir, git) = craft();
             let (pack, idx) = git.pack(&[
                 PackEntry::Whole(Blob, b"one".to_vec()),
                 PackEntry::Whole(Blob, b"two".to_vec()),
             ]);
+            (dir, pack, idx)
+        };
+        for (what, damage, expected) in cases {
+            let (dir, pack, idx) = two();
             damage(&pack, &idx);
             let message = broken(open(&dir).read(&id(Blob, b"one")));
             assert!(message.contains(expected), "{what}: {message}");
+        }
+        // A pack that is a folder isn't damage `git fsck` would find.
+        let (dir, pack, _) = two();
+        fs::remove_file(&pack).unwrap();
+        fs::create_dir(&pack).unwrap();
+        match open(&dir).read(&id(Blob, b"one")) {
+            Err(GitError::NotPlain { what }) => {
+                assert!(what.contains("not a regular file"), "{what}")
+            }
+            other => panic!("{other:?}"),
         }
     }
 

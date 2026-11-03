@@ -808,7 +808,7 @@ mod tests {
         std::fs::remove_file(&head).unwrap();
         assert!(matches!(refs_of(&dir), Err(GitError::Broken { .. })));
         std::fs::create_dir(&head).unwrap();
-        assert!(matches!(refs_of(&dir), Err(GitError::Broken { .. })));
+        assert!(matches!(refs_of(&dir), Err(GitError::NotPlain { .. })));
     }
 
     #[test]
@@ -902,7 +902,7 @@ mod tests {
         #[cfg(windows)]
         crate::test_support::junction(&link, outside.path());
         match refs_of(&dir) {
-            Err(GitError::Broken { what }) => assert!(what.contains("linked"), "{what}"),
+            Err(GitError::NotPlain { what }) => assert!(what.contains("linked"), "{what}"),
             other => panic!("{other:?}"),
         }
         let (dir, _git) = repo();
@@ -910,7 +910,7 @@ mod tests {
             &outside.path().join("main"),
             &dir.path().join(".git/refs/heads/linked"),
         ) {
-            assert!(matches!(refs_of(&dir), Err(GitError::Broken { .. })));
+            assert!(matches!(refs_of(&dir), Err(GitError::NotPlain { .. })));
         }
     }
 

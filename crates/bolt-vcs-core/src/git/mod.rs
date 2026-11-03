@@ -157,6 +157,10 @@ pub enum GitError {
     /// Damaged or hostile data; `what` names the file or object.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     Broken { what: String },
+    /// A link or special file where Git keeps a plain file or folder, or a file where it keeps a
+    /// folder, which Bolt never reads through and `git fsck` doesn't mind; `what` names it.
+    #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
+    NotPlain { what: String },
     /// An object Git reads, but past a limit or a rule of Bolt's that Git doesn't have, so
     /// `git fsck` finds nothing wrong; `what` names the object and says why.
     #[error(
@@ -192,6 +196,11 @@ impl GitError {
                 GitError::Broken { .. } => {
                     "Nothing was changed. Check the repository with `git fsck`, or import a \
                      fresh clone of it."
+                }
+                GitError::NotPlain { .. } => {
+                    "Nothing was changed. Bolt never follows links in a Git repository, nor reads \
+                     special files there: put what a link points to in its place, or import a \
+                     fresh clone."
                 }
                 GitError::Unimportable { .. } => {
                     "Nothing was changed. Rewrite the Git history that holds it, then run bolt \
@@ -283,11 +292,15 @@ fn trim_start(mut text: &[u8]) -> &[u8] {
     text
 }
 
-/// A `safe_fs` refusal (a link, special file or oversized file where Git keeps a plain one) is
-/// `Broken`, a file gone while Bolt read is `Changed`, anything else `Io`. Each names `path`.
+/// `safe_fs`'s refusal of a link or special file where Git keeps a plain one is `NotPlain`, and of
+/// a file past its cap `Broken`; a file gone while Bolt read is `Changed`, anything else `Io`.
+/// Each names `path`.
 fn read_error(path: &Path, e: io::Error) -> GitError {
     match e.kind() {
-        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => broken(naming(path, &e)),
+        io::ErrorKind::InvalidInput => GitError::NotPlain {
+            what: naming(path, &e),
+        },
+        io::ErrorKind::InvalidData => broken(naming(path, &e)),
         io::ErrorKind::NotFound => GitError::Changed {
             what: format!("{} went away", path.display()),
         },
@@ -702,7 +715,13 @@ mod tests {
         #[cfg(windows)]
         crate::test_support::junction(&link, &real.path().join(".git"));
         match Repo::open(dir.path()) {
-            Err(GitError::Broken { what }) => assert!(what.contains("not a real folder"), "{what}"),
+            Err(e @ GitError::NotPlain { .. }) => {
+                assert!(e.to_string().contains("not a real folder"), "{e}");
+                // `git fsck` follows the link and finds nothing wrong, so the hint says what to do.
+                let hint = e.hint().unwrap();
+                assert!(hint.contains("never follows links"), "{hint}");
+                assert!(!hint.contains("fsck"), "{hint}");
+            }
             other => panic!("{other:?}"),
         }
         // Nothing at all is not a repository.
@@ -768,7 +787,7 @@ mod tests {
         fs::remove_file(&config).unwrap();
         fs::create_dir(&config).unwrap();
         let err = Repo::open(dir.path()).err().unwrap();
-        assert!(matches!(err, GitError::Broken { .. }), "{err:?}");
+        assert!(matches!(err, GitError::NotPlain { .. }), "{err:?}");
     }
 
     #[test]
@@ -856,20 +875,20 @@ mod tests {
         }
     }
 
-    /// A refusal from `safe_fs` is damage, a file gone mid-read is Git at work, the rest is I/O;
-    /// each names the path once.
+    /// `safe_fs` refusing a link or special file is a file that isn't plain, and one past its cap
+    /// damage; a file gone mid-read is Git at work, the rest is I/O. Each names the path once.
     #[test]
     fn read_errors_are_told_apart() {
         let path = Path::new("refs/heads/main");
         let kind = |kind| read_error(path, io::Error::from(kind));
-        for k in [io::ErrorKind::InvalidInput, io::ErrorKind::InvalidData] {
-            // As the system gives it: no path in its message, so Bolt adds it.
-            match kind(k) {
-                GitError::Broken { what } => {
-                    assert!(what.starts_with("refs/heads/main: "), "{what}")
-                }
-                other => panic!("{other:?}"),
-            }
+        // As the system gives them: no path in the message, so Bolt adds it.
+        match kind(io::ErrorKind::InvalidInput) {
+            GitError::NotPlain { what } => assert!(what.starts_with("refs/heads/main: "), "{what}"),
+            other => panic!("{other:?}"),
+        }
+        match kind(io::ErrorKind::InvalidData) {
+            GitError::Broken { what } => assert!(what.starts_with("refs/heads/main: "), "{what}"),
+            other => panic!("{other:?}"),
         }
         // As safe_fs gives it: the path is in the message already.
         let named = io::Error::new(
@@ -877,7 +896,13 @@ mod tests {
             "refs/heads/main is not a regular file",
         );
         match read_error(path, named) {
-            GitError::Broken { what } => assert_eq!(what, "refs/heads/main is not a regular file"),
+            e @ GitError::NotPlain { .. } => {
+                assert_eq!(
+                    e.to_string(),
+                    "Bolt can't import this Git repository: refs/heads/main is not a regular file."
+                );
+                assert!(e.hint().unwrap().contains("never follows links"), "{e}");
+            }
             other => panic!("{other:?}"),
         }
         match kind(io::ErrorKind::NotFound) {
@@ -902,6 +927,9 @@ mod tests {
         assert_hostile_text_escaped(&refused.to_string());
         for err in [
             GitError::Broken {
+                what: HOSTILE.into(),
+            },
+            GitError::NotPlain {
                 what: HOSTILE.into(),
             },
             GitError::Unimportable {

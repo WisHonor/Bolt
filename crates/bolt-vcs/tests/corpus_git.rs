@@ -7,7 +7,7 @@
 mod support;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bolt_core::diff::for_each_change;
@@ -143,6 +143,35 @@ fn left_out_heading(count: usize) -> String {
          with everything in them:\n"
     )
 }
+
+/// `parts` inside `.git`, joined as this system joins them.
+fn in_git(parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(PathBuf::from(".git"), |path, part| path.join(part))
+}
+
+/// Fails unless `err` has the line `error: <before><a path ending in path><after>`. Bolt names a
+/// file in the repository by its whole path, which starts with the project folder's as this
+/// system gives it (macOS puts `/private` before a temporary one), so only that part is open.
+#[track_caller]
+fn assert_names(err: &str, before: &str, path: &Path, after: &str) {
+    let before = format!("error: {before}");
+    let after = format!("{}{}{after}", std::path::MAIN_SEPARATOR, path.display());
+    let named = |line: &str| {
+        line.len() > before.len() + after.len()
+            && line.starts_with(&before)
+            && line.ends_with(&after)
+    };
+    assert!(err.lines().any(named), "{before}…{after}\nin {err}");
+}
+
+const BROKEN: &str = "Bolt can't import this Git repository: ";
+
+/// The hint for a link or special file in a Git repository, which `git fsck` wouldn't mind.
+const NOT_PLAIN: &str = "\nhint: Nothing was changed. Bolt never follows links in a Git \
+                         repository, nor reads special files there: put what a link points to \
+                         in its place, or import a fresh clone.\n";
 
 /// Makes `link` a link to the folder `target`: on Windows a junction, which needs no rights.
 fn link_folder(target: &Path, link: &Path) {
@@ -616,20 +645,22 @@ fn refs_bolt_cant_read_stop_the_import() {
     }
 
     // Loose refs that are links to a folder and to a file outside, which hold a good ref.
-    let heads = |env: &Env| env.root().join(".git").join("refs").join("heads");
+    let linked = in_git(&["refs", "heads", "linked"]);
+    let why = " is not a regular file (it is a link, folder or special file).";
     let outside = tempfile::tempdir().unwrap();
     let (env, git) = repo();
     let id = one_file(&git);
     fs::write(outside.path().join("main"), format!("{}\n", id.to_hex())).unwrap();
-    link_folder(outside.path(), &heads(&env).join("linked"));
+    link_folder(outside.path(), &env.root().join(&linked));
     let err = refused(&env);
-    let stop = "linked is not a regular file (it is a link, folder or special file).\n";
-    assert!(err.contains(stop), "{err}");
+    assert_names(&err, BROKEN, &linked, why);
+    assert!(err.contains(NOT_PLAIN), "{err}");
     let (env, git) = repo();
     one_file(&git);
-    if link_file(&outside.path().join("main"), &heads(&env).join("linked")) {
+    if link_file(&outside.path().join("main"), &env.root().join(&linked)) {
         let err = refused(&env);
-        assert!(err.contains(stop), "{err}");
+        assert_names(&err, BROKEN, &linked, why);
+        assert!(err.contains(NOT_PLAIN), "{err}");
     }
 }
 
@@ -774,25 +805,24 @@ fn repository_shapes_bolt_doesnt_follow_are_refused_saying_what_to_do() {
 /// Each link leads to a good repository's own part, so following it would have imported.
 #[test]
 fn links_in_the_repositorys_shape_are_refused_unfollowed() {
-    let hint = "hint: Nothing was changed. Check the repository with `git fsck`, or import a fresh \
-                clone of it.\n";
+    let not_a_folder = " is not a real folder (it is a link, junction or file).";
     let elsewhere = tempfile::tempdir().unwrap();
     one_file(&Craft::new(elsewhere.path(), HashKind::Sha1));
     let env = Env::empty();
     link_folder(&elsewhere.path().join(".git"), &env.root().join(".git"));
     let err = refused(&env);
-    let refusal = ".git is not a real folder (it is a link, junction or file).\n";
-    assert!(err.contains(refusal) && err.contains(hint), "{err}");
+    assert_names(&err, BROKEN, Path::new(".git"), not_a_folder);
+    assert!(err.contains(NOT_PLAIN), "{err}");
 
     let outside = tempfile::tempdir().unwrap();
     let (env, git) = repo();
     one_file(&git);
-    let objects = env.root().join(".git").join("objects");
+    let objects = env.root().join(in_git(&["objects"]));
     fs::rename(&objects, outside.path().join("objects")).unwrap();
     link_folder(&outside.path().join("objects"), &objects);
     let err = refused(&env);
-    let refusal = "objects is not a real folder (it is a link, junction or file).\n";
-    assert!(err.contains(refusal) && err.contains(hint), "{err}");
+    assert_names(&err, BROKEN, &in_git(&["objects"]), not_a_folder);
+    assert!(err.contains(NOT_PLAIN), "{err}");
 
     // A pack holding the whole history.
     let (env, git) = repo();
@@ -809,8 +839,10 @@ fn links_in_the_repositorys_shape_are_refused_unfollowed() {
     fs::rename(&pack, &moved).unwrap();
     if link_file(&moved, &pack) {
         let err = refused(&env);
-        let refusal = ".pack is not a regular file (it is a link, folder or special file).\n";
-        assert!(err.contains(refusal) && err.contains(hint), "{err}");
+        let name = pack.file_name().unwrap().to_str().unwrap();
+        let why = " is not a regular file (it is a link, folder or special file).";
+        assert_names(&err, BROKEN, &in_git(&["objects", "pack", name]), why);
+        assert!(err.contains(NOT_PLAIN), "{err}");
     }
 }
 
