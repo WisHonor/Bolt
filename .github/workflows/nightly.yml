@@ -32,7 +32,7 @@ jobs:
           restore-keys: fuzz-corpus-
       - name: Fuzz every target
         run: |
-          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines open_pack name_rules format_file ignore_rules; do
+          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config; do
             cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 || exit 1
           done
       - name: Upload crash files

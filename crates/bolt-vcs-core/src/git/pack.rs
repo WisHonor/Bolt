@@ -497,7 +497,7 @@ pub(super) fn delta_sizes(mut delta: &[u8]) -> Option<(u64, u64)> {
 
 /// The object `delta` builds on `base`, with every instruction checked; `Err` says what is wrong
 /// with the delta.
-pub(super) fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
+pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
     let mut rest = delta;
     let damaged_size = || "starts with a damaged size".to_owned();
     let base_size = varint(&mut rest, 10).ok_or_else(damaged_size)?;

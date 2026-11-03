@@ -1,6 +1,6 @@
 # Bolt Test Plan — Draft
 
-> **Status:** drafted in the design phase (2026-10-31); §3 and §4 describe the tests and CI as they run after milestone 1 (2026-11-02), with milestone 2's differential tests (2026-11-03).
+> **Status:** drafted in the design phase (2026-10-31); §3 and §4 describe the tests and CI as they run after milestone 1 (2026-11-02), with milestone 2's differential tests and hostile Git repositories (2026-11-03).
 
 **In plain words.** Bolt's first promise is "never lose or corrupt your data". Tests are how that promise survives every change to the code. Each kind of test below proves something specific, and together they run on Windows, macOS and Linux every time code is pushed.
 
@@ -51,9 +51,9 @@ Measured on 2026-11-03 in release builds, on git/git as of 2026-11-01: 85,977 co
 - GitHub's Linux runner (`ubuntu-latest`, nightly run 41638396168): imported in 102.0 s, with a peak of 583 MiB (`VmHWM`).
 - A Windows 11 laptop (AMD Ryzen 7 7730U with 8 cores, 16 GB of RAM, an NVMe SSD) with Git 2.50.1: imported in 165 s, with a peak working set of 503 MiB; the comparison took 124 s more. Windows tells a process its peak memory only through a system call, so there the test prints none: this figure is the test process's `PeakWorkingSet64`, read by PowerShell twice a second and taken as the import ended (the comparison never raised it).
 
-**Fuzz targets.** The decoders for folder listings, saves, chunk lists, conflict records and diary entries; pack indexes and trailers; `.bolt/format`; `state/journal`; `bolt.toml`; `.boltignore`; name and path validation; the Git import reader.
+**Fuzz targets.** The decoders for folder listings, saves, chunk lists, conflict records and diary entries; pack indexes and trailers; `.bolt/format`; `state/journal`; `bolt.toml`; `.boltignore`; name and path validation; the Git import reader: loose objects, packs and their indexes (given the checksums no fuzzer finds by chance), deltas, commits, trees and tags, `packed-refs` and `HEAD`, and config.
 
-**Malicious-repository corpus.** At least one case per threat in [security.md](security.md) §4: path tricks, `.bolt` spellings, symlink escapes, case and Unicode collisions, device names, bombs, non-canonical encodings, wrong fingerprints, truncated packs and corrupted indexes. Cases inspired by Git's published vulnerabilities are added as they are reviewed.
+**Malicious-repository corpus.** At least one case per threat in [security.md](security.md) §4: path tricks, `.bolt` spellings, symlink escapes, case and Unicode collisions, device names, bombs, non-canonical encodings, wrong fingerprints, truncated packs and corrupted indexes. The cases from the review of Git's published vulnerabilities (2026-11-02, security.md §6) are in `crates/bolt-vcs/tests/corpus_git.rs`: each is a Git repository written byte by byte with `Craft`, which only Bolt reads, run through `bolt import` (in the test's own process where a sweep imports a thousand times), and each test checks the exact refusal, or what was left out and how it was listed, and that nothing was committed when the import stopped.
 
 **Red-team proof tests.** Every proven red-team finding keeps its proof as a permanent test that runs on every push: `crates/bolt-vcs/tests/redteam.rs` (session 1, 18 tests) and `crates/bolt-vcs/tests/redteam2.rs` (session 2 and the final review of its fixes, 12 tests). Each runs on the systems its attack needs; the only ignored test is a helper that plants files for the session's attack scripts.
 

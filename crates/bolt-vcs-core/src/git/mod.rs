@@ -19,6 +19,9 @@ pub use object::{
     parse_tree, rebuild_commit,
 };
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
+// For the delta fuzz target.
+#[cfg(feature = "test-support")]
+pub use pack::apply_delta;
 pub use refs::{Head, Refs};
 
 use std::fs;

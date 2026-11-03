@@ -332,12 +332,15 @@ fn ofs_distance(mut distance: u64) -> Vec<u8> {
     out
 }
 
-fn zlib(bytes: &[u8]) -> Vec<u8> {
+/// `bytes` compressed as Git compresses objects, for `raw_loose`.
+#[must_use]
+pub fn zlib(bytes: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(bytes, 6)
 }
 
 /// The repository's hash of `bytes`, as packs and indexes end with.
-fn digest(hash: HashKind, bytes: &[u8]) -> Vec<u8> {
+#[must_use]
+pub fn digest(hash: HashKind, bytes: &[u8]) -> Vec<u8> {
     let mut hasher = Hasher::new(hash);
     hasher.update(bytes);
     hasher

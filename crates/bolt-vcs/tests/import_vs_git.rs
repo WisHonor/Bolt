@@ -9,27 +9,15 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
-use bolt_core::history::current_save;
 use bolt_core::import::{ImportRequest, import_git};
-use bolt_core::listing::Listing;
 use bolt_core::names::holdable_here;
 use bolt_core::repo::Repository;
 use bolt_core::save::Person;
-use support::{Env, assert_matches_git, copy_dir, git, git_with_input, text};
+use support::{Env, assert_matches_git, copy_dir, git, git_with_input, text, top_folder};
 
 /// Writes `bytes` into the repository as a blob, and returns its ID.
 fn blob(env: &Env, bytes: &[u8]) -> String {
     env.git_input(&["hash-object", "-w", "--stdin"], bytes)
-}
-
-/// The top folder of the save the project in `dir` is on.
-fn top_folder(dir: &Path) -> Listing {
-    let repo = Repository::open(dir).unwrap();
-    let save = repo
-        .store()
-        .save(&current_save(&repo).unwrap(), false)
-        .unwrap();
-    repo.store().listing(&save.root).unwrap()
 }
 
 #[test]

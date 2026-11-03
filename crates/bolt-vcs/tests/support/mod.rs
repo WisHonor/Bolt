@@ -13,7 +13,9 @@ use std::process::{Child, Command, Output, Stdio};
 
 use assert_cmd::Command as Bolt;
 use bolt_core::diary::State;
+use bolt_core::history::current_save;
 use bolt_core::id::Id;
+use bolt_core::listing::Listing;
 use bolt_core::repo::Repository;
 use bolt_core::save::EXTRA_GIT_COMMIT;
 use tempfile::TempDir;
@@ -106,6 +108,16 @@ pub fn git_commit(repo: &Repository, save: &Id) -> String {
     String::from_utf8(save.extra[EXTRA_GIT_COMMIT].clone()).unwrap()
 }
 
+/// The top folder of the save the project in `dir` is on.
+pub fn top_folder(dir: &Path) -> Listing {
+    let repo = Repository::open(dir).unwrap();
+    let save = repo
+        .store()
+        .save(&current_save(&repo).unwrap(), false)
+        .unwrap();
+    repo.store().listing(&save.root).unwrap()
+}
+
 /// Copies the folder `from`, everything in it, to `to`.
 pub fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -134,12 +146,17 @@ impl Env {
 
     /// A Git repository made by `git init` with `options`, with no commits yet, on `main`.
     pub fn init(options: &[&str]) -> Env {
-        let env = Env {
-            work: tempfile::tempdir().unwrap(),
-            config: tempfile::tempdir().unwrap(),
-        };
+        let env = Env::empty();
         env.git(&[&["init", "-q"], options].concat());
         env
+    }
+
+    /// An empty folder, for a repository the test writes itself.
+    pub fn empty() -> Env {
+        Env {
+            work: tempfile::tempdir().unwrap(),
+            config: tempfile::tempdir().unwrap(),
+        }
     }
 
     pub fn root(&self) -> &Path {

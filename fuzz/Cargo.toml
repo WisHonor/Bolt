@@ -10,7 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3"
-bolt-vcs-core = { path = "../crates/bolt-vcs-core" }
+# test-support for `Craft`, which writes the Git repositories the git_* targets read.
+bolt-vcs-core = { path = "../crates/bolt-vcs-core", features = ["test-support"] }
 
 # Not part of the main workspace, so `cargo test --workspace` and clippy never touch it.
 [workspace]
@@ -74,6 +75,48 @@ bench = false
 [[bin]]
 name = "ignore_rules"
 path = "fuzz_targets/ignore_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_loose"
+path = "fuzz_targets/git_loose.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_pack"
+path = "fuzz_targets/git_pack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_delta"
+path = "fuzz_targets/git_delta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_objects"
+path = "fuzz_targets/git_objects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_refs"
+path = "fuzz_targets/git_refs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_config"
+path = "fuzz_targets/git_config.rs"
 test = false
 doc = false
 bench = false
