@@ -210,7 +210,7 @@ struct Plan {
 
 /// The steps that only read, so that the refusals they make come before anything is written.
 fn plan(root: &Path) -> Result<Plan, ImportError> {
-    Repository::check_new(root).map_err(starting)?;
+    Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
@@ -371,6 +371,34 @@ fn carry_out(
     repo.commit_first(lock, packs, &entry)?;
     report.warnings.extend(repo.store().warnings());
     Ok(report)
+}
+
+/// `check_new`'s refusal of `root`, as an import says it. A `.bolt` that Git checked out makes it
+/// refuse for the wrong reason (a project already, another tool's folder, damage), so then the
+/// import says that Git tracks it.
+fn refused(root: &Path, e: RepoError) -> ImportError {
+    let about_bolt = matches!(
+        e,
+        RepoError::AlreadyAProject { .. }
+            | RepoError::OtherToolsFolder { .. }
+            | RepoError::Damaged { .. }
+    );
+    if about_bolt && let Some(name) = tracked_at(root) {
+        return tracked_stop(&name);
+    }
+    starting(e)
+}
+
+/// The name of a `.bolt` entry Git tracks at the top of the commit `root`'s Git repository is
+/// on, if Bolt can read the repository to tell. It only reads, as `plan` does.
+fn tracked_at(root: &Path) -> Option<String> {
+    let git = git::Repo::open(root).ok()?;
+    let refs = git.refs().ok()?;
+    let head = match refs.head {
+        Head::Branch(branch) => refs.branches.iter().find(|(name, _)| *name == branch)?.1,
+        Head::Detached(id) => id,
+    };
+    tracked_bolt(&git, &head).ok().flatten()
 }
 
 /// A refusal from making the project, as an import says it.

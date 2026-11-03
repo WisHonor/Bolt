@@ -370,6 +370,27 @@ fn a_bolt_folder_git_tracks_stops_the_import() {
     assert_eq!(inside.len(), 1);
 }
 
+/// What Git checked out decides the first look at `.bolt`, which would say it is a project
+/// already, another tool's folder, or damaged; the import says what is really wrong.
+#[test]
+fn a_bolt_git_tracks_is_named_whatever_it_holds() {
+    for (file, refused) in [
+        (".bolt/format", "already a Bolt project"),
+        (".bolt/prompt", "Bolt didn't make"),
+        (".bolt", "damaged"),
+    ] {
+        let env = Env::new();
+        env.commit(file, "not Bolt's\n", "Track it");
+        let err = env.refused_import();
+        assert!(
+            err.contains("Git tracks `.bolt` at the top of this project"),
+            "{file}: {err}"
+        );
+        assert!(!err.contains(refused), "{file}: {err}");
+        assert!(!env.root().join(".bolt/state").exists(), "{file}");
+    }
+}
+
 #[test]
 fn import_inside_another_project_is_refused() {
     let env = Env::new();
