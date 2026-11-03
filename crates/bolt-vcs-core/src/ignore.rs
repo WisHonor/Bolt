@@ -121,6 +121,12 @@ impl<'p> Pieces<'p> {
     }
 }
 
+// The cells `advance` fills on this thread, so a test can bound `wildmatch`'s work without a clock.
+#[cfg(test)]
+thread_local! {
+    static CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One row of `wildmatch`'s table: `row[j]` says whether the pattern's first `j` pieces match the
 /// text read so far. Fills `new` from `old`, the row before `byte` (for `None`, the row of the
 /// empty text), cut after its last true cell, and returns whether the whole pattern matches.
@@ -155,6 +161,8 @@ fn advance(pieces: &mut Pieces<'_>, old: &[bool], new: &mut Vec<bool>, byte: Opt
             (Token::StarsSlash, Some(t)) => left2 || (diag && t == b'/'),
         };
         new.push(cell);
+        #[cfg(test)]
+        CELLS.with(|cells| cells.set(cells.get().saturating_add(1)));
         (left2, left, diag) = (left, cell, up);
         j = j.saturating_add(1);
     };
@@ -524,7 +532,6 @@ mod tests {
     )]
     use super::*;
     use proptest::prelude::*;
-    use std::time::{Duration, Instant};
 
     /// Every row of Git's `t/t3070-wildmatch.sh`: whether `wildmatch` and then `iwildmatch` match
     /// (Git's test tool runs both with `WM_PATHNAME`), the text, and the pattern.
@@ -786,15 +793,19 @@ mod tests {
 
     #[test]
     fn matching_takes_time_proportional_to_its_input() {
-        let pattern = "*a".repeat(2000) + "b";
-        let text = "a".repeat(4000);
-        let start = Instant::now();
-        assert!(!wildmatch(pattern.as_bytes(), text.as_bytes(), false));
-        // Each `**/` doubles the time Git's recursion takes; here it is one more step per byte.
-        let pattern = "**/".repeat(1000) + "x";
-        let text = "a/".repeat(1000);
-        assert!(!wildmatch(pattern.as_bytes(), text.as_bytes(), false));
-        assert!(start.elapsed() < Duration::from_secs(2));
+        // Git's recursion takes exponential time on these; each `**/` doubles it.
+        for (pattern, text) in [
+            ("*a".repeat(2000) + "b", "a".repeat(4000)),
+            ("**/".repeat(1000) + "x", "a/".repeat(1000)),
+        ] {
+            CELLS.with(|cells| cells.set(0));
+            assert!(!wildmatch(pattern.as_bytes(), text.as_bytes(), false));
+            // At most a cell for each piece of the pattern, in a row for each byte and one before;
+            // and at least one a byte, as no row here empties.
+            let cells = CELLS.with(std::cell::Cell::get);
+            assert!(cells <= (pattern.len() + 1) * (text.len() + 1), "{cells}");
+            assert!(cells >= text.len(), "{cells}");
+        }
     }
 
     const MATCH: i32 = 0;
