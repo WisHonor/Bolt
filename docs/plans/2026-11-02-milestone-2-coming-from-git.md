@@ -49,10 +49,11 @@
   - **Change IDs of imported saves:** the commit's first `change-id` header, if it decodes to 16 bytes in Jujutsu's letters (`z` = 0 … `k` = 15). Otherwise the last 16 bytes of the commit ID, in reverse order, with each byte's bits reversed.
   - **Renaming rule** (decision 033), applied to line, server-line and server names:
     1. each character Bolt doesn't allow becomes `-` (bytes that aren't UTF-8 become U+FFFD, and so `-`);
-    2. a name over 255 bytes is cut to 255 at a character boundary;
-    3. a name equal to an earlier one, or differing only by letter case (`to_lowercase`), gets `-2`, `-3`… in the byte order of the original names; a suffixed name must itself be free.
+    2. a name over 255 bytes is cut to 255 at a character boundary, and a `/` the cut leaves at its end is dropped;
+    3. names that need neither step keep their names and are given first; of names that differ only by letter case (`to_lowercase`), only the first in byte order keeps its name;
+    4. then each other name, in the byte order of the original names, gets its name from steps 1 and 2 unless a name given already equals it but for letter case; if one does, it gets the first of `-2`, `-3`… that leaves it free, cut to make room for the suffix.
 
-    Tag names use the same rule, except that any valid UTF-8 is allowed.
+    Tag names follow the same rule, except that any valid UTF-8 is allowed and two names clash only when they are the same, so only names that aren't UTF-8 or are over 255 bytes are renamed (decision 034).
 - **Dependencies:** only the four above. Any other needs the owner's approval.
 - One commit per task unless a step says otherwise, and no Claude attribution in commit messages.
 

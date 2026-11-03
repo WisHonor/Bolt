@@ -57,7 +57,7 @@
 | `tags` | number | How many tags were imported. |
 | `position` | object | Where the project is now: `{"line": …}`, the line Git's current branch became, or `{"save": …}`, the fingerprint (64 hex digits) of the save Git's detached `HEAD` became. |
 | `renamed` | list | Each name Bolt's rules don't allow, and the one it was given: `{"kind", "git", "bolt"}`. `kind` is `"line"`, `"server"`, `"server_line"` or `"tag"`. A server line's `git` is `<server>/<branch>` and its `bolt` is `<line>@<server>`. `[]` if nothing was renamed. |
-| `skipped_refs` | list of string | The whole names of the refs that weren't imported, such as `refs/stash` and `refs/notes/commits`: only branches, server branches and tags are. |
+| `skipped_refs` | object | The refs that weren't imported, such as `refs/stash`, `refs/notes/commits` and `refs/pull/…` (only branches, server branches and tags are): `count`, how many in all, and `first`, the whole names of the first 100 in byte order. |
 | `skipped_tags` | list | Each tag that wasn't imported: `{"git": …, "reason": …}`, its Git name and why, such as a tag of a folder. |
 | `skipped_entries` | object | Entries left out of saves because Bolt never writes their names to disk, such as spellings of `.git` and `.bolt`, with everything in them: `count`, how many in all, and `first`, the first 100 met, each `{"commit": …, "path": …}` (the Git commit in hex, and the path in it). A path can end in `/`, or be `""`, where the name left out is empty. |
 | `inexact_commits` | number | How many commits a later export can't recreate with their Git IDs: their folders are in a form Git no longer writes, or entries were left out. |
@@ -130,7 +130,7 @@ Folders are not listed; the files in them are.
 | `gitignore_skipped` | `save`, unless the save stops | A `.gitignore` isn't a regular file (it is a link, folder or special file), so Bolt skipped it and its rules didn't apply, as Git skips a linked one. The message names the file. |
 | `kept_as_they_were` | `save`, unless the save stops | The save kept entries of the last save exactly as they were, because this computer can't hold them as they are: project links, names this system can't create and names that are one file on this drive, whatever the folder holds at their paths, and links Git wrote as files holding exactly their targets. The message counts them. |
 | `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
-| `nested_bolt_folder` | `import` | Git checked out a folder named `.bolt` below the top of the project (one in its current commit). Bolt left it out of history, but Bolt commands run inside it would take it for a project. Each of the first 100 gets a warning naming it; one more warning counts the rest. |
+| `nested_bolt_folder` | `import` | Git checked out a folder named `.bolt` below the top of the project (one in its current commit). Bolt left it out of history, but Bolt commands run inside it would take it for a project. Each of the first 100 gets a warning naming it; one more warning counts the rest. A folder Git holds at two paths (one tree used twice) is named at the first only. |
 | `grafts_ignored` | `import` | The Git repository has a grafts file (`.git/info/grafts`), which changes the parents Git shows for some commits. Bolt ignored it and imported the commits as they are. |
 
 ## 5. Errors
