@@ -38,6 +38,14 @@ impl Writer {
         Writer::default()
     }
 
+    /// A writer whose buffer holds `capacity` bytes before it grows.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Writer {
+        Writer {
+            buf: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }

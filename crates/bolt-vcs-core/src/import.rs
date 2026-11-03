@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
+use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{self, GitError, GitId, Head, ObjectType, Refs, parse_tag, parse_tree, shown};
 use crate::id::{Id, hash_record};
@@ -264,6 +264,8 @@ struct Plan {
     skipped_ref_count: u64,
     /// Every commit to convert, each after its parents.
     order: Vec<GitId>,
+    /// The tag list's size as the first pass counted it, with room for its longest head.
+    tag_list_len: u64,
     /// The line of Git's current branch, if `HEAD` is on one, and `HEAD`'s commit.
     head_line: Option<String>,
     head_commit: GitId,
@@ -276,7 +278,8 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
     let git = git::Repo::open(root)?;
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
-    let roots = roots(&git, &refs, &names.tags, &mut TagBudget::new())?;
+    let mut tag_budget = TagBudget::new();
+    let roots = roots(&git, &refs, &names.tags, &mut tag_budget)?;
     if roots.is_empty() {
         return Err(ImportError::Stop {
             what: "There's nothing to import: this Git repository has no commits. bolt start \
@@ -304,6 +307,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
         git,
         names,
         order,
+        tag_list_len: tag_budget.used(),
         head_line,
         head_commit,
         grafts,
@@ -324,6 +328,7 @@ fn carry_out(
         skipped_refs,
         skipped_ref_count,
         order,
+        tag_list_len,
         head_line,
         head_commit,
         grafts,
@@ -336,16 +341,19 @@ fn carry_out(
         (req.progress)(done, total);
     }
     converter.finish()?;
-    let mut tag_list = TagList::default();
+    // Each tag goes into the list as it is read, in the list's order, and is let go: the tags
+    // are never held whole beside the list.
+    let mut in_list_order: Vec<&Named> = names.tags.iter().collect();
+    in_list_order.sort_by(|a, b| a.bolt.cmp(&b.bolt));
+    let mut tag_list = TagListWriter::with_capacity(tag_list_len);
     let mut skipped_tags = Vec::new();
-    for tag in &names.tags {
+    for tag in in_list_order {
         match converter.tag(&tag.bolt, &tag.target)? {
-            TagOutcome::Tag(kept) => {
-                tag_list.tags.insert(tag.bolt.clone(), kept);
-            }
+            TagOutcome::Tag(kept) => tag_list.push(&tag.bolt, &kept),
             TagOutcome::Skipped { reason } => skipped_tags.push((lossy(&tag.git), reason)),
         }
     }
+    let tag_count = tag_list.count();
     let lines = lines_of(&converter, &names.lines)?;
     let mut server_lines = ServerLines::default();
     for (server, own) in &names.servers {
@@ -358,17 +366,16 @@ fn carry_out(
     };
     let counts = converter.counts().clone();
 
-    let tags = if tag_list.tags.is_empty() {
+    let tags = if tag_count == 0 {
         None
     } else {
-        let encoded = tag_list.encode();
-        let read_back = |bytes: &[u8]| TagList::decode(bytes).map(drop);
+        let encoded = tag_list.finish();
         Some(put_record(
             repo.store(),
             &mut packs,
             ObjectKind::TagList,
             &encoded,
-            read_back,
+            TagList::check,
         )?)
     };
     let servers = if server_lines.servers.is_empty() {
@@ -400,7 +407,7 @@ fn carry_out(
             .values()
             .map(|own| own.len() as u64)
             .sum(),
-        tags: tag_list.tags.len() as u64,
+        tags: tag_count,
         position: position.clone(),
         renamed: names.renamed,
         skipped_refs,
@@ -714,7 +721,8 @@ fn lines_of(
 }
 
 /// Stores the record `encoded` of `kind`, a tag list or server lines, unless a good copy is there
-/// already. Their encoders don't check what they write, so `read_back` decodes it first. Their
+/// already. Their encoders don't check what they write, so `read_back` reads it first, as the
+/// decoder would; for the tag list, without keeping what it reads, since the list can be big. Their
 /// sizes were held to a record's limit before anything was written: the tag list's by `roots`
 /// (and again, as a guard, by the converter), the server lines' by `Names::of`.
 fn put_record(

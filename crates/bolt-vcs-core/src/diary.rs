@@ -336,21 +336,19 @@ impl DiaryEntry {
 }
 
 impl TagList {
+    /// The list's bytes, written once into a buffer of their size.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u8(1);
-        w.varint(self.tags.len() as u64);
+        let tags = self
+            .tags
+            .iter()
+            .map(|(name, tag)| TagList::tag_len(name, tag));
+        let len = TagList::head_len(self.tags.len() as u64) + tags.sum::<u64>();
+        let mut w = TagListWriter::with_capacity(len);
         for (name, tag) in &self.tags {
-            w.string(name);
-            w.id(&tag.save);
-            w.string(&tag.message);
-            w.varint(tag.git_tags.len() as u64);
-            for object in &tag.git_tags {
-                w.bytes(object);
-            }
+            w.push(name, tag);
         }
-        w.into_bytes()
+        w.finish()
     }
 
     /// What `encode` writes before the tags of a list of `count`: its version and the count.
@@ -381,6 +379,21 @@ impl TagList {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<TagList, DecodeError> {
+        let mut tags = BTreeMap::new();
+        TagList::read(bytes, |name, tag| {
+            tags.insert(name, tag);
+        })?;
+        Ok(TagList { tags })
+    }
+
+    /// Checks `bytes` as `decode` does, but lets each tag go once it is read: for a list too big
+    /// to hold twice.
+    pub fn check(bytes: &[u8]) -> Result<(), DecodeError> {
+        TagList::read(bytes, |_, _| {})
+    }
+
+    /// Reads the list `bytes`, giving `each` every tag in name order.
+    fn read(bytes: &[u8], mut each: impl FnMut(String, Tag)) -> Result<(), DecodeError> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 1 {
             return Err(DecodeError::Invalid("unknown tag list version"));
@@ -389,7 +402,6 @@ impl TagList {
         if n == 0 {
             return Err(DecodeError::Invalid("a tag list cannot be empty"));
         }
-        let mut tags = BTreeMap::new();
         let mut prev = None;
         for _ in 0..n {
             let name = read_sorted_name(&mut r, &mut prev, "tag name")?;
@@ -404,7 +416,7 @@ impl TagList {
                 let object = r.bytes(MAX_GIT_TAG_OBJECT_BYTES, "Git tag object")?;
                 git_tags.push(object.to_vec());
             }
-            tags.insert(
+            each(
                 name,
                 Tag {
                     save,
@@ -413,13 +425,61 @@ impl TagList {
                 },
             );
         }
-        r.finish()?;
-        Ok(TagList { tags })
+        r.finish()
     }
 
     #[must_use]
     pub fn id(&self) -> Id {
         hash_record(Flavor::TagList, &self.encode())
+    }
+}
+
+/// Writes a tag list a tag at a time, so a caller can let each tag go once it is written. Tags go
+/// in name order, as a list holds them.
+pub struct TagListWriter {
+    tags: Writer,
+    count: u64,
+}
+
+impl TagListWriter {
+    /// A writer with room for `len` bytes: the list's size, as `head_len` and `tag_len` count it,
+    /// so the list is written without its buffer growing.
+    #[must_use]
+    pub fn with_capacity(len: u64) -> TagListWriter {
+        TagListWriter {
+            tags: Writer::with_capacity(usize::try_from(len).unwrap_or(0)),
+            count: 0,
+        }
+    }
+
+    pub fn push(&mut self, name: &str, tag: &Tag) {
+        let w = &mut self.tags;
+        w.string(name);
+        w.id(&tag.save);
+        w.string(&tag.message);
+        w.varint(tag.git_tags.len() as u64);
+        for object in &tag.git_tags {
+            w.bytes(object);
+        }
+        self.count = self.count.saturating_add(1);
+    }
+
+    /// How many tags it holds.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// The list: its version and count, then the tags. The head goes in front of them in place,
+    /// in the room `with_capacity` left for it.
+    #[must_use]
+    pub fn finish(self) -> Vec<u8> {
+        let mut head = Writer::new();
+        head.u8(1);
+        head.varint(self.count);
+        let mut bytes = self.tags.into_bytes();
+        bytes.splice(0..0, head.into_bytes());
+        bytes
     }
 }
 
@@ -858,6 +918,7 @@ mod tests {
         ];
         for (what, bytes) in bad {
             assert!(TagList::decode(&bytes).is_err(), "{what}");
+            assert!(TagList::check(&bytes).is_err(), "{what}");
         }
         // Just inside each limit, the same lists are fine.
         let message = "m".repeat(MAX_TAG_MESSAGE_BYTES);
@@ -870,6 +931,7 @@ mod tests {
         ];
         for bytes in good {
             TagList::decode(&bytes).unwrap();
+            TagList::check(&bytes).unwrap();
         }
     }
 
@@ -987,9 +1049,18 @@ mod tests {
             let list = TagList { tags };
             let bytes = list.encode();
             prop_assert_eq!(TagList::decode(&bytes).unwrap(), list.clone());
+            prop_assert!(TagList::check(&bytes).is_ok());
             prop_assert_eq!(list.id(), hash_record(Flavor::TagList, &bytes));
             let lengths: u64 = list.tags.iter().map(|(name, tag)| TagList::tag_len(name, tag)).sum();
             prop_assert_eq!(TagList::head_len(list.tags.len() as u64) + lengths, bytes.len() as u64);
+            // Written once, into a buffer of its size.
+            prop_assert_eq!(bytes.capacity(), bytes.len());
+            // A tag at a time, with room for the longest head, as an import writes it.
+            let mut w = TagListWriter::with_capacity(TagList::head_len(MAX_TAGS) + lengths);
+            for (name, tag) in &list.tags {
+                w.push(name, tag);
+            }
+            prop_assert_eq!(w.finish(), bytes);
         }
 
         #[test]

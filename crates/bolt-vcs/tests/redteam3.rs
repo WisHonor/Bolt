@@ -540,7 +540,6 @@ fn rt3_8_streaming_a_deltified_blob_holds_it_at_most_twice() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT3-9: red-team proof, run once its fix is in"]
 fn rt3_9_storing_a_tag_list_takes_at_most_twice_its_size() {
     let env = Env::new();
     let git = one_commit(&env, &[("a.txt", b"a\n")]);

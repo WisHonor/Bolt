@@ -222,8 +222,7 @@ impl TagBudget {
         self.check(name, self.used.saturating_add(least))
     }
 
-    /// What the list holds so far, as counted.
-    #[cfg(test)]
+    /// What the list holds so far, as counted: its tags, and its head at its longest.
     pub(super) fn used(&self) -> u64 {
         self.used
     }
@@ -449,8 +448,9 @@ impl<'r> Converter<'r> {
     ///
     /// Each tag object is read once to learn where its chain ends; a chain that ends at a commit
     /// is read again for each tag kept through it, since each keeps its bytes. Every tag kept
-    /// counts toward the 512 MiB one tag list holds, so the tags returned hold at most that, and
-    /// reading holds one chain more, at most 16 MiB. The converter keeps no tag's bytes.
+    /// counts toward the 512 MiB one tag list holds, and reading holds one chain more, at most
+    /// 16 MiB. The converter keeps no tag's bytes, so a caller that writes each tag into the list
+    /// and lets it go holds the list once.
     pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
         self.tags.room_for(name)?;
         let outcome = self.read_tag(name, target)?;
