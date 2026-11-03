@@ -38,6 +38,9 @@ const MAX_COMMIT_BYTES: u64 = MAX_EXTRA_VALUE_BYTES as u64 + 1 + MAX_MESSAGE_BYT
 /// How many skipped entries, or names that aren't UTF-8, are listed by path. The rest are counted.
 const MAX_LISTED: usize = 100;
 
+/// About the most bytes of a path a list or message holds.
+const MAX_SHOWN_PATH: usize = 1024;
+
 const BUG_HINT: &str = "Nothing was changed. This is a bug in Bolt, not a problem with the \
                         repository.";
 
@@ -56,7 +59,8 @@ pub enum ImportError {
     #[error("{}", escape(what, false))]
     Stop { what: String, hint: Option<String> },
     /// Names that aren't valid UTF-8 (decision 019): the first ones as the commit (hex) and the
-    /// path, escaped, and how many there are.
+    /// path, with U+FFFD for bytes that aren't UTF-8, and how many there are. Paths here, as in
+    /// `Counts`, are kept as they are and escaped only where they are shown.
     #[error("{}", not_utf8_message(first, *count))]
     NotUtf8Names {
         first: Vec<(String, String)>,
@@ -167,7 +171,8 @@ pub struct Counts {
     /// writes, or entries skipped (decisions 032 and 035).
     pub inexact_commits: u64,
     /// The first 100 entries skipped, each as the commit (hex) and the path where it was met
-    /// first. Paths are as Git has them, not escaped.
+    /// first. Paths are as Git has them, not escaped; a name is cut to 255 bytes, and a path to
+    /// about its last 1 KiB.
     pub skipped_entries: Vec<(String, String)>,
     /// Every entry skipped, the listed ones included.
     pub skipped_entry_count: u64,
@@ -554,7 +559,8 @@ impl<'r> Converter<'r> {
                 }
                 _ => {
                     exact = false;
-                    self.skipped(commit, || path_of(stack, &[name]));
+                    // A name holding `/` can be any length: it is listed cut, like any other.
+                    self.skipped(commit, || path_of(stack, &[shown(e.name).as_str()]));
                 }
             }
         }
@@ -582,8 +588,7 @@ impl<'r> Converter<'r> {
     fn not_utf8(&mut self, commit: &str, path: impl FnOnce() -> String) {
         self.not_utf8_count = self.not_utf8_count.saturating_add(1);
         if self.not_utf8.len() < MAX_LISTED {
-            self.not_utf8
-                .push((commit.to_owned(), escape(&path(), false)));
+            self.not_utf8.push((commit.to_owned(), path()));
         }
     }
 
@@ -722,14 +727,28 @@ fn attach(stack: &mut [Frame], name: String, done: Folder) -> Option<Folder> {
     None
 }
 
-/// The path of `names` in the folder on top of the stack, `/` between names. Only messages
-/// build one: for every entry of a deep tree of long names it would cost gigabytes.
+/// The path of `names` in the folder on top of the stack, `/` between names, for a list or a
+/// message. A deep one keeps only the whole names at its end that fit in `MAX_SHOWN_PATH`, after
+/// `…/`: a tree 4,096 levels deep would otherwise make each path a megabyte.
 fn path_of(stack: &[Frame], names: &[&str]) -> String {
     let folders = stack.iter().skip(1).map(|frame| frame.name.as_str());
-    folders
-        .chain(names.iter().copied())
-        .collect::<Vec<_>>()
-        .join("/")
+    let parts: Vec<&str> = folders.chain(names.iter().copied()).collect();
+    let mut start = parts.len();
+    let mut len = 0usize;
+    while let Some(part) = start.checked_sub(1).and_then(|i| parts.get(i)) {
+        len = len.saturating_add(part.len()).saturating_add(1);
+        // The last name is kept whatever its length; callers cut names to 255 bytes.
+        if len > MAX_SHOWN_PATH && start < parts.len() {
+            break;
+        }
+        start = start.saturating_sub(1);
+    }
+    let kept = parts.get(start..).unwrap_or_default().join("/");
+    if start == 0 {
+        kept
+    } else {
+        format!("…/{kept}")
+    }
 }
 
 /// Stops at a commit a save can't keep exactly (decision 032), before its people are read or its
@@ -1222,6 +1241,47 @@ mod tests {
         assert!(e.to_string().contains("101 names"), "{e}");
         assert!(e.to_string().contains("and 1 more"), "{e}");
         assert!(e.hint().unwrap().starts_with("Nothing was changed."));
+    }
+
+    #[test]
+    fn listed_paths_and_names_stay_small() {
+        let (dir, git) = repo(Sha1);
+        let file = blob(&git, b"x");
+        // Names of 100 KB: one holding `/`, so skipped; one that isn't UTF-8; one only too long.
+        let slashed = [&[b'a'; 50_000][..], b"/", &[b'a'; 50_000]].concat();
+        let not_utf8 = [&[b'n'; 100_000][..], b"\xff"].concat();
+        let long = vec![b'z'; 100_000];
+        // Each under 20 levels of 255-byte folder names: about 5 KB of path above it.
+        let folder = "d".repeat(255);
+        let deep = |name: &[u8]| {
+            let mut tree = git.tree(&[(b"100644", name, file)]);
+            for _ in 0..20 {
+                tree = git.tree(&[(b"40000", folder.as_bytes(), tree)]);
+            }
+            git.commit(&commit_bytes(&tree, &[], "", b"m\n"))
+        };
+        let (skipped, bad, too_long) = (deep(&slashed), deep(&not_utf8), deep(&long));
+        let ((counts, finished, stopped), _) = convert(dir.path(), "a", |c| {
+            c.commit(&skipped, &[]).unwrap();
+            c.commit(&bad, &[]).unwrap();
+            (c.counts().clone(), c.finish(), c.commit(&too_long, &[]))
+        });
+        // The end of a path is kept, after `…/`, and a name is cut at 255 bytes.
+        let small = |path: &str| {
+            assert!(path.len() < 1400, "{} bytes", path.len());
+            assert!(path.starts_with("…/"), "{path}");
+        };
+        let listed = &counts.skipped_entries[0].1;
+        small(listed);
+        assert!(listed.ends_with(&format!("{folder}/{}...", "a".repeat(255))));
+        let e = finished.unwrap_err();
+        let ImportError::NotUtf8Names { first, .. } = &e else {
+            panic!("{e:?}")
+        };
+        small(&first[0].1);
+        assert!(e.to_string().len() < 2000, "{} bytes", e.to_string().len());
+        let stopped = stopped.unwrap_err().to_string();
+        assert!(stopped.len() < 2000, "{} bytes", stopped.len());
     }
 
     #[test]
