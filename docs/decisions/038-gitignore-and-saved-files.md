@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
+- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (a save warns when it keeps a change to a file an ignore rule matches)
 - **Agenda topic:** none (milestone 2 planning, question 8)
 - **Partly supersedes:** [decision 008](008-layout-and-settings.md) ("Git import copies an existing `.gitignore` into it")
 - **Refines:** [decision 003](003-working-copy-model.md) (which files a save tracks)

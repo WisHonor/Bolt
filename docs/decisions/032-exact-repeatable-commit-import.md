@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
+- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (a change-id header is used only once per import)
 - **Agenda topic:** none (milestone 2 planning, question 2)
 - **Refines:** [decision 006](006-save-object.md) (change IDs of imported saves) and [decision 019](019-review-clarifications.md) #6–7 (what an imported save holds)
 

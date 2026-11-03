@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with its red-team session, review and merge next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 42
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with its red-team session, review and merge next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 43
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -135,6 +135,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] Re-importing → [decision 040](decisions/040-import-once-catch-up-later.md)
 - [x] More objects than one pack may hold (decision 028's open question) → [decision 041](decisions/041-several-packs-per-command.md)
 - [x] Trusting a folder that other accounts can write to (a question from milestone 1's second red-team session) → [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md)
+- [x] Rulings after milestone 2's red-team session (names Git treats as `.git` in saves, merges with many parents, shared change IDs, ignored files kept saved, sparse checkouts set up through an include, the tag list's memory) → [decision 043](decisions/043-red-team-m2-rulings.md)
 
 ## 5. Design
 

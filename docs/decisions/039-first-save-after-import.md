@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
+- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (sparse checkouts set up through a config include: a warning, not a refusal)
 - **Agenda topic:** none (milestone 2 planning, question 9)
 - **Refines:** [decision 019](019-review-clarifications.md) #2 (entries this computer can't hold), built now rather than in milestone 3; [decision 004](004-project-contents.md) (bytes in = bytes out)
 
