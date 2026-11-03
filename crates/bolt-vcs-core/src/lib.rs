@@ -7,6 +7,7 @@ pub mod diff;
 pub mod drive;
 pub mod encoding;
 pub mod fsio;
+pub mod git;
 pub mod history;
 pub mod id;
 pub mod ignore;

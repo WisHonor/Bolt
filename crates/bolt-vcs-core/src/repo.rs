@@ -223,7 +223,7 @@ fn check_owner_with(
 /// Whether Bolt may use the project at `root`, given who owns the folder and its `.bolt` (or why
 /// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. The
 /// Administrators group is the user's only while it is switched on in this terminal.
-fn owner_allows(
+pub(crate) fn owner_allows(
     owners: impl IntoIterator<Item = io::Result<Owner>>,
     root: &Path,
     safe: &[PathBuf],

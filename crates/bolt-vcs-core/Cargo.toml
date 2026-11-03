@@ -9,6 +9,7 @@ name = "bolt_core"
 
 [features]
 fault-injection = []
+test-support = []
 
 [lints]
 workspace = true
@@ -20,7 +21,10 @@ directories = "6.0.0"
 getrandom = "0.4.3"
 ignore = "0.4.34"
 jiff = "0.2.38"
+miniz_oxide = "0.9.1"
 serde = { version = "1", features = ["derive"] }
+sha1-checked = { version = "0.10.0", default-features = false }
+sha2 = { version = "0.11.1", default-features = false }
 thiserror = "2.0.21"
 toml = "1.1.8"
 unicode-normalization = "0.1.26"

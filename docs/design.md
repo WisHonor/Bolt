@@ -345,8 +345,10 @@ head ─► redo     main → ptvz
 - **Reading Git** ([decision 031](decisions/031-own-git-reader.md)): Bolt's own read-only reader, for loose objects, packs and their deltas, refs, and from `.git/config` only the format lines (plus `core.sparseCheckout`, only to refuse); SHA-1 and SHA-256 repositories.
   - No memory-mapping, and every read is bounded. Files in `.git` are opened without following links, objects Git stored whole stream straight into Bolt's pack, and every Git object's ID is checked as it is read (SHA-1 with collision detection).
   - A deltified object and its base may each be at most 512 MiB, which Git never exceeds by default.
+  - `.git/packed-refs` may be at most 512 MiB, room for millions of refs.
+  - It reads at most 7,600,000 refs: every one decision 033's limits let an import bring in, and a million more it only lists.
   - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files.
-  - It refuses, before writing anything and saying what to do: unknown formats or extensions, reftable, partial and shallow clones, alternates, a `.git` that is a file, and a `.git` another account owns.
+  - It refuses, before writing anything and saying what to do: unknown formats or extensions, reftable, partial and shallow clones, alternates, sparse checkouts, a `.git` that is a file, and a `.git` another account owns.
 - **Commits become saves exactly** ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
   - Tree, parents (in Git's order), author, committer (as the saver) and message carry over; imported saves get no `line` note, since Git never recorded where a commit was made.
   - Whatever the save's own fields can't rebuild (a signature, a signed merge, extra or unusual header lines) stays in the extra field `git-header`. Import checks that every commit rebuilds to its own Git ID, so a later export can give back the same IDs.
