@@ -38,10 +38,42 @@ fn hides_or_reorders(c: char) -> bool {
     )
 }
 
+/// `n` with a comma between each group of three digits, as in 1,234,567: how Bolt writes counts
+/// for people.
+#[must_use]
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn counts_have_a_comma_every_three_digits() {
+        let counts = [0, 999, 1000, 1234, 123_456, 1_234_567, u64::MAX].map(thousands);
+        assert_eq!(
+            counts,
+            [
+                "0",
+                "999",
+                "1,000",
+                "1,234",
+                "123,456",
+                "1,234,567",
+                "18,446,744,073,709,551,615"
+            ]
+        );
+    }
 
     #[test]
     fn control_characters_become_visible() {

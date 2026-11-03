@@ -16,7 +16,7 @@ use bolt_core::import::{ImportError, ImportReport, ImportRequest, import_git};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
-use bolt_core::text::escape;
+use bolt_core::text::{escape, thousands};
 use bolt_core::warning::{self, Warning};
 use clap::{Parser, Subcommand};
 use output::{BOLT_JSON, Failure};
@@ -201,14 +201,14 @@ fn import(json: bool) -> Result<(), Failure> {
 /// "1 tag" or "2 tags", with the count as `thousands` writes it.
 fn counted(count: u64, one: &str, many: &str) -> String {
     let noun = if count == 1 { one } else { many };
-    format!("{} {noun}", output::thousands(count))
+    format!("{} {noun}", thousands(count))
 }
 
 /// `listed`, the first of `count` things, and a last item counting the rest, if there are more.
 fn and_the_rest(mut listed: Vec<String>, count: u64) -> Vec<String> {
     let more = count.saturating_sub(listed.len() as u64);
     if more > 0 {
-        listed.push(format!("and {} more", output::thousands(more)));
+        listed.push(format!("and {} more", thousands(more)));
     }
     listed
 }
@@ -305,7 +305,7 @@ fn print_import(report: &ImportReport, standing: &str) {
         format!(
             "Left out {} entries whose names Bolt never writes to disk (such as .git and .bolt), \
              with everything in them",
-            output::thousands(report.skipped_entry_count)
+            thousands(report.skipped_entry_count)
         )
     };
     print_list(&heading, &entries);
@@ -318,7 +318,7 @@ fn print_import(report: &ImportReport, standing: &str) {
         n => println!(
             "{} commits can't be recreated exactly by a later export: they hold folders in a form \
              Git no longer writes, or entries Bolt left out.",
-            output::thousands(n)
+            thousands(n)
         ),
     }
 }

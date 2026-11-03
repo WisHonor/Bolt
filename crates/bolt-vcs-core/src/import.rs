@@ -17,7 +17,7 @@ use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::Person;
 use crate::store::{Store, StoreError};
-use crate::text::escape;
+use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 
 mod convert;
@@ -540,13 +540,18 @@ fn bolt_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, I
     }
     let more = count.saturating_sub(warnings.len() as u64);
     if more > 0 {
-        warnings.push(Warning::new(
-            warning::NESTED_BOLT_FOLDER,
+        let message = if more == 1 {
+            "Git checked out 1 more folder named .bolt. Bolt left it out of history too; delete \
+             it unless you made it."
+                .to_owned()
+        } else {
             format!(
-                "Git checked out {more} more folders named .bolt. Bolt left them out of history \
-                 too; delete them unless you made them."
-            ),
-        ));
+                "Git checked out {} more folders named .bolt. Bolt left them out of history too; \
+                 delete them unless you made them.",
+                thousands(more)
+            )
+        };
+        warnings.push(Warning::new(warning::NESTED_BOLT_FOLDER, message));
     }
     Ok(warnings)
 }
@@ -694,6 +699,55 @@ mod tests {
                 other => panic!("{name}: {:?}", other.map(|_| ())),
             }
             assert!(!dir.path().join(".bolt").exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn bolt_folders_past_the_first_100_are_counted() {
+        for (folders, last) in [
+            (
+                101,
+                "Git checked out 1 more folder named .bolt. Bolt left it out of history too; \
+                 delete it unless you made it.",
+            ),
+            (
+                102,
+                "Git checked out 2 more folders named .bolt. Bolt left them out of history \
+                 too; delete them unless you made them.",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Craft::new(dir.path(), HashKind::Sha1);
+            let blob = git.object(ObjectType::Blob, b"a\n");
+            let bolt = git.tree(&[(b"100644", b"x", blob)]);
+            // Each folder's tree its own, since each tree is looked at once.
+            let folders: Vec<(Vec<u8>, GitId)> = (0..folders)
+                .map(|n| {
+                    let own = git.object(ObjectType::Blob, format!("{n}\n").as_bytes());
+                    let folder =
+                        git.tree(&[(b"40000", b".bolt", bolt), (b"100644", b"n.txt", own)]);
+                    (format!("d{n:03}").into_bytes(), folder)
+                })
+                .collect();
+            let entries: Vec<(&[u8], &[u8], GitId)> = folders
+                .iter()
+                .map(|(name, id)| (&b"40000"[..], name.as_slice(), *id))
+                .collect();
+            let tree = git.tree(&entries);
+            let raw = format!(
+                "tree {}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 \
+                 +0000\n\nOne\n",
+                tree.to_hex()
+            );
+            let commit = git.commit(raw.as_bytes());
+            let repo = git::Repo::open(dir.path()).unwrap();
+            let warnings = bolt_folder_warnings(&repo, &commit).unwrap();
+            assert_eq!(warnings.len(), 101);
+            assert!(
+                warnings[0].message.contains("at `d000/.bolt`."),
+                "{warnings:?}"
+            );
+            assert_eq!(warnings[100].message, last);
         }
     }
 
