@@ -80,6 +80,19 @@ fn read_to_cap(file: File, path: &Path, max: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Reads into `buf` from offset `pos` of `file`, as much as one read gives, so readers of one
+/// file never share a cursor.
+pub fn read_at(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, buf, pos)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, buf, pos)
+    }
+}
+
 /// Checks that `path` is a real folder: not a link, junction or other reparse point, and not a
 /// file. `NotFound` comes back unchanged.
 pub fn check_real_dir(path: &Path) -> io::Result<()> {

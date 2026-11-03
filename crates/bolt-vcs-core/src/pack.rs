@@ -927,10 +927,7 @@ impl Read for Section<'_> {
         if want == 0 {
             return Ok(0);
         }
-        #[cfg(unix)]
-        let n = std::os::unix::fs::FileExt::read_at(self.file, &mut buf[..want], self.pos)?;
-        #[cfg(windows)]
-        let n = std::os::windows::fs::FileExt::seek_read(self.file, &mut buf[..want], self.pos)?;
+        let n = safe_fs::read_at(self.file, &mut buf[..want], self.pos)?;
         self.pos += n as u64;
         Ok(n)
     }

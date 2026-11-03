@@ -43,7 +43,7 @@ pub struct GitId {
 }
 
 impl GitId {
-    fn new(kind: HashKind, digest: &[u8]) -> GitId {
+    pub(super) fn new(kind: HashKind, digest: &[u8]) -> GitId {
         let mut bytes = [0; 32];
         bytes.iter_mut().zip(digest).for_each(|(b, d)| *b = *d);
         GitId { kind, bytes }
@@ -95,7 +95,7 @@ pub enum ObjectType {
 
 impl ObjectType {
     /// The name in an object's header.
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             ObjectType::Commit => "commit",
             ObjectType::Tree => "tree",
@@ -103,37 +103,76 @@ impl ObjectType {
             ObjectType::Tag => "tag",
         }
     }
+
+    /// The type a loose object's header names.
+    pub(super) fn named(name: &[u8]) -> Option<ObjectType> {
+        match name {
+            b"commit" => Some(ObjectType::Commit),
+            b"tree" => Some(ObjectType::Tree),
+            b"blob" => Some(ObjectType::Blob),
+            b"tag" => Some(ObjectType::Tag),
+            _ => None,
+        }
+    }
 }
 
 /// What Git puts before an object's bytes, both to hash and to store: `<type> <length>\0`.
-pub(super) fn object_header(kind: ObjectType, len: usize) -> String {
+pub(super) fn object_header(kind: ObjectType, len: u64) -> String {
     format!("{} {len}\0", kind.name())
 }
 
 /// Git's ID for an object of `kind` holding `data`: the hash of its header and bytes. SHA-1 runs
 /// with collision detection, as in Git, and an object made for a collision attack is `Broken`.
 pub fn object_id(kind: ObjectType, data: &[u8], hash: HashKind) -> Result<GitId, GitError> {
-    let header = object_header(kind, data.len());
-    match hash {
-        HashKind::Sha1 => {
-            let mut hasher = sha1_checked::Sha1::new();
-            hasher.update(header.as_bytes());
-            hasher.update(data);
-            let result = hasher.try_finalize();
-            if result.has_collision() {
-                return Err(broken(format!(
-                    "a {} of {} bytes is part of a SHA-1 collision attack",
-                    kind.name(),
-                    data.len()
-                )));
-            }
-            Ok(GitId::new(hash, result.hash()))
+    let mut hasher = Hasher::object(hash, kind, data.len() as u64);
+    hasher.update(data);
+    hasher.finish(|| format!("a {} of {} bytes", kind.name(), data.len()))
+}
+
+/// Git's hash, taken a piece at a time: SHA-1 with collision detection, as Git's own, or SHA-256.
+/// Object IDs and the checksums of packs and indexes all go through it.
+#[derive(Clone)]
+pub(super) enum Hasher {
+    Sha1(Box<sha1_checked::Sha1>),
+    Sha256(sha2::Sha256),
+}
+
+impl Hasher {
+    pub(super) fn new(hash: HashKind) -> Hasher {
+        match hash {
+            HashKind::Sha1 => Hasher::Sha1(Box::new(sha1_checked::Sha1::new())),
+            HashKind::Sha256 => Hasher::Sha256(sha2::Sha256::new()),
         }
-        HashKind::Sha256 => {
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(header.as_bytes());
-            hasher.update(data);
-            Ok(GitId::new(hash, &hasher.finalize()))
+    }
+
+    /// A hasher that has taken the header of an object of `kind` holding `len` bytes.
+    pub(super) fn object(hash: HashKind, kind: ObjectType, len: u64) -> Hasher {
+        let mut hasher = Hasher::new(hash);
+        hasher.update(object_header(kind, len).as_bytes());
+        hasher
+    }
+
+    pub(super) fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Hasher::Sha1(hasher) => hasher.update(bytes),
+            Hasher::Sha256(hasher) => hasher.update(bytes),
+        }
+    }
+
+    /// The hash, as an ID. Input made for a SHA-1 collision attack is `Broken`, naming `what`.
+    pub(super) fn finish(self, what: impl FnOnce() -> String) -> Result<GitId, GitError> {
+        match self {
+            Hasher::Sha1(hasher) => {
+                let result = hasher.try_finalize();
+                if result.has_collision() {
+                    return Err(broken(format!(
+                        "{} is part of a SHA-1 collision attack",
+                        what()
+                    )));
+                }
+                Ok(GitId::new(HashKind::Sha1, result.hash()))
+            }
+            Hasher::Sha256(hasher) => Ok(GitId::new(HashKind::Sha256, &hasher.finalize())),
         }
     }
 }
@@ -202,5 +241,27 @@ mod tests {
         }
         // An ID of the other hash is not one of this one.
         assert_eq!(GitId::from_hex(HashKind::Sha256, lower), None);
+    }
+
+    #[test]
+    fn a_sha1_collision_attack_is_refused() {
+        // The first 320 bytes of shattered-1.pdf (shattered.io), from sha1-checked's test data.
+        let attack = include_bytes!("../../tests/vectors/shattered-prefix.bin");
+        let mut hasher = Hasher::new(HashKind::Sha1);
+        hasher.update(attack);
+        match hasher.finish(|| "the test input".to_owned()) {
+            Err(e @ GitError::Broken { .. }) => assert_eq!(
+                e.to_string(),
+                "Bolt can't import this Git repository: the test input is part of a SHA-1 \
+                 collision attack."
+            ),
+            other => panic!("{other:?}"),
+        }
+        // One bit changed in a collision block, and nothing is detected.
+        let mut changed = *attack;
+        changed[200] ^= 1;
+        let mut hasher = Hasher::new(HashKind::Sha1);
+        hasher.update(&changed);
+        assert!(hasher.finish(String::new).is_ok());
     }
 }

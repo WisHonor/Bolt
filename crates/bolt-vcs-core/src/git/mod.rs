@@ -1,15 +1,18 @@
 //! Bolt's own read-only Git reader (decision 031). `Repo::open` checks a repository's format and
-//! refuses what Bolt can't import; `Repo::refs` reads its refs. Everything under `.git` is read
-//! through `safe_fs`, bounded, and treated as possibly hostile.
+//! refuses what Bolt can't import; `Repo::refs` reads its refs, and `Repo::read` its objects.
+//! Everything under `.git` is read through `safe_fs`, bounded, and treated as possibly hostile.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 mod config;
 #[cfg(any(test, feature = "test-support"))]
 pub mod craft;
 mod id;
+mod odb;
+mod pack;
 mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
+pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 pub use refs::{Head, Refs};
 
 use std::fs;
@@ -239,6 +242,13 @@ fn read_error(path: &Path, e: io::Error) -> GitError {
     }
 }
 
+/// A file that ended before the length Bolt measured when it opened it.
+fn shrank(path: &Path) -> GitError {
+    GitError::Changed {
+        what: format!("{} got shorter", path.display()),
+    }
+}
+
 /// `e`'s message, naming `path`: safe_fs's own messages name it already, the system's don't.
 fn naming(path: &Path, e: &io::Error) -> String {
     let (shown, message) = (path.display().to_string(), e.to_string());
@@ -281,6 +291,7 @@ fn real_dir(path: &Path) -> Result<bool, GitError> {
 pub struct Repo {
     git: PathBuf,
     hash: HashKind,
+    objects: odb::Objects,
 }
 
 impl Repo {
@@ -316,7 +327,11 @@ impl Repo {
         safe_fs::check_real_dir(&git).map_err(|e| read_error(&git, e))?;
         let hash = read_format(&git)?;
         refuse_layouts(&git)?;
-        Ok(Repo { git, hash })
+        Ok(Repo {
+            git,
+            hash,
+            objects: odb::Objects::default(),
+        })
     }
 
     #[must_use]
