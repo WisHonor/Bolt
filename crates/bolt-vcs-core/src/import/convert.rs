@@ -142,6 +142,27 @@ struct Item {
     id: GitId,
 }
 
+/// Where a chain of Git tag objects ends, from one of them on.
+#[derive(Clone, Copy)]
+struct Chain {
+    /// The tag objects from that one to the end, it included.
+    objects: u64,
+    /// What the last of them tags: a commit, a tree or a blob.
+    end: ObjectType,
+}
+
+/// A tag that ends at `end`, a tree or a blob, which Bolt can't tag (decision 034).
+fn skipped(end: ObjectType) -> TagOutcome {
+    let what = if end == ObjectType::Tree {
+        "a folder (a Git tree)"
+    } else {
+        "a file (a Git blob)"
+    };
+    TagOutcome::Skipped {
+        reason: format!("it tags {what}, not a commit"),
+    }
+}
+
 /// One commit's snapshot as far as it has been walked.
 struct Walk<'c> {
     commit: &'c str,
@@ -206,8 +227,8 @@ pub struct Converter<'r> {
     /// The first names met that aren't UTF-8, by commit (hex) and path, and how many in all.
     not_utf8: Vec<(String, String)>,
     not_utf8_count: u64,
-    /// What each tag ref's target became, so a chain many refs share is read once.
-    tags: HashMap<GitId, TagOutcome>,
+    /// Where the chain from each Git tag object read ends.
+    chains: HashMap<GitId, Chain>,
     /// What the tag list will hold so far, at most, and the most it may: its record's limit,
     /// which tests lower.
     tag_bytes: u64,
@@ -229,7 +250,7 @@ impl<'r> Converter<'r> {
             counts: Counts::default(),
             not_utf8: Vec::new(),
             not_utf8_count: 0,
-            tags: HashMap::new(),
+            chains: HashMap::new(),
             tag_bytes: TagList::head_len(MAX_TAGS),
             tag_budget: MAX_RECORD_SIZE,
         }
@@ -341,8 +362,12 @@ impl<'r> Converter<'r> {
     /// What the Git tag `name` (as Bolt's tag list will name it) at `target` becomes (decision
     /// 034): a commit is a lightweight tag; annotated tags are followed to their commit, keeping
     /// each tag object, outermost first, and the outermost's message. The commit must be
-    /// converted already. A target is read once however many tags share it, but each tag counts
-    /// toward what one tag list can hold.
+    /// converted already.
+    ///
+    /// Each tag object is read once to learn where its chain ends; a chain that ends at a commit
+    /// is read again for each tag kept through it, since each keeps its bytes. Every tag kept
+    /// counts toward the 512 MiB one tag list holds, so the tags returned hold at most that, and
+    /// reading holds one chain more, at most 16 MiB. The converter keeps no tag's bytes.
     pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
         // The least this tag adds to the list: its name and save, without a message.
         let lightweight = diary::Tag {
@@ -366,14 +391,7 @@ impl<'r> Converter<'r> {
         if self.tag_bytes.saturating_add(least) > self.tag_budget {
             return Err(full());
         }
-        let outcome = match self.tags.get(target) {
-            Some(outcome) => outcome.clone(),
-            None => {
-                let outcome = self.read_tag(name, target)?;
-                self.tags.insert(*target, outcome.clone());
-                outcome
-            }
-        };
+        let outcome = self.read_tag(name, target)?;
         if let TagOutcome::Tag(tag) = &outcome {
             let total = self.tag_bytes.saturating_add(TagList::tag_len(name, tag));
             if total > self.tag_budget {
@@ -384,42 +402,58 @@ impl<'r> Converter<'r> {
         Ok(outcome)
     }
 
-    /// Follows the tag `name` from `target` to what it tags, reading each tag object.
+    /// Follows the tag `name` from `target` to what it tags. A tag object met before tells where
+    /// its chain ends: one that ends at a tree or blob isn't read again, and one that ends at a
+    /// commit is, for the bytes the tag keeps.
     fn read_tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
+        let too_long = || {
+            unimportable(format!(
+                "tag `{name}` reaches its commit through more than {MAX_GIT_TAG_OBJECTS} tag \
+                 objects, more than Bolt keeps"
+            ))
+        };
         let mut id = *target;
+        // The tag objects read so far, outermost first, and their bytes.
+        let mut read: Vec<GitId> = Vec::new();
         let mut git_tags: Vec<Vec<u8>> = Vec::new();
         let mut message = String::new();
         loop {
-            if let Some(save) = self.saves.get(&id) {
+            if let Some(save) = self.saves.get(&id).copied() {
+                self.remember(&read, 0, ObjectType::Commit);
                 return Ok(TagOutcome::Tag(diary::Tag {
-                    save: *save,
+                    save,
                     message,
                     git_tags,
                 }));
+            }
+            if let Some(known) = self.chains.get(&id).copied() {
+                if (read.len() as u64).saturating_add(known.objects) > MAX_GIT_TAG_OBJECTS {
+                    return Err(too_long());
+                }
+                if known.end != ObjectType::Commit {
+                    self.remember(&read, known.objects, known.end);
+                    return Ok(skipped(known.end));
+                }
             }
             let hex = id.to_hex();
             // The ref's own target may be a commit, or missing, as well as a tag object.
             let here = || format!("tag `{name}`, at object `{hex}`");
             // Not checked against the ID, but a tag object is, when it is read.
             let (kind, size) = self.git.header(&id).map_err(|e| at(e, here))?;
-            let skipped = |what: &str| TagOutcome::Skipped {
-                reason: format!("it tags {what}, not a commit"),
-            };
             match kind {
                 ObjectType::Tag => {}
-                ObjectType::Tree => return Ok(skipped("a folder (a Git tree)")),
-                ObjectType::Blob => return Ok(skipped("a file (a Git blob)")),
+                ObjectType::Tree | ObjectType::Blob => {
+                    self.remember(&read, 0, kind);
+                    return Ok(skipped(kind));
+                }
                 ObjectType::Commit => {
                     return Err(bug(format!(
                         "Bolt was asked for tag `{name}` before importing its commit `{hex}`"
                     )));
                 }
             }
-            if git_tags.len() as u64 >= MAX_GIT_TAG_OBJECTS {
-                return Err(unimportable(format!(
-                    "tag `{name}` reaches its commit through more than {MAX_GIT_TAG_OBJECTS} \
-                     tag objects, more than Bolt keeps"
-                )));
+            if read.len() as u64 >= MAX_GIT_TAG_OBJECTS {
+                return Err(too_long());
             }
             let too_big = |size: u64| {
                 unimportable(format!(
@@ -436,12 +470,22 @@ impl<'r> Converter<'r> {
                 return Err(too_big(object.data.len() as u64));
             }
             let tag = parse_tag(&object.data, self.git.hash()).map_err(|e| at(e, here))?;
-            if git_tags.is_empty() {
+            if read.is_empty() {
                 message = message_text(tag.message, None).into_owned();
                 message.truncate(message.floor_char_boundary(MAX_TAG_MESSAGE_BYTES));
             }
+            read.push(id);
             id = tag.object;
             git_tags.push(object.data);
+        }
+    }
+
+    /// Remembers where the chain from each tag object `read` ends: `rest` tag objects past the
+    /// last of them, then `end`.
+    fn remember(&mut self, read: &[GitId], rest: u64, end: ObjectType) {
+        for (i, object) in read.iter().enumerate() {
+            let objects = (read.len().saturating_sub(i) as u64).saturating_add(rest);
+            self.chains.entry(*object).or_insert(Chain { objects, end });
         }
     }
 
@@ -1845,29 +1889,21 @@ mod tests {
     }
 
     #[test]
-    fn a_tag_chain_is_read_once_and_the_tags_bytes_budgeted() {
+    fn the_tags_bytes_are_budgeted() {
         let (dir, git) = repo(Sha1);
         let tree = git.tree(&[]);
         let commit = git.commit(&commit_bytes(&tree, &[], "", b"m\n"));
         let head = format!("object {}\ntype commit\ntag v1\n", commit.to_hex());
         let raw = format!("{head}tagger T <t@x> 1 +0000\n\nRelease\n").into_bytes();
         let signed = git.object(ObjectType::Tag, &raw);
-        let hex = signed.to_hex();
-        let loose = dir
-            .path()
-            .join(".git/objects")
-            .join(&hex[..2])
-            .join(&hex[2..]);
         let missing = GitId::from_hex(Sha1, &"ee".repeat(20)).unwrap();
         let ((first, again, refused, unread), _) = convert(dir.path(), "a", |c| {
             c.commit(&commit, &[]).unwrap();
             let before = c.tag_bytes;
             let first = c.tag("v1", &signed).unwrap();
-            // Room for one more tag of the same chain, not two.
+            // Room for one more tag of the same chain, not two: each ref keeps its bytes.
             let each = c.tag_bytes - before;
             c.tag_budget = c.tag_bytes + each + each / 2;
-            // Read once: the next ref to it is answered without its object.
-            fs::remove_file(&loose).unwrap();
             let again = c.tag("v1-again", &signed).unwrap();
             let refused = c.tag("v1-third", &signed);
             // Once the budget is spent, nothing more is read, not even an object that's missing.
@@ -1887,6 +1923,55 @@ mod tests {
                 other => panic!("{name}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn tag_objects_are_read_once_when_their_chain_ends_at_a_tree() {
+        let (dir, git) = repo(Sha1);
+        let tag = |object: &GitId, kind: &str, name: &str| {
+            let raw = format!(
+                "object {}\ntype {kind}\ntag {name}\ntagger T <t@x> 1 +0000\n\nx\n",
+                object.to_hex()
+            );
+            git.object(ObjectType::Tag, raw.as_bytes())
+        };
+        // A chain of 15 tag objects ending at a folder, under many tags of their own.
+        let mut shared = vec![tag(&git.tree(&[]), "tree", "s0")];
+        for k in 1..15 {
+            shared.push(tag(&shared[k - 1], "tag", &format!("s{k}")));
+        }
+        let top = shared[14];
+        let outer: Vec<GitId> = (0..50)
+            .map(|i| tag(&top, "tag", &format!("o{i}")))
+            .collect();
+        // Two more on top: 17 tag objects in all.
+        let longer = tag(&tag(&top, "tag", "p"), "tag", "q");
+        let loose = |id: &GitId| {
+            let hex = id.to_hex();
+            dir.path()
+                .join(".git/objects")
+                .join(&hex[..2])
+                .join(&hex[2..])
+        };
+        let ((outcomes, too_long), _) = convert(dir.path(), "a", |c| {
+            let mut outcomes = vec![c.tag("o0", &outer[0]).unwrap()];
+            // Read once, the shared chain is never read again: its objects can go.
+            for id in &shared {
+                fs::remove_file(loose(id)).unwrap();
+            }
+            for (i, id) in outer.iter().enumerate().skip(1) {
+                outcomes.push(c.tag(&format!("o{i}"), id).unwrap());
+            }
+            (outcomes, c.tag("q", &longer))
+        });
+        for outcome in &outcomes {
+            assert!(
+                matches!(outcome, TagOutcome::Skipped { reason } if reason.contains("folder")),
+                "{outcome:?}"
+            );
+        }
+        // The length counts the objects remembered too, and stops before reading them.
+        assert_refused(too_long, &["tag `q`", "16 tag objects"]);
     }
 
     #[test]
