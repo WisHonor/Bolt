@@ -33,6 +33,11 @@
 
 **Crash tests.** Every disk write goes through one small layer that tests can make fail (return an error, or abort the process) at the N-th operation, or fail at one named point (`BOLT_FAULT_FAIL=start:read-back`) and let the command carry on. For each N, a test runs a command, fails it at step N, then checks that the repository opens, `bolt verify` passes, no saved data is missing, and the next command finishes or rolls back the interrupted one. Separately, a loop kills real Bolt processes at random moments.
 
+A command can now write several packs, so milestone 2 added crash tests for the gap between two of them. A named point, `packs:rolled-over`, sits right after a full pack goes into the store.
+- `a_crash_between_packs_leaves_the_repository_as_it_was` (in `crates/bolt-vcs-core/src/repo.rs`) fails a command that needs three packs at every step. It checks that `state/head` still names the old entry, that the store checks out, and that running the command again works.
+- `crates/bolt-vcs-core/tests/import_interrupted.rs` does the same to `bolt import`, with a test-only limit of three objects a pack. After every stop there is no project yet (`.bolt/format` is missing), and running the import again gives the saves and state of a clean import. At least one stop must fall between two packs.
+- `crates/bolt-vcs-core/tests/pack_limit.rs` checks that the test-only limit splits a command's packs until it is cleared. The limit applies to every command in the process, so each of these two files holds a single test.
+
 **Differential tests against Git.** `crates/bolt-vcs/tests/import_vs_git.rs` makes repositories with Git itself, runs `bolt import`, and then `assert_matches_git` (in `tests/support/`) compares the project with what Git holds, reading Git's objects through `git cat-file --batch`:
 
 - each commit `git rev-list --all` lists has exactly one save, which rebuilds the commit's exact bytes, and commits Git writes itself rebuild from their saves' own fields, without their Git header;
@@ -52,7 +57,7 @@ Measured on 2026-11-03 in release builds, on git/git as of 2026-11-01: 85,977 co
 - A Windows 11 laptop (AMD Ryzen 7 7730U with 8 cores, 16 GB of RAM, an NVMe SSD) with Git 2.50.1: imported in 165 s, with a peak working set of 503 MiB; the comparison took 124 s more. Windows tells a process its peak memory only through a system call, so there the test prints none: this figure is the test process's `PeakWorkingSet64`, read by PowerShell twice a second and taken as the import ended (the comparison never raised it).
 
 **Ignore rules against Git.** Bolt's ignore matcher is a port of Git's own, and three kinds of test hold it to Git:
-- Every row of Git's wildmatch table (`t/t3070-wildmatch.sh`, 190 rows) passes, with and without letter case folded. A port of Git's recursive matcher, kept in the tests, must agree with Bolt's loop on 20,000 random patterns and texts. A count of the cells the matcher fills (not a clock) shows that its time stays within the pattern's length times the text's.
+- Every row of Git's wildmatch table (`t/t3070-wildmatch.sh`, 190 rows) passes, with and without letter case folded. A port of Git's recursive matcher, kept in the tests, must agree with Bolt's loop on 20,000 random patterns and texts. A count of the steps the matcher takes (not a clock) shows that its work stays within the pattern's length times the text's.
 - `crates/bolt-vcs/tests/ignore_vs_git.rs` writes random rule files in random projects (as `.gitignore` for Git and `.boltignore` for Bolt, in several folders, with names in both letter cases and in composed and decomposed Unicode). For 256 projects each, it checks that a save keeps exactly the files `git ls-files --others --exclude-standard` lists, and that the verdict on every path is the one `git check-ignore --no-index -v` gives. Git is told what the drive is like (letter case, Unicode form) and kept from the user's own ignore list.
 - The same file holds the cases of Git's own `t/t0008-ignores.sh` that need only a project's own ignore files, since Bolt reads no personal lists.
 
@@ -60,7 +65,7 @@ Git before 2.52 reads a `**` right after the literal start of a pattern with a `
 
 **Fuzz targets.** Fifteen cover the decoders and parsers of data from outside Bolt:
 - Bolt's records: `decode_listing` (folder listings), `decode_save`, `decode_diary` (diary entries), `decode_tag_list` and `decode_server_lines`.
-- Bolt's files: `open_pack` (a pack, with its index, trailer and every entry), `format_file` (`.bolt/format`) and `name_rules` (name and path validation, `.git` spellings and folder collisions).
+- Bolt's files: `open_pack` (a pack, with its index, trailer and every entry), `format_file` (`.bolt/format`) and `name_rules` (a list of names given to `validate_name`, `is_git_alias` and `folder_problems`: the always-on name rules, the `.git` spellings and the clashes among one folder's names).
 - `ignore_rules`: ignore files, the matcher and wildmatch, on drives that do and don't ignore letter case or compose Unicode.
 - The Git reader: `git_loose` (loose objects, as they are and compressed, to get past zlib), `git_pack` (a pack and its index, given the checksums no fuzzer finds by chance), `git_delta`, `git_objects` (commits, trees, tags, people, and the tests for Git LFS pointers), `git_refs` (`packed-refs` and `HEAD`, then the renaming of branch and tag names) and `git_config`.
 

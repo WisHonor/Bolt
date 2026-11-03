@@ -122,7 +122,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] 17. Commands, names and aliases; error and output style (human-readable and `--json`) → [decision 017](decisions/017-commands-and-output.md)
 - [x] 18. Deliverables: storage format spec draft, threat model and security plan, test plan, milestone-1 task list; a fresh-eyes review of this document before sign-off → milestones in [decision 018](decisions/018-milestone-plan.md); review clarifications in [decision 019](decisions/019-review-clarifications.md); the owner's answers to the review in decisions [020](decisions/020-lfs-import.md), [021](decisions/021-v0.1-command-scope.md), [022](decisions/022-engineering-rules.md) and [023](decisions/023-v0.1-speed-bar.md). Signed off by the owner on 2026-10-31.
 
-**Milestone 2 planning** (from 2026-11-02; each question is decided before the milestone's plan is written)
+**Milestone 2 planning** (from 2026-11-02; each question is decided before the milestone's plan is written, except the last, which the owner settled by approving the plan)
 - [x] Reading Git repositories → [decision 031](decisions/031-own-git-reader.md)
 - [x] How a Git commit becomes a save → [decision 032](decisions/032-exact-repeatable-commit-import.md)
 - [x] How branches become lines, and where you stand after an import → [decision 033](decisions/033-git-branches-to-lines.md)
@@ -134,7 +134,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] The first save after an import → [decision 039](decisions/039-first-save-after-import.md)
 - [x] Re-importing → [decision 040](decisions/040-import-once-catch-up-later.md)
 - [x] More objects than one pack may hold (decision 028's open question) → [decision 041](decisions/041-several-packs-per-command.md)
-- [x] Trusting a folder that other accounts can write to (left by milestone 1's second red-team session, settled with the plan) → [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md)
+- [x] Trusting a folder that other accounts can write to (a question from milestone 1's second red-team session) → [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md)
 
 ## 5. Design
 
