@@ -19,7 +19,7 @@ pub(super) struct Named {
 
 /// Which of Bolt's rules a name must pass.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Rules {
+pub enum Rules {
     /// Line and server names: decision 012's characters, and no two alike but for letter case.
     Line,
     /// Tag names: any UTF-8, and no two the same.
@@ -155,7 +155,7 @@ fn named(
 /// first; of names alike (for lines, alike but for letter case), the first in byte order. Then
 /// every other name, in byte order, gets its new name unless a name given already is alike, and
 /// else the first of `-2`, `-3`… that leaves it free. The same names always come out the same.
-pub(super) fn rename(names: &[&[u8]], rules: Rules) -> Vec<String> {
+pub fn rename(names: &[&[u8]], rules: Rules) -> Vec<String> {
     let fold = |name: &str| match rules {
         Rules::Line => name.to_lowercase(),
         Rules::Tag => name.to_owned(),

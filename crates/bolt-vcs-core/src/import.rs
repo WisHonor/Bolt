@@ -30,6 +30,9 @@ use convert::{
     tag_message, tree_and_parents,
 };
 use names::{Named, Names};
+// For tests that check an import's names against Git's refs.
+#[cfg(feature = "test-support")]
+pub use names::{Rules, rename};
 
 /// What `import_git` needs besides the folder.
 pub struct ImportRequest<'a> {

@@ -6,124 +6,9 @@ mod support;
 
 use std::path::Path;
 
-use assert_cmd::Command;
-use bolt_core::diary::{Position, State};
-use bolt_core::id::Id;
+use bolt_core::diary::Position;
 use bolt_core::repo::Repository;
-use bolt_core::save::EXTRA_GIT_COMMIT;
-use support::{git, git_with_input};
-use tempfile::TempDir;
-
-/// A folder for the Git repository, and an empty one for the user's own Bolt settings.
-struct Env {
-    work: TempDir,
-    config: TempDir,
-}
-
-impl Env {
-    /// A Git repository with no commits yet, on `main`.
-    fn new() -> Env {
-        let env = Env {
-            work: tempfile::tempdir().unwrap(),
-            config: tempfile::tempdir().unwrap(),
-        };
-        env.git(&["init", "-q"]);
-        env
-    }
-
-    fn root(&self) -> &Path {
-        self.work.path()
-    }
-
-    /// `bolt`, run in `dir` as the test user.
-    fn bolt_in(&self, dir: &Path) -> Command {
-        let mut cmd = Command::cargo_bin("bolt").unwrap();
-        cmd.current_dir(dir)
-            .env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com")
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path());
-        cmd
-    }
-
-    fn bolt(&self) -> Command {
-        self.bolt_in(self.root())
-    }
-
-    /// Runs Git in the repository and returns what it printed, trimmed.
-    fn git(&self, args: &[&str]) -> String {
-        text(&git(self.root(), args)).trim().to_owned()
-    }
-
-    /// Writes `file` and commits it with `message`, by Ada; returns the commit's ID.
-    fn commit(&self, file: &str, contents: &str, message: &str) -> String {
-        let path = self.root().join(file);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
-        self.git(&["add", "-A"]);
-        self.git(&[
-            "commit",
-            "-q",
-            "--author=Ada Lovelace <ada@example.com>",
-            "-m",
-            message,
-        ]);
-        self.git(&["rev-parse", "HEAD"])
-    }
-
-    /// Runs `bolt import` and fails the test unless it worked; returns what it printed.
-    fn import(&self) -> (String, String) {
-        let out = self.bolt().arg("import").output().unwrap();
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        (text(&out.stdout), text(&out.stderr))
-    }
-
-    /// Runs `bolt import`, which must fail, and returns its error output.
-    fn refused_import(&self) -> String {
-        let out = self.bolt().arg("import").output().unwrap();
-        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-        text(&out.stderr)
-    }
-
-    /// The project's state after the import.
-    fn state(&self) -> (Repository, State) {
-        let repo = Repository::open(self.root()).unwrap();
-        let state = repo.current().unwrap().1.state;
-        (repo, state)
-    }
-
-    /// `bolt save` with these arguments, whatever happens.
-    fn save(&self, args: &[&str]) -> std::process::Output {
-        self.bolt().arg("save").args(args).output().unwrap()
-    }
-
-    /// The newest diary entry and the packs in the store: a save that wrote nothing leaves both
-    /// as they were.
-    fn standing(&self) -> (Id, Vec<String>) {
-        let repo = Repository::open(self.root()).unwrap();
-        let mut packs: Vec<String> = std::fs::read_dir(repo.packs_dir())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        packs.sort();
-        (repo.head().unwrap(), packs)
-    }
-
-    /// Writes `file` as it is, in the folder.
-    fn overwrite(&self, file: &str, contents: &str) {
-        std::fs::write(self.root().join(file), contents).unwrap();
-    }
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-/// The Git commit a save was imported from.
-fn git_commit(repo: &Repository, save: &Id) -> String {
-    let save = repo.store().save(save, false).unwrap();
-    String::from_utf8(save.extra[EXTRA_GIT_COMMIT].clone()).unwrap()
-}
+use support::{Env, copy_dir, git, git_commit, git_with_input, text};
 
 #[test]
 fn a_simple_repository_imports() {
@@ -434,20 +319,6 @@ fn import_inside_another_project_is_refused() {
     assert!(!inner.join(".bolt").exists());
 }
 
-/// Copies the folder `from`, everything in it, to `to`.
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
 #[test]
 fn the_same_repository_imports_to_the_same_saves_anywhere() {
     let env = Env::new();
@@ -545,6 +416,7 @@ fn import_json_output() {
         "refs/remotes/origin/HEAD",
         "refs/remotes/origin/main",
     ]);
+    std::fs::create_dir_all(env.root().join(".git/info")).unwrap();
     std::fs::write(env.root().join(".git/info/grafts"), "").unwrap();
     let out = env.bolt().args(["--json", "import"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));

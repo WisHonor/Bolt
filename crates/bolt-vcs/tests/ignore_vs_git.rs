@@ -392,7 +392,7 @@ proptest! {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_tree(root, &tree);
-        git(root, &["init", "-q", "--template="]);
+        git(root, &["init", "-q"]);
         let drive = this_drive();
         let args = git_args(drive, &["ls-files", "--others", "--exclude-standard", "-z"]);
         let listed = git(root, &args.iter().map(String::as_str).collect::<Vec<_>>());
@@ -417,7 +417,7 @@ proptest! {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_tree(root, &tree);
-        git(root, &["init", "-q", "--template="]);
+        git(root, &["init", "-q"]);
         let drive = this_drive();
         let paths = every_path(&tree);
         let mut input = Vec::new();

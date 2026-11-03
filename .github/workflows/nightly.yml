@@ -1,4 +1,4 @@
-name: Nightly fuzzing
+name: Nightly
 
 on:
   schedule:
@@ -42,3 +42,19 @@ jobs:
           name: fuzz-crashes
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # Imports Git's own repository, then compares every commit, tree, file and ref with Git. The
+  # test prints how long the import took and its peak memory.
+  differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Clone git/git with its whole history
+        run: git clone --quiet --no-checkout https://github.com/git/git "$RUNNER_TEMP/git"
+      - name: Import it and compare with Git
+        env:
+          BOLT_DIFF_REPO: ${{ runner.temp }}/git
+        run: cargo test --release -p bolt-vcs --test import_vs_git -- --ignored --nocapture a_real_repository_matches_git
