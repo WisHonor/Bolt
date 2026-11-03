@@ -172,6 +172,9 @@ pub enum GitError {
     /// More refs, or longer names, than Bolt reads; `what` names the limit.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     TooManyRefs { what: String },
+    /// More objects in its packs than Bolt keeps the indexes of; `what` names the limit.
+    #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
+    TooManyObjects { what: String },
     #[error(
         "Git changed the repository while Bolt read it: {}.",
         escape(what, false)
@@ -211,6 +214,10 @@ impl GitError {
                     "Nothing was changed. Delete refs you don't need, such as stale server \
                      branches (`git remote prune <server>`) or old tags (`git tag -d <tag>`), \
                      then run bolt import again."
+                }
+                GitError::TooManyObjects { .. } => {
+                    "Nothing was changed. If its packs hold copies of the same objects, or objects \
+                     nothing uses, merge them with `git repack -a -d`, then run bolt import again."
                 }
                 GitError::Changed { .. } => {
                     "Nothing was changed. Run bolt import again once Git has finished."
@@ -938,6 +945,9 @@ mod tests {
                 what: HOSTILE.into(),
             },
             GitError::TooManyRefs {
+                what: HOSTILE.into(),
+            },
+            GitError::TooManyObjects {
                 what: HOSTILE.into(),
             },
             GitError::NotYours {

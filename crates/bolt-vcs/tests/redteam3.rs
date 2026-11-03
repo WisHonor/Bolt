@@ -288,7 +288,6 @@ impl PackOut {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT3-1: red-team proof, run once its fix is in"]
 fn rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size() {
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);

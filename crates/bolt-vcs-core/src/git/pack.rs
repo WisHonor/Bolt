@@ -1,6 +1,7 @@
 //! Git's packs and their version 2 indexes, entry headers and deltas (decision 031). An index's
-//! name and offset tables are read into memory a buffer at a time, once its length is checked
-//! against its object count; the rest of a pack is read only when an object in it is.
+//! name and offset tables are read into memory a buffer at a time, once its object count is
+//! within Bolt's limit and its length fits that count; the rest of a pack is read only when an
+//! object in it is.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::collections::BTreeSet;
@@ -15,6 +16,11 @@ use crate::safe_fs;
 
 /// Entries `objects/pack` may hold, of any kind: room for tens of thousands of packs.
 const MAX_PACK_FOLDER_ENTRIES: u64 = 100_000;
+/// Objects Bolt reads from all of a repository's packs, whose indexes it keeps in memory (28 to
+/// 40 bytes an object): git/git has about 0.4 million, and Linux about 10 million.
+pub(super) const MAX_GIT_OBJECTS: u64 = 1 << 24;
+/// Index entries read at a time.
+const ENTRIES_AT_A_TIME: usize = 2048;
 /// A pack's header: `PACK`, its version and its object count.
 const PACK_HEADER_LEN: u64 = 12;
 /// An index's header (`\377tOc` and its version), then its fan-out of 256 counts.
@@ -63,11 +69,20 @@ pub(super) struct Entry {
 
 /// The packs in `folder` (`objects/pack`), each index read and each pack checked against it.
 pub(super) fn load(folder: &Path, hash: HashKind) -> Result<PackFolder, GitError> {
+    load_at_most(folder, hash, MAX_GIT_OBJECTS)
+}
+
+/// `load`, refusing indexes that list more than `max_objects` in all.
+fn load_at_most(folder: &Path, hash: HashKind, max_objects: u64) -> Result<PackFolder, GitError> {
     let listed = list(folder)?;
-    let packs = listed
-        .iter()
-        .filter_map(|name| Pack::load(folder, name, hash).transpose())
-        .collect::<Result<_, _>>()?;
+    let mut packs: Vec<Pack> = Vec::new();
+    let mut objects = 0u64;
+    for name in &listed {
+        if let Some(pack) = Pack::load(folder, name, hash, objects, max_objects)? {
+            objects = objects.saturating_add(pack.offsets.len() as u64);
+            packs.push(pack);
+        }
+    }
     Ok(PackFolder { listed, packs })
 }
 
@@ -111,9 +126,17 @@ fn list_at_most(folder: &Path, max_entries: u64) -> Result<Vec<String>, GitError
 
 impl Pack {
     /// The pack `name` in `folder`, checked against its index; `None` if either file went away
-    /// after the folder was listed, as when Git removes the pack.
-    fn load(folder: &Path, name: &str, hash: HashKind) -> Result<Option<Pack>, GitError> {
-        let Some(index) = read_index(&folder.join(format!("{name}.idx")), hash)? else {
+    /// after the folder was listed, as when Git removes the pack. The packs before it listed
+    /// `before` objects, and all may list at most `max`.
+    fn load(
+        folder: &Path,
+        name: &str,
+        hash: HashKind,
+        before: u64,
+        max: u64,
+    ) -> Result<Option<Pack>, GitError> {
+        let path = folder.join(format!("{name}.idx"));
+        let Some(index) = read_index(&path, hash, before, max)? else {
             return Ok(None);
         };
         let path = folder.join(format!("{name}.pack"));
@@ -299,9 +322,15 @@ struct Index {
 }
 
 /// Reads the version 2 index at `path` a buffer at a time and checks it, keeping its names and
-/// offsets; `None` if it's gone. Its length is checked against its object count before anything
-/// that size is allocated.
-fn read_index(path: &Path, hash: HashKind) -> Result<Option<Index>, GitError> {
+/// offsets; `None` if it's gone. The packs before it listed `before` objects, and all may list at
+/// most `max`. Its count is checked against those and its length before anything is kept, and
+/// its tables grow only as their names pass, so a table of zeros fails at its second name.
+fn read_index(
+    path: &Path,
+    hash: HashKind,
+    before: u64,
+    max: u64,
+) -> Result<Option<Index>, GitError> {
     let Some((file, len)) = open_measured(path)? else {
         return Ok(None);
     };
@@ -338,6 +367,18 @@ fn read_index(path: &Path, hash: HashKind) -> Result<Option<Index>, GitError> {
     let count =
         fanout_count(fanout).ok_or_else(|| damaged("has a fan-out that goes down".into()))?;
     let objects = u64::from(count);
+    if objects > max.saturating_sub(before) {
+        let others = match before {
+            0 => ",".to_owned(),
+            n => format!(", which with the {n} in the packs before it makes"),
+        };
+        return Err(GitError::TooManyObjects {
+            what: format!(
+                "{shown} lists {count} objects{others} more than the {max} Bolt reads from a \
+                 repository's packs, whose indexes it keeps in memory"
+            ),
+        });
+    }
     // Each object's name, CRC and offset, and the two checksums; then 8 bytes for each offset of
     // 2 GiB or more, which only a second object or later can need.
     let least = INDEX_HEAD_LEN
@@ -352,43 +393,49 @@ fn read_index(path: &Path, hash: HashKind) -> Result<Option<Index>, GitError> {
             "is {len} bytes long, which doesn't fit the {count} objects its fan-out lists"
         )));
     }
-    let mut names = buffer(objects.saturating_mul(hash_len), path)?;
-    index.fill(&mut names)?;
-    let mut later = names.chunks_exact(hash.len());
-    later.next();
-    if names
-        .chunks_exact(hash.len())
-        .zip(later)
-        .any(|(a, b)| a >= b)
-    {
-        return Err(damaged("lists its objects out of order".into()));
-    }
+    // Each name must come after the one before it, checked before it is kept.
+    let mut names: Vec<u8> = Vec::new();
+    index.entries(objects, hash.len(), |name| {
+        let last = names
+            .len()
+            .checked_sub(name.len())
+            .and_then(|at| names.get(at..));
+        if last.is_some_and(|last| last >= name) {
+            return Err(damaged("lists its objects out of order".into()));
+        }
+        names
+            .try_reserve(name.len())
+            .map_err(|_| out_of_memory(path))?;
+        names.extend_from_slice(name);
+        Ok(())
+    })?;
     // The CRCs: Bolt checks every object against its ID instead.
     index.skip(objects.saturating_mul(4))?;
-    let mut small = buffer(objects.saturating_mul(4), path)?;
-    index.fill(&mut small)?;
-    let mut table = buffer(large, path)?;
-    index.fill(&mut table)?;
-    let table: Vec<u64> = table
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|b| u64::from_be_bytes(*b))
-        .collect();
-    let mut offsets = Vec::new();
+    // The names passed, so the count is real. Offsets as Git stores them: one with its top bit
+    // set is a row of the table of 64-bit offsets that follows.
+    let mut offsets: Vec<u64> = Vec::new();
     offsets
         .try_reserve_exact(usize::try_from(count).unwrap_or(usize::MAX))
         .map_err(|_| out_of_memory(path))?;
-    for small in small.as_chunks::<4>().0 {
-        let small = u32::from_be_bytes(*small);
-        offsets.push(if small & 0x8000_0000 == 0 {
-            u64::from(small)
-        } else {
-            let row = usize::try_from(small & 0x7fff_ffff).unwrap_or(usize::MAX);
-            *table
+    index.entries(objects, 4, |small| {
+        offsets.push(u64::from(u32::from_be_bytes(
+            small.try_into().unwrap_or_default(),
+        )));
+        Ok(())
+    })?;
+    let mut table: Vec<u64> = Vec::new();
+    index.entries(large / 8, 8, |big| {
+        table.try_reserve(1).map_err(|_| out_of_memory(path))?;
+        table.push(u64::from_be_bytes(big.try_into().unwrap_or_default()));
+        Ok(())
+    })?;
+    for offset in &mut offsets {
+        if *offset & 0x8000_0000 != 0 {
+            let row = usize::try_from(*offset & 0x7fff_ffff).unwrap_or(usize::MAX);
+            *offset = *table
                 .get(row)
-                .ok_or_else(|| damaged("points past its table of 64-bit offsets".into()))?
-        });
+                .ok_or_else(|| damaged("points past its table of 64-bit offsets".into()))?;
+        }
     }
     let mut pack_checksum = vec![0u8; hash.len()];
     index.fill(&mut pack_checksum)?;
@@ -435,17 +482,6 @@ fn is_old_index(head: &[u8], len: u64, hash_len: u64) -> bool {
     })
 }
 
-/// `len` zero bytes, `len` having been checked against a file of at least that length.
-fn buffer(len: u64, path: &Path) -> Result<Vec<u8>, GitError> {
-    let len = usize::try_from(len).map_err(|_| out_of_memory(path))?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(len)
-        .map_err(|_| out_of_memory(path))?;
-    bytes.resize(len, 0);
-    Ok(bytes)
-}
-
 fn out_of_memory(path: &Path) -> GitError {
     GitError::Io {
         path: path.to_owned(),
@@ -474,6 +510,28 @@ impl Hashed<'_> {
             io::ErrorKind::UnexpectedEof => shrank(self.path),
             _ => read_error(self.path, e),
         })
+    }
+
+    /// Reads `count` entries of `width` bytes a buffer at a time, handing each to `each` in turn.
+    fn entries(
+        &mut self,
+        count: u64,
+        width: usize,
+        mut each: impl FnMut(&[u8]) -> Result<(), GitError>,
+    ) -> Result<(), GitError> {
+        let width = width.max(1);
+        let mut buf = vec![0u8; ENTRIES_AT_A_TIME.saturating_mul(width)];
+        let mut left = count;
+        while left > 0 {
+            let n = ENTRIES_AT_A_TIME.min(usize::try_from(left).unwrap_or(usize::MAX));
+            let part = buf.get_mut(..n.saturating_mul(width)).unwrap_or_default();
+            self.fill(part)?;
+            for entry in part.chunks_exact(width) {
+                each(entry)?;
+            }
+            left = left.saturating_sub(n as u64);
+        }
+        Ok(())
     }
 
     /// Hashes `len` bytes without keeping them.
@@ -715,21 +773,106 @@ mod tests {
         let x = id(Blob, b"x");
         // The pack says so while its index lists one.
         let good = fs::read(&pack).unwrap();
-        let mut claim = good.clone();
-        claim[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
-        fs::write(&pack, &claim).unwrap();
+        let mut claiming = good.clone();
+        claiming[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        fs::write(&pack, &claiming).unwrap();
         let message = broken(open(&dir).read(&x));
         assert!(message.contains("4294967295"), "{message}");
         fs::write(&pack, &good).unwrap();
-        // The index says so: its length can't hold them, which is found before its tables are
-        // read, so nothing that size is allocated.
-        patch_index(&idx, |bytes| {
+        // The index says so: past Bolt's limit, which is found before its tables are read, so
+        // nothing that size is allocated.
+        claim(&idx, 4_000_000_000);
+        match open(&dir).read(&x) {
+            Err(GitError::TooManyObjects { what }) => {
+                assert!(what.contains("4000000000"), "{what}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An index whose fan-out says it lists `count` objects, with the checksum fixed.
+    fn claim(idx: &Path, count: u64) {
+        let count = u32::try_from(count).unwrap();
+        patch_index(idx, |bytes| {
             for at in (8..8 + 1024).step_by(4) {
-                bytes[at..at + 4].copy_from_slice(&4_000_000_000u32.to_be_bytes());
+                bytes[at..at + 4].copy_from_slice(&count.to_be_bytes());
             }
         });
+    }
+
+    #[test]
+    fn an_index_past_the_object_limit_is_refused_on_its_count() {
+        let (dir, git) = craft();
+        let (_, idx) = git.pack(&[PackEntry::Whole(Blob, b"x".to_vec())]);
+        let x = id(Blob, b"x");
+        // Refused before its length is even looked at, so before any table is read.
+        claim(&idx, MAX_GIT_OBJECTS + 1);
+        match open(&dir).read(&x) {
+            Err(e @ GitError::TooManyObjects { .. }) => {
+                let message = e.to_string();
+                let says = format!("lists 16777217 objects, more than the {MAX_GIT_OBJECTS} Bolt");
+                assert!(message.contains(&says), "{message}");
+                assert!(message.contains("keeps in memory"), "{message}");
+                assert!(e.hint().unwrap().contains("git repack -a -d"), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // At the limit, only the length is wrong.
+        claim(&idx, MAX_GIT_OBJECTS);
         let message = broken(open(&dir).read(&x));
-        assert!(message.contains("4000000000"), "{message}");
+        assert!(
+            message.contains("doesn't fit the 16777216 objects"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_object_limit_counts_the_objects_of_every_pack() {
+        let (dir, git) = craft();
+        git.pack(&[
+            PackEntry::Whole(Blob, b"one".to_vec()),
+            PackEntry::Whole(Blob, b"two".to_vec()),
+        ]);
+        git.pack(&[
+            PackEntry::Whole(Blob, b"three".to_vec()),
+            PackEntry::Whole(Blob, b"four".to_vec()),
+        ]);
+        let folder = dir.path().join(".git/objects/pack");
+        let loaded = load_at_most(&folder, HashKind::Sha1, 4).unwrap();
+        assert_eq!(loaded.packs.len(), 2);
+        match load_at_most(&folder, HashKind::Sha1, 3).err() {
+            Some(GitError::TooManyObjects { what }) => {
+                let says = "lists 2 objects, which with the 2 in the packs before it makes more \
+                            than the 3";
+                assert!(what.contains(says), "{what}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn names_are_checked_in_order_across_the_buffers_they_are_read_in() {
+        let (dir, git) = craft();
+        let blobs: Vec<Vec<u8>> = (0..ENTRIES_AT_A_TIME + 50)
+            .map(|i| format!("blob {i}\n").into_bytes())
+            .collect();
+        let entries: Vec<PackEntry> = blobs
+            .iter()
+            .map(|b| PackEntry::Whole(Blob, b.clone()))
+            .collect();
+        let (_, idx) = git.pack(&entries);
+        let repo = open(&dir);
+        for data in &blobs {
+            assert_eq!(&repo.read(&id(Blob, data)).unwrap().data, data);
+        }
+        // The last name of the first buffer swapped with the first of the second.
+        let at = 8 + 1024 + (ENTRIES_AT_A_TIME - 1) * 20;
+        patch_index(&idx, |bytes| {
+            let (last, first) = bytes[at..at + 40].split_at_mut(20);
+            last.swap_with_slice(first);
+        });
+        let message = broken(open(&dir).read(&id(Blob, &blobs[0])));
+        assert!(message.contains("out of order"), "{message}");
     }
 
     /// A pack of a blob, a delta on it and a tree, and the IDs of the three.
@@ -1051,7 +1194,7 @@ mod tests {
             let names = list(folder).unwrap();
             assert_eq!(names.len(), 1);
             fs::remove_file(if gone == ".idx" { &idx } else { &pack }).unwrap();
-            let read = Pack::load(folder, &names[0], HashKind::Sha1).unwrap();
+            let read = Pack::load(folder, &names[0], HashKind::Sha1, 0, MAX_GIT_OBJECTS).unwrap();
             assert!(read.is_none(), "{gone}");
         }
     }
