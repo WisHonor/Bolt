@@ -246,7 +246,7 @@ fn unimportable(what: impl Into<String>) -> GitError {
 
 /// Bytes from a repository for a message, cut to a name's worth so a hostile one can't flood
 /// it. Git allows nearly any bytes in names; the error escapes them when it is shown.
-fn shown(bytes: &[u8]) -> String {
+pub(crate) fn shown(bytes: &[u8]) -> String {
     match bytes.get(..MAX_NAME_BYTES) {
         Some(start) if start.len() < bytes.len() => {
             format!("{}...", String::from_utf8_lossy(start))

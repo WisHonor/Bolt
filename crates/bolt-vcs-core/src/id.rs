@@ -120,18 +120,39 @@ impl ChangeId {
     /// Exactly 32 letters `k`-`z`.
     #[must_use]
     pub fn from_letters(s: &str) -> Option<ChangeId> {
-        let s = s.as_bytes();
-        if s.len() != 32 {
-            return None;
+        from_halves(s.as_bytes(), |c| c.checked_sub(b'k'))
+    }
+
+    /// An imported commit's change ID (storage-format.md section 5): its `change-id` header if
+    /// that spells 16 bytes in Jujutsu's letters, else Jujutsu's rule for a commit without one,
+    /// the last 16 bytes of its ID, last first, with each byte's bits reversed.
+    #[must_use]
+    pub fn from_git_commit(commit_id: &[u8], change_id_header: Option<&[u8]>) -> ChangeId {
+        // Jujutsu's letters run the other way, `z` for 0, and it reads them in either case.
+        let jujutsu = |c: u8| b'z'.checked_sub(c.to_ascii_lowercase());
+        if let Some(id) = change_id_header.and_then(|letters| from_halves(letters, jujutsu)) {
+            return id;
         }
         let mut out = [0u8; 16];
-        for (o, pair) in out.iter_mut().zip(s.chunks(2)) {
-            let hi = pair[0].checked_sub(b'k').filter(|h| *h < 16)?;
-            let lo = pair[1].checked_sub(b'k').filter(|l| *l < 16)?;
-            *o = hi << 4 | lo;
+        for (o, b) in out.iter_mut().zip(commit_id.iter().rev()) {
+            *o = b.reverse_bits();
         }
-        Some(ChangeId(out))
+        ChangeId(out)
     }
+}
+
+/// 32 letters as 16 bytes, two to a byte; `half` gives each letter's value, which must be under
+/// 16.
+fn from_halves(s: &[u8], half: impl Fn(u8) -> Option<u8>) -> Option<ChangeId> {
+    if s.len() != 32 {
+        return None;
+    }
+    let half = |c| half(c).filter(|h| *h < 16);
+    let mut out = [0u8; 16];
+    for (o, pair) in out.iter_mut().zip(s.chunks(2)) {
+        *o = half(pair[0])? << 4 | half(pair[1])?;
+    }
+    Some(ChangeId(out))
 }
 
 #[cfg(test)]

@@ -100,7 +100,7 @@ pub enum ObjectType {
 
 impl ObjectType {
     /// The name in an object's header.
-    pub(super) fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             ObjectType::Commit => "commit",
             ObjectType::Tree => "tree",
