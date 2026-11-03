@@ -11,7 +11,7 @@ use std::path::Path;
 use super::id::hex_id;
 use super::{
     GitError, GitId, HashKind, broken, is_git_space, naming, read_error, read_optional, real_dir,
-    trim_end, trim_start,
+    shown, trim_end, trim_start,
 };
 use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS};
 use crate::names;
@@ -168,11 +168,6 @@ fn sort(head: Head, all: BTreeMap<Vec<u8>, Option<GitId>>) -> Refs {
         }
     }
     refs
-}
-
-/// The text of `name` for a message: Git allows any bytes in names but a few.
-fn shown(name: &[u8]) -> String {
-    String::from_utf8_lossy(name).into_owned()
 }
 
 fn read_head(git: &Path, hash: HashKind) -> Result<Head, GitError> {

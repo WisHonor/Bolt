@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::id::hex_id;
-use super::{GitError, GitId, HashKind, ObjectType, broken, trim_end, trim_start, unimportable};
-use crate::listing::{EntryKind, MAX_SAVE_ENTRIES};
-use crate::names::MAX_NAME_BYTES;
+use super::{
+    GitError, GitId, HashKind, ObjectType, broken, shown, trim_end, trim_start, unimportable,
+};
+use crate::listing::{EntryKind, MAX_ENTRIES};
 use crate::save::{
     EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_PARENTS, MAX_PERSON_FIELD_BYTES, Person, Save,
 };
@@ -66,7 +67,7 @@ pub fn parse_commit(data: &[u8], hash: HashKind) -> Result<Commit<'_>, GitError>
         .and_then(|line| line.strip_prefix(b"committer "))
         .ok_or_else(|| broken("a commit has no `committer` line after its `author` line"))?;
     let (mut encoding, mut change_id) = (None, None);
-    for (key, value) in other_headers(lines, "commit")? {
+    other_headers(lines, "commit", |key, value| {
         match key {
             // Each comes once, in its place: Git's own tools disagree on which of two authors
             // counts, so Bolt doesn't guess.
@@ -84,7 +85,8 @@ pub fn parse_commit(data: &[u8], hash: HashKind) -> Result<Commit<'_>, GitError>
             }
             _ => {}
         }
-    }
+        Ok(())
+    })?;
     if count > MAX_PARENTS {
         return Err(unimportable(format!(
             "a commit has {count} parents, more than the {MAX_PARENTS} Bolt keeps"
@@ -114,14 +116,14 @@ pub struct TreeEntry<'a> {
 }
 
 /// Reads a tree's entries, each `mode name\0id`, refusing modes Bolt doesn't take, entries out
-/// of Git's order or of one name, and more entries than a save may hold. Names are the
+/// of Git's order or of one name, and more entries than a Bolt folder may hold. Names are the
 /// importer's to judge (decision 035).
 pub fn parse_tree(data: &[u8], hash: HashKind) -> Result<Vec<TreeEntry<'_>>, GitError> {
-    parse_tree_with_limit(data, hash, MAX_SAVE_ENTRIES)
+    parse_tree_with_limit(data, hash, MAX_ENTRIES)
 }
 
-/// `parse_tree`, stopping past `max_entries`: a tree that big can't be imported anyway, and
-/// stopping there bounds the memory a hostile one takes.
+/// `parse_tree`, stopping past `max_entries`: a tree becomes one folder, which can't hold more,
+/// and stopping there bounds the memory a hostile one takes.
 fn parse_tree_with_limit(
     data: &[u8],
     hash: HashKind,
@@ -188,7 +190,7 @@ fn parse_tree_with_limit(
         }
         if entries.len() as u64 >= max_entries {
             return Err(unimportable(format!(
-                "a tree has more than {max_entries} entries, more than a Bolt save may hold"
+                "a tree holds more than {max_entries} entries, more than a Bolt folder may hold"
             )));
         }
         entries.push(TreeEntry {
@@ -204,11 +206,7 @@ fn parse_tree_with_limit(
     }
 }
 
-/// What a tree entry's mode means, and whether it is one of the five Git writes; `None` for one
-/// Bolt doesn't take. Bolt takes them zero-padded too, and any regular file's mode as a file or
-/// an executable by its owner-execute bit, as Git's `canon_mode` reads it. `canon_mode` reads any
-/// other mode too, most as a submodule, which would take a file's ID for another repository's
-/// commit; and Git cuts a longer mode to 16 bits. Bolt takes neither.
+/// A mode's kind, and whether it is one of the five Git writes; `None` if Bolt doesn't take it.
 fn mode_kind((value, was_cut): (u16, bool), mode: &[u8]) -> Option<(EntryKind, bool)> {
     if was_cut {
         return None;
@@ -217,8 +215,10 @@ fn mode_kind((value, was_cut): (u16, bool), mode: &[u8]) -> Option<(EntryKind, b
         0o040000 => EntryKind::Folder,
         0o120000 => EntryKind::Symlink,
         0o160000 => EntryKind::ProjectLink,
+        // Any regular file's mode, by its owner-execute bit, as Git's `canon_mode` reads it.
         0o100000..=0o107777 if value & 0o100 == 0 => EntryKind::File,
         0o100000..=0o107777 => EntryKind::Executable,
+        // Git reads most of the rest as a submodule, taking a file's ID for a commit.
         _ => return None,
     };
     let standard = matches!(
@@ -288,7 +288,7 @@ pub fn parse_tag(data: &[u8], hash: HashKind) -> Result<TagObject<'_>, GitError>
         .next()
         .and_then(|line| line.strip_prefix(b"tag "))
         .ok_or_else(|| broken("a tag has no `tag` line after its `type` line"))?;
-    other_headers(lines, "tag")?;
+    other_headers(lines, "tag", |_, _| Ok(()))?;
     let message = message.ok_or_else(|| no_empty_line("tag"))?;
     Ok(TagObject {
         object,
@@ -336,35 +336,35 @@ fn header_lines(header: &[u8]) -> impl Iterator<Item = &[u8]> {
         .flat_map(|lines| lines.split(|&b| b == b'\n'))
 }
 
-/// A header's key, and the value on its first line.
-type Header<'a> = (&'a [u8], &'a [u8]);
-
 /// The headers after a commit's or tag's own lines: each `key value`, maybe continued on lines
-/// that start with a space. Git doesn't check these, so a line that breaks the form is
-/// `Unimportable`, not `Broken`.
+/// that start with a space. Each key goes to `each` with its first line's value as it is read,
+/// and nothing is kept: a hostile header can hold millions of lines. Git doesn't check these, so
+/// a line that breaks the form is `Unimportable`, not `Broken`.
 fn other_headers<'a>(
     lines: impl Iterator<Item = &'a [u8]>,
     what: &str,
-) -> Result<Vec<Header<'a>>, GitError> {
-    let mut headers = Vec::new();
+    mut each: impl FnMut(&'a [u8], &'a [u8]) -> Result<(), GitError>,
+) -> Result<(), GitError> {
+    let mut seen_header = false;
     for line in lines {
         if line.first() == Some(&b' ') {
-            if headers.is_empty() {
+            if !seen_header {
                 return Err(unimportable(format!(
                     "a {what}'s header has a line that starts with a space but follows no header \
                      it could continue"
                 )));
             }
         } else {
-            let header = split_at_byte(line, b' ').ok_or_else(|| {
+            let (key, value) = split_at_byte(line, b' ').ok_or_else(|| {
                 unimportable(format!(
                     "a {what}'s header has a line that isn't a key and a value"
                 ))
             })?;
-            headers.push(header);
+            each(key, value)?;
+            seen_header = true;
         }
     }
-    Ok(headers)
+    Ok(())
 }
 
 /// `bytes` up to the first `byte`, and what follows it.
@@ -372,16 +372,6 @@ fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
     let at = bytes.iter().position(|&b| b == byte)?;
     let (before, after) = bytes.split_at_checked(at)?;
     Some((before, after.get(1..)?))
-}
-
-/// Bytes from an object for a message, cut to a name's worth so a hostile one can't flood it.
-fn shown(bytes: &[u8]) -> String {
-    match bytes.get(..MAX_NAME_BYTES) {
-        Some(start) if start.len() < bytes.len() => {
-            format!("{}...", String::from_utf8_lossy(start))
-        }
-        _ => String::from_utf8_lossy(bytes).into_owned(),
-    }
 }
 
 /// Most bytes a Git LFS pointer may have (decision 037).
@@ -480,9 +470,12 @@ fn person(name: &[u8], email: &[u8], (time_ms, tz_offset_min): (i64, i16)) -> Pe
 
 /// A name or email as a save holds it: valid UTF-8, at most 4 KiB.
 fn person_field(bytes: &[u8]) -> String {
-    let mut text = String::from_utf8_lossy(bytes).into_owned();
-    text.truncate(text.floor_char_boundary(MAX_PERSON_FIELD_BYTES));
-    text
+    // Three bytes past the limit finish any character that starts inside it, so none is cut
+    // into a U+FFFD that would fit; what lies further can't reach the result.
+    let start = bytes.get(..MAX_PERSON_FIELD_BYTES.saturating_add(3));
+    let text = String::from_utf8_lossy(start.unwrap_or(bytes));
+    let end = text.floor_char_boundary(MAX_PERSON_FIELD_BYTES);
+    text.get(..end).unwrap_or_default().to_owned()
 }
 
 /// The time in milliseconds and the zone in minutes after an ident's last `>`: digits, then `+`
@@ -925,6 +918,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn many_short_headers_are_read_without_a_list() {
+        // A hostile commit can hold millions of 3-byte header lines: each is looked at as it is
+        // read, then dropped.
+        let count = 1 << 20;
+        let raw = commit(TREE, &[], &"a \n".repeat(count), b"m");
+        let c = parse_commit(&raw, Sha1).unwrap();
+        assert_eq!(c.message, b"m");
+        let mut seen = 0;
+        // After `tree`, `author` and `committer`.
+        other_headers(header_lines(c.header).skip(3), "commit", |key, value| {
+            assert_eq!((key, value), (&b"a"[..], &b""[..]));
+            seen += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, count);
+    }
+
     /// A tree of `entries` (mode, name), in the order given, each pointing at `11…11`.
     fn tree(hash: HashKind, entries: &[(&str, &[u8])]) -> Vec<u8> {
         let id = vec![0x11; hash.len()];
@@ -1103,14 +1115,15 @@ mod tests {
             "ends in the middle of an entry",
         );
 
-        // A tree of more entries than a save may hold stops one past the limit; Git reads it.
+        // A tree of more entries than a Bolt folder may hold stops one past the limit; Git
+        // reads it.
         let names: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
         let raw = tree(Sha1, &names.map(|name| ("100644", name)));
         assert_eq!(parse_tree_with_limit(&raw, Sha1, 4).unwrap().len(), 4);
         assert_unimportable(
             "one past the limit",
             parse_tree_with_limit(&raw, Sha1, 3),
-            "more than 3 entries",
+            "holds more than 3 entries, more than a Bolt folder may hold",
         );
         // Damage before the limit is still named as damage.
         let raw = tree(Sha1, &[("100644", b"b"), ("100644", b"a")]);
@@ -1552,6 +1565,12 @@ mod tests {
                 authored(b" <> 0 -1200"),
                 None,
             ),
+            (
+                "a zone west, not in whole hours",
+                Sha1,
+                authored(b"A <a@b> 1 -0330"),
+                None,
+            ),
         ];
         for (what, hash, raw, git_id) in cases {
             let c = parse_commit(&raw, hash).unwrap();
@@ -1568,6 +1587,26 @@ mod tests {
                 );
             }
         }
+        // A time before 1970 rounds down to whole seconds: -1.5 s is -2 and -1 ms is -1.
+        let person = |time_ms| Person {
+            name: "A".into(),
+            email: "a@b".into(),
+            time_ms,
+            tz_offset_min: 0,
+        };
+        let save = Save {
+            root: Id([0; 32]),
+            parents: Vec::new(),
+            author: person(-1500),
+            saver: person(-1),
+            message: "m".into(),
+            change_id: ChangeId([0; 16]),
+            move_notes: Vec::new(),
+            signature: Vec::new(),
+            extra: BTreeMap::new(),
+        };
+        let want = format!("tree {TREE}\nauthor A <a@b> -2 +0000\ncommitter A <a@b> -1 +0000\n\nm");
+        assert_eq!(rebuild_commit(&save, &id(Sha1, TREE), &[]), want.as_bytes());
     }
 
     #[test]
@@ -1709,5 +1748,8 @@ mod tests {
         // Bytes that aren't UTF-8 grow as U+FFFD, and are cut after.
         let p = parse_person(&[&[0xff; 3000][..], b" <a> 1 +0000"].concat());
         assert_eq!(p.name, "\u{fffd}".repeat(1365));
+        // A character that starts inside the limit and ends past it goes whole, not as U+FFFD.
+        let line = format!("{}\u{1f600}bb <a> 1 +0000", "a".repeat(4093));
+        assert_eq!(parse_person(line.as_bytes()).name, "a".repeat(4093));
     }
 }

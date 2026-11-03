@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use bolt_platform::Owner;
 
 use crate::config::ConfigError;
+use crate::names::MAX_NAME_BYTES;
 use crate::repo::{self, RepoError};
 use crate::safe_fs;
 use crate::text::escape;
@@ -241,6 +242,17 @@ fn broken(what: impl Into<String>) -> GitError {
 
 fn unimportable(what: impl Into<String>) -> GitError {
     GitError::Unimportable { what: what.into() }
+}
+
+/// Bytes from a repository for a message, cut to a name's worth so a hostile one can't flood
+/// it. Git allows nearly any bytes in names; the error escapes them when it is shown.
+fn shown(bytes: &[u8]) -> String {
+    match bytes.get(..MAX_NAME_BYTES) {
+        Some(start) if start.len() < bytes.len() => {
+            format!("{}...", String::from_utf8_lossy(start))
+        }
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
 }
 
 /// Git's `isspace`: space, tab, LF and CR, but not vertical tab or form feed.
