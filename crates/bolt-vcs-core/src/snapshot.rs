@@ -205,11 +205,7 @@ pub fn save_folder(
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
     // Probed under the lock: the probe's file sits in `tmp/`, which is cleared when it is free.
     let drive = drive::probe(repo.tmp_dir()).map_err(RepoError::from)?;
-    let base = Base {
-        store: repo.store(),
-        root: parent.root,
-        limits: SaveLimits::default(),
-    };
+    let base = Base::new(repo.store(), parent.root, SaveLimits::default());
     let Scan {
         folders,
         old,
@@ -654,11 +650,7 @@ mod tests {
         let (_, entry) = repo.current().unwrap();
         let id = entry.state.lines["main"];
         let save = repo.store().save(&id, repo.signatures_allowed()).unwrap();
-        Base {
-            store: repo.store(),
-            root: save.root,
-            limits: SaveLimits::default(),
-        }
+        Base::new(repo.store(), save.root, SaveLimits::default())
     }
 
     /// `walk` of the project on top of the line's newest save, as `save` does.

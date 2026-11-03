@@ -91,13 +91,25 @@ fn path_bytes(rel: &Path) -> Vec<u8> {
 /// The save a new one builds on. A walk reads its listings along the folders it keeps, which its
 /// own depth limit holds, and below the folders gone from disk, which `limits` holds.
 pub(super) struct Base<'a> {
-    pub(super) store: &'a Store,
-    pub(super) root: Id,
+    store: &'a Store,
+    root: Id,
     /// The listings both read count against these, a shared one once per path.
-    pub(super) limits: SaveLimits,
+    limits: SaveLimits,
+    /// Whether the search of gone folders has passed `limits`, and so reads nothing more.
+    spent: bool,
 }
 
-impl Base<'_> {
+impl<'a> Base<'a> {
+    /// The save whose top listing is `root`, read from `store` within `limits`.
+    pub(super) fn new(store: &'a Store, root: Id, limits: SaveLimits) -> Base<'a> {
+        Base {
+            store,
+            root,
+            limits,
+            spent: false,
+        }
+    }
+
     fn listing(&mut self, id: Id) -> Result<Listing, SaveError> {
         let listing = self.store.listing(&id)?;
         self.limits
@@ -106,19 +118,21 @@ impl Base<'_> {
         Ok(listing)
     }
 
-    /// The listing `id` of a folder `depth` levels down that is gone from disk, or `None` past
-    /// the limits. There the base save is invalid and nothing can be kept, so the search ends and
-    /// the save goes ahead, as one beside a save too large to compare does.
+    /// The listing `id` of a folder `depth` levels down that is gone from disk, or `None` from
+    /// the first time a read would pass the limits on. Past them the base save is invalid and
+    /// nothing can be kept, so the whole search ends there, reading nothing more, and the save
+    /// goes ahead, as one beside a save too large to compare does.
     fn gone_listing(&mut self, id: Id, depth: usize) -> Result<Option<Listing>, SaveError> {
-        if self.limits.check_depth(depth).is_err() {
+        if self.spent || self.limits.check_depth(depth).is_err() {
+            self.spent = true;
             return Ok(None);
         }
         let listing = self.store.listing(&id)?;
-        Ok(self
-            .limits
-            .add(listing.entries().len())
-            .is_ok()
-            .then_some(listing))
+        if self.limits.add(listing.entries().len()).is_err() {
+            self.spent = true;
+            return Ok(None);
+        }
+        Ok(Some(listing))
     }
 }
 
@@ -1919,6 +1933,83 @@ mod tests {
         let hint = err.hint().unwrap();
         assert!(hint.contains("Rename or move libs"), "{hint}");
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn a_base_save_past_its_limits_is_read_no_further() {
+        let (_dir, mut repo) = project();
+        // A listing of three files, and an ID no object has: reading that one fails.
+        let mut three = None;
+        plant_root(&mut repo, |packs| {
+            let empty = packs.add_content(b"").unwrap();
+            let file = |name: &str| Entry {
+                name: name.to_owned(),
+                kind: EntryKind::File,
+                id: empty,
+                size: 0,
+            };
+            let id = add_listing(packs, vec![file("a"), file("b"), file("c")]).0;
+            three = Some(id);
+            id
+        });
+        let (three, missing) = (three.unwrap(), Id([0xee; 32]));
+        let base = |limits| Base::new(repo.store(), three, limits);
+        // Within its limits it reads, so the missing listing fails.
+        assert!(
+            base(SaveLimits::default())
+                .gone_listing(missing, 1)
+                .is_err()
+        );
+        // The third read of three entries passes a limit of 8; nothing is read after that.
+        let mut spent = base(SaveLimits::new(MAX_SAVE_DEPTH, 8));
+        assert!(spent.gone_listing(three, 1).unwrap().is_some());
+        assert!(spent.gone_listing(three, 1).unwrap().is_some());
+        assert!(spent.gone_listing(three, 1).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1).unwrap().is_none());
+        // Likewise once a folder lies past the depth limit.
+        let mut spent = base(SaveLimits::new(2, MAX_SAVE_ENTRIES));
+        assert!(spent.gone_listing(three, 3).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_search_of_gone_folders_ends_once_the_base_save_passes_its_limits() {
+        let (dir, mut repo) = project();
+        // A tree bomb in the gone folder `a`: 5,000 folders all pointing at one listing of 5,000
+        // files, 25,000,000 paths in all. Then the gone folder `b`, which holds a link.
+        plant_root(&mut repo, |packs| {
+            let empty = packs.add_content(b"").unwrap();
+            let files = (0..5000).map(|i| Entry {
+                name: format!("x{i:04}"),
+                kind: EntryKind::File,
+                id: empty,
+                size: 0,
+            });
+            let wide = add_listing(packs, files.collect()).0;
+            let folders = (0..5000).map(|i| entry(&format!("f{i:04}"), EntryKind::Folder, wide));
+            let bomb = add_listing(packs, folders.collect()).0;
+            let link = add_link(packs, COMMIT);
+            let holds_link = add_listing(packs, vec![entry("sub", EntryKind::ProjectLink, link)]).0;
+            let top = vec![
+                entry("a", EntryKind::Folder, bomb),
+                entry("b", EntryKind::Folder, holds_link),
+            ];
+            add_listing(packs, top).0
+        });
+        // The base's limit is passed on the third read of the wide listing.
+        let base = Base {
+            limits: SaveLimits::new(MAX_SAVE_DEPTH, 20_000),
+            ..newest(&repo)
+        };
+        let started = std::time::Instant::now();
+        let scan = walk(dir.path(), base, SaveLimits::default(), this_drive()).unwrap();
+        let took = started.elapsed();
+        eprintln!("a tree bomb past the base's limits: walked in {took:?}");
+        // Reading on would take thousands of reads of 5,000 entries.
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        // Nothing past the limits is read, so `b` isn't either: past them the base save is
+        // invalid, and nothing in it can be kept.
+        assert!(scan.folders[""].is_empty());
     }
 
     #[test]
