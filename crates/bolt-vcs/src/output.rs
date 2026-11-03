@@ -185,19 +185,30 @@ fn date(time_ms: i64, tz_offset_min: i16) -> String {
 
 /// A line such as "Importing commits: 1,234 of 5,678" on stderr while a long step runs, kept up
 /// to date at most four times a second, and only in a terminal.
-pub struct Progress {
+pub struct Progress<W: Write> {
     what: &'static str,
+    out: W,
     terminal: bool,
     since: Instant,
     last: (u64, u64),
     shown: bool,
 }
 
-impl Progress {
-    pub fn new(what: &'static str) -> Progress {
+impl Progress<std::io::Stderr> {
+    pub fn new(what: &'static str) -> Self {
+        let out = std::io::stderr();
+        let terminal = out.is_terminal();
+        Progress::to(what, out, terminal)
+    }
+}
+
+impl<W: Write> Progress<W> {
+    /// Progress written to `out`, which is a terminal or isn't.
+    fn to(what: &'static str, out: W, terminal: bool) -> Self {
         Progress {
             what,
-            terminal: std::io::stderr().is_terminal(),
+            out,
+            terminal,
             since: Instant::now(),
             last: (0, 0),
             shown: false,
@@ -216,18 +227,16 @@ impl Progress {
     pub fn finish(&mut self) {
         if self.shown {
             self.show();
-            eprintln!();
+            let _ = writeln!(self.out);
         }
     }
 
+    /// A failed write only loses the progress line, so it is let go.
     fn show(&mut self) {
         let (done, total) = self.last;
-        eprint!(
-            "\r{}: {} of {}",
-            self.what,
-            thousands(done),
-            thousands(total)
-        );
+        let (done, total) = (thousands(done), thousands(total));
+        let _ = write!(self.out, "\r{}: {done} of {total}", self.what);
+        let _ = self.out.flush();
         self.shown = true;
     }
 }
@@ -386,5 +395,35 @@ mod tests {
             ]
         );
         assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
+    }
+
+    #[test]
+    fn progress_shows_only_in_a_terminal_and_at_most_four_times_a_second() {
+        let a_while_ago = || {
+            Instant::now()
+                .checked_sub(Duration::from_millis(300))
+                .unwrap()
+        };
+        // Without a terminal, nothing, however long the step takes.
+        let mut quiet = Progress::to("Importing commits", Vec::new(), false);
+        quiet.since = a_while_ago();
+        quiet.update(1, 2);
+        quiet.finish();
+        assert!(quiet.out.is_empty());
+        // In one, nothing for the first quarter of a second, so a quick step shows nothing.
+        let mut quick = Progress::to("Importing commits", Vec::new(), true);
+        quick.update(1, 2);
+        quick.finish();
+        assert!(quick.out.is_empty());
+        // Then at most once a quarter of a second, and the last count when it ends.
+        let mut slow = Progress::to("Importing commits", Vec::new(), true);
+        slow.since = a_while_ago();
+        slow.update(2, 1234);
+        slow.update(3, 1234);
+        slow.finish();
+        assert_eq!(
+            String::from_utf8(slow.out).unwrap(),
+            "\rImporting commits: 2 of 1,234\rImporting commits: 3 of 1,234\n"
+        );
     }
 }
