@@ -34,6 +34,8 @@ pub(super) struct PackFolder {
     pub(super) listed: Vec<String>,
     /// The packs read, each checked against its index; one Git removed after the listing isn't.
     pub(super) packs: Vec<Pack>,
+    /// How many bytes those packs hold in all.
+    pub(super) bytes: u64,
 }
 
 /// A pack, checked against its index when the packs were listed.
@@ -76,14 +78,19 @@ pub(super) fn load(folder: &Path, hash: HashKind) -> Result<PackFolder, GitError
 fn load_at_most(folder: &Path, hash: HashKind, max_objects: u64) -> Result<PackFolder, GitError> {
     let listed = list(folder)?;
     let mut packs: Vec<Pack> = Vec::new();
-    let mut objects = 0u64;
+    let (mut objects, mut bytes) = (0u64, 0u64);
     for name in &listed {
         if let Some(pack) = Pack::load(folder, name, hash, objects, max_objects)? {
             objects = objects.saturating_add(pack.offsets.len() as u64);
+            bytes = bytes.saturating_add(pack.len);
             packs.push(pack);
         }
     }
-    Ok(PackFolder { listed, packs })
+    Ok(PackFolder {
+        listed,
+        packs,
+        bytes,
+    })
 }
 
 /// The names of the packs in `folder`, sorted: every `pack-*.idx` that has its `.pack`. A file

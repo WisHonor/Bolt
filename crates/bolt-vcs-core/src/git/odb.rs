@@ -4,7 +4,7 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::borrow::{Borrow, Cow};
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -26,6 +26,11 @@ pub const MAX_IN_MEMORY_OBJECT: u64 = 512 << 20;
 pub const MAX_DELTA_DEPTH: u32 = 4096;
 /// The most the bases kept for later deltas may hold.
 pub const DELTA_BASE_CACHE: u64 = 256 << 20;
+/// Bytes an import may inflate and build to rebuild objects through deltas: at least this...
+const MIN_DELTA_WORK: u64 = 4 << 30;
+/// ...or this many for each byte of the repository's packs. git/git needs about 34, so this
+/// leaves it a margin of 14.
+const DELTA_WORK_PER_PACK_BYTE: u64 = 500;
 /// The most a loose object may say it holds: 1 TiB.
 const MAX_LOOSE_SIZE: u64 = 1 << 40;
 /// A loose object's header fits in this many bytes with its NUL, as Git requires.
@@ -51,6 +56,8 @@ pub(super) struct Objects {
     /// Packs opened for reading, by number, the most recently used first.
     open: RefCell<Vec<(usize, File)>>,
     cache: RefCell<BaseCache>,
+    /// Bytes inflated and built so far to rebuild objects through deltas.
+    work: Cell<u64>,
 }
 
 impl fmt::Debug for Objects {
@@ -189,7 +196,8 @@ impl Repo {
     }
 
     /// The object at `at` in pack number `n`, rebuilt through its deltas. A base comes from the
-    /// cache if it is there, and goes into it once built on.
+    /// cache if it is there, and goes into it once built on. What the deltas take to inflate and
+    /// apply is counted against the import's budget before each step.
     fn unpack(&self, n: usize, pack: &Pack, file: &File, at: u64) -> Result<Object, GitError> {
         let cache = &self.objects.cache;
         let chain = chain(pack, file, at, &mut |base| {
@@ -197,15 +205,22 @@ impl Repo {
         })?;
         let mut base = match chain.bottom {
             Bottom::Cached(base) => base,
-            Bottom::Whole(kind, entry) => Base {
-                kind,
-                data: inflate_entry(pack, file, chain.bottom_at, &entry)?,
-                depth: 0,
-            },
+            Bottom::Whole(kind, entry) => {
+                if !chain.deltas.is_empty() {
+                    self.spend(entry.size)?;
+                }
+                Base {
+                    kind,
+                    data: inflate_entry(pack, file, chain.bottom_at, &entry)?,
+                    depth: 0,
+                }
+            }
         };
         let mut base_at = chain.bottom_at;
         for (delta_at, entry) in chain.deltas.into_iter().rev() {
+            self.spend(entry.size)?;
             let delta = inflate_entry(pack, file, delta_at, &entry)?;
+            self.spend(delta_sizes(&delta).map_or(0, |(_, size)| size))?;
             let built = apply_delta(&base.data, &delta).map_err(|why| {
                 broken(format!(
                     "the delta at offset {delta_at} in {} {why}",
@@ -229,6 +244,26 @@ impl Repo {
         })
     }
 
+    /// Counts `bytes` more inflated or built through deltas, stopping past the import's budget:
+    /// a delta of a few bytes can build hundreds of megabytes, again for each object read on it.
+    fn spend(&self, bytes: u64) -> Result<(), GitError> {
+        // No step does more: it refuses a bigger claim itself, in its own words.
+        let bytes = bytes.min(MAX_IN_MEMORY_OBJECT);
+        let work = self.objects.work.get().saturating_add(bytes);
+        self.objects.work.set(work);
+        let budget = delta_work_budget(self.packs()?.bytes);
+        if work <= budget {
+            return Ok(());
+        }
+        Err(GitError::TooMuchWork {
+            what: format!(
+                "rebuilding its objects from Git's deltas would take more than {} GiB of work, so \
+                 it looks built to make importing slow",
+                budget >> 30
+            ),
+        })
+    }
+
     /// Checks that `object` is the one `id` names.
     fn check(&self, id: &GitId, object: &Object) -> Result<(), GitError> {
         let mut hasher = Hasher::object(self.hash, object.kind, object.data.len() as u64);
@@ -249,6 +284,11 @@ fn packed_header(pack: &Pack, file: &File, at: u64) -> Result<(ObjectType, u64),
         Bottom::Whole(kind, _) | Bottom::Cached(Base { kind, .. }) => kind,
     };
     Ok((kind, size))
+}
+
+/// The most an import may inflate and build through deltas, for packs of `bytes` in all.
+fn delta_work_budget(bytes: u64) -> u64 {
+    MIN_DELTA_WORK.max(DELTA_WORK_PER_PACK_BYTE.saturating_mul(bytes))
 }
 
 /// Checks that what `hasher` took is the object `id` names.
@@ -922,6 +962,62 @@ mod tests {
             assert_eq!((object.kind, &object.data), (*kind, data), "{i}");
         }
         assert!(repo.objects.cache.borrow().bytes > 0);
+    }
+
+    #[test]
+    fn rebuilding_through_deltas_counts_what_they_inflate_and_build() {
+        let (dir, git) = craft(Sha1);
+        let objects = pack_with_deltas(&git);
+        let [(_, base), (_, second), (_, third), (_, tree)] = &objects[..] else {
+            unreachable!()
+        };
+        let repo = open(&dir);
+        // Objects stored whole are read, not rebuilt.
+        repo.read(&id(Blob, base, Sha1)).unwrap();
+        repo.read(&id(Tree, tree, Sha1)).unwrap();
+        assert_eq!(repo.objects.work.get(), 0);
+        // The bottom inflated, then each delta inflated and applied.
+        repo.read(&id(Blob, third, Sha1)).unwrap();
+        let rebuilt = base.len()
+            + delta(base, second).len()
+            + second.len()
+            + delta(second, third).len()
+            + third.len();
+        assert_eq!(repo.objects.work.get(), rebuilt as u64);
+        // A base the cache kept is built on again for nothing.
+        repo.read(&id(Blob, second, Sha1)).unwrap();
+        assert_eq!(repo.objects.work.get(), rebuilt as u64);
+    }
+
+    #[test]
+    fn rebuilding_stops_before_a_step_past_the_budget() {
+        let (dir, git) = craft(Sha1);
+        let objects = pack_with_deltas(&git);
+        let [(_, base), (_, second), ..] = &objects[..] else {
+            unreachable!()
+        };
+        let repo = open(&dir);
+        let budget = delta_work_budget(repo.packs().unwrap().bytes);
+        // A small repository gets the least budget; a big one more for each byte of its packs.
+        assert_eq!(budget, MIN_DELTA_WORK);
+        assert!(delta_work_budget(10 << 30) > MIN_DELTA_WORK);
+        // Room for the base and the delta, but not for what the delta builds.
+        let room = base.len() + delta(base, second).len();
+        repo.objects.work.set(budget - room as u64);
+        match repo.read(&id(Blob, second, Sha1)) {
+            Err(e @ GitError::TooMuchWork { .. }) => {
+                let says = format!("more than {} GiB of work", MIN_DELTA_WORK >> 30);
+                assert!(e.to_string().contains(&says), "{e}");
+                assert!(
+                    e.to_string().contains("built to make importing slow"),
+                    "{e}"
+                );
+                assert!(e.hint().unwrap().contains("repack -a -d -f"), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The inflating fit exactly; building is what was refused.
+        assert_eq!(repo.objects.work.get(), budget + second.len() as u64);
     }
 
     #[test]

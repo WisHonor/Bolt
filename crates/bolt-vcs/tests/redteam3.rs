@@ -436,7 +436,6 @@ fn rt3_3_a_valid_200_mib_file_of_zeros_imports() {
 // 16 commits sit on a 300 MiB object rebuilt through 8 deltas (a ~6 KB .git).
 
 #[test]
-#[ignore = "RT3-4: red-team proof, run once its fix is in"]
 fn rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time() {
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);
