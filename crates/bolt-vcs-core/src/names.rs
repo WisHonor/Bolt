@@ -1,7 +1,8 @@
 //! Which file names Bolt stores, and which it flags as non-portable (decision 004):
 //! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
 //! that work here but would break on another operating system. [`is_git_alias`] spots the
-//! spellings of `.git`, and [`holdable_here`] says whether this system can hold a name.
+//! spellings of `.git`, [`holdable_here`] says whether this system can hold a name, and [`fold`]
+//! compares names as a drive does.
 
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
@@ -180,13 +181,29 @@ pub fn holdable_here(name: &str) -> bool {
     !cfg!(windows) || name_problems(name).is_empty()
 }
 
+/// `name` as a drive compares names: composed (NFC) where it composes Unicode, then lowercase
+/// where it ignores letter case. Both what a save refuses and what it keeps fold names this way.
+pub fn fold(name: &str, compose: bool, ignore_case: bool) -> String {
+    let name: String = if compose {
+        name.nfc().collect()
+    } else {
+        name.to_owned()
+    };
+    // shortcut: Unicode lowercase approximates NTFS's uppercase table; upgrade if it matters.
+    if ignore_case {
+        name.to_lowercase()
+    } else {
+        name
+    }
+}
+
 /// Collisions among the names in one folder, plus each name's own problems.
 pub fn folder_problems(names: &[&str]) -> Vec<PortabilityProblem> {
     let mut out: Vec<_> = names.iter().flat_map(|n| name_problems(n)).collect();
     let mut by_nfc: BTreeMap<String, &str> = BTreeMap::new();
     let mut by_fold: BTreeMap<String, &str> = BTreeMap::new();
     for &n in names {
-        let nfc: String = n.nfc().collect();
+        let nfc = fold(n, true, false);
         match by_nfc.get(&nfc) {
             Some(&first) if first != n => {
                 out.push(PortabilityProblem::NormalizationCollision {
@@ -200,15 +217,14 @@ pub fn folder_problems(names: &[&str]) -> Vec<PortabilityProblem> {
                 by_nfc.insert(nfc.clone(), n);
             }
         }
-        // shortcut: Unicode lowercase approximates NTFS's uppercase table; upgrade if it matters.
-        let fold = nfc.to_lowercase();
-        if let Some(&first) = by_fold.get(&fold) {
+        let folded = fold(&nfc, false, true);
+        if let Some(&first) = by_fold.get(&folded) {
             out.push(PortabilityProblem::CaseCollision {
                 a: first.into(),
                 b: n.into(),
             });
         } else {
-            by_fold.insert(fold, n);
+            by_fold.insert(folded, n);
         }
     }
     out

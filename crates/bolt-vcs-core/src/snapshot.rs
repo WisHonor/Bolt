@@ -90,7 +90,7 @@ pub enum SaveError {
     TooLarge { detail: String },
     #[error(
         "Bolt can't save {}: the last save has a folder there holding {}, which every save keeps \
-         as it was because this computer doesn't hold it as it is, and a save can't hold both \
+         as it was because this computer can't hold it as it is, and a save can't hold both \
          under one name.",
         escape(path, false),
         escape(kept, false)
@@ -299,15 +299,13 @@ pub fn save_folder(
 /// Says how many entries a save kept as they were, and why.
 fn kept_warning(count: usize) -> Warning {
     let message = if count == 1 {
-        "Kept 1 entry as it was in the last save, because this computer doesn't hold it as it \
-         is, like a project link or a name it can't create. A later version's `bolt status` will \
-         list it."
+        "Kept 1 entry as it was in the last save, because this computer can't hold it as it is \
+         (a project link, or a name it can't create)."
             .to_owned()
     } else {
         format!(
-            "Kept {count} entries as they were in the last save, because this computer doesn't \
-             hold them as they are, like project links or names it can't create. A later \
-             version's `bolt status` will list them."
+            "Kept {count} entries as they were in the last save, because this computer can't \
+             hold them as they are (project links, or names it can't create)."
         )
     };
     Warning::new(warning::KEPT_AS_THEY_WERE, message)
@@ -371,6 +369,31 @@ fn path_in(rel: &str, name: &str) -> String {
     } else {
         format!("{rel}/{name}")
     }
+}
+
+/// Which entries of `listing`, a folder of the last save, every save keeps as they were because
+/// this computer can't hold them as they are: project links, names this system can't hold, and
+/// names that are one file with another on this drive (decisions 036 and 039).
+fn kept_as_they_were(listing: &Listing, drive: Drive) -> Vec<bool> {
+    let entries = listing.entries();
+    let mut kept: Vec<bool> = entries
+        .iter()
+        .map(|e| e.kind == EntryKind::ProjectLink || !holdable_here(&e.name))
+        .collect();
+    // A listing's names all differ, so only a drive that folds them can make two one file.
+    if drive.ignores_case || drive.composes_unicode {
+        let mut first: HashMap<String, usize> = HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            let folded = drive.compared(&e.name);
+            if let Some(&j) = first.get(&folded) {
+                kept[i] = true;
+                kept[j] = true;
+            } else {
+                first.insert(folded, i);
+            }
+        }
+    }
+    kept
 }
 
 /// A project path as Git matches it: the bytes of its names, with `/` between them.
@@ -468,37 +491,25 @@ impl IgnoreRules {
         Ok(())
     }
 
-    /// Notes the entries of `listing`, the base save's listing of the folder `rel`, that this
-    /// computer doesn't hold as they are: project links, names this system can't hold, and
-    /// names that are one file on this drive (decisions 036 and 039). A link Git wrote as a file
-    /// is `build`'s to spot, from the file it reads anyway.
+    /// Notes the entries of `listing`, the base save's listing of the folder `rel`, that are
+    /// kept as they were. A link Git wrote as a file is `build`'s to spot, from the file it reads
+    /// anyway.
     fn note_untouched(&mut self, rel: &str, listing: &Listing) {
-        let compared: Vec<String> = listing
-            .entries()
-            .iter()
-            .map(|e| self.drive.compared(&e.name))
-            .collect();
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        for name in &compared {
-            *seen.entry(name).or_default() += 1;
-        }
-        for (e, name) in listing.entries().iter().zip(&compared) {
-            let one_file = seen.get(name.as_str()).is_some_and(|&n| n > 1);
-            if e.kind == EntryKind::ProjectLink || !holdable_here(&e.name) || one_file {
-                let path = path_in(rel, &e.name);
-                let kept = Child {
-                    name: e.name.clone(),
-                    kind: Kind::Kept {
-                        kind: e.kind,
-                        id: e.id,
-                        size: e.size,
-                    },
-                    path: self.root.join(&path),
-                    rel: path.clone(),
-                    executable: None,
-                };
-                self.untouched.insert(path, kept);
-            }
+        let kept = kept_as_they_were(listing, self.drive);
+        for (e, _) in listing.entries().iter().zip(kept).filter(|(_, k)| *k) {
+            let path = path_in(rel, &e.name);
+            let child = Child {
+                name: e.name.clone(),
+                kind: Kind::Kept {
+                    kind: e.kind,
+                    id: e.id,
+                    size: e.size,
+                },
+                path: self.root.join(&path),
+                rel: path.clone(),
+                executable: None,
+            };
+            self.untouched.insert(path, child);
         }
     }
 
@@ -2486,11 +2497,11 @@ mod tests {
         let warnings = warnings_of(&saved).to_vec();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].kind, "kept_as_they_were");
-        assert!(
-            warnings[0]
-                .message
-                .starts_with("Kept 3 entries as they were"),
-            "{warnings:?}"
+        // It promises nothing a later version may or may not do.
+        assert_eq!(
+            warnings[0].message,
+            "Kept 3 entries as they were in the last save, because this computer can't hold them \
+             as they are (project links, or names it can't create)."
         );
         // Said again when nothing changed, since they are still kept.
         let again = save_now(&mut repo).unwrap();

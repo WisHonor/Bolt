@@ -4,9 +4,8 @@
 use std::io;
 use std::path::Path;
 
-use unicode_normalization::UnicodeNormalization;
-
 use crate::fsio;
+use crate::names;
 
 /// Which names the drive takes to be one file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,17 +20,7 @@ impl Drive {
     /// `name` as this drive compares it: names that come out the same are one file here.
     #[must_use]
     pub fn compared(self, name: &str) -> String {
-        let name: String = if self.composes_unicode {
-            name.nfc().collect()
-        } else {
-            name.to_owned()
-        };
-        // shortcut: Unicode lowercase stands in for the drive's case table; upgrade if it matters.
-        if self.ignores_case {
-            name.to_lowercase()
-        } else {
-            name
-        }
+        names::fold(name, self.composes_unicode, self.ignores_case)
     }
 }
 
