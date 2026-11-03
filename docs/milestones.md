@@ -1,13 +1,13 @@
 # Bolt Milestones
 
-> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). Next: milestone 2, planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md); its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). Items milestone 1's reviews deferred are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
+> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03) and waits for its red-team session, review and merge. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). Items milestone 1's reviews deferred, and the ones milestone 2 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
 
 ## v0.1: solo, local, games first
 
 | # | Milestone | Done when |
 |---|---|---|
 | 1 | **First save** ✅ | `bolt start`, `bolt save`, `bolt history` and `bolt show` work end to end on real projects, on the real formats, on all three systems |
-| 2 | **Coming from Git** | `bolt import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git |
+| 2 | **Coming from Git** | `bolt import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git; the owner has imported one of their own repositories and tried a project inside a OneDrive folder ([decision 026](decisions/026-ownership-check-details.md) #4) |
 | 3 | **Working folder** | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves, safety copies, and basic lines: saving after `goto` creates one, `line` lists them, `goto <line>` switches; merge small packs and open packs lazily before real use (each save adds a pack, and every pack stays open) |
 | 4 | **Undo everything** | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy`; `shelf`/`unshelf` and `save --amend` ([decision 021](decisions/021-v0.1-command-scope.md)) |
 | 5 | **Big files** | Chunking, streaming, parallel hashing, Git LFS import (contents must be on disk, [decision 020](decisions/020-lfs-import.md)), and benchmarks against Git LFS |
@@ -83,43 +83,43 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 
 ## Milestone 2: Coming from Git
 
-Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets.
+Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (2026-11-03).
 
-**0. Ownership and warnings** (Tasks 1–2)
+**0. Ownership and warnings** ✅ (Tasks 1–2)
 - The Administrators group counts as the user only in an elevated terminal (decision 030).
 - Warnings travel in `--json` too, JSON output stays valid when a command fails midway, and `docs/json.md` documents every format.
 - *Done when:* the ownership rule and every JSON document have tests.
 
-**1. Shared diary records, and several packs per command** (Tasks 3–4)
+**1. Shared diary records, and several packs per command** ✅ (Tasks 3–4)
 - Tags and server lines live in records of their own that diary entries share (decision 034).
 - A command writes a new pack every 2^20 objects, and still takes effect at one moment (decision 041).
 - *Done when:* test vectors and fuzz targets cover the two records, and a crash between packs leaves the repository as it was.
 
-**2. Names, and Git's ignore rules** (Tasks 5–7)
+**2. Names, and Git's ignore rules** ✅ (Tasks 5–7)
 - Every name Git treats as `.git`; which names this system can hold; this drive's letter case and Unicode form.
 - A matcher that follows Git's own rules, tested against `git check-ignore`; the forms storage-format.md §12 refused now work.
 - `save` reads `.gitignore` files too, and keeps saved files that a rule matches (decision 038).
 - *Done when:* Git's own wildmatch table passes, and the matcher agrees with Git on random rules on all three systems.
 
-**3. Saving keeps what it can't hold** (Task 8)
+**3. Saving keeps what it can't hold** ✅ (Task 8)
 - Names this computer can't hold, names that are one file on this drive, links Git wrote as files, and project links stay as they were (decisions 036, 039).
 - *Done when:* each case has a test.
 
-**4. The Git reader** (Tasks 9–11)
+**4. The Git reader** ✅ (Tasks 9–11)
 - The repository's format and config, refs and packed refs, loose objects, packs and deltas, commits, trees and tags, with every read bounded and every object verified (decision 031).
 - *Done when:* every refusal, limit and parser has a test, and the reader never panics on truncated or crafted input.
 
-**5. Import** (Tasks 12–14)
+**5. Import** ✅ (Tasks 12–14)
 - `bolt import`: commits become saves exactly and repeatably (decision 032), branches lines and server lines (033), tags kept exactly (034), dangerous names skipped (035), submodules bare links (036), LFS repositories refused until milestone 5 (037), one-time for now (040).
 - The first save after an import stops at line endings Git converted (decision 039).
 - *Done when:* importing a repository twice, anywhere, gives the same saves, and an interrupted import can be run again.
 
-**6. Proof** (Tasks 15–16)
+**6. Proof** ✅ (Tasks 15–16)
 - Differential tests compare every imported commit with Git, on scripted repositories on every push and on Git's own repository nightly.
 - The hostile-repository corpus covers Git's published vulnerabilities that apply to an import (reviewed 2026-11-02), and the Git reader has fuzz targets.
 - *Done when:* both pass, and the nightly run on Git's own repository matches.
 
-**7. Follow-ups and docs** (Tasks 17–19)
+**7. Follow-ups and docs** ✅ (Tasks 17–19)
 - The milestone 1 follow-ups due now, and every document brought up to date.
 - *Done when:* the follow-ups list and the docs match the code.
 

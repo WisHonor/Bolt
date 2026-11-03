@@ -70,7 +70,7 @@ entries, sorted by name:
 
 - `name` must follow decision 004's always-on rules: valid UTF-8, not empty, not `.` or `..`, no `/`, no NUL, at most 255 bytes, and not `.bolt` under any spelling Windows or macOS would treat as `.bolt` (any letter case, trailing dots or spaces, the short names `BOLT~1` to `BOLT~4`, a `:stream` suffix).
 - The portability rules (differences only in letter case or Unicode normalization, reserved device names, trailing dots or spaces, characters Windows forbids) are checked when saving, not when reading: imported histories may contain such names (decision 004).
-- **Limits for a whole save** ([decision 025](decisions/025-red-team-m1-rulings.md)): the folders reachable from a save's root listing may nest at most **4,096** levels below the root, and describe at most **10,000,000** entries in total, counting every path (a listing reached through two paths counts twice). A reader walking a save must stop with an error as soon as either limit is passed, and must not recurse once per folder level. A reader that compares two saves counts each of them against the limits on its own, not the two together.
+- **Limits for a whole save** ([decision 025](decisions/025-red-team-m1-rulings.md)): the folders reachable from a save's root listing may nest at most **4,096** levels below the root, and describe at most **10,000,000** entries in total, counting every path (a listing reached through two paths counts twice). A reader walking a save must stop with an error as soon as either limit is passed, and must not recurse once per folder level. The one exception is a save's search through folders of the save before it that are gone from disk, for entries it must keep ([design.md](design.md) §5.2). Past that earlier save's limits, that search ends without an error and keeps what it found, so a save that is over the limits can't stop every save after it. A reader that compares two saves counts each of them against the limits on its own, not the two together.
 
 ## 4. Save
 
@@ -346,6 +346,19 @@ The first implementation generates, and the owner reviews, vectors in `crates/bo
 - invalid encodings that every reader must reject.
 
 Vectors are added milestone by milestone, for the records each milestone builds; format 1 freezes at the v0.1 release (decision 019).
+
+**The files so far.** All are in `crates/bolt-vcs-core/tests/vectors/`.
+- **Milestone 1:**
+  - `listing.json`: folder listings (§3), three vectors;
+  - `save.json`: saves (§4), three vectors;
+  - `diary.json`: diary entries (§9), a `minimal` one and a `full` one;
+  - `pack.json`: packs (§11), two vectors.
+- **Milestone 2:**
+  - `tag_list.json`: a tag list (§9) with a lightweight tag and an annotated one that keeps a Git tag object;
+  - `server_lines.json`: server lines (§9), one server with two lines;
+  - `project_link.json`: project links (§7), a SHA-1 submodule and a SHA-256 one;
+  - `diary.json`: the `full` entry now points at the tag list and the server lines of the two files above, so it changed; the `minimal` entry is byte for byte what milestone 1 wrote;
+  - `shattered-prefix.bin`: not a record. It is the first 320 bytes of one of the two PDFs of SHAttered, the first public SHA-1 collision. The Git reader's SHA-1 must refuse it as a collision attack, and must accept it with one bit changed.
 
 ## 14. Open points
 

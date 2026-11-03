@@ -393,7 +393,7 @@ pub fn probe(tmp_dir: &Path) -> io::Result<Drive>;   // drive.rs
 ```rust
 #[test]
 fn git_aliases_match_gits_own_lists() {
-    // copied from Git's t/t0060-path-utils.sh (is_ntfs_dotgit, is_hfs_dotgit), plus these
+    // copied from Git's t/t1014-read-tree-confusing.sh (the spellings its read-tree refuses), plus these
     for name in [".git", ".GIT", "git~1", "GIT~1", ".git.", ".git ", ".git. .", ".git::$INDEX_ALLOCATION", ".g\u{200c}it", "\u{feff}.git"] {
         assert!(is_git_alias(name), "{name:?}");
     }

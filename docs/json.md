@@ -1,6 +1,6 @@
 # Bolt `--json` Formats
 
-> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03. Each command that comes later adds its document here in the milestone that builds it.
+> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03. It holds every document and every kind of warning these five commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
 
 **In plain words.** Every Bolt command takes `--json`. Instead of text for people, it then prints one JSON document that a script, an editor plugin or the desktop app can read. This page says what is in each document, what each field means, and what `null` means where it can appear. The formats are a public interface: they are versioned, and the CLI tests keep them from changing by accident.
 
@@ -8,7 +8,7 @@
 
 - **One document, on stdout, in one line.** Nothing else goes to stdout: warnings and progress lines go to stderr, as text. `history` and `show` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
 - **`bolt_json` is the version of the format,** a number, `1` now. It is in every document.
-- **The versioning rule.** Within one `bolt_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A change that breaks the rule gets the next number.
+- **The versioning rule.** Within one `bolt_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A change that breaks the rule gets the next number. A field that can be `null` says so in its table, and says when: `start`'s `save`, for one, is `null` if the project was made but its first save couldn't be read back (a `first_save_not_read` warning says so). Check for `null` before you use such a field.
 - **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON.
 - **Text from the project is data.** Names, messages and paths are given exactly as they are stored, so a program can use them. They can hold anything, escape sequences included, so escape them before showing them in a terminal. Bolt's own messages (`warnings[].message`, `error.message` and `error.hint`) are already escaped.
 - **Messages are for people.** Programs should go by `kind`, `result` and the other fields, because the words of a message can change.
@@ -79,7 +79,9 @@ Saving gives one of two documents, told apart by `result`.
 
 `"result": "nothing-changed"`: the folder is as the line's last save has it, so nothing was saved. The fields are `bolt_json`, `result`, `warnings` and, if it applies, `ignored_project_identity`.
 
-**`ignored_project_identity`** is there only when the project's own settings (`.bolt/config.toml`) name a person other than the user. Bolt never takes who the user is from a project, since a project that was shared could name anyone, so the save was made as the user. The field says who was named, `{"name": …, "email": …}`, and is left out otherwise. For people, `bolt save` prints a note with the lines to add to their own settings if they do want that identity in this folder.
+**`ignored_project_identity`** is there only when the project's own settings (`.bolt/config.toml`) name a person other than the user. Bolt never takes who the user is from a project, since a project that was shared could name anyone, so the save was made as the user. The field says who was named, `{"name": …, "email": …}`, and is left out otherwise. For people, `bolt save` prints a note instead of the field. The note shows at most 256 characters of a name or email, and gives the lines to add to their own settings, if they do want that identity in this folder, only when nothing was cut: lines with a cut name would save as someone else. The field always has both in full.
+
+**A save that stops.** Like any failed command, a save that fails prints an error document (§5) and exits with 1. One case is worth knowing after an import: a save made on top of an imported save stops, and saves nothing, when files differ from the imported version only in line endings, because Git turned LF into CRLF when it wrote them out. The `error.message` says how many files, and names the first few. The `error.hint` gives the two ways on: have Git write the files back as it stored them, or save them as they are with `bolt save --accept-crlf "message"`. Once a save has been made, later ones don't check.
 
 ### `bolt history --json`
 
@@ -148,7 +150,7 @@ A command that fails before it has printed anything gives a document of just thi
 | `error.hint` | string or `null` | What to do next, if there is something to say. |
 | `warnings` | list | What the command had found before it failed, such as a damaged pack its store noted while reading: §4. `[]` if nothing. |
 
-`history` and `show` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves` or `changes`.
+`history` and `show` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added, with `save` too for `show`. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves` or `changes`.
 
 ```text
 {"bolt_json":1,"line":"main","saves":[ …the saves read so far… ],"error":{"hint":null,"message":"…"},"warnings":[]}
