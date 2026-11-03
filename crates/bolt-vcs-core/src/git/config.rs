@@ -3,7 +3,7 @@
 //! 031 and 039). Includes aren't followed, as Git's own format check doesn't follow them.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use super::{GitError, HashKind, Refusal, broken};
+use super::{GitError, HashKind, Refusal, broken, is_git_space};
 
 /// What `.git/config` says about how to read the repository.
 pub(super) struct Format {
@@ -248,11 +248,6 @@ fn parse_int(value: &[u8]) -> Option<i64> {
         .map(i64::from)
 }
 
-/// Git's `isspace`, which leaves out vertical tab and form feed.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
-}
-
 /// Git's `iskeychar`.
 fn is_key_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'-'
@@ -328,7 +323,7 @@ fn parse(text: &[u8], each: &mut Each) -> Result<(), usize> {
             comment = false;
             continue;
         }
-        if comment || is_space(c) {
+        if comment || is_git_space(c) {
             continue;
         }
         if c == b'#' || c == b';' {
@@ -363,7 +358,7 @@ fn section(src: &mut Source, name: &mut Vec<u8>) -> Option<()> {
         if c == b']' {
             return Some(());
         }
-        if is_space(c) {
+        if is_git_space(c) {
             return subsection(src, name, c);
         }
         if !is_key_char(c) && c != b'.' {
@@ -381,7 +376,7 @@ fn subsection(src: &mut Source, name: &mut Vec<u8>, mut c: u8) -> Option<()> {
             return None;
         }
         c = src.next_char();
-        if !is_space(c) {
+        if !is_git_space(c) {
             break;
         }
     }
@@ -461,7 +456,7 @@ fn value(src: &mut Source) -> Option<Vec<u8>> {
         if comment {
             continue;
         }
-        if is_space(c) && !quote {
+        if is_git_space(c) && !quote {
             if trim_len == 0 {
                 trim_len = out.len();
             }

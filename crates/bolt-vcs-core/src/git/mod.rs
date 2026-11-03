@@ -16,7 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bolt_platform::Owner;
-use sha1_checked::Digest as _;
+// The hashing trait of both hashers (digest 0.10).
 use sha2::Digest as _;
 
 use crate::config::ConfigError;
@@ -295,6 +295,11 @@ impl GitError {
 
 fn broken(what: impl Into<String>) -> GitError {
     GitError::Broken { what: what.into() }
+}
+
+/// Git's `isspace`: space, tab, LF and CR, but not vertical tab or form feed.
+fn is_git_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 /// A `safe_fs` refusal (a link, special file or oversized file where Git keeps a plain one) is

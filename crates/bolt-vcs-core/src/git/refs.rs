@@ -1,12 +1,13 @@
 //! Git's refs: `HEAD`, the loose refs under `.git/refs/` and `.git/packed-refs` (decisions 031
-//! and 033). Names follow Git's `check-ref-format`, and anything Git wouldn't write is `Broken`.
+//! and 033). Ref files are read as Git reads them and names follow its `check-ref-format`;
+//! anything else is `Broken`.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use super::{GitError, GitId, HashKind, broken, read_error, read_optional, real_dir};
+use super::{GitError, GitId, HashKind, broken, is_git_space, read_error, read_optional, real_dir};
 use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS};
 use crate::names;
 use crate::safe_fs;
@@ -41,10 +42,11 @@ pub struct Refs {
     pub other: Vec<Vec<u8>>,
 }
 
-/// What a ref holds. A symbolic ref names another ref, which Bolt doesn't follow.
-enum Target {
+/// What a ref file holds.
+enum Contents<'a> {
     Id(GitId),
-    Symbolic,
+    /// The name of another ref, which Bolt doesn't follow.
+    Symbolic(&'a [u8]),
 }
 
 /// The refs of the repository whose `.git` is `git`, reading at most `max` of them.
@@ -58,16 +60,17 @@ pub(super) fn read(git: &Path, hash: HashKind, max: u64) -> Result<Refs, GitErro
         Some(text) => read_packed(&text, hash, max, &mut count)?,
         None => BTreeMap::new(),
     };
-    let mut all: BTreeMap<Vec<u8>, Target> = packed
+    let mut all: BTreeMap<Vec<u8>, Option<GitId>> = packed
         .into_iter()
-        .map(|(name, id)| (name, Target::Id(id)))
+        .map(|(name, id)| (name, Some(id)))
         .collect();
     // A loose ref wins, as in Git: it is the newer.
     all.extend(loose);
     Ok(sort(head, all))
 }
 
-fn sort(head: Head, all: BTreeMap<Vec<u8>, Target>) -> Refs {
+/// `all` maps each ref's name to its ID, or to `None` for a symbolic ref.
+fn sort(head: Head, all: BTreeMap<Vec<u8>, Option<GitId>>) -> Refs {
     let mut refs = Refs {
         head,
         branches: Vec::new(),
@@ -75,12 +78,12 @@ fn sort(head: Head, all: BTreeMap<Vec<u8>, Target>) -> Refs {
         tags: Vec::new(),
         other: Vec::new(),
     };
-    for (name, target) in all {
+    for (name, id) in all {
         let server_ref = name.strip_prefix(b"refs/remotes/").and_then(|rest| {
             let mut parts = rest.splitn(2, |&c| c == b'/');
             Some((parts.next()?.to_vec(), parts.next()?.to_vec()))
         });
-        let Target::Id(id) = target else {
+        let Some(id) = id else {
             // A server's HEAD only names its default branch.
             if !server_ref.is_some_and(|(_, branch)| branch == b"HEAD") {
                 refs.other.push(name);
@@ -116,34 +119,73 @@ fn read_head(git: &Path, hash: HashKind) -> Result<Head, GitError> {
     parse_head(&text, hash)
 }
 
-/// `ref: refs/heads/<name>` or a commit ID, each ending in a newline: how Git writes `HEAD`.
+/// `HEAD` names a branch, or holds the commit it is detached at.
 fn parse_head(text: &[u8], hash: HashKind) -> Result<Head, GitError> {
-    let line = text.strip_suffix(b"\n");
-    if let Some(target) = line.and_then(|l| l.strip_prefix(b"ref: ")) {
-        if let Some(branch) = target.strip_prefix(b"refs/heads/")
-            && is_valid_ref_name(target)
-        {
-            return Ok(Head::Branch(branch.to_vec()));
+    let points_at = match parse_ref_file(text, hash) {
+        Some(Contents::Id(id)) => return Ok(Head::Detached(id)),
+        Some(Contents::Symbolic(target)) => {
+            if let Some(branch) = target.strip_prefix(b"refs/heads/")
+                && is_valid_ref_name(target)
+            {
+                return Ok(Head::Branch(branch.to_vec()));
+            }
+            target
         }
-    } else if let Some(id) = line.and_then(|l| hex_id(hash, l)) {
-        return Ok(Head::Detached(id));
-    }
-    let x = line.unwrap_or(text);
+        None => trim_end(text),
+    };
     Err(broken(format!(
         "Git's HEAD points at `{}`, which isn't a branch",
-        shown(x.strip_prefix(b"ref: ").unwrap_or(x))
+        shown(points_at)
     )))
 }
 
-/// The loose refs under `.git/refs`, walked with a stack of folders, not recursion. Each folder
-/// must be a real one and each ref a regular file; names Git skips (`.` first, `.lock` last) are
-/// skipped. Every entry counts toward `max`.
+/// A ref file read as Git reads it (`parse_loose_ref_contents`, after `strbuf_rtrim`): `ref:`, any
+/// whitespace and another ref's name; or an ID, then the end, or whitespace and anything at all
+/// (FETCH_HEAD's form). Git would stop at a NUL; Bolt refuses one, as in config.
+fn parse_ref_file(text: &[u8], hash: HashKind) -> Option<Contents<'_>> {
+    if text.contains(&0) {
+        return None;
+    }
+    let text = trim_end(text);
+    if let Some(target) = text.strip_prefix(b"ref:") {
+        return Some(Contents::Symbolic(trim_start(target)));
+    }
+    let (hex, rest) = text.split_at_checked(hash.hex_len())?;
+    if rest.first().is_some_and(|&c| !is_git_space(c)) {
+        return None;
+    }
+    hex_id(hash, hex).map(Contents::Id)
+}
+
+/// `text` without the whitespace Git's `strbuf_rtrim` takes off its end.
+fn trim_end(mut text: &[u8]) -> &[u8] {
+    while let Some((&last, rest)) = text.split_last()
+        && is_git_space(last)
+    {
+        text = rest;
+    }
+    text
+}
+
+/// `text` without the whitespace Git skips after `ref:`.
+fn trim_start(mut text: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = text.split_first()
+        && is_git_space(first)
+    {
+        text = rest;
+    }
+    text
+}
+
+/// The loose refs under `.git/refs`, walked with a stack of folders, not recursion: each ref's ID,
+/// or `None` for a symbolic ref. Each folder must be a real one and each ref a regular file; names
+/// Git skips (`.` first, `.lock` last) are skipped. Every entry counts toward `max`.
 fn read_loose(
     git: &Path,
     hash: HashKind,
     max: u64,
     count: &mut u64,
-) -> Result<BTreeMap<Vec<u8>, Target>, GitError> {
+) -> Result<BTreeMap<Vec<u8>, Option<GitId>>, GitError> {
     let root = git.join("refs");
     if !real_dir(&root)? {
         return Err(broken(format!("{} is missing", root.display())));
@@ -186,24 +228,20 @@ fn read_loose(
             }
             let text = safe_fs::read_capped(&path, MAX_REF_FILE_BYTES)
                 .map_err(|e| read_error(&path, e))?;
-            let target = parse_loose(&text, hash).ok_or_else(|| {
-                broken(format!(
-                    "the ref `{}` holds neither a commit ID nor another ref's name",
-                    shown(&full)
-                ))
-            })?;
-            refs.insert(full, target);
+            let id = match parse_ref_file(&text, hash) {
+                Some(Contents::Id(id)) => Some(id),
+                Some(Contents::Symbolic(_)) => None,
+                None => {
+                    return Err(broken(format!(
+                        "the ref `{}` holds neither a commit ID nor another ref's name",
+                        shown(&full)
+                    )));
+                }
+            };
+            refs.insert(full, id);
         }
     }
     Ok(refs)
-}
-
-/// A loose ref as Git writes it: an ID and a newline, or `ref:` and the name of another ref.
-fn parse_loose(text: &[u8], hash: HashKind) -> Option<Target> {
-    if text.starts_with(b"ref:") {
-        return Some(Target::Symbolic);
-    }
-    hex_id(hash, text.strip_suffix(b"\n")?).map(Target::Id)
 }
 
 fn counted(count: &mut u64, max: u64) -> Result<(), GitError> {
@@ -591,40 +629,123 @@ mod tests {
         }
     }
 
+    /// Git's `parse_loose_ref_contents`, after the `strbuf_rtrim` of `read_ref_internal`
+    /// (refs/files-backend.c, v2.56.0).
+    #[test]
+    fn ref_files_are_read_as_git_reads_them() {
+        fn sha1(text: &str) -> Option<Contents<'_>> {
+            parse_ref_file(text.as_bytes(), HashKind::Sha1)
+        }
+        fn sha256(text: &str) -> Option<Contents<'_>> {
+            parse_ref_file(text.as_bytes(), HashKind::Sha256)
+        }
+        for text in [
+            format!("{A}\n"),
+            A.to_owned(),
+            // Saved by Notepad, and with what FETCH_HEAD puts after the ID: Git reads both.
+            format!("{A}\r\n"),
+            format!("{A} trailing\n"),
+            format!("{A}\tbranch 'main' of https://example.com/x\n"),
+            format!("{A}\n\n \t"),
+            format!("{}\n", A.to_uppercase()),
+        ] {
+            assert!(
+                matches!(sha1(&text), Some(Contents::Id(i)) if i == id(A)),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "ref: refs/heads/main\n",
+            "ref:refs/heads/main\n",
+            "ref: refs/heads/main  \n",
+            "ref: refs/heads/main\r\n",
+            "ref: refs/heads/main",
+            "ref:\t \r\nrefs/heads/main",
+        ] {
+            assert!(
+                matches!(sha1(text), Some(Contents::Symbolic(b"refs/heads/main"))),
+                "{text:?}"
+            );
+        }
+        // The name is kept as written; whoever reads it checks it.
+        assert!(matches!(
+            sha1("ref: refs/heads/a b\n"),
+            Some(Contents::Symbolic(b"refs/heads/a b"))
+        ));
+        assert!(matches!(sha1("ref:"), Some(Contents::Symbolic(b""))));
+        // Git refuses these: no ID or `ref:` first, or something stuck to the ID.
+        for text in [
+            String::new(),
+            "\n".to_owned(),
+            "garbage\n".to_owned(),
+            format!(" {A}\n"),
+            format!("{A}x\n"),
+            format!("{}\n", &A[1..]),
+            format!("{}\n", "a".repeat(64)),
+            // To Git, vertical tab and form feed aren't whitespace.
+            format!("{A}\x0b\n"),
+            format!("{A}\x0c"),
+            "REF: refs/heads/main\n".to_owned(),
+            "refs/heads/main\n".to_owned(),
+            // Git would read up to the NUL; Bolt refuses, as in config.
+            format!("{A}\0\n"),
+            "ref: refs/heads/main\0\n".to_owned(),
+        ] {
+            assert!(sha1(&text).is_none(), "{text:?}");
+        }
+        let long = "e".repeat(64);
+        assert!(matches!(
+            sha256(&format!("{long}\r\n")),
+            Some(Contents::Id(_))
+        ));
+        assert!(sha256(&format!("{A}\n")).is_none());
+    }
+
     #[test]
     fn head_forms() {
         let (dir, git) = repo();
-        let (detached, upper) = (format!("{A}\n"), format!("{}\n", A.to_uppercase()));
+        let branch = |name: &[u8]| Head::Branch(name.to_vec());
         for (head, want) in [
-            ("ref: refs/heads/main\n", Head::Branch(b"main".to_vec())),
+            ("ref: refs/heads/main\n".to_owned(), branch(b"main")),
             (
-                "ref: refs/heads/feature/x\n",
-                Head::Branch(b"feature/x".to_vec()),
+                "ref: refs/heads/feature/x\n".to_owned(),
+                branch(b"feature/x"),
             ),
-            (detached.as_str(), Head::Detached(id(A))),
-            (upper.as_str(), Head::Detached(id(A))),
+            // Forms Git reads besides its own: hand-edited, saved by Notepad, no newline.
+            ("ref: refs/heads/main\r\n".to_owned(), branch(b"main")),
+            ("ref:refs/heads/main\n".to_owned(), branch(b"main")),
+            ("ref: refs/heads/main  \n".to_owned(), branch(b"main")),
+            ("ref: refs/heads/main".to_owned(), branch(b"main")),
+            (format!("{A}\n"), Head::Detached(id(A))),
+            (format!("{A}\r\n"), Head::Detached(id(A))),
+            (format!("{A} trailing\n"), Head::Detached(id(A))),
+            (A.to_owned(), Head::Detached(id(A))),
+            (format!("{}\n", A.to_uppercase()), Head::Detached(id(A))),
         ] {
-            git.head(head);
+            git.head(&head);
             assert_eq!(refs_of(&dir).unwrap().head, want, "{head:?}");
         }
-        let (spaced, long) = (format!("{A} "), "a".repeat(64));
-        let (spaced_line, long_line) = (format!("{spaced}\n"), format!("{long}\n"));
+        let long = "a".repeat(64);
         for (head, shown) in [
-            ("ref: refs/tags/v1\n", "refs/tags/v1"),
-            ("ref: refs/heads/a..b\n", "refs/heads/a..b"),
+            ("ref: refs/tags/v1\n".to_owned(), "refs/tags/v1".to_owned()),
+            ("ref: refs/heads/a..b\n".into(), "refs/heads/a..b".into()),
             (
-                "ref: refs/remotes/origin/main\n",
-                "refs/remotes/origin/main",
+                "ref: refs/remotes/origin/main\n".into(),
+                "refs/remotes/origin/main".into(),
             ),
-            ("ref: refs/heads/main", "refs/heads/main"),
-            ("ref:refs/heads/main\n", "ref:refs/heads/main"),
-            ("ref: refs/heads/main\r\n", "refs/heads/main\r"),
-            (A, A),
-            (spaced_line.as_str(), spaced.as_str()),
-            (long_line.as_str(), long.as_str()),
-            ("", ""),
+            ("ref: refs/heads/\n".into(), "refs/heads/".into()),
+            ("ref:\n".into(), String::new()),
+            // Without `ref:`, a ref's name is no symbolic ref.
+            ("refs/heads/main\n".into(), "refs/heads/main".into()),
+            (format!("{A}x\n"), format!("{A}x")),
+            (format!("{long}\n"), long.clone()),
+            (
+                "ref: refs/heads/main\0\n".into(),
+                "ref: refs/heads/main\0".into(),
+            ),
+            (String::new(), String::new()),
         ] {
-            git.head(head);
+            git.head(&head);
             match refs_of(&dir) {
                 Err(GitError::Broken { what }) => assert_eq!(
                     what,
@@ -660,15 +781,33 @@ mod tests {
         git.loose_ref("refs/heads/alias", "ref: refs/heads/main\n");
         git.loose_ref("refs/stash", &format!("{C}\n"));
         git.loose_ref("refs/tags/v1", &format!("{C}\n"));
+        // Forms Git reads besides its own.
+        git.loose_ref("refs/heads/crlf", &format!("{B}\r\n"));
+        git.loose_ref("refs/heads/bare", A);
+        git.loose_ref(
+            "refs/heads/fetched",
+            &format!("{C}\tbranch 'main' of ../x\n"),
+        );
+        git.loose_ref("refs/heads/sym", "ref:refs/heads/main");
         assert_eq!(
             refs_of(&dir).unwrap(),
             Refs {
                 head: Head::Branch(b"main".to_vec()),
-                branches: named(&[("feature/x", B), ("main", A)]),
+                branches: named(&[
+                    ("bare", A),
+                    ("crlf", B),
+                    ("feature/x", B),
+                    ("fetched", C),
+                    ("main", A),
+                ]),
                 servers: vec![(b"origin".to_vec(), b"main".to_vec(), id(A))],
                 tags: named(&[("v1", C)]),
                 // A symbolic ref is listed, unless it is a server's HEAD.
-                other: vec![b"refs/heads/alias".to_vec(), b"refs/stash".to_vec()],
+                other: vec![
+                    b"refs/heads/alias".to_vec(),
+                    b"refs/heads/sym".to_vec(),
+                    b"refs/stash".to_vec(),
+                ],
             }
         );
         // Without refs/ there are no loose refs Git could read.
@@ -680,9 +819,10 @@ mod tests {
     fn loose_refs_bolt_cant_read_are_broken() {
         for (name, text) in [
             ("refs/heads/a..b", format!("{A}\n")),
-            ("refs/heads/x", A.to_owned()),
-            ("refs/heads/x", format!("{A}\r\n")),
+            ("refs/heads/x", format!("{A}x\n")),
+            ("refs/heads/x", format!(" {A}\n")),
             ("refs/heads/x", "garbage\n".to_owned()),
+            ("refs/heads/x", format!("{A}\0\n")),
             ("refs/heads/x", "x".repeat(4097)),
         ] {
             let (dir, git) = repo();
