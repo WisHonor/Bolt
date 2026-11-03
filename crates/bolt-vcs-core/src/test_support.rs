@@ -2,8 +2,8 @@
 //! the shared tag and server-line records.
 
 use crate::diary::{Position, ServerLines, Tag, TagList};
-use crate::encoding::Writer;
 use crate::id::{ChangeId, Id};
+use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackSet, PackWriter};
 use crate::repo::Repository;
@@ -104,13 +104,11 @@ pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u
 
 /// Stores a Git submodule's link to `commit`, as an import makes it (storage-format.md §7).
 pub(crate) fn add_link(packs: &mut PackSet, commit: &[u8]) -> Id {
-    let mut link = Writer::new();
-    link.u8(1);
-    link.string("git");
-    link.string("");
-    link.bytes(commit);
     packs
-        .add_record(ObjectKind::ProjectLink, &link.into_bytes())
+        .add_record(
+            ObjectKind::ProjectLink,
+            &ProjectLink::submodule(commit).encode(),
+        )
         .expect("store a link")
 }
 

@@ -5,6 +5,7 @@ use bolt_core::diary::{
     Action, DiaryEntry, Position, SafetyCopy, ServerLines, State, Tag, TagList,
 };
 use bolt_core::id::{ChangeId, Id};
+use bolt_core::link::ProjectLink;
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
 use bolt_core::save::{MoveNote, Person, Save};
@@ -371,6 +372,42 @@ fn server_lines_vectors_hold() {
     assert!(!vectors.is_empty());
     for v in vectors {
         let l = ServerLines::decode(&unhex(&v.hex)).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(hex(&l.encode()), v.hex, "{}", v.name);
+        assert_eq!(l.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/project_link.json"]
+fn print_project_link_vectors() {
+    // A submodule in a SHA-1 repository and one in a SHA-256 repository.
+    let rows: Vec<String> = [
+        ("sha1-submodule", ProjectLink::submodule(&[0x5a; 20])),
+        ("sha256-submodule", ProjectLink::submodule(&[0xa5; 32])),
+    ]
+    .iter()
+    .map(|(n, l)| {
+        format!(
+            "  {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
+            hex(&l.encode()),
+            l.id()
+        )
+    })
+    .collect();
+    println!("[\n{}\n]", rows.join(",\n"));
+}
+
+#[test]
+fn project_link_vectors_hold() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/project_link.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let l = ProjectLink::decode(&unhex(&v.hex)).unwrap_or_else(|e| panic!("{}: {e}", v.name));
         assert_eq!(hex(&l.encode()), v.hex, "{}", v.name);
         assert_eq!(l.id().to_hex(), v.id, "{}", v.name);
     }

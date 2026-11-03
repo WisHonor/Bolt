@@ -11,6 +11,7 @@ pub mod git;
 pub mod history;
 pub mod id;
 pub mod ignore;
+pub mod link;
 pub mod listing;
 pub mod names;
 pub mod pack;
