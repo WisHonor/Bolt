@@ -13,7 +13,10 @@ use bolt_core::import::{ImportRequest, import_git};
 use bolt_core::names::holdable_here;
 use bolt_core::repo::Repository;
 use bolt_core::save::Person;
-use support::{Env, assert_matches_git, copy_dir, git, git_with_input, text, top_folder};
+use support::{
+    Env, assert_matches_git, assert_matches_git_counting, copy_dir, git, git_with_input, text,
+    top_folder,
+};
 
 /// Writes `bytes` into the repository as a blob, and returns its ID.
 fn blob(env: &Env, bytes: &[u8]) -> String {
@@ -238,9 +241,13 @@ fn unusual_commits_match_git() {
     last = write(&[&last, &last], format!("{people}\nTwice\n").as_bytes());
     env.git(&["update-ref", "refs/heads/main", &last]);
     env.import();
+    let counted = assert_matches_git_counting(env.root());
     // All but the plain two, the one in no encoding and the one without a newline keep their
     // Git header.
-    assert_eq!(assert_matches_git(env.root()), 8);
+    assert_eq!(counted.headers, 8);
+    // The odd author line is the only person line not compared with Git's, so a parser that
+    // gave up on more of them would show here.
+    assert_eq!(counted.odd_people, 1);
 }
 
 #[test]

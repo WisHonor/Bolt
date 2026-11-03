@@ -5,7 +5,7 @@
 mod vs_git;
 
 #[allow(unused_imports)]
-pub use vs_git::assert_matches_git;
+pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
 use std::io::{self, Write};
 use std::path::Path;

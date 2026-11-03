@@ -1125,6 +1125,34 @@ mod tests {
             assert!(broken(repo.header(&id)).contains("loop"));
         }
 
+        // Three REF_DELTAs in a ring: A on B, B on C, C on A.
+        let (dir, git) = craft(Sha1);
+        let (to_a, to_b, to_c) = (delta(b"x", b"a"), delta(b"x", b"b"), delta(b"x", b"c"));
+        let (a, b, c) = (
+            id(Blob, &to_a, Sha1),
+            id(Blob, &to_b, Sha1),
+            id(Blob, &to_c, Sha1),
+        );
+        git.pack(&[
+            PackEntry::RefDelta {
+                base: b,
+                delta: to_a,
+            },
+            PackEntry::RefDelta {
+                base: c,
+                delta: to_b,
+            },
+            PackEntry::RefDelta {
+                base: a,
+                delta: to_c,
+            },
+        ]);
+        let repo = open(&dir);
+        for id in [a, b, c] {
+            assert!(broken(repo.read(&id)).contains("loop"));
+            assert!(broken(repo.header(&id)).contains("loop"));
+        }
+
         // An OFS_DELTA 0 bytes back, on itself; and a REF_DELTA on an object outside its pack.
         let (dir, git) = craft(Sha1);
         let on_itself = delta(b"x", b"y");

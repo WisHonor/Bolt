@@ -222,6 +222,15 @@ mod tests {
         }
     }
 
+    /// Each LF adds one byte, so a file of nothing but line endings doubles, and no conversion
+    /// grows more than that.
+    #[test]
+    fn a_conversion_is_at_most_twice_as_long_as_what_was_saved() {
+        let found = found(checked(b"\n\n", b"\r\n\r\n"));
+        assert_eq!(found, (1, vec!["f.txt".to_owned()]));
+        checked(b"\n\n", b"\r\n\r\nx").unwrap();
+    }
+
     #[test]
     fn executables_are_compared_and_other_kinds_are_not() {
         let (dir, mut repo) = project();
@@ -343,6 +352,25 @@ mod tests {
             rest = tail;
         }
         at_end(&file).unwrap()
+    }
+
+    /// The store writes at most a piece at a time, so only a direct write of more reaches the
+    /// split inside `write`.
+    #[test]
+    fn one_write_of_many_pieces_is_compared_piece_by_piece() {
+        let mut saved = vec![b'x'; 2 * PIECE + 100];
+        for at in [PIECE - 1, PIECE, 2 * PIECE - 1, 2 * PIECE, saved.len() - 1] {
+            saved[at] = b'\n';
+        }
+        let disk = expand(&saved);
+        let whole = [saved.len()];
+        assert!(agrees(&saved, &disk, &whole));
+        // A difference in any one of the three pieces is found.
+        for at in [10, PIECE + 10, disk.len() - 10] {
+            let mut changed = disk.clone();
+            changed[at] ^= 1;
+            assert!(!agrees(&saved, &changed, &whole), "byte {at}");
+        }
     }
 
     proptest! {

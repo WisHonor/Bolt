@@ -836,6 +836,36 @@ mod tests {
     }
 
     #[test]
+    fn an_escaped_bang_ignores_a_name_that_begins_with_one() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", b"\\!name\n");
+        write(root, "!name", b"ignored");
+        write(root, "sub/!name", b"ignored");
+        write(root, "name", b"kept");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(saved_paths(&repo, saved), [".boltignore", "name", "sub"]);
+    }
+
+    /// Git doesn't look inside a folder it ignores, so no line, there or above, takes a name
+    /// back from it.
+    #[test]
+    fn nothing_is_taken_back_from_inside_an_ignored_folder() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".boltignore", b"build/\n!keep\n");
+        write(root, "build/.boltignore", b"!keep\n");
+        write(root, "build/keep", b"x");
+        write(root, "build/deep/keep", b"x");
+        write(root, "other/keep", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".boltignore", "other", "other/keep"]
+        );
+    }
+
+    #[test]
     fn boltignore_ignores_letter_case_where_git_does() {
         let (dir, mut repo) = project();
         let root = dir.path();

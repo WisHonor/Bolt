@@ -32,6 +32,20 @@ use super::{git, git_command, spawn, text};
 /// them (decision 032). Commits Git writes itself need none, so a count above zero for them means
 /// the saves' people, times or zones are wrong.
 pub fn assert_matches_git(dir: &Path) -> usize {
+    assert_matches_git_counting(dir).headers
+}
+
+/// What a comparison with Git left out of its checks.
+pub struct Counted {
+    /// The commits that kept their Git header (see `assert_matches_git`).
+    pub headers: usize,
+    /// The author and committer lines not in the form Git writes. Their saves' people can't be
+    /// compared with Git's, so only a kept header vouches for them.
+    pub odd_people: usize,
+}
+
+/// `assert_matches_git`, with both counts.
+pub fn assert_matches_git_counting(dir: &Path) -> Counted {
     let repo = Repository::open(dir).unwrap();
     let state = repo.current().unwrap().1.state;
     let store = repo.store();
@@ -90,6 +104,7 @@ pub fn assert_matches_git(dir: &Path) -> usize {
     let mut objects = CatFile::new(dir);
     let mut trees: Vec<(GitId, Id)> = Vec::new();
     let mut headers = 0;
+    let mut odd_people = 0;
     for (commit, save_id) in &save_of {
         let hex = commit.to_hex();
         let raw = objects.read(commit, "commit");
@@ -123,7 +138,10 @@ pub fn assert_matches_git(dir: &Path) -> usize {
             );
             match person_in(&raw, key) {
                 Some(git) => assert_eq!(saved, git, "the {key} of commit {hex}"),
-                None => assert!(kept, "the {key} line of commit {hex} isn't in Git's form"),
+                None => {
+                    assert!(kept, "the {key} line of commit {hex} isn't in Git's form");
+                    odd_people += 1;
+                }
             }
         }
         headers += usize::from(kept);
@@ -282,7 +300,10 @@ pub fn assert_matches_git(dir: &Path) -> usize {
             assert_eq!(tag.message, message, "the message of tag {name}");
         }
     }
-    headers
+    Counted {
+        headers,
+        odd_people,
+    }
 }
 
 /// `git cat-file --batch`, asked for one object at a time.
