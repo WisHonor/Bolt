@@ -142,7 +142,8 @@ struct Item {
     id: GitId,
 }
 
-/// Where a chain of Git tag objects ends, from one of them on.
+/// Where a chain of Git tag objects ends, from one of them on, or from the tree or blob it ends
+/// at, which counts no tag objects.
 #[derive(Clone, Copy)]
 struct Chain {
     /// The tag objects from that one to the end, it included.
@@ -426,7 +427,8 @@ impl<'r> Converter<'r> {
                     git_tags,
                 }));
             }
-            if let Some(known) = self.chains.get(&id).copied() {
+            let known = self.chains.get(&id).copied();
+            if let Some(known) = known {
                 if (read.len() as u64).saturating_add(known.objects) > MAX_GIT_TAG_OBJECTS {
                     return Err(too_long());
                 }
@@ -438,31 +440,38 @@ impl<'r> Converter<'r> {
             let hex = id.to_hex();
             // The ref's own target may be a commit, or missing, as well as a tag object.
             let here = || format!("tag `{name}`, at object `{hex}`");
-            // Not checked against the ID, but a tag object is, when it is read.
-            let (kind, size) = self.git.header(&id).map_err(|e| at(e, here))?;
-            match kind {
-                ObjectType::Tag => {}
-                ObjectType::Tree | ObjectType::Blob => {
-                    self.remember(&read, 0, kind);
-                    return Ok(skipped(kind));
-                }
-                ObjectType::Commit => {
-                    return Err(bug(format!(
-                        "Bolt was asked for tag `{name}` before importing its commit `{hex}`"
-                    )));
-                }
-            }
-            if read.len() as u64 >= MAX_GIT_TAG_OBJECTS {
-                return Err(too_long());
-            }
             let too_big = |size: u64| {
                 unimportable(format!(
                     "tag `{name}` has a tag object of {size} bytes (`{hex}`), more than the 1 \
                      MiB Bolt keeps of one"
                 ))
             };
-            if size > MAX_GIT_TAG_OBJECT_BYTES as u64 {
-                return Err(too_big(size));
+            // A tag object known to lead to a commit was read before, and reading it checks it
+            // again; anything else is looked at first. The header isn't checked against the ID.
+            if known.is_none() {
+                let (kind, size) = self.git.header(&id).map_err(|e| at(e, here))?;
+                match kind {
+                    ObjectType::Tag => {}
+                    ObjectType::Tree | ObjectType::Blob => {
+                        self.chains.entry(id).or_insert(Chain {
+                            objects: 0,
+                            end: kind,
+                        });
+                        self.remember(&read, 0, kind);
+                        return Ok(skipped(kind));
+                    }
+                    ObjectType::Commit => {
+                        return Err(bug(format!(
+                            "Bolt was asked for tag `{name}` before importing its commit `{hex}`"
+                        )));
+                    }
+                }
+                if size > MAX_GIT_TAG_OBJECT_BYTES as u64 {
+                    return Err(too_big(size));
+                }
+            }
+            if read.len() as u64 >= MAX_GIT_TAG_OBJECTS {
+                return Err(too_long());
             }
             let object = self.git.read(&id).map_err(|e| at(e, here))?;
             expect_kind(object.kind, ObjectType::Tag, &id, here)?;
@@ -1946,6 +1955,8 @@ mod tests {
             .collect();
         // Two more on top: 17 tag objects in all.
         let longer = tag(&tag(&top, "tag", "p"), "tag", "q");
+        // One more on `o1`, whose length is learned from what the shared chain left behind.
+        let above = tag(&outer[1], "tag", "above");
         let loose = |id: &GitId| {
             let hex = id.to_hex();
             dir.path()
@@ -1962,7 +1973,10 @@ mod tests {
             for (i, id) in outer.iter().enumerate().skip(1) {
                 outcomes.push(c.tag(&format!("o{i}"), id).unwrap());
             }
-            (outcomes, c.tag("q", &longer))
+            (
+                outcomes,
+                [("q", longer), ("above", above)].map(|(n, t)| c.tag(n, &t)),
+            )
         });
         for outcome in &outcomes {
             assert!(
@@ -1971,7 +1985,57 @@ mod tests {
             );
         }
         // The length counts the objects remembered too, and stops before reading them.
-        assert_refused(too_long, &["tag `q`", "16 tag objects"]);
+        let [q, above] = too_long;
+        assert_refused(q, &["tag `q`", "16 tag objects"]);
+        assert_refused(above, &["tag `above`", "16 tag objects"]);
+    }
+
+    #[test]
+    fn a_tree_or_blob_tagged_many_times_is_looked_at_once() {
+        let (dir, git) = repo(Sha1);
+        let tree = git.tree(&[]);
+        let file = blob(&git, b"x");
+        let tag = |object: &GitId, kind: &str, name: &str| {
+            let raw = format!(
+                "object {}\ntype {kind}\ntag {name}\ntagger T <t@x> 1 +0000\n\nx\n",
+                object.to_hex()
+            );
+            git.object(ObjectType::Tag, raw.as_bytes())
+        };
+        // A tag object of the file, under two tags of their own.
+        let inner = tag(&file, "blob", "inner");
+        let [first, second] = ["a", "b"].map(|name| tag(&inner, "tag", name));
+        let loose = |id: &GitId| {
+            let hex = id.to_hex();
+            dir.path()
+                .join(".git/objects")
+                .join(&hex[..2])
+                .join(&hex[2..])
+        };
+        let (outcomes, _) = convert(dir.path(), "a", |c| {
+            let mut outcomes = vec![
+                ("folder", c.tag("t0", &tree).unwrap()),
+                ("file", c.tag("f0", &file).unwrap()),
+                ("file", c.tag("a", &first).unwrap()),
+            ];
+            // Met once, none of them is looked at again: their objects can go.
+            for id in [tree, file, inner] {
+                fs::remove_file(loose(&id)).unwrap();
+            }
+            for i in 1..50 {
+                outcomes.push(("folder", c.tag(&format!("t{i}"), &tree).unwrap()));
+                outcomes.push(("file", c.tag(&format!("f{i}"), &file).unwrap()));
+            }
+            outcomes.push(("file", c.tag("b", &second).unwrap()));
+            outcomes
+        });
+        assert_eq!(outcomes.len(), 102);
+        for (what, outcome) in &outcomes {
+            assert!(
+                matches!(outcome, TagOutcome::Skipped { reason } if reason.contains(what)),
+                "{what}: {outcome:?}"
+            );
+        }
     }
 
     #[test]
