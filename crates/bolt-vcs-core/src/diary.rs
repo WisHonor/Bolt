@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::encoding::{DecodeError, Reader, Writer};
+use crate::encoding::{DecodeError, Reader, Writer, varint_len};
 use crate::id::{Flavor, Id, hash_record};
 use crate::listing::EntryKind;
 use crate::save::{MAX_PATH_BYTES, Person, read_person, write_person};
@@ -350,6 +350,24 @@ impl TagList {
         w.into_bytes()
     }
 
+    /// What `encode` writes before the tags of a list of `count`: its version and the count.
+    #[must_use]
+    pub fn head_len(count: u64) -> u64 {
+        1 + varint_len(count)
+    }
+
+    /// What `encode` writes for the tag `name`, so a list's size can be known before it is built.
+    #[must_use]
+    pub fn tag_len(name: &str, tag: &Tag) -> u64 {
+        let bytes = |len: usize| varint_len(len as u64) + len as u64;
+        let objects: u64 = tag.git_tags.iter().map(|object| bytes(object.len())).sum();
+        bytes(name.len())
+            + tag.save.0.len() as u64
+            + bytes(tag.message.len())
+            + varint_len(tag.git_tags.len() as u64)
+            + objects
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<TagList, DecodeError> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 1 {
@@ -693,6 +711,39 @@ mod tests {
     }
 
     #[test]
+    fn tag_lengths_are_what_encode_writes() {
+        // Lengths that take one, two and three bytes to write.
+        let tags = BTreeMap::from([
+            (
+                "v1".to_owned(),
+                Tag {
+                    save: Id([1; 32]),
+                    message: String::new(),
+                    git_tags: vec![],
+                },
+            ),
+            (
+                "n".repeat(255),
+                Tag {
+                    save: Id([2; 32]),
+                    message: "m".repeat(200),
+                    git_tags: vec![vec![b't'; 130], vec![b'u'; 20_000], vec![]],
+                },
+            ),
+        ]);
+        let lengths: u64 = tags
+            .iter()
+            .map(|(name, tag)| TagList::tag_len(name, tag))
+            .sum();
+        let list = TagList { tags };
+        let bytes = list.encode();
+        assert_eq!(TagList::head_len(2) + lengths, bytes.len() as u64);
+        // The head is longer for more tags.
+        assert_eq!(TagList::head_len(127), 2);
+        assert_eq!(TagList::head_len(MAX_TAGS), 4);
+    }
+
+    #[test]
     fn server_lines_bytes() {
         let list = ServerLines {
             servers: BTreeMap::from([(
@@ -888,6 +939,8 @@ mod tests {
             let bytes = list.encode();
             prop_assert_eq!(TagList::decode(&bytes).unwrap(), list.clone());
             prop_assert_eq!(list.id(), hash_record(Flavor::TagList, &bytes));
+            let lengths: u64 = list.tags.iter().map(|(name, tag)| TagList::tag_len(name, tag)).sum();
+            prop_assert_eq!(TagList::head_len(list.tags.len() as u64) + lengths, bytes.len() as u64);
         }
 
         #[test]

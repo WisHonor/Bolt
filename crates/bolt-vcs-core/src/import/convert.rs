@@ -10,7 +10,9 @@ use std::io;
 use encoding_rs::{Encoding, UTF_8};
 
 use super::ImportError;
-use crate::diary::{self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES};
+use crate::diary::{
+    self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
+};
 use crate::encoding::DecodeError;
 use crate::git::{
     self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, parse_commit, parse_person,
@@ -39,16 +41,6 @@ const MAX_LISTED: usize = 100;
 
 /// About the most bytes of a path a list or message holds.
 const MAX_SHOWN_PATH: usize = 1024;
-
-/// The most bytes a varint takes (storage-format.md section 1).
-const MAX_VARINT_BYTES: u64 = 10;
-
-/// A tag list's version and count of tags, at most (storage-format.md section 9).
-const TAG_LIST_HEAD_BYTES: u64 = 1 + MAX_VARINT_BYTES;
-
-/// What one tag adds to a tag list besides its name, message and Git tag objects, at most: its
-/// save, and the lengths of its name and message and the count of its tag objects.
-const TAG_ENTRY_BYTES: u64 = 32 + 3 * MAX_VARINT_BYTES;
 
 const BUG_HINT: &str = "Nothing was changed. This is a bug in Bolt, not a problem with the \
                         repository.";
@@ -238,7 +230,7 @@ impl<'r> Converter<'r> {
             not_utf8: Vec::new(),
             not_utf8_count: 0,
             tags: HashMap::new(),
-            tag_bytes: TAG_LIST_HEAD_BYTES,
+            tag_bytes: TagList::head_len(MAX_TAGS),
             tag_budget: MAX_RECORD_SIZE,
         }
     }
@@ -352,7 +344,13 @@ impl<'r> Converter<'r> {
     /// converted already. A target is read once however many tags share it, but each tag counts
     /// toward what one tag list can hold.
     pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError> {
-        let fixed = TAG_ENTRY_BYTES.saturating_add(name.len() as u64);
+        // The least this tag adds to the list: its name and save, without a message.
+        let lightweight = diary::Tag {
+            save: Id([0; 32]),
+            message: String::new(),
+            git_tags: Vec::new(),
+        };
+        let least = TagList::tag_len(name, &lightweight);
         let full = || ImportError::Stop {
             what: format!(
                 "Bolt's tag list can't hold the Git tags: with tag `{name}`, their names, \
@@ -365,7 +363,7 @@ impl<'r> Converter<'r> {
             ),
         };
         // Checked before anything is read, so a spent budget reads no more tags.
-        if self.tag_bytes.saturating_add(fixed) > self.tag_budget {
+        if self.tag_bytes.saturating_add(least) > self.tag_budget {
             return Err(full());
         }
         let outcome = match self.tags.get(target) {
@@ -377,13 +375,7 @@ impl<'r> Converter<'r> {
             }
         };
         if let TagOutcome::Tag(tag) = &outcome {
-            let objects = tag.git_tags.iter().map(|object| object.len() as u64);
-            let total = objects.fold(
-                self.tag_bytes
-                    .saturating_add(fixed)
-                    .saturating_add(tag.message.len() as u64),
-                |total, len| total.saturating_add(len).saturating_add(MAX_VARINT_BYTES),
-            );
+            let total = self.tag_bytes.saturating_add(TagList::tag_len(name, tag));
             if total > self.tag_budget {
                 return Err(full());
             }
