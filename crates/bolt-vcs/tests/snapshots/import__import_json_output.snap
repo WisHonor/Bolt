@@ -28,9 +28,12 @@ expression: json
       }
     ]
   },
-  "skipped_refs": [
-    "refs/notes/commits"
-  ],
+  "skipped_refs": {
+    "count": 1,
+    "first": [
+      "refs/notes/commits"
+    ]
+  },
   "skipped_tags": [
     {
       "git": "folder",

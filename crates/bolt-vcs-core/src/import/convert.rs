@@ -36,8 +36,9 @@ const MAX_WHOLE_BLOB: u64 = 64 << 20;
 /// (decision 032).
 const MAX_COMMIT_BYTES: u64 = MAX_EXTRA_VALUE_BYTES as u64 + 1 + MAX_MESSAGE_BYTES as u64;
 
-/// How many skipped entries, or names that aren't UTF-8, are listed by path. The rest are counted.
-const MAX_LISTED: usize = 100;
+/// How many of a kind of thing an import leaves out, or warns about, it lists: skipped entries,
+/// names that aren't UTF-8, refs and `.bolt` folders. The rest are counted.
+pub(super) const MAX_LISTED: usize = 100;
 
 /// About the most bytes of a path a list or message holds.
 const MAX_SHOWN_PATH: usize = 1024;

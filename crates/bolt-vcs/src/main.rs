@@ -204,6 +204,15 @@ fn counted(count: u64, one: &str, many: &str) -> String {
     format!("{} {noun}", output::thousands(count))
 }
 
+/// `listed`, the first of `count` things, and a last item counting the rest, if there are more.
+fn and_the_rest(mut listed: Vec<String>, count: u64) -> Vec<String> {
+    let more = count.saturating_sub(listed.len() as u64);
+    if more > 0 {
+        listed.push(format!("and {} more", output::thousands(more)));
+    }
+    listed
+}
+
 /// Prints `heading` and `items` after it: one on the same line, more on a line each.
 fn print_list(heading: &str, items: &[String]) {
     match items {
@@ -254,16 +263,15 @@ fn print_import(report: &ImportReport, standing: &str) {
         &format!("Renamed {names} that Bolt's names don't allow"),
         &renamed,
     );
-    let refs: Vec<String> = report
-        .skipped_refs
-        .iter()
-        .map(|r| escape(r, false))
-        .collect();
+    let refs = report.skipped_refs.iter().map(|r| escape(r, false));
     let heading = format!(
         "Didn't import {} (only branches, server branches and tags come in)",
-        counted(refs.len() as u64, "ref", "refs")
+        counted(report.skipped_ref_count, "ref", "refs")
     );
-    print_list(&heading, &refs);
+    print_list(
+        &heading,
+        &and_the_rest(refs.collect(), report.skipped_ref_count),
+    );
     let tags: Vec<String> = report
         .skipped_tags
         .iter()
@@ -274,7 +282,7 @@ fn print_import(report: &ImportReport, standing: &str) {
         counted(tags.len() as u64, "tag", "tags")
     );
     print_list(&heading, &tags);
-    let mut entries: Vec<String> = report
+    let entries: Vec<String> = report
         .skipped_entries
         .iter()
         .map(|(commit, path)| {
@@ -288,12 +296,7 @@ fn print_import(report: &ImportReport, standing: &str) {
             format!("{path} in commit {}", escape(commit, false))
         })
         .collect();
-    let more = report
-        .skipped_entry_count
-        .saturating_sub(entries.len() as u64);
-    if more > 0 {
-        entries.push(format!("and {} more", output::thousands(more)));
-    }
+    let entries = and_the_rest(entries, report.skipped_entry_count);
     let heading = if report.skipped_entry_count == 1 {
         "Left out 1 entry whose name Bolt never writes to disk (such as .git and .bolt), with \
          everything in it"
@@ -350,7 +353,7 @@ fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::Value
         "tags": report.tags,
         "position": position,
         "renamed": renamed,
-        "skipped_refs": report.skipped_refs,
+        "skipped_refs": {"count": report.skipped_ref_count, "first": report.skipped_refs},
         "skipped_tags": skipped_tags,
         "skipped_entries": {"count": report.skipped_entry_count, "first": first},
         "inexact_commits": report.inexact_commits,

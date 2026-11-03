@@ -206,6 +206,40 @@ fn names_bolt_refuses_are_renamed_and_listed() {
     );
 }
 
+/// A mirror of a busy repository holds a pull-request ref for every pull request.
+#[test]
+fn refs_left_out_are_listed_up_to_100_and_counted() {
+    let env = Env::new();
+    let id = env.commit("a.txt", "a\n", "First");
+    let mut packed = "# pack-refs with: peeled fully-peeled sorted \n".to_owned();
+    let mut pulls: Vec<String> = (1..=150).map(|n| format!("refs/pull/{n}/head")).collect();
+    pulls.sort();
+    for name in &pulls {
+        packed += &format!("{id} {name}\n");
+    }
+    std::fs::write(env.root().join(".git/packed-refs"), packed).unwrap();
+    let (out, _) = env.import();
+    assert!(
+        out.contains("Didn't import 150 refs (only branches, server branches and tags come in):"),
+        "{out}"
+    );
+    assert!(out.contains(&format!("\n  {}\n", pulls[99])), "{out}");
+    assert!(!out.contains(&format!("\n  {}\n", pulls[100])), "{out}");
+    assert!(out.contains("\n  and 50 more\n"), "{out}");
+
+    let copy = Env::new();
+    copy.commit("a.txt", "a\n", "First");
+    let id = copy.git(&["rev-parse", "HEAD"]);
+    let packed: String = pulls.iter().map(|name| format!("{id} {name}\n")).collect();
+    std::fs::write(copy.root().join(".git/packed-refs"), packed).unwrap();
+    let out = copy.bolt().args(["--json", "import"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["skipped_refs"]["count"], 150);
+    let first = json["skipped_refs"]["first"].as_array().unwrap();
+    assert_eq!(first.len(), 100);
+    assert_eq!(first[0], pulls[0].as_str());
+}
+
 #[test]
 fn a_detached_head_puts_you_at_its_save() {
     let env = Env::new();

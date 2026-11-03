@@ -25,12 +25,10 @@ mod names;
 
 pub use convert::{Converter, Counts, TagOutcome};
 use convert::{
-    at, bug, check_tag_chain, check_tag_object, expect_kind, shown_path, tree_and_parents,
+    MAX_LISTED, at, bug, check_tag_chain, check_tag_object, expect_kind, shown_path,
+    tree_and_parents,
 };
 use names::{Named, Names};
-
-/// How many folders named `.bolt` the import's warnings name; the rest are counted.
-const MAX_NAMED_BOLT_FOLDERS: usize = 100;
 
 /// What `import_git` needs besides the folder.
 pub struct ImportRequest<'a> {
@@ -55,8 +53,10 @@ pub struct ImportReport {
     /// On the line of Git's current branch, or at the save of a detached `HEAD`.
     pub position: Position,
     pub renamed: Vec<Renaming>,
-    /// The whole names of the refs not imported: the stash, notes and the like.
+    /// The whole names of the first 100 refs not imported (the stash, notes, pull requests and
+    /// the like), in byte order, and how many there are.
     pub skipped_refs: Vec<String>,
+    pub skipped_ref_count: u64,
     /// Each tag not imported, by its Git name, and why.
     pub skipped_tags: Vec<(String, String)>,
     /// The first 100 entries left out of saves, as the commit (hex) and the path.
@@ -262,7 +262,13 @@ pub fn import_git(root: &Path, req: &mut ImportRequest) -> Result<ImportReport, 
         tags: tag_list.tags.len() as u64,
         position: position.clone(),
         renamed: names.renamed,
-        skipped_refs: refs.other.iter().map(|name| lossy(name)).collect(),
+        skipped_refs: refs
+            .other
+            .iter()
+            .take(MAX_LISTED)
+            .map(|name| lossy(name))
+            .collect(),
+        skipped_ref_count: refs.other.len() as u64,
         skipped_tags,
         skipped_entries: counts.skipped_entries,
         skipped_entry_count: counts.skipped_entry_count,
@@ -504,7 +510,7 @@ fn bolt_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, I
                 continue;
             }
             count = count.saturating_add(1);
-            if warnings.len() < MAX_NAMED_BOLT_FOLDERS {
+            if warnings.len() < MAX_LISTED {
                 let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, _)| n.as_str()).collect();
                 path.push(&name);
                 let message = format!(
