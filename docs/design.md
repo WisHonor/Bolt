@@ -353,7 +353,7 @@ head ─► redo     main → ptvz
   - `.git/packed-refs` may be at most 512 MiB, room for millions of refs.
   - It reads at most 7,600,000 entries of `.git/refs` and `packed-refs` (folders, files and refs): room for every ref decision 033's limits let an import bring in, and a million more it only lists.
   - The ref names and folder paths it keeps while reading refs may take at most 512 MiB.
-  - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files.
+  - It never runs Git or Git LFS and never fetches. It ignores replace refs, grafts and Git's speed-up files, and warns when the repository has a grafts file.
   - It refuses, before writing anything and saying what to do: unknown formats or extensions, reftable, refs kept outside `.git`, partial and shallow clones, alternates, sparse checkouts, pack indexes in Git's old version 1 format, a `.git` that is a file, and a `.git` another account owns.
 - **Commits become saves exactly** ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
   - Tree, parents (in Git's order), author, committer (as the saver) and message carry over; imported saves get no `line` note, since Git never recorded where a commit was made.

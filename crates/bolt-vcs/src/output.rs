@@ -1,7 +1,8 @@
 //! What `bolt` prints: JSON shapes, warnings and error messages.
 
 use std::fmt::Write as _;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
 
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
@@ -182,6 +183,68 @@ fn date(time_ms: i64, tz_offset_min: i16) -> String {
     zoned.map_or_else(|_| format!("{time_ms} ms"), |z| z.date().to_string())
 }
 
+/// `n` with a comma between each group of three digits, as in 1,234,567.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// A line such as "Importing commits: 1,234 of 5,678" on stderr while a long step runs, kept up
+/// to date at most four times a second, and only in a terminal.
+pub struct Progress {
+    what: &'static str,
+    terminal: bool,
+    since: Instant,
+    last: (u64, u64),
+    shown: bool,
+}
+
+impl Progress {
+    pub fn new(what: &'static str) -> Progress {
+        Progress {
+            what,
+            terminal: std::io::stderr().is_terminal(),
+            since: Instant::now(),
+            last: (0, 0),
+            shown: false,
+        }
+    }
+
+    pub fn update(&mut self, done: u64, total: u64) {
+        self.last = (done, total);
+        if self.terminal && self.since.elapsed() >= Duration::from_millis(250) {
+            self.show();
+            self.since = Instant::now();
+        }
+    }
+
+    /// Ends the line, with the last count, if it was ever shown.
+    pub fn finish(&mut self) {
+        if self.shown {
+            self.show();
+            eprintln!();
+        }
+    }
+
+    fn show(&mut self) {
+        let (done, total) = self.last;
+        eprint!(
+            "\r{}: {} of {}",
+            self.what,
+            thousands(done),
+            thousands(total)
+        );
+        self.shown = true;
+    }
+}
+
 /// 1024-based size: bytes below 1 KiB, else KB, MB or GB with one decimal.
 #[allow(clippy::cast_precision_loss)]
 pub fn format_size(bytes: u64) -> String {
@@ -336,5 +399,18 @@ mod tests {
             ]
         );
         assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
+        let counts = [0, 999, 1000, 1234, 123_456, 1_234_567, u64::MAX].map(thousands);
+        assert_eq!(
+            counts,
+            [
+                "0",
+                "999",
+                "1,000",
+                "1,234",
+                "123,456",
+                "1,234,567",
+                "18,446,744,073,709,551,615"
+            ]
+        );
     }
 }

@@ -396,6 +396,13 @@ impl Repo {
     pub fn refs(&self) -> Result<Refs, GitError> {
         refs::read(&self.git, self.hash, refs::LIMITS)
     }
+
+    /// Whether `.git/info/grafts` is there: Bolt ignores it, so the import says so. Only looked
+    /// for, never read, and not through a linked `info`.
+    pub fn has_grafts(&self) -> Result<bool, GitError> {
+        let info = self.git.join("info");
+        Ok(matches!(real_dir(&info), Ok(true)) && exists(&info.join("grafts"))?)
+    }
 }
 
 /// Refuses a `.git` that isn't the user's, unless they listed the work tree in safe-folders, as

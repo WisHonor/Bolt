@@ -142,6 +142,31 @@ fn start_inside_a_project_is_refused() {
     assert!(!sub.join(".bolt").exists());
 }
 
+/// bolt.new and other tools keep their own `.bolt` folders; Bolt never settles into one.
+#[test]
+fn start_refuses_another_tools_bolt_folder() {
+    let env = Env::new();
+    let bolt = env.root().join(".bolt");
+    std::fs::create_dir(&bolt).unwrap();
+    std::fs::write(bolt.join("prompt"), "Build me an app").unwrap();
+    let out = env.bolt().arg("start").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains(
+            "There's a .bolt folder here that Bolt didn't make (bolt.new and other tools use \
+             that name); move or rename it first."
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    let inside: Vec<_> = std::fs::read_dir(&bolt).unwrap().collect();
+    assert_eq!(inside.len(), 1, "nothing was made in it");
+    // An interrupted start of Bolt's own, with only its own folders, is finished.
+    std::fs::remove_file(bolt.join("prompt")).unwrap();
+    std::fs::create_dir(bolt.join("store")).unwrap();
+    env.bolt().arg("start").assert().success();
+}
+
 #[test]
 fn start_without_a_name_explains_how_to_set_it() {
     let env = Env::new();

@@ -1,6 +1,6 @@
 # Bolt `--json` Formats
 
-> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised. Each command that comes later adds its document here in the milestone that builds it.
+> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03. Each command that comes later adds its document here in the milestone that builds it.
 
 **In plain words.** Every Bolt command takes `--json`. Instead of text for people, it then prints one JSON document that a script, an editor plugin or the desktop app can read. This page says what is in each document, what each field means, and what `null` means where it can appear. The formats are a public interface: they are versioned, and the CLI tests keep them from changing by accident.
 
@@ -41,6 +41,26 @@
 | `root` | string | The project's folder. |
 | `line` | string | The line the project starts on: always `"main"`. |
 | `save` | save | The first save, "Start project". |
+| `warnings` | list | See §4. |
+
+### `bolt import --json`
+
+`bolt import` brings the Git repository in the current folder into Bolt, whole ([design.md](design.md) §5.16). Names from Git can hold bytes that aren't UTF-8; in this document each such byte sequence is U+FFFD.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `commits` | number | How many commits became saves. |
+| `lines` | number | How many lines the branches became. |
+| `servers` | number | How many servers have server lines. |
+| `server_lines` | number | How many server lines there are, all servers together. |
+| `tags` | number | How many tags were imported. |
+| `position` | object | Where the project is now: `{"line": …}`, the line Git's current branch became, or `{"save": …}`, the fingerprint (64 hex digits) of the save Git's detached `HEAD` became. |
+| `renamed` | list | Each name Bolt's rules don't allow, and the one it was given: `{"kind", "git", "bolt"}`. `kind` is `"line"`, `"server"`, `"server_line"` or `"tag"`. A server line's `git` is `<server>/<branch>` and its `bolt` is `<line>@<server>`. `[]` if nothing was renamed. |
+| `skipped_refs` | list of string | The whole names of the refs that weren't imported, such as `refs/stash` and `refs/notes/commits`: only branches, server branches and tags are. |
+| `skipped_tags` | list | Each tag that wasn't imported: `{"git": …, "reason": …}`, its Git name and why, such as a tag of a folder. |
+| `skipped_entries` | object | Entries left out of saves because Bolt never writes their names to disk, such as spellings of `.git` and `.bolt`, with everything in them: `count`, how many in all, and `first`, the first 100 met, each `{"commit": …, "path": …}` (the Git commit in hex, and the path in it). A path can end in `/`, or be `""`, where the name left out is empty. |
+| `inexact_commits` | number | How many commits a later export can't recreate with their Git IDs: their folders are in a form Git no longer writes, or entries were left out. |
 | `warnings` | list | See §4. |
 
 ### `bolt save --json`
@@ -109,7 +129,9 @@ Folders are not listed; the files in them are.
 | `changed_files_not_counted` | `save` | The save was made, but `changed_files` is `null`. The message says why. |
 | `gitignore_skipped` | `save`, unless the save stops | A `.gitignore` isn't a regular file (it is a link, folder or special file), so Bolt skipped it and its rules didn't apply, as Git skips a linked one. The message names the file. |
 | `kept_as_they_were` | `save`, unless the save stops | The save kept entries of the last save exactly as they were, because this computer can't hold them as they are: project links, names this system can't create and names that are one file on this drive, whatever the folder holds at their paths, and links Git wrote as files holding exactly their targets. The message counts them. |
-| `elevated_only` | `start`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
+| `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
+| `nested_bolt_folder` | `import` | Git checked out a folder named `.bolt` below the top of the project (one in its current commit). Bolt left it out of history, but Bolt commands run inside it would take it for a project. Each of the first 100 gets a warning naming it; one more warning counts the rest. |
+| `grafts_ignored` | `import` | The Git repository has a grafts file (`.git/info/grafts`), which changes the parents Git shows for some commits. Bolt ignored it and imported the commits as they are. |
 
 ## 5. Errors
 

@@ -1,0 +1,51 @@
+---
+source: crates/bolt-vcs/tests/import.rs
+expression: json
+---
+{
+  "bolt_json": 1,
+  "commits": 2,
+  "inexact_commits": 1,
+  "lines": 2,
+  "position": {
+    "line": "main"
+  },
+  "renamed": [
+    {
+      "bolt": "feature-x",
+      "git": "feature+x",
+      "kind": "line"
+    }
+  ],
+  "server_lines": 1,
+  "servers": 1,
+  "skipped_entries": {
+    "count": 1,
+    "first": [
+      {
+        "commit": "37c94309676b7d12b75fc0032539494aca56a0db",
+        "path": "sub/.bolt"
+      }
+    ]
+  },
+  "skipped_refs": [
+    "refs/notes/commits"
+  ],
+  "skipped_tags": [
+    {
+      "git": "folder",
+      "reason": "it tags a folder (a Git tree), not a commit"
+    }
+  ],
+  "tags": 1,
+  "warnings": [
+    {
+      "kind": "nested_bolt_folder",
+      "message": "Git checked out a folder named .bolt at `sub/.bolt`. Bolt left it out of history, but commands run inside it would use it as a Bolt project; delete it unless you made it."
+    },
+    {
+      "kind": "grafts_ignored",
+      "message": "Git's grafts file was ignored; Bolt imported the commits as they are."
+    }
+  ]
+}

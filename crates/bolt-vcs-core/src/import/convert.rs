@@ -46,7 +46,7 @@ const BUG_HINT: &str = "Nothing was changed. This is a bug in Bolt, not a proble
                         repository.";
 
 /// A stop that only a bug in Bolt can cause.
-fn bug(what: String) -> ImportError {
+pub(super) fn bug(what: String) -> ImportError {
     ImportError::Stop {
         what: format!("{what}; please report this."),
         hint: Some(BUG_HINT.to_owned()),
@@ -58,7 +58,7 @@ fn unimportable(what: String) -> ImportError {
 }
 
 /// `e`, saying where it was met: Git's parsers can't name the object they refuse.
-fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
+pub(super) fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
     match e {
         GitError::Broken { what } => GitError::Broken {
             what: format!("{what}, in {}", place()),
@@ -72,7 +72,7 @@ fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
 }
 
 /// Refuses an object found to be of another kind than the one it was named as.
-fn expect_kind(
+pub(super) fn expect_kind(
     found: ObjectType,
     kind: ObjectType,
     id: &GitId,
@@ -262,6 +262,12 @@ impl<'r> Converter<'r> {
         &self.counts
     }
 
+    /// The save of the commit `id`, if it is converted already.
+    #[must_use]
+    pub fn save_of(&self, id: &GitId) -> Option<Id> {
+        self.saves.get(id).copied()
+    }
+
     /// Stops the import if any name met so far isn't UTF-8 (decision 019). The converter leaves
     /// such names out of their folders and goes on, so that one stop lists them all: call this
     /// after the last commit, and before committing anything.
@@ -282,19 +288,9 @@ impl<'r> Converter<'r> {
             return Ok(*save);
         }
         let hex = id.to_hex();
-        let here = || format!("commit `{hex}`");
-        // The header isn't checked against the ID, but it bounds what reading would hold.
-        let (kind, size) = self.git.header(id).map_err(|e| at(e, here))?;
-        expect_kind(kind, ObjectType::Commit, id, here)?;
-        if size > MAX_COMMIT_BYTES {
-            return Err(unimportable(format!(
-                "commit `{hex}` is {size} bytes, more than any commit Bolt can keep (64 KiB of \
-                 header lines and 1 MiB of message)"
-            )));
-        }
-        let object = self.git.read(id).map_err(|e| at(e, here))?;
-        expect_kind(object.kind, ObjectType::Commit, id, here)?;
-        let c = parse_commit(&object.data, self.git.hash()).map_err(|e| at(e, here))?;
+        let object = read_commit(self.git, id)?;
+        let c = parse_commit(&object.data, self.git.hash())
+            .map_err(|e| at(e, || format!("commit `{hex}`")))?;
         keepable(&c, &hex)?;
         if parent_saves.len() != c.parents.len() {
             return Err(bug(format!(
@@ -797,12 +793,16 @@ fn attach(stack: &mut [Frame], name: String, done: Folder) -> Option<Folder> {
     None
 }
 
-/// The path of `names` in the folder on top of the stack, `/` between names, for a list or a
-/// message. A deep one keeps only the whole names at its end that fit in `MAX_SHOWN_PATH`, after
-/// `…/`: a tree 4,096 levels deep would otherwise make each path a megabyte.
+/// The path of `names` in the folder on top of the stack, for a list or a message.
 fn path_of(stack: &[Frame], names: &[&str]) -> String {
     let folders = stack.iter().skip(1).map(|frame| frame.name.as_str());
-    let parts: Vec<&str> = folders.chain(names.iter().copied()).collect();
+    shown_path(&folders.chain(names.iter().copied()).collect::<Vec<_>>())
+}
+
+/// The path of the names `parts`, `/` between them, for a list or a message. A deep one keeps
+/// only the whole names at its end that fit in `MAX_SHOWN_PATH`, after `…/`: a tree 4,096 levels
+/// deep would otherwise make each path a megabyte.
+pub(super) fn shown_path(parts: &[&str]) -> String {
     let mut start = parts.len();
     let mut len = 0usize;
     while let Some(part) = start.checked_sub(1).and_then(|i| parts.get(i)) {
@@ -819,6 +819,38 @@ fn path_of(stack: &[Frame], names: &[&str]) -> String {
     } else {
         format!("…/{kept}")
     }
+}
+
+/// The commit `id`, read whole. The header isn't checked against the ID, but it bounds what
+/// reading would hold, so a commit too big for a save to keep is refused before it is read.
+fn read_commit(git: &git::Repo, id: &GitId) -> Result<git::Object, ImportError> {
+    let hex = id.to_hex();
+    let here = || format!("commit `{hex}`");
+    let (kind, size) = git.header(id).map_err(|e| at(e, here))?;
+    expect_kind(kind, ObjectType::Commit, id, here)?;
+    if size > MAX_COMMIT_BYTES {
+        return Err(unimportable(format!(
+            "commit `{hex}` is {size} bytes, more than any commit Bolt can keep (64 KiB of \
+             header lines and 1 MiB of message)"
+        )));
+    }
+    let object = git.read(id).map_err(|e| at(e, here))?;
+    expect_kind(object.kind, ObjectType::Commit, id, here)?;
+    Ok(object)
+}
+
+/// The tree and the parents (in the commit's own order) of the commit `id`, once it is known a
+/// save can keep it: what an import reads of every commit before it writes anything.
+pub(super) fn tree_and_parents(
+    git: &git::Repo,
+    id: &GitId,
+) -> Result<(GitId, Vec<GitId>), ImportError> {
+    let hex = id.to_hex();
+    let object = read_commit(git, id)?;
+    let c =
+        parse_commit(&object.data, git.hash()).map_err(|e| at(e, || format!("commit `{hex}`")))?;
+    keepable(&c, &hex)?;
+    Ok((c.tree, c.parents))
 }
 
 /// Stops at a commit a save can't keep exactly (decision 032), before its people are read or its

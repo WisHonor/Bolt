@@ -8,9 +8,11 @@ use bolt_core::config::{
     ConfigError, Identity, ignored_identity_note, ignored_project_identity, load_identity,
     now_person,
 };
+use bolt_core::diary::Position;
 use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
 use bolt_core::id::{ChangeId, Id};
+use bolt_core::import::{ImportError, ImportReport, ImportRequest, import_git};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
@@ -38,6 +40,8 @@ struct Cli {
 enum Command {
     /// Make this folder a Bolt project.
     Start,
+    /// Bring the Git repository in this folder into Bolt, with all its history.
+    Import,
     /// Save the current state of your files.
     Save { message: Option<String> },
     /// List the saves on this line.
@@ -103,6 +107,16 @@ impl From<std::io::Error> for Failure {
     }
 }
 
+impl From<ImportError> for Failure {
+    fn from(e: ImportError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
 fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
     // The user's own settings may name this folder, so the first save is theirs too.
@@ -141,6 +155,207 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     }
     output::print_warnings(&warnings);
     Ok(())
+}
+
+fn import(json: bool) -> Result<(), Failure> {
+    let root = std::env::current_dir()?;
+    let who = now_person(&load_identity(Some(&root))?);
+    let mut progress = output::Progress::new("Importing commits");
+    let imported = import_git(
+        &root,
+        &mut ImportRequest {
+            who: &who,
+            command: "import",
+            progress: &mut |done, total| progress.update(done, total),
+        },
+    );
+    progress.finish();
+    let report = imported?;
+    // A project made from an import opens only where one made by `start` would.
+    let mut warnings: Vec<Warning> = elevated_only_note(&root)
+        .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
+        .into_iter()
+        .collect();
+    warnings.extend(report.warnings.iter().cloned());
+    if json {
+        println!("{}", import_json(&report, &warnings));
+    } else {
+        let standing = match &report.position {
+            Position::OnLine(line) => format!("You're on line {}.", escape(line, false)),
+            Position::AtSave(id) => {
+                // By change ID, as everywhere else; by fingerprint if the save can't be read now.
+                let short = Repository::open(&root).ok().and_then(|repo| {
+                    let save = repo.store().save(id, repo.signatures_allowed()).ok()?;
+                    Some(short_or_whole(&repo, id, &save.change_id, &mut warnings))
+                });
+                let short = short.unwrap_or_else(|| id.to_hex());
+                format!("You're at save {short}, where Git's HEAD was detached.")
+            }
+        };
+        print_import(&report, &standing);
+    }
+    output::print_warnings(&warnings);
+    Ok(())
+}
+
+/// "1 tag" or "2 tags", with the count as `thousands` writes it.
+fn counted(count: u64, one: &str, many: &str) -> String {
+    let noun = if count == 1 { one } else { many };
+    format!("{} {noun}", output::thousands(count))
+}
+
+/// Prints `heading` and `items` after it: one on the same line, more on a line each.
+fn print_list(heading: &str, items: &[String]) {
+    match items {
+        [] => {}
+        [one] => println!("{heading}: {one}"),
+        _ => {
+            println!("{heading}:");
+            for item in items {
+                println!("  {item}");
+            }
+        }
+    }
+}
+
+/// What `bolt import` tells people it did: what came in, where they stand, and what was renamed
+/// or left out.
+fn print_import(report: &ImportReport, standing: &str) {
+    let mut parts = vec![counted(report.lines, "line", "lines")];
+    if report.servers > 0 {
+        let lines = counted(report.server_lines, "server line", "server lines");
+        parts.push(format!(
+            "{lines} from {}",
+            counted(report.servers, "server", "servers")
+        ));
+    }
+    parts.push(counted(report.tags, "tag", "tags"));
+    let commits = counted(report.commits, "commit", "commits");
+    println!("Imported {commits} from Git: {}.", parts.join(", "));
+    println!("{standing}");
+    let renamed: Vec<String> = report
+        .renamed
+        .iter()
+        .map(|r| {
+            let kind = match r.kind {
+                "server" => "server ",
+                "tag" => "tag ",
+                _ => "",
+            };
+            format!(
+                "{kind}{} → {}",
+                escape(&r.git, false),
+                escape(&r.bolt, false)
+            )
+        })
+        .collect();
+    let names = counted(renamed.len() as u64, "name", "names");
+    print_list(
+        &format!("Renamed {names} that Bolt's names don't allow"),
+        &renamed,
+    );
+    let refs: Vec<String> = report
+        .skipped_refs
+        .iter()
+        .map(|r| escape(r, false))
+        .collect();
+    let heading = format!(
+        "Didn't import {} (only branches, server branches and tags come in)",
+        counted(refs.len() as u64, "ref", "refs")
+    );
+    print_list(&heading, &refs);
+    let tags: Vec<String> = report
+        .skipped_tags
+        .iter()
+        .map(|(name, why)| format!("{}, as {why}", escape(name, false)))
+        .collect();
+    let heading = format!(
+        "Didn't import {}",
+        counted(tags.len() as u64, "tag", "tags")
+    );
+    print_list(&heading, &tags);
+    let mut entries: Vec<String> = report
+        .skipped_entries
+        .iter()
+        .map(|(commit, path)| {
+            // A name can be empty, and an empty one at the top has no path to show.
+            let path = if path.is_empty() {
+                "an empty name".to_owned()
+            } else {
+                format!("`{}`", escape(path, false))
+            };
+            let commit = commit.get(..12).unwrap_or(commit);
+            format!("{path} in commit {}", escape(commit, false))
+        })
+        .collect();
+    let more = report
+        .skipped_entry_count
+        .saturating_sub(entries.len() as u64);
+    if more > 0 {
+        entries.push(format!("and {} more", output::thousands(more)));
+    }
+    let heading = if report.skipped_entry_count == 1 {
+        "Left out 1 entry whose name Bolt never writes to disk (such as .git and .bolt), with \
+         everything in it"
+            .to_owned()
+    } else {
+        format!(
+            "Left out {} entries whose names Bolt never writes to disk (such as .git and .bolt), \
+             with everything in them",
+            output::thousands(report.skipped_entry_count)
+        )
+    };
+    print_list(&heading, &entries);
+    match report.inexact_commits {
+        0 => {}
+        1 => println!(
+            "1 commit can't be recreated exactly by a later export: it holds a folder in a form \
+             Git no longer writes, or an entry Bolt left out."
+        ),
+        n => println!(
+            "{} commits can't be recreated exactly by a later export: they hold folders in a form \
+             Git no longer writes, or entries Bolt left out.",
+            output::thousands(n)
+        ),
+    }
+}
+
+/// The `--json` document of `bolt import` (docs/json.md).
+fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::Value {
+    let position = match &report.position {
+        Position::OnLine(line) => json!({ "line": line }),
+        Position::AtSave(id) => json!({ "save": id.to_hex() }),
+    };
+    let renamed: Vec<serde_json::Value> = report
+        .renamed
+        .iter()
+        .map(|r| json!({"kind": r.kind, "git": r.git, "bolt": r.bolt}))
+        .collect();
+    let skipped_tags: Vec<serde_json::Value> = report
+        .skipped_tags
+        .iter()
+        .map(|(git, reason)| json!({"git": git, "reason": reason}))
+        .collect();
+    let first: Vec<serde_json::Value> = report
+        .skipped_entries
+        .iter()
+        .map(|(commit, path)| json!({"commit": commit, "path": path}))
+        .collect();
+    json!({
+        "bolt_json": BOLT_JSON,
+        "commits": report.commits,
+        "lines": report.lines,
+        "servers": report.servers,
+        "server_lines": report.server_lines,
+        "tags": report.tags,
+        "position": position,
+        "renamed": renamed,
+        "skipped_refs": report.skipped_refs,
+        "skipped_tags": skipped_tags,
+        "skipped_entries": {"count": report.skipped_entry_count, "first": first},
+        "inexact_commits": report.inexact_commits,
+        "warnings": output::warnings_json(warnings),
+    })
 }
 
 fn save(
@@ -401,6 +616,7 @@ fn main() -> ExitCode {
     let mut opened = None;
     let result = match cli.command {
         Command::Start => start(cli.json, &mut opened),
+        Command::Import => import(cli.json),
         Command::Save { message } => save(cli.json, message, &mut opened),
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),

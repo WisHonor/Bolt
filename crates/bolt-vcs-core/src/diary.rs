@@ -94,6 +94,12 @@ pub struct DiaryEntry {
     pub safety_copies: Vec<SafetyCopy>,
 }
 
+/// Whether a line name may hold `c` (decision 012).
+#[must_use]
+pub fn is_line_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')
+}
+
 /// Decision 012's rules for line names.
 pub fn validate_line_name(name: &str) -> Result<(), DecodeError> {
     if name.is_empty() {
@@ -104,10 +110,7 @@ pub fn validate_line_name(name: &str) -> Result<(), DecodeError> {
             "a line name cannot be longer than 255 bytes",
         ));
     }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
-    {
+    if !name.chars().all(is_line_name_char) {
         return Err(DecodeError::Invalid(
             "a line name can only hold letters, digits, -, _, . and /",
         ));

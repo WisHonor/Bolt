@@ -17,6 +17,10 @@ pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
 pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
 /// The project opens only from an administrator terminal.
 pub const ELEVATED_ONLY: &str = "elevated_only";
+/// Git checked out a folder named `.bolt` below the top of the project.
+pub const NESTED_BOLT_FOLDER: &str = "nested_bolt_folder";
+/// The Git repository has a grafts file, which the import ignored.
+pub const GRAFTS_IGNORED: &str = "grafts_ignored";
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

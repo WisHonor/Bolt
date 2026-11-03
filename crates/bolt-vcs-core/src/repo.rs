@@ -32,6 +32,11 @@ pub enum RepoError {
     #[error("This folder is already a Bolt project.")]
     AlreadyAProject { root: PathBuf },
     #[error(
+        "There's a .bolt folder here that Bolt didn't make (bolt.new and other tools use that \
+         name); move or rename it first."
+    )]
+    OtherToolsFolder { root: PathBuf },
+    #[error(
         "This folder is inside a Bolt project at {}.",
         escape(&root.display().to_string(), false)
     )]
@@ -173,6 +178,21 @@ fn fixed_folders(bolt: &Path) -> [PathBuf; 6] {
         bolt.join("cache"),
         bolt.join("tmp"),
     ]
+}
+
+/// Everything Bolt keeps directly in `.bolt` (storage-format.md §10).
+const BOLT_ENTRIES: [&str; 6] = ["format", "store", "state", "cache", "tmp", "config.toml"];
+
+/// Whether `.bolt` holds only names Bolt puts there. Anything else means another tool made it:
+/// bolt.new and others use the name too.
+fn holds_only_bolts_own(bolt: &Path) -> Result<bool, RepoError> {
+    for entry in fs::read_dir(bolt)? {
+        let name = entry?.file_name();
+        if !BOLT_ENTRIES.iter().any(|own| name == *own) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Refuses a `.bolt` whose fixed folders are links, junctions or files. A missing one passes:
@@ -438,7 +458,7 @@ fn enclosing_project<'a>(
 
 impl Repository {
     /// Makes `root` a new project: the folders, the first save on line `main`, then `.bolt/format`
-    /// last. A `.bolt` without `format` is an interrupted start, which this finishes.
+    /// last. A `.bolt` without `format` is an interrupted start or import, which this finishes.
     pub fn init(root: &Path, who: &Person) -> Result<Repository, RepoError> {
         Repository::init_with(root, who, &check_owner)
     }
@@ -449,20 +469,89 @@ impl Repository {
         who: &Person,
         owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
-        let already = || RepoError::AlreadyAProject {
-            root: root.to_owned(),
+        let (mut repo, lock) = Repository::begin_with(root, owner_check)?;
+        let mut packs = repo.new_packs()?;
+        let listing = packs.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
+        let save = Save {
+            root: listing,
+            parents: vec![],
+            author: who.clone(),
+            saver: who.clone(),
+            message: "Start project".into(),
+            change_id: ChangeId::random().map_err(io::Error::other)?,
+            move_notes: vec![],
+            signature: vec![],
+            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
         };
-        let bolt = root.join(".bolt");
+        let encoded = save.encode();
+        // Refuse a save that would not read back (an over-long name, say) before storing it.
+        Save::decode(&encoded, false)?;
+        let save = packs.add_record(ObjectKind::Save, &encoded)?;
+        let entry = DiaryEntry {
+            parent: None,
+            action: Action::Command,
+            command: "start".into(),
+            who: who.clone(),
+            bolt_version: env!("CARGO_PKG_VERSION").into(),
+            state: State {
+                lines: BTreeMap::from([("main".to_owned(), save)]),
+                tags: None,
+                position: Position::OnLine("main".into()),
+                shelves: vec![],
+                server_lines: None,
+            },
+            safety_copies: vec![],
+        };
+        repo.commit_first(&lock, packs, &entry)?;
+        Ok(repo)
+    }
+
+    /// Refuses to make `root` a project when it or its `.bolt` isn't the user's, when it is a
+    /// project already, when another tool made its `.bolt`, or when it is inside another project.
+    /// Makes nothing, so a command can ask before its own slow checks.
+    pub fn check_new(root: &Path) -> Result<(), RepoError> {
+        Repository::check_new_with(root, &check_owner).map(drop)
+    }
+
+    /// `check_new`, with the owner check given. `Ok(true)`: a `.bolt` that Bolt made is there
+    /// already, left by a start or import that didn't finish.
+    fn check_new_with(
+        root: &Path,
+        owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+    ) -> Result<bool, RepoError> {
         // Before anything is made: a folder that isn't the user's is refused at once.
         let found = check_bolt(root, owner_check)?;
         if found && has_format(root)? {
-            return Err(already());
+            return Err(RepoError::AlreadyAProject {
+                root: root.to_owned(),
+            });
+        }
+        if found && !holds_only_bolts_own(&root.join(".bolt"))? {
+            return Err(RepoError::OtherToolsFolder {
+                root: root.to_owned(),
+            });
         }
         if let Some(outer) = enclosing_project(root, owner_check)? {
             return Err(RepoError::InsideAnotherProject {
                 root: outer.to_owned(),
             });
         }
+        Ok(found)
+    }
+
+    /// Starts making `root` a project, after `check_new`'s checks: the folders, and the change
+    /// lock. Nothing is committed and there is no `format` yet, so `commit_first` must follow.
+    pub fn begin(root: &Path) -> Result<(Repository, ChangeLock), RepoError> {
+        Repository::begin_with(root, &check_owner)
+    }
+
+    /// `begin`, with the owner check given.
+    fn begin_with(
+        root: &Path,
+        owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+    ) -> Result<(Repository, ChangeLock), RepoError> {
+        let bolt = root.join(".bolt");
+        let found = Repository::check_new_with(root, owner_check)?;
         if !found {
             fsio::create_dir_durable(&bolt)?;
             // Some drives give a new folder another owner, or none, and every later command
@@ -503,46 +592,29 @@ impl Repository {
             },
             head: None,
         };
+        // `state/lock-info` is never shown before there is a `format`, so an import's says
+        // `start` too.
         let lock = repo.lock_for_change("start", &mut |_| {})?;
-        // Another `bolt start` may have finished while this one waited for the lock.
+        // Another start or import may have finished while this one waited for the lock.
         if has_format(root)? {
-            return Err(already());
+            return Err(RepoError::AlreadyAProject {
+                root: root.to_owned(),
+            });
         }
-        let mut packs = repo.new_packs()?;
-        let listing = packs.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
-        let save = Save {
-            root: listing,
-            parents: vec![],
-            author: who.clone(),
-            saver: who.clone(),
-            message: "Start project".into(),
-            change_id: ChangeId::random().map_err(io::Error::other)?,
-            move_notes: vec![],
-            signature: vec![],
-            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
-        };
-        let encoded = save.encode();
-        // Refuse a save that would not read back (an over-long name, say) before storing it.
-        Save::decode(&encoded, false)?;
-        let save = packs.add_record(ObjectKind::Save, &encoded)?;
-        let entry = DiaryEntry {
-            parent: None,
-            action: Action::Command,
-            command: "start".into(),
-            who: who.clone(),
-            bolt_version: env!("CARGO_PKG_VERSION").into(),
-            state: State {
-                lines: BTreeMap::from([("main".to_owned(), save)]),
-                tags: None,
-                position: Position::OnLine("main".into()),
-                shelves: vec![],
-                server_lines: None,
-            },
-            safety_copies: vec![],
-        };
-        repo.commit(&lock, packs, &entry)?;
-        write_atomic(&repo.tmp, &format_path(root), FORMAT_TEXT.as_bytes())?;
-        Ok(repo)
+        Ok((repo, lock))
+    }
+
+    /// Commits the first entry of a project `begin` started, then writes `.bolt/format`, which
+    /// makes it a project.
+    pub fn commit_first(
+        &mut self,
+        lock: &ChangeLock,
+        packs: PackSet,
+        entry: &DiaryEntry,
+    ) -> Result<Id, RepoError> {
+        let id = self.commit(lock, packs, entry)?;
+        write_atomic(&self.tmp, &format_path(&self.root), FORMAT_TEXT.as_bytes())?;
+        Ok(id)
     }
 
     /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one.
