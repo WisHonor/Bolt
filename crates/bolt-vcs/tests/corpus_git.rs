@@ -81,7 +81,11 @@ fn refused(env: &Env) -> String {
 /// Runs `bolt import`, which must stop once it has begun `.bolt`, committing nothing, and returns
 /// its error output.
 fn stopped(env: &Env) -> String {
-    let err = env.refused_import();
+    committed_nothing(env, env.refused_import())
+}
+
+/// Checks that an import that stopped after it began `.bolt` said so and committed nothing.
+fn committed_nothing(env: &Env, err: String) -> String {
     assert!(err.contains("Nothing was committed."), "{err}");
     assert!(!env.root().join(".bolt/format").exists(), "{err}");
     err
@@ -428,24 +432,29 @@ fn broken_trees_stop_naming_the_commit_and_folder() {
     assert!(err.contains(&stop), "{err}");
 }
 
+/// One mode to a commit, so each is counted on its own.
 #[test]
 fn modes_git_no_longer_writes_are_imported_as_inexact() {
     let (env, git) = repo();
     let file = git.object(Blob, b"x\n");
-    let old = git.tree(&[(b"100644", b"inner.txt", file)]);
-    main_of(
-        &git,
-        &[(b"040000", b"old", old), (b"100664", b"shared.txt", file)],
-    );
+    let inner = git.tree(&[(b"100644", b"inner.txt", file)]);
+    let padded = commit(&git, tree(&git, &[(b"040000", b"old", inner)]), &[], "One");
+    let shared = tree(&git, &[(b"100664", b"shared.txt", file)]);
+    on_main(&git, commit(&git, shared, &[padded], "Two"));
     let (out, _) = env.import();
     assert!(
         out.contains(
-            "1 commit can't be recreated exactly by a later export: it holds a folder in a form \
-             Git no longer writes, or an entry Bolt left out.\n"
+            "2 commits can't be recreated exactly by a later export: they hold folders in a form \
+             Git no longer writes, or entries Bolt left out.\n"
         ),
         "{out}"
     );
-    assert_eq!(saved(&env), ["file old/inner.txt", "file shared.txt"]);
+    assert_eq!(saved(&env), ["file shared.txt"]);
+    let (repo, state) = env.state();
+    let two = repo.store().save(&state.lines["main"], false).unwrap();
+    let one = repo.store().save(&two.parents[0], false).unwrap();
+    let old = repo.store().listing(&one.root).unwrap();
+    assert_eq!(old.get("old").unwrap().kind, EntryKind::Folder);
 }
 
 /// A pack of `levels` trees, each holding the one below as `a`; returns the top one.
@@ -461,14 +470,16 @@ fn deep_tree(git: &Craft, levels: usize) -> GitId {
     below
 }
 
-/// Runs `bolt import`, which must stop within 30 seconds, and returns its error output. A stack
-/// overflow would end it with another exit code.
+/// `stopped`, for an import that must stop within 30 seconds: it is killed then, so a limit gone
+/// fails the test instead of hanging it. A stack overflow would end it with another exit code.
 fn stopped_quickly(env: &Env) -> String {
+    let limit = Duration::from_secs(30);
     let started = Instant::now();
-    let err = stopped(env);
+    let out = env.bolt().arg("import").timeout(limit).output().unwrap();
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(30), "{took:?}");
-    err
+    assert!(took < limit, "{took:?}");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    committed_nothing(env, text(&out.stderr))
 }
 
 // CVE-2016-2324
@@ -587,31 +598,31 @@ fn tags_bolt_cant_keep_are_left_out_or_stop_the_import() {
     );
     assert!(out.contains(", 0 tags."), "{out}");
 
-    // A chain of 17 tag objects, and a tag object of 1 MiB and a byte.
-    for objects in [17, 1] {
+    // Chains of tag objects, each tagging the one before, and the size of the first, which tags
+    // the commit.
+    for (objects, size, why) in [
+        (
+            17,
+            200,
+            "tag `t` reaches its commit through more than 16 tag objects, more than Bolt keeps",
+        ),
+        (
+            1,
+            1_048_577,
+            "tag `t` has a tag object of 1048577 bytes (`{tag}`), more than the 1 MiB Bolt keeps \
+             of one",
+        ),
+    ] {
         let (env, git) = repo();
-        let id = main_of(&git, &[(b"100644", b"x", git.object(Blob, b"x\n"))]);
-        let message = if objects == 1 {
-            vec![b'x'; 1_048_577 - tag_head(&id, "commit").len()]
-        } else {
-            b"v1\n".to_vec()
-        };
+        let id = one_file(&git);
+        let message = vec![b'x'; size - tag_head(&id, "commit").len()];
         let mut tag = tag_object(&git, &id, "commit", &message);
         for _ in 1..objects {
             tag = tag_object(&git, &tag, "tag", b"Again\n");
         }
         git.loose_ref("refs/tags/t", &format!("{}\n", tag.to_hex()));
         let err = refused(&env);
-        let why = if objects == 1 {
-            format!(
-                "tag `t` has a tag object of 1048577 bytes (`{}`), more than the 1 MiB Bolt keeps \
-                 of one",
-                tag.to_hex()
-            )
-        } else {
-            "tag `t` reaches its commit through more than 16 tag objects, more than Bolt keeps"
-                .to_owned()
-        };
+        let why = why.replace("{tag}", &tag.to_hex());
         let stop =
             format!("error: Git reads this object, but Bolt can't import it as it is: {why}.\n");
         assert!(err.contains(&stop), "{err}");
@@ -853,6 +864,11 @@ fn links_in_the_repositorys_shape_are_refused_unfollowed() {
 // libgit2 CVE-2026-53585
 #[test]
 fn loose_objects_that_lie_about_their_size_are_refused_before_allocating() {
+    // Where Git keeps the loose object `id`, which the messages name.
+    let loose = |id: &GitId| {
+        let hex = id.to_hex();
+        in_git(&["objects", &hex[..2], &hex[2..]])
+    };
     let x = blob_id(b"x\n");
     // 8 MiB of zeros, a few kilobytes compressed, in an object that says it holds 10 bytes.
     let bomb = zlib(&[b"blob 10\0".as_slice(), &vec![0; 8 << 20]].concat());
@@ -869,12 +885,8 @@ fn loose_objects_that_lie_about_their_size_are_refused_before_allocating() {
         git.raw_loose(&x.to_hex(), &stored);
         let id = main_of(&git, &[(b"100644", b"x", x)]);
         let err = stopped(&env);
-        let stop = format!("{why}, in the file `x` of commit `{}`.\n", id.to_hex());
-        assert!(
-            err.contains("error: Bolt can't import this Git repository: "),
-            "{err}"
-        );
-        assert!(err.contains(&stop), "{err}");
+        let after = format!(" {why}, in the file `x` of commit `{}`.", id.to_hex());
+        assert_names(&err, BROKEN, &loose(&x), &after);
     }
     // A folder is read whole, so its size is refused before memory is asked for.
     let (env, git) = repo();
@@ -882,12 +894,12 @@ fn loose_objects_that_lie_about_their_size_are_refused_before_allocating() {
     git.raw_loose(&top.to_hex(), &zlib(b"tree 99999999999\0"));
     on_main(&git, commit(&git, top, &[], "Huge"));
     let err = refused(&env);
-    let stop = format!(
-        "says it holds 99999999999 bytes, more than the 536870912 Bolt reads into memory, in the \
-         top folder (tree `{}`) of `HEAD`.\n",
+    let after = format!(
+        " says it holds 99999999999 bytes, more than the 536870912 Bolt reads into memory, in the \
+         top folder (tree `{}`) of `HEAD`.",
         top.to_hex()
     );
-    assert!(err.contains(&stop), "{err}");
+    assert_names(&err, BROKEN, &loose(&top), &after);
 }
 
 // gitoxide GHSA-x494, GHSA-x862, GHSA-mpf5, GHSA-633h; dulwich CVE-2026-114095; libgit2
@@ -937,15 +949,35 @@ fn every_cut_of_a_pack_or_its_index_is_refused() {
 }
 
 /// A repository whose one file, `x`, is the object `file`, packed with `entries` while its commit
-/// and tree are loose; `damage` changes the pack's bytes first. Returns the commit.
-fn packed(entries: &[PackEntry], file: GitId, damage: impl FnOnce(&mut [u8])) -> (Env, GitId) {
+/// and tree are loose; `damage` changes the pack's bytes first. Returns the commit, and the pack
+/// as Bolt names it inside the repository.
+fn packed(
+    entries: &[PackEntry],
+    file: GitId,
+    damage: impl FnOnce(&mut [u8]),
+) -> (Env, GitId, PathBuf) {
     let (env, git) = repo();
     let (pack, _) = git.pack(entries);
     let mut bytes = fs::read(&pack).unwrap();
     damage(&mut bytes);
     fs::write(&pack, bytes).unwrap();
     let id = main_of(&git, &[(b"100644", b"x", file)]);
-    (env, id)
+    let name = pack.file_name().unwrap().to_str().unwrap();
+    (env, id, in_git(&["objects", "pack", name]))
+}
+
+/// Where the index of `pack` (inside `env`'s repository) puts `id`: Git's version 2 layout, with
+/// every offset under 2 GiB.
+fn offset_in(env: &Env, pack: &Path, id: &GitId) -> u32 {
+    let idx = fs::read(env.root().join(pack).with_extension("idx")).unwrap();
+    let count = u32::from_be_bytes(idx[1028..1032].try_into().unwrap()) as usize;
+    let names = &idx[1032..1032 + 20 * count];
+    let n = names
+        .chunks(20)
+        .position(|name| name == id.as_bytes())
+        .unwrap();
+    let at = 1032 + 24 * count + 4 * n;
+    u32::from_be_bytes(idx[at..at + 4].try_into().unwrap())
 }
 
 #[test]
@@ -964,12 +996,14 @@ fn bad_packs_and_deltas_are_errors_never_a_crash() {
         ),
     ];
     for (damage, why) in cases {
-        let (env, _) = packed(&[x()], blob_id(b"x"), damage);
+        let (env, id, pack) = packed(&[x()], blob_id(b"x"), damage);
         let err = refused(&env);
-        assert!(err.contains(why), "{err}");
+        // Found when the import reads its first object, the commit.
+        let after = format!(" {why}, in commit `{}`.", id.to_hex());
+        assert_names(&err, BROKEN, &pack, &after);
     }
     // Git reads version 3 as it reads version 2, and so does Bolt.
-    let (env, _) = packed(&[x()], blob_id(b"x"), |pack| pack[7] = 3);
+    let (env, _, _) = packed(&[x()], blob_id(b"x"), |pack| pack[7] = 3);
     env.import();
     assert_eq!(saved(&env), ["file x"]);
 
@@ -990,7 +1024,13 @@ fn bad_packs_and_deltas_are_errors_never_a_crash() {
     ]
     .concat();
     let past_base = vec![10, 5, 0x91, 8, 5];
-    for (entries, file, why) in [
+    // Each names the entry of `x` by where it is in the pack: `{at}`.
+    let (entry, object, built) = (
+        "the entry at offset {at} in",
+        "the object at offset {at} in",
+        "the delta at offset {at} in",
+    );
+    for (entries, file, what, why) in [
         (
             vec![
                 x(),
@@ -1000,11 +1040,13 @@ fn bad_packs_and_deltas_are_errors_never_a_crash() {
                 },
             ],
             blob_id(&on_itself),
+            entry,
             "names itself as its base",
         ),
         (
             vec![Raw(before_start.clone())],
             blob_id(&before_start),
+            entry,
             "names a base 100 bytes back, before the pack's first entry",
         ),
         (
@@ -1019,11 +1061,13 @@ fn bad_packs_and_deltas_are_errors_never_a_crash() {
                 },
             ],
             blob_id(&to_a),
+            "the deltas that build the object at offset {at} in",
             "go round in a loop",
         ),
         (
             chain,
             blob_id(&versions[4097]),
+            object,
             "is more than 4096 deltas deep",
         ),
         (
@@ -1035,6 +1079,7 @@ fn bad_packs_and_deltas_are_errors_never_a_crash() {
                 },
             ],
             blob_id(&huge),
+            built,
             "would build 4611686018427387904 bytes, more than the 536870912 Bolt rebuilds in \
              memory",
         ),
@@ -1047,13 +1092,16 @@ fn bad_packs_and_deltas_are_errors_never_a_crash() {
                 },
             ],
             blob_id(&past_base),
+            built,
             "copies from past the end of its base",
         ),
     ] {
-        let (env, id) = packed(&entries, file, |_| {});
+        let (env, id, pack) = packed(&entries, file, |_| {});
         let err = stopped(&env);
-        let place = format!(", in the file `x` of commit `{}`.\n", id.to_hex());
-        assert!(err.contains(why) && err.contains(&place), "{why}: {err}");
+        let at = offset_in(&env, &pack, &file).to_string();
+        let before = format!("{BROKEN}{} ", what.replace("{at}", &at));
+        let after = format!(" {why}, in the file `x` of commit `{}`.", id.to_hex());
+        assert_names(&err, &before, &pack, &after);
     }
 }
 
@@ -1342,16 +1390,18 @@ fn text_from_the_repository_is_shown_escaped() {
     one_file(&git);
     git.head(&format!("ref: refs/heads/{HOSTILE_REF}\n"));
     let err = refused(&env);
-    assert_escaped(
-        &err,
-        &format!("current branch `{HOSTILE_REF_SHOWN}` has no commits"),
+    let stop = format!(
+        "error: Git's current branch `{HOSTILE_REF_SHOWN}` has no commits yet; switch to a branch \
+         with commits, or commit first.\n"
     );
+    assert_escaped(&err, &stop);
     let (env, git) = repo();
     let id = one_file(&git).to_hex();
     git.packed_refs(&format!("{id} refs/heads/{HOSTILE}\n"));
     let err = refused(&env);
-    assert_escaped(
-        &err,
-        &format!("the ref `refs/heads/{HOSTILE_SHOWN}` in .git/packed-refs"),
+    let stop = format!(
+        "error: {BROKEN}the ref `refs/heads/{HOSTILE_SHOWN}` in .git/packed-refs has a name Git \
+         doesn't allow.\n"
     );
+    assert_escaped(&err, &stop);
 }
