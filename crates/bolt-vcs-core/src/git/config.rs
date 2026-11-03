@@ -1,6 +1,7 @@
 //! `.git/config`, read as Git reads it, keeping only what decides how to read the repository:
 //! `core.repositoryformatversion`, the `extensions.*` keys and `core.sparsecheckout` (decisions
-//! 031 and 039). Includes aren't followed, as Git's own format check doesn't follow them.
+//! 031 and 039). Includes aren't followed, as Git's own format check doesn't follow them, but
+//! whether there are any is noted: they can set `core.sparsecheckout` (decision 043).
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use super::{GitError, HashKind, Refusal, broken, is_git_space};
@@ -12,6 +13,8 @@ pub(super) struct Format {
     pub worktree_config: bool,
     /// The last `core.sparsecheckout`, if any.
     pub sparse: Option<bool>,
+    /// Whether it has an `[include]` or `[includeIf]` section, whose files Bolt doesn't read.
+    pub includes: bool,
 }
 
 /// Reads `text`, the config named `file` in messages, as Git's `read_repository_format` and
@@ -22,17 +25,26 @@ pub(super) fn read_format(text: &[u8], file: &str) -> Result<Format, GitError> {
     found.check(file)
 }
 
-/// The last `core.sparsecheckout` in `text`, the config named `file` in messages.
-pub(super) fn read_sparse(text: &[u8], file: &str) -> Result<Option<bool>, GitError> {
-    let mut sparse = None;
+/// The last `core.sparsecheckout` in `text`, the config named `file` in messages, and whether
+/// `text` has an `[include]` or `[includeIf]` section.
+pub(super) fn read_sparse(text: &[u8], file: &str) -> Result<(Option<bool>, bool), GitError> {
+    let (mut sparse, mut includes) = (None, false);
     parse(text, &mut |name, value| {
         if name == b"core.sparsecheckout" {
             sparse = Some(parse_bool(value)?);
         }
+        includes |= is_include(name);
         Some(())
     })
     .map_err(|line| bad_line(file, line))?;
-    Ok(sparse)
+    Ok((sparse, includes))
+}
+
+/// Whether the setting `name` is in an `[include]` or `[includeIf]` section, where Git takes
+/// other files to read.
+fn is_include(name: &[u8]) -> bool {
+    let section = name.split(|&c| c == b'.').next().unwrap_or_default();
+    section == b"include" || section == b"includeif"
 }
 
 fn bad_line(file: &str, line: usize) -> GitError {
@@ -52,11 +64,13 @@ struct Found {
     /// Extensions Git reads only in format version 1.
     v1_only: Vec<String>,
     unknown: Vec<String>,
+    includes: bool,
 }
 
 impl Found {
     /// Takes one setting; `None` for a value Git refuses too, or one Bolt can't read as Git does.
     fn take(&mut self, name: &[u8], value: Option<&[u8]>) -> Option<()> {
+        self.includes |= is_include(name);
         if name == b"core.repositoryformatversion" {
             self.version = Some(parse_int(value?)?);
         } else if name == b"core.sparsecheckout" {
@@ -129,6 +143,7 @@ impl Found {
                 hash: HashKind::Sha1,
                 worktree_config: false,
                 sparse: self.sparse,
+                includes: self.includes,
             });
         };
         match version {
@@ -164,6 +179,7 @@ impl Found {
             hash: self.hash.unwrap_or(HashKind::Sha1),
             worktree_config: self.worktree_config,
             sparse: self.sparse,
+            includes: self.includes,
         })
     }
 }
@@ -797,11 +813,32 @@ mod tests {
         assert!(format("[remote \"origin\"]\n\turl = x\n\tpromisor = maybe\n").is_ok());
         assert_eq!(
             read_sparse(b"[core]\n\tsparseCheckout = no\n", ".git/config.worktree").unwrap(),
-            Some(false)
+            (Some(false), false)
         );
         assert_eq!(
             read_sparse(b"[extensions]\n\tx = y\n", ".git/config.worktree").unwrap(),
-            None
+            (None, false)
         );
+    }
+
+    /// Includes aren't followed, but a section that can take Git to another file is noted, in
+    /// either file Bolt reads: what Git reads there may turn on sparse checkout.
+    #[test]
+    fn include_sections_are_noted() {
+        for (text, includes) in [
+            ("[include]\n\tpath = sparse.inc\n", true),
+            ("[includeIf \"gitdir:~/work/\"]\n\tpath = work.inc\n", true),
+            ("[Include]\n\tPath = x\n", true),
+            (
+                "[remote \"include\"]\n\turl = x\n[includes]\n\tpath = y\n",
+                false,
+            ),
+            // A section with no settings takes Git nowhere.
+            ("[include]\n", false),
+        ] {
+            assert_eq!(format(text).unwrap().includes, includes, "{text}");
+            let (_, worktree) = read_sparse(text.as_bytes(), ".git/config.worktree").unwrap();
+            assert_eq!(worktree, includes, "{text}");
+        }
     }
 }

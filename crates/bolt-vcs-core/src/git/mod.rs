@@ -385,6 +385,8 @@ fn real_dir(path: &Path) -> Result<bool, GitError> {
 pub struct Repo {
     git: PathBuf,
     hash: HashKind,
+    /// Whether its config has `[include]` or `[includeIf]` sections, which Bolt doesn't follow.
+    includes: bool,
     objects: odb::Objects,
 }
 
@@ -419,11 +421,12 @@ impl Repo {
         check_owner(work_tree, &git, owner_of, safe_folders)?;
         // Looked at again: it may have become a link while its owner was asked.
         safe_fs::check_real_dir(&git).map_err(|e| read_error(&git, e))?;
-        let hash = read_format(&git)?;
+        let (hash, includes) = read_format(&git)?;
         refuse_layouts(&git)?;
         Ok(Repo {
             git,
             hash,
+            includes,
             objects: odb::Objects::default(),
         })
     }
@@ -431,6 +434,14 @@ impl Repo {
     #[must_use]
     pub fn hash(&self) -> HashKind {
         self.hash
+    }
+
+    /// Whether `.git/config`, or the `config.worktree` Git reads beside it, has an `[include]` or
+    /// `[includeIf]` section. Bolt doesn't read the files they name, so the import says it can't
+    /// tell whether they turn on sparse checkout (decision 043).
+    #[must_use]
+    pub fn has_config_includes(&self) -> bool {
+        self.includes
     }
 
     /// `HEAD`, the loose refs and `packed-refs`.
@@ -468,22 +479,24 @@ fn check_owner(
     repo::owner_allows([owner], work_tree, &safe).map_err(refused)
 }
 
-/// The repository's hash, after refusing a format, extension or sparse checkout Bolt can't import.
-fn read_format(git: &Path) -> Result<HashKind, GitError> {
+/// The repository's hash, and whether its config has include sections, after refusing a format,
+/// extension or sparse checkout Bolt can't import.
+fn read_format(git: &Path) -> Result<(HashKind, bool), GitError> {
     // Git reads a repository without a config with its defaults.
     let text = read_optional(&git.join("config"), MAX_CONFIG_BYTES)?.unwrap_or_default();
     let format = config::read_format(&text, ".git/config")?;
-    let mut sparse = format.sparse;
+    let (mut sparse, mut includes) = (format.sparse, format.includes);
     if format.worktree_config
         && let Some(text) = read_optional(&git.join("config.worktree"), MAX_CONFIG_BYTES)?
-        && let Some(value) = config::read_sparse(&text, ".git/config.worktree")?
     {
-        sparse = Some(value);
+        let (value, more) = config::read_sparse(&text, ".git/config.worktree")?;
+        sparse = value.or(sparse);
+        includes |= more;
     }
     if sparse == Some(true) {
         return Err(GitError::Refused(Refusal::SparseCheckout));
     }
-    Ok(format.hash)
+    Ok((format.hash, includes))
 }
 
 /// Refuses the files and folders that mean refs, history or objects Bolt doesn't read.

@@ -405,6 +405,16 @@ fn carry_out(
     if counts.duplicate_change_ids > 0 {
         warnings.push(duplicate_change_ids(counts.duplicate_change_ids));
     }
+    if git.has_config_includes() {
+        warnings.push(Warning::new(
+            warning::CONFIG_INCLUDES_IGNORED,
+            "Git's config here includes other files ([include] or [includeIf]), which Bolt \
+             doesn't read, so it can't tell whether they turn on sparse checkout. If `git config \
+             core.sparseCheckout` says true, Git left some files out of this folder: run `git \
+             sparse-checkout disable` before your first save, or that save will record them as \
+             deleted (they stay in history and can be brought back).",
+        ));
+    }
     let mut report = ImportReport {
         commits: total,
         lines: lines.len() as u64,
@@ -1133,6 +1143,27 @@ mod tests {
             e.hint().unwrap().starts_with("Nothing was changed."),
             "{e:?}"
         );
+    }
+
+    /// Bolt doesn't follow a config's includes, so an import of a repository whose config has one
+    /// says it can't tell whether they turn on sparse checkout; without one, it says nothing.
+    #[test]
+    fn config_includes_are_warned_about() {
+        let warning = |config: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let (git, _) = one_commit(dir.path());
+            git.config(config);
+            let report = import(dir.path()).unwrap();
+            let found = report.warnings.into_iter();
+            found
+                .filter(|w| w.kind == warning::CONFIG_INCLUDES_IGNORED)
+                .map(|w| w.message)
+                .next()
+        };
+        let message = warning("[core]\n\tbare = false\n[include]\n\tpath = sparse.inc\n").unwrap();
+        assert!(message.contains("git sparse-checkout disable"), "{message}");
+        assert!(warning("[includeIf \"gitdir:/x/\"]\n\tpath = x.inc\n").is_some());
+        assert_eq!(warning("[core]\n\tbare = false\n"), None);
     }
 
     /// No two saves share a change ID: a `change-id` header that another commit's own ID gives

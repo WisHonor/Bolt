@@ -709,7 +709,7 @@ fn rt3_6_a_tracked_but_ignored_env_is_not_saved_silently() {
 // out of the folder as deleted, which decision 039's refusal exists to prevent.
 
 #[test]
-#[ignore = "RT3-7: red-team proof, run once its fix is in"]
+#[ignore = "RT3-7: ruled in decision 043 (a warning, not a refusal)"]
 fn rt3_7_a_sparse_checkout_turned_on_through_an_include_is_refused() {
     let env = Env::new();
     let git = one_commit(&env, &[("a.txt", b"a\n"), ("b.txt", b"b\n")]);

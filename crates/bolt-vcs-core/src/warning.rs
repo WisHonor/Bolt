@@ -26,6 +26,9 @@ pub const GRAFTS_IGNORED: &str = "grafts_ignored";
 /// Imported commits whose `change-id` header gives a change ID another commit has too took their
 /// own commits' change IDs instead.
 pub const DUPLICATE_CHANGE_ID: &str = "duplicate_change_id";
+/// The Git repository's config includes other files, which the import didn't read, so it can't
+/// tell whether they turn on sparse checkout.
+pub const CONFIG_INCLUDES_IGNORED: &str = "config_includes_ignored";
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -692,6 +692,7 @@ mod tests {
         Repo {
             git: dir.path().join(".git"),
             hash: HashKind::Sha1,
+            includes: false,
             objects: Default::default(),
         }
     }
