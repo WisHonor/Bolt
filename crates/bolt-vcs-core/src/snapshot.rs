@@ -214,10 +214,14 @@ pub fn save_folder(
     let Scan {
         folders,
         old,
+        rebuilt,
         mut warnings,
     } = walk(repo.root(), base, SaveLimits::default(), drive)?;
     check_names(&folders, &old)?;
     let mut packs = repo.new_packs()?;
+    for listing in &rebuilt {
+        store_listing(repo.store(), &mut packs, listing)?;
+    }
     let (root, kept) = build(repo.store(), &mut packs, &folders, &old)?;
     if kept > 0 {
         warnings.push(kept_warning(kept));
@@ -322,6 +326,12 @@ enum Kind {
         id: Id,
         size: u64,
     },
+    /// A folder gone from disk, back as the listing `id` holding only the `kept` entries kept as
+    /// they were below it and the folders leading to them.
+    Back {
+        id: Id,
+        kept: usize,
+    },
 }
 
 struct Child {
@@ -402,12 +412,12 @@ fn path_bytes(rel: &Path) -> Vec<u8> {
     names.join(&b'/')
 }
 
-/// The save a new one builds on. A walk reads its listings along the folders it keeps, where the
-/// walk's depth limit holds them too, and through the folders gone from disk.
+/// The save a new one builds on. A walk reads its listings along the folders it keeps, which its
+/// own depth limit holds, and below the folders gone from disk, which `limits` holds.
 struct Base<'a> {
     store: &'a Store,
     root: Id,
-    /// Every listing read counts against these, a shared one once per path.
+    /// The listings both read count against these, a shared one once per path.
     limits: SaveLimits,
 }
 
@@ -418,6 +428,21 @@ impl Base<'_> {
             .add(listing.entries().len())
             .map_err(|detail| StoreError::SaveTooLarge { detail })?;
         Ok(listing)
+    }
+
+    /// The listing `id` of a folder `depth` levels down that is gone from disk, or `None` past
+    /// the limits. There the base save is invalid and nothing can be kept, so the search ends and
+    /// the save goes ahead, as one beside a save too large to compare does.
+    fn gone_listing(&mut self, id: Id, depth: usize) -> Result<Option<Listing>, SaveError> {
+        if self.limits.check_depth(depth).is_err() {
+            return Ok(None);
+        }
+        let listing = self.store.listing(&id)?;
+        Ok(self
+            .limits
+            .add(listing.entries().len())
+            .is_ok()
+            .then_some(listing))
     }
 }
 
@@ -513,78 +538,22 @@ impl IgnoreRules {
         }
     }
 
-    /// After the walk, which found `found`: looks through the base save's folders it didn't find
-    /// on disk for what is kept as it was there. Such an entry stays even when its folder is
-    /// gone (decisions 019 and 036).
-    fn note_gone(&mut self, base: &mut Base, found: &Folders) -> Result<(), SaveError> {
+    /// After the walk, which found `found`: the base save's folders, in the folders it found,
+    /// that it didn't find on disk and that aren't kept whole. Each comes as its folder, name and
+    /// listing, in path order, so a save that stops says the same thing every time.
+    fn gone(&self, found: &Folders) -> Vec<(String, String, Id)> {
         let mut gone = Vec::new();
         for (rel, listing) in &self.old {
             let inner = listing.iter().flat_map(Listing::entries);
             for e in inner.filter(|e| e.kind == EntryKind::Folder) {
                 let path = path_in(rel, &e.name);
                 if !found.contains_key(&path) && !self.untouched.contains_key(&path) {
-                    gone.push((path, e.id));
+                    gone.push((rel.clone(), e.name.clone(), e.id));
                 }
             }
         }
-        // In path order, so a damaged base save is reported the same way every time.
         gone.sort();
-        for (rel, id) in gone {
-            self.note_gone_tree(base, rel, id)?;
-        }
-        Ok(())
-    }
-
-    /// Notes what is kept as it was in the gone folder `rel` (listing `id`) and below it. As in
-    /// the diff walk, only the folders from `rel` down to the one being read are held, and one
-    /// goes into `old` only when something in or below it is kept.
-    fn note_gone_tree(&mut self, base: &mut Base, rel: String, id: Id) -> Result<(), SaveError> {
-        let depth = rel.split('/').count();
-        let mut path = rel;
-        // Each open folder's listing, the next of its entries to look at, and its path's length.
-        let mut open: Vec<(Listing, usize, usize)> = Vec::new();
-        // How many of the open folders, from the top, are in `old`.
-        let mut known = 0;
-        let mut read = Some(id);
-        loop {
-            // Past its limits a base save is invalid and nothing there can be kept, so the search
-            // ends and the save goes ahead, as one beside a save too large to compare does.
-            if let Some(id) = read.take()
-                && base.limits.check_depth(depth + open.len()).is_ok()
-            {
-                let listing = base.store.listing(&id)?;
-                if base.limits.add(listing.entries().len()).is_err() {
-                    return Ok(());
-                }
-                let kept = self.untouched.len();
-                self.note_untouched(&path, &listing);
-                open.push((listing, 0, path.len()));
-                if self.untouched.len() > kept {
-                    for (listing, _, end) in &open[known..] {
-                        self.old
-                            .insert(path[..*end].to_owned(), Some(listing.clone()));
-                    }
-                    known = open.len();
-                }
-            }
-            let Some((listing, next, end)) = open.last_mut() else {
-                return Ok(());
-            };
-            path.truncate(*end);
-            let Some(e) = listing.entries().get(*next) else {
-                open.pop();
-                known = known.min(open.len());
-                continue;
-            };
-            *next += 1;
-            if e.kind == EntryKind::Folder {
-                path.push('/');
-                path.push_str(&e.name);
-                if !self.untouched.contains_key(&path) {
-                    read = Some(e.id);
-                }
-            }
-        }
+        gone
     }
 
     /// Puts the rules of the ignore files in `dir` in force: its `.gitignore`, then its
@@ -736,6 +705,8 @@ struct Scan {
     folders: Folders,
     /// The base save's listing of each folder in `folders`, if it has that folder.
     old: HashMap<String, Option<Listing>>,
+    /// The new listings of the folders gone from disk that come back, still to be stored.
+    rebuilt: Vec<Listing>,
     /// One for each `.gitignore` skipped.
     warnings: Vec<Warning>,
 }
@@ -845,20 +816,49 @@ fn scan_folder(
     if let Some(problem) = rules.problem.take() {
         return Err(problem);
     }
-    rules.note_gone(&mut base, &folders)?;
-    // In path order, so a save that stops names the same entry every time.
-    let mut kept: Vec<Child> = rules.untouched.drain().map(|(_, c)| c).collect();
-    kept.sort_by(|a, b| a.rel.cmp(&b.rel));
-    for c in kept {
+    // Sorted, so a name the walk found can be looked up.
+    for children in folders.values_mut() {
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    // A folder gone from disk comes back if something below it is kept as it was.
+    let mut back = Vec::new();
+    let mut rebuilt = Vec::new();
+    for (rel, name, id) in rules.gone(&folders) {
+        let found = |c: &[Child]| c.binary_search_by(|c| c.name.as_str().cmp(&name)).is_ok();
+        let taken = folders.get(&rel).is_some_and(|c| found(c));
+        let top = path_in(&rel, &name);
+        if let Some(gone) = rebuild_gone(&mut base, &mut limits, drive, &top, id, taken)? {
+            rebuilt.extend(gone.listings);
+            let kind = Kind::Back {
+                id: gone.id,
+                kept: gone.kept,
+            };
+            let path = root.join(&top);
+            let child = Child {
+                name,
+                kind,
+                path,
+                rel: top,
+                executable: None,
+            };
+            back.push((rel, child));
+        }
+    }
+    for (rel, child) in back {
+        folders.entry(rel).or_default().push(child);
+    }
+    for (_, kept) in rules.untouched.drain() {
         if let Kind::Kept {
             kind: EntryKind::Folder,
             id,
             ..
-        } = c.kind
+        } = kept.kind
         {
-            count_kept_folder(base.store, &mut limits, &c.rel, id)?;
+            count_kept_folder(base.store, &mut limits, kept.rel.split('/').count(), id)?;
         }
-        put_back(root, &mut folders, &mut limits, c)?;
+        limits.add(1).map_err(too_large)?;
+        let (up, _) = kept.rel.rsplit_once('/').unwrap_or_default();
+        folders.entry(up.to_owned()).or_default().push(kept);
     }
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -866,20 +866,139 @@ fn scan_folder(
     Ok(Scan {
         folders,
         old: std::mem::take(&mut rules.old),
+        rebuilt,
         warnings: std::mem::take(&mut rules.warnings),
     })
 }
 
-/// Counts everything the kept folder `rel` holds, from its listing `id` down, against `limits`,
-/// one listing at a time: kept or not, a save holds no more than its format allows.
+/// A folder gone from disk, back with only what is kept as it was below it.
+struct Gone {
+    /// Its new listing's ID.
+    id: Id,
+    /// How many entries below it are kept as they were.
+    kept: usize,
+    /// Its new listings, its own last.
+    listings: Vec<Listing>,
+}
+
+/// One folder open in [`rebuild_gone`]'s search.
+struct Open {
+    /// Its name; the folder the search starts from has none.
+    name: String,
+    listing: Listing,
+    /// Which of its entries are kept as they were.
+    kept: Vec<bool>,
+    /// The next of its entries to look at.
+    next: usize,
+    /// What it holds once rebuilt: its kept entries, and its subfolders that come back.
+    holds: Vec<Entry>,
+}
+
+/// Rebuilds the gone folder `top` from its base listing `id`, holding only the entries kept as
+/// they were below it and the folders leading to them, counted against `limits`; `None` if none
+/// is kept. If `taken`, something the walk found has `top`'s name, and a kept entry stops the
+/// save. As in the diff walk, only names and the listings from `top` down are held.
+fn rebuild_gone(
+    base: &mut Base,
+    limits: &mut SaveLimits,
+    drive: Drive,
+    top: &str,
+    id: Id,
+    taken: bool,
+) -> Result<Option<Gone>, SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    let depth = top.split('/').count();
+    let mut open: Vec<Open> = Vec::new();
+    let mut kept_in_all = 0;
+    let mut listings = Vec::new();
+    let mut read = Some((String::new(), id));
+    loop {
+        if let Some((name, id)) = read.take()
+            && let Some(listing) = base.gone_listing(id, depth + open.len())?
+        {
+            let kept = kept_as_they_were(&listing, drive);
+            let mut holds = Vec::new();
+            for (e, _) in listing.entries().iter().zip(&kept).filter(|(_, k)| **k) {
+                if taken {
+                    // Only now is a path below `top` needed, to name it.
+                    let names = open.iter().map(|f| f.name.as_str());
+                    let names = names.chain([name.as_str(), e.name.as_str()]);
+                    let below = names
+                        .filter(|n| !n.is_empty())
+                        .fold(top.to_owned(), |path, n| path + "/" + n);
+                    return Err(SaveError::InTheWay {
+                        path: top.to_owned(),
+                        kept: below,
+                    });
+                }
+                if e.kind == EntryKind::Folder {
+                    count_kept_folder(base.store, limits, depth + open.len() + 1, e.id)?;
+                }
+                limits.add(1).map_err(too_large)?;
+                holds.push(e.clone());
+            }
+            kept_in_all += holds.len();
+            open.push(Open {
+                name,
+                listing,
+                kept,
+                next: 0,
+                holds,
+            });
+        }
+        let Some(folder) = open.last_mut() else {
+            return Ok(None);
+        };
+        if let Some(e) = folder.listing.entries().get(folder.next) {
+            let kept = folder.kept.get(folder.next).copied().unwrap_or(false);
+            folder.next += 1;
+            if e.kind == EntryKind::Folder && !kept {
+                read = Some((e.name.clone(), e.id));
+            }
+            continue;
+        }
+        // Done with this folder, which comes back if it holds anything.
+        let Some(done) = open.pop() else {
+            return Ok(None);
+        };
+        let mut back = None;
+        if !done.holds.is_empty() {
+            limits.check_depth(depth + open.len()).map_err(too_large)?;
+            limits.add(1).map_err(too_large)?;
+            let listing = Listing::new(done.holds).map_err(StoreError::from)?;
+            back = Some(listing.id());
+            listings.push(listing);
+        }
+        match (open.last_mut(), back) {
+            (Some(above), Some(id)) => above.holds.push(Entry {
+                name: done.name,
+                kind: EntryKind::Folder,
+                id,
+                size: 0,
+            }),
+            (Some(_), None) => {}
+            (None, back) => {
+                return Ok(back.map(|id| Gone {
+                    id,
+                    kept: kept_in_all,
+                    listings,
+                }));
+            }
+        }
+    }
+}
+
+/// Counts everything the kept folder `depth` levels down holds, from its listing `id` down,
+/// against `limits`, one listing at a time: kept or not, a save holds no more than its format
+/// allows.
 fn count_kept_folder(
     store: &Store,
     limits: &mut SaveLimits,
-    rel: &str,
+    depth: usize,
     id: Id,
 ) -> Result<(), SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
-    let mut todo = vec![(id, rel.split('/').count())];
+    let mut todo = vec![(id, depth)];
     while let Some((id, depth)) = todo.pop() {
         limits.check_depth(depth).map_err(too_large)?;
         let listing = store.listing(&id)?;
@@ -891,49 +1010,6 @@ fn count_kept_folder(
         todo.extend(inner.map(|e| (e.id, depth + 1)));
     }
     Ok(())
-}
-
-/// Puts an entry kept as it was into its folder. A folder above it that is gone from disk comes
-/// back holding only what is kept; if something else on disk now has its name, the save stops.
-fn put_back(
-    root: &Path,
-    folders: &mut Folders,
-    limits: &mut SaveLimits,
-    kept: Child,
-) -> Result<(), SaveError> {
-    let too_large = |detail| SaveError::TooLarge { detail };
-    let kept_path = kept.rel.clone();
-    let mut child = kept;
-    loop {
-        limits.add(1).map_err(too_large)?;
-        let (up, _) = child.rel.rsplit_once('/').unwrap_or_default();
-        let up = up.to_owned();
-        if let Some(children) = folders.get_mut(&up) {
-            // The walk never takes in a kept entry's own name, but a folder brought back can meet
-            // what it found.
-            if child.kind == Kind::Folder
-                && let Some(other) = children.iter().find(|c| c.name == child.name)
-            {
-                return Err(SaveError::InTheWay {
-                    path: other.rel.clone(),
-                    kept: kept_path,
-                });
-            }
-            children.push(child);
-            return Ok(());
-        }
-        let depth = up.split('/').count();
-        limits.check_depth(depth).map_err(too_large)?;
-        let name = up.rsplit('/').next().unwrap_or_default().to_owned();
-        folders.insert(up.clone(), vec![child]);
-        child = Child {
-            name,
-            kind: Kind::Folder,
-            path: root.join(&up),
-            rel: up,
-            executable: None,
-        };
-    }
 }
 
 /// An `ignore` error with paths shown as project paths.
@@ -1068,6 +1144,10 @@ fn build(
                     kept += 1;
                     (kind, id, size)
                 }
+                Kind::Back { id, kept: below } => {
+                    kept += below;
+                    (EntryKind::Folder, id, 0)
+                }
             };
             entries.push(Entry {
                 name: c.name.clone(),
@@ -1077,15 +1157,21 @@ fn build(
             });
         }
         let listing = Listing::new(entries).map_err(StoreError::from)?;
-        let id = listing.id();
-        let encoded = listing.encode();
-        if !store.has_good_copy(&id, ObjectKind::FolderListing, encoded.len() as u64)? {
-            packs.add_record(ObjectKind::FolderListing, &encoded)?;
-        }
-        built.insert(rel, id);
+        built.insert(rel, store_listing(store, packs, &listing)?);
     }
     let root = built.remove("").ok_or_else(missing)?;
     Ok((root, kept))
+}
+
+/// Stores `listing` unless a good copy is held already, and returns its ID.
+fn store_listing(store: &Store, packs: &mut PackSet, listing: &Listing) -> Result<Id, SaveError> {
+    let id = listing.id();
+    let encoded = listing.encode();
+    let len = encoded.len() as u64;
+    if !packs.contains(&id) && !store.has_good_copy(&id, ObjectKind::FolderListing, len)? {
+        packs.add_record(ObjectKind::FolderListing, &encoded)?;
+    }
+    Ok(id)
 }
 
 /// Stores a symlink's target as content; the link itself is never followed.
@@ -1177,7 +1263,10 @@ mod tests {
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
-    use crate::test_support::{commit_records, plant_damaged_copies, plant_save, sample_records};
+    use crate::test_support::{
+        add_link, add_listing, commit_records, plant_damaged_copies, plant_root, plant_save,
+        sample_records,
+    };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -2604,18 +2693,189 @@ mod tests {
         );
         // None of it is on disk. `a/b/c/d` is four levels down, and the five listings from the
         // top to it hold one entry each.
-        let found_within = |levels, entries| {
+        let comes_back_within = |levels, entries| {
             let base = Base {
                 limits: SaveLimits::new(levels, entries),
                 ..newest(&repo)
             };
-            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive());
-            scan.unwrap().folders
+            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive()).unwrap();
+            scan.folders[""].iter().any(|c| c.name == "a")
         };
-        assert!(found_within(4, 5).contains_key("a/b/c/d"));
+        assert!(comes_back_within(4, 5));
         // Past either limit the base save is invalid, so nothing there can be kept.
-        assert!(!found_within(3, 5).contains_key("a"));
-        assert!(!found_within(4, 4).contains_key("a"));
+        assert!(!comes_back_within(3, 5));
+        assert!(!comes_back_within(4, 4));
+    }
+
+    /// A folder or project link entry.
+    fn entry(name: &str, kind: EntryKind, id: Id) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            kind,
+            id,
+            size: 0,
+        }
+    }
+
+    /// Saves the project, which must make a save, and says how long it took.
+    fn timed_save(repo: &mut Repository, what: &str) -> Listing {
+        let started = std::time::Instant::now();
+        let saved = saved_top(repo);
+        let took = started.elapsed();
+        eprintln!("{what}: saved in {took:?}");
+        // Well above what a debug build takes; copying a path per folder needs gigabytes here.
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{what}: {took:?}"
+        );
+        saved
+    }
+
+    #[test]
+    fn a_deep_chain_of_gone_folders_comes_back_in_linear_time() {
+        let (dir, mut repo) = project();
+        // 4,000 folders of 200-byte names with a link at the bottom: an 800 KB path that nothing
+        // may copy once per folder. Planted from the bottom up, so planting isn't quadratic.
+        let name = "n".repeat(200);
+        let mut first = None;
+        plant_root(&mut repo, |packs| {
+            let link = add_link(packs, COMMIT);
+            let mut id = add_listing(packs, vec![entry("sub", EntryKind::ProjectLink, link)]).0;
+            for _ in 1..4000 {
+                id = add_listing(packs, vec![entry(&name, EntryKind::Folder, id)]).0;
+            }
+            first = Some(id);
+            add_listing(packs, vec![entry(&name, EntryKind::Folder, id)]).0
+        });
+        write(dir.path(), "new.txt", b"x");
+        let saved = timed_save(&mut repo, "4,000 gone folders deep");
+        // The chain comes back whole, so it holds the link at the bottom.
+        assert_eq!(saved.get(&name).map(|e| e.id), first);
+    }
+
+    #[test]
+    fn many_gone_folders_side_by_side_come_back_in_linear_time() {
+        let (dir, mut repo) = project();
+        // 20,000 gone folders in the top folder and 20,000 in a gone folder, each holding a link.
+        let mut wide = None;
+        let mut inner = None;
+        plant_root(&mut repo, |packs| {
+            let link = add_link(packs, COMMIT);
+            let holds_link = add_listing(packs, vec![entry("sub", EntryKind::ProjectLink, link)]).0;
+            let many = |prefix: char| -> Vec<Entry> {
+                (0..20_000)
+                    .map(|i| entry(&format!("{prefix}{i:05}"), EntryKind::Folder, holds_link))
+                    .collect()
+            };
+            let below = add_listing(packs, many('g')).0;
+            let mut top = many('f');
+            top.push(entry("wide", EntryKind::Folder, below));
+            (wide, inner) = (Some(below), Some(holds_link));
+            add_listing(packs, top).0
+        });
+        write(dir.path(), "new.txt", b"x");
+        let saved = timed_save(&mut repo, "40,000 gone folders side by side");
+        assert_eq!(saved.entries().len(), 20_002);
+        assert_eq!(saved.get("f12345").map(|e| e.id), inner);
+        assert_eq!(saved.get("wide").map(|e| e.id), wide);
+    }
+
+    #[test]
+    fn kept_entries_in_two_gone_subfolders_come_back_together() {
+        let (dir, mut repo) = project();
+        let base = plant_save(
+            &mut repo,
+            &[
+                ("gone/a/one", EntryKind::ProjectLink, COMMIT),
+                ("gone/a/x.txt", EntryKind::File, b"x"),
+                ("gone/b/two", EntryKind::ProjectLink, COMMIT),
+                ("gone/c/y.txt", EntryKind::File, b"y"),
+            ],
+        );
+        write(dir.path(), "new.txt", b"x");
+        let saved = saved_top(&mut repo);
+        let paths: Vec<String> = saved_tree(repo.store(), saved.id()).into_keys().collect();
+        assert_eq!(
+            paths,
+            [
+                "gone",
+                "gone/a",
+                "gone/a/one",
+                "gone/b",
+                "gone/b/two",
+                "new.txt"
+            ]
+        );
+        for link in ["gone/a/one", "gone/b/two"] {
+            let was = entry_at(&repo, &base, link);
+            assert_eq!(entry_at(&repo, &saved, link), was, "{link}");
+        }
+    }
+
+    /// A drive that ignores letter case, whatever this one does.
+    const CASE_BLIND: Drive = Drive {
+        ignores_case: true,
+        composes_unicode: false,
+    };
+
+    #[test]
+    fn a_kept_folder_in_a_gone_folder_counts_with_everything_it_holds() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[
+                ("gone/Docs/a", EntryKind::File, b"a"),
+                ("gone/Docs/b", EntryKind::File, b"b"),
+                ("gone/docs/c", EntryKind::File, b"c"),
+            ],
+        );
+        // `gone`, the two kept folders, and the three files they hold.
+        let walk_under = |most| {
+            let limits = SaveLimits::new(MAX_SAVE_DEPTH, most);
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+        };
+        assert!(walk_under(6).is_ok());
+        let Err(SaveError::TooLarge { detail }) = walk_under(5) else {
+            panic!("6 entries were accepted under a limit of 5");
+        };
+        assert!(detail.contains("more than 5 "), "{detail}");
+    }
+
+    #[test]
+    fn a_kept_folder_counts_its_depth_against_the_limit() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[
+                ("Docs/a/b/x", EntryKind::File, b"x"),
+                ("docs/y", EntryKind::File, b"y"),
+            ],
+        );
+        // `Docs/a/b` is three levels down.
+        let walk_within = |levels| {
+            let limits = SaveLimits::new(levels, MAX_SAVE_ENTRIES);
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+        };
+        assert!(walk_within(3).is_ok());
+        let Err(SaveError::TooLarge { detail }) = walk_within(2) else {
+            panic!("a kept folder three levels deep was accepted under a limit of 2");
+        };
+        assert!(detail.contains("more than 2 levels"), "{detail}");
+    }
+
+    #[test]
+    fn a_damaged_listing_in_a_gone_folder_stops_the_save() {
+        let (dir, mut repo) = project();
+        let base = plant_save(&mut repo, &[("gone/x/sub", EntryKind::ProjectLink, COMMIT)]);
+        let x = entry_at(&repo, &base, "gone/x").unwrap().id;
+        damage_the_only_copy_of(&repo, &x);
+        write(dir.path(), "new.txt", b"x");
+        // Unread, it might hold a link that must stay, so the save can't go on without it.
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let head = repo.head().unwrap();
+        let err = save_now(&mut repo).unwrap_err();
+        assert!(matches!(err, SaveError::Repo(_)), "{err:?}");
+        assert_eq!(repo.head().unwrap(), head);
     }
 
     #[test]

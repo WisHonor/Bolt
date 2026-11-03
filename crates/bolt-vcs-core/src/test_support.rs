@@ -5,7 +5,7 @@ use crate::diary::{Position, ServerLines, Tag, TagList};
 use crate::encoding::Writer;
 use crate::id::{ChangeId, Id};
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackWriter};
+use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackSet, PackWriter};
 use crate::repo::Repository;
 use crate::save::Save;
 use std::collections::BTreeMap;
@@ -59,6 +59,73 @@ pub(crate) fn commit_records(
 /// the project folder holds, and returns its top listing. Each entry is a path with `/` between
 /// names, a kind, and bytes: a file's contents, a link's target, or a Git submodule's commit ID.
 pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u8])]) -> Listing {
+    let mut top = None;
+    plant_root(repo, |packs| {
+        let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
+        for &(path, kind, bytes) in entries {
+            let (id, size) = if kind == EntryKind::ProjectLink {
+                (add_link(packs, bytes), 0)
+            } else {
+                let id = packs.add_content(bytes).expect("store an entry");
+                (id, bytes.len() as u64)
+            };
+            let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+            folders.entry(up.to_owned()).or_default().push(Entry {
+                name: name.to_owned(),
+                kind,
+                id,
+                size,
+            });
+        }
+        // Longest path first, so a folder's listing is stored before the folder that holds it.
+        loop {
+            let path = folders
+                .keys()
+                .max_by_key(|p| p.len())
+                .cloned()
+                .expect("a folder");
+            let entries = folders.remove(&path).expect("its entries");
+            let (id, listing) = add_listing(packs, entries);
+            if path.is_empty() {
+                top = Some(listing);
+                return id;
+            }
+            let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+            folders.entry(up.to_owned()).or_default().push(Entry {
+                name: name.to_owned(),
+                kind: EntryKind::Folder,
+                id,
+                size: 0,
+            });
+        }
+    });
+    top.expect("the top listing")
+}
+
+/// Stores a Git submodule's link to `commit`, as an import makes it (storage-format.md §7).
+pub(crate) fn add_link(packs: &mut PackSet, commit: &[u8]) -> Id {
+    let mut link = Writer::new();
+    link.u8(1);
+    link.string("git");
+    link.string("");
+    link.bytes(commit);
+    packs
+        .add_record(ObjectKind::ProjectLink, &link.into_bytes())
+        .expect("store a link")
+}
+
+/// Stores a listing of `entries`, returning its ID and the listing.
+pub(crate) fn add_listing(packs: &mut PackSet, entries: Vec<Entry>) -> (Id, Listing) {
+    let listing = Listing::new(entries).expect("a listing");
+    let id = packs
+        .add_record(ObjectKind::FolderListing, &listing.encode())
+        .expect("store a listing");
+    (id, listing)
+}
+
+/// Commits a save on the current line whose top listing `build` stores and returns the ID of,
+/// whatever the project folder holds.
+pub(crate) fn plant_root(repo: &mut Repository, build: impl FnOnce(&mut PackSet) -> Id) {
     let lock = repo.lock_for_change("save", &mut |_| {}).expect("the lock");
     let (head, mut diary) = repo.current().expect("a current entry");
     let Position::OnLine(line) = diary.state.position.clone() else {
@@ -70,52 +137,7 @@ pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u
         .save(&parent_id, false)
         .expect("the line's save");
     let mut packs = repo.new_packs().expect("a pack set");
-    let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
-    for &(path, kind, bytes) in entries {
-        let (id, size) = if kind == EntryKind::ProjectLink {
-            // As an import makes it (storage-format.md §7).
-            let mut link = Writer::new();
-            link.u8(1);
-            link.string("git");
-            link.string("");
-            link.bytes(bytes);
-            (
-                packs.add_record(ObjectKind::ProjectLink, &link.into_bytes()),
-                0,
-            )
-        } else {
-            (packs.add_content(bytes), bytes.len() as u64)
-        };
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
-        folders.entry(up.to_owned()).or_default().push(Entry {
-            name: name.to_owned(),
-            kind,
-            id: id.expect("store an entry"),
-            size,
-        });
-    }
-    // Longest path first, so a folder's listing is stored before the folder that holds it.
-    let (root, top) = loop {
-        let path = folders
-            .keys()
-            .max_by_key(|p| p.len())
-            .cloned()
-            .expect("a folder");
-        let listing = Listing::new(folders.remove(&path).expect("its entries")).expect("a listing");
-        let id = packs
-            .add_record(ObjectKind::FolderListing, &listing.encode())
-            .expect("store a listing");
-        if path.is_empty() {
-            break (id, listing);
-        }
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
-        folders.entry(up.to_owned()).or_default().push(Entry {
-            name: name.to_owned(),
-            kind: EntryKind::Folder,
-            id,
-            size: 0,
-        });
-    };
+    let root = build(&mut packs);
     let save = Save {
         root,
         parents: vec![parent_id],
@@ -134,7 +156,6 @@ pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u
     diary.command = "save".into();
     diary.state.lines.insert(line, save_id);
     repo.commit(&lock, packs, &diary).expect("commit");
-    top
 }
 
 /// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte
