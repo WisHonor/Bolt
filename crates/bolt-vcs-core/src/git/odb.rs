@@ -1231,6 +1231,14 @@ mod tests {
                 .collect();
             git.pack(&pair);
         }
+        // An object two packs hold, each with one of its own.
+        let shared = b"in two packs".to_vec();
+        for own in [b"own one".as_slice(), b"own two"] {
+            git.pack(&[
+                PackEntry::Whole(Blob, shared.clone()),
+                PackEntry::Whole(Blob, own.to_vec()),
+            ]);
+        }
         // Packs of no objects under names of their own, as an archive can hold them.
         let (pack, idx) = git.pack(&[]);
         for i in 0..100 {
@@ -1248,9 +1256,26 @@ mod tests {
                     .is_some()
             );
         }
-        // Packs of no objects are listed, so a change to them is noticed, but never searched.
+        // The pack that found the last object is asked first: after an object only the later of
+        // two packs holds, one both hold is found there, not in the earlier.
         let folder = repo.packs().unwrap();
-        assert_eq!((folder.listed.len(), folder.packs.len()), (201, 100));
+        let shared = id(Blob, &shared, Sha1);
+        let both: Vec<usize> = (0..folder.packs.len())
+            .filter(|&n| folder.packs[n].find(&shared).is_some())
+            .collect();
+        assert_eq!(both.len(), 2);
+        let later = both[1];
+        let own = ["own one", "own two"]
+            .map(|own| id(Blob, own.as_bytes(), Sha1))
+            .into_iter()
+            .find(|own| folder.packs[later].find(own).is_some())
+            .unwrap();
+        repo.read(&own).unwrap();
+        assert_eq!(repo.objects.last_pack.get(), later);
+        repo.read(&shared).unwrap();
+        assert_eq!(repo.objects.last_pack.get(), later);
+        // Packs of no objects are listed, so a change to them is noticed, but never searched.
+        assert_eq!((folder.listed.len(), folder.packs.len()), (203, 102));
     }
 
     #[test]

@@ -252,7 +252,8 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
         if let Some(status) = child.try_wait().unwrap() {
             let mut stderr = String::new();
             std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
-            stderr.truncate(600);
+            // By characters: a cut inside one would panic.
+            let stderr: String = stderr.chars().take(600).collect();
             return Ended {
                 code: status.code(),
                 timed_out: false,

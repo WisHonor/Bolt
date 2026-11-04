@@ -1231,6 +1231,27 @@ mod tests {
     }
 
     #[test]
+    fn one_name_left_out_is_said_in_the_singular() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/.git", b"gitdir: /elsewhere\n");
+        write(root, "sub/notes.txt", b"mine");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["sub", "sub/notes.txt"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "git_names_left_out");
+        assert_eq!(
+            warnings[0].message,
+            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/.git\n\
+             Git keeps such names for itself (some spellings only on Windows or macOS), so Bolt \
+             leaves them out of saves, as it does on import. If Git uses it (a submodule's or \
+             worktree's .git file), list it in .boltignore to leave it out without this warning; \
+             otherwise rename it to save it."
+        );
+    }
+
+    #[test]
     fn braces_in_boltignore_are_literal_as_in_git() {
         let (dir, mut repo) = project();
         let root = dir.path();

@@ -225,7 +225,21 @@ mod tests {
     fn a_conversion_is_at_most_twice_as_long_as_what_was_saved() {
         let found = found(checked(b"\n\n", b"\r\n\r\n"));
         assert_eq!(found, (1, vec!["f.txt".to_owned()]));
-        checked(b"\n\n", b"\r\n\r\nx").unwrap();
+        // One byte more is no conversion, and it is decided from the sizes alone: the store lacks
+        // the saved bytes, so any read of them would fail the check.
+        let (dir, mut repo) = project();
+        plant_root(&mut repo, |packs| {
+            let lost = Entry {
+                name: "f.txt".into(),
+                kind: EntryKind::File,
+                id: hash_content(b"\n\n"),
+                size: 2,
+            };
+            add_listing(packs, vec![lost]).0
+        });
+        write(dir.path(), "f.txt", b"\r\n\r\nx");
+        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        check(repo.store(), &scan.folders, &scan.old).unwrap();
     }
 
     #[test]
