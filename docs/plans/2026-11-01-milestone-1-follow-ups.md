@@ -126,6 +126,10 @@ The task reviews, both red-team sessions and the final review left these small i
 - The `.bolt` check splits names at the first backslash only, while the `.git` check looks at every part. A NUL could end a name in `is_git_alias` as in C Git. `is_hfs_dotgit` checks the whole name, not each backslash part. All are unreachable while names holding `\` are never written.
 - A case-only rename of a folder holding a kept entry (`Docs` → `docs`) is refused as not portable on a drive that ignores case. An ignored saved file re-created in the other Unicode form on macOS drops out.
 
+- Finding an unfinished `.bolt` reads its packs for saves with no cap of its own, and every folder on the way up is looked at, even below a real project. A planted `.bolt` with 100,000 first entries costs about 2 s on every command run under it. Look only when no project is found above, and treat more than a few dozen first entries as saves.
+- A head left at the first entry is trusted over packs that hold later saves. Decision 010 makes the head the record, but checking the packs too would be safer.
+- A `.bolt` an import began, whose Git repository is then deleted, has no way out the hints name: `bolt start` refuses it and `bolt import` can't run. Say to move or delete it then.
+
 **Tests**
 - Error documents have no byte-exact snapshot.
 - No test pins tag names that differ only by case, a 256-byte name inside server lines, or a decode-then-encode round trip in the fuzz decoders.

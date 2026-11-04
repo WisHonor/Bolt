@@ -1010,7 +1010,7 @@ impl Repository {
 1. **What already exists.**
    - A `.bolt` with `format` refuses: "This folder is already a Bolt project. Picking up new Git commits comes in a later version" (decision 040).
    - A `.bolt` without `format` is an interrupted start or import, and this run finishes it. Exception: if it holds anything besides Bolt's own entries (`format`, `store`, `state`, `cache`, `tmp`, `config.toml`), it is another tool's folder, such as bolt.new's. Then Bolt refuses: "There's a .bolt folder here that Bolt didn't make (bolt.new and other tools use that name); move or rename it first."
-   - A `.bolt` without `format` whose diary shows saves (an entry with a parent, at the head or in a pack) is a project that lost its `format`. `bolt import` and `bolt start` refuse it as damage ("Ask for help before trying to repair it"), so neither writes a new first entry over its saves.
+   - A `.bolt` without `format` whose diary shows saves (the head's entry has a parent or, when the head is gone too, an entry in a pack does) is a project that lost its `format`. `bolt import` and `bolt start` refuse it as damage ("Ask for help before trying to repair it"), so neither writes a new first entry over its saves.
    - An import inside another Bolt project refuses, as `start` does.
 2. `git::Repo::open(root)`, then `refs()`.
 3. **Names and limits.** The renaming rule is applied to lines, servers, server lines and tags. The limits are checked (Global Constraints).

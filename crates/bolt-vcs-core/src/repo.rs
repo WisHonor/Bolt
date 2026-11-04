@@ -528,8 +528,8 @@ enum Diary {
     /// What a start or import stores before it finishes, which running it again redoes: packs,
     /// and at most the one entry it commits just before it writes `format`.
     Begun,
-    /// An entry with a parent, at the head or in a pack: a project that had saves and lost its
-    /// `format`, and maybe its head too.
+    /// The head's entry has a parent or, with no head, an entry in a pack does: a project that
+    /// had saves and lost its `format`, and maybe its head too.
     Saves,
 }
 
