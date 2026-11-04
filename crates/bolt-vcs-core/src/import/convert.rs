@@ -1936,7 +1936,7 @@ mod tests {
                 other => panic!("{other:?}"),
             }
             assert!(e.to_string().contains(says), "{e}");
-            // Git LFS's own tools reject a lookalike as Git LFS does.
+            // `migrate export` can't convert a lookalike, so only a pointer's hint offers it.
             let hint = e.hint().unwrap();
             assert_eq!(
                 hint.contains("git lfs migrate export"),

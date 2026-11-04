@@ -36,7 +36,8 @@
 A command can now write several packs, so milestone 2 added crash tests for the gap between two of them. A named point, `packs:rolled-over`, sits right after a full pack goes into the store.
 - `a_crash_between_packs_leaves_the_repository_as_it_was` (in `crates/bolt-vcs-core/src/repo.rs`) fails a command that needs three packs at every step. It checks that `state/head` still names the old entry, that the store checks out, and that running the command again works.
 - `crates/bolt-vcs-core/tests/import_interrupted.rs` does the same to `bolt import`, with a test-only limit of three objects a pack. After every stop there is no project yet (`.bolt/format` is missing), and running the import again gives the saves and state of a clean import. At least one stop must fall between two packs.
-- `crates/bolt-vcs-core/tests/pack_limit.rs` checks that the test-only limit splits a command's packs until it is cleared. The limit applies to every command in the process, so each of these two files holds a single test.
+
+Beside them, `crates/bolt-vcs-core/tests/pack_limit.rs` is not a crash test: it checks the test-only limit itself, that it splits a command's packs until it is cleared. The limit applies to every command in the process, so that file and `import_interrupted.rs` each hold a single test.
 
 **Differential tests against Git.** `crates/bolt-vcs/tests/import_vs_git.rs` makes repositories with Git itself, runs `bolt import`, and then `assert_matches_git` (in `tests/support/`) compares the project with what Git holds, reading Git's objects through `git cat-file --batch`:
 

@@ -416,16 +416,16 @@ fn gitignored_files_saved(mut paths: Vec<String>) -> Warning {
     let (what, why) = if count == 1 {
         (
             "1 new or changed file".to_owned(),
-            "Git would leave it out unless it was added (git add). If it shouldn't be saved, \
-             remove the .boltignore line that takes it back and move it out of the project \
-             folder; this save keeps it.",
+            "Git would leave it out unless it was forced in with git add -f. If it shouldn't be \
+             saved, remove the .boltignore line that takes it back and move it out of the \
+             project folder; this save keeps it.",
         )
     } else {
         (
             format!("{count} new or changed files"),
-            "Git would leave them out unless they were added (git add). If they shouldn't be \
-             saved, remove the .boltignore lines that take them back and move them out of the \
-             project folder; this save keeps them.",
+            "Git would leave them out unless they were forced in with git add -f. If they \
+             shouldn't be saved, remove the .boltignore lines that take them back and move them \
+             out of the project folder; this save keeps them.",
         )
     };
     let message = format!(

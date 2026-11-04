@@ -179,7 +179,7 @@ fn lfs_hint(lookalike: bool) -> String {
     if lookalike {
         "Nothing was changed. Git LFS won't convert it either, since it doesn't read it as a \
          pointer: rewrite the Git history that holds it, with the real file in its place if it \
-         stands for one, then run bolt import again."
+         stands for one, so that it no longer looks like a pointer, then run bolt import again."
     } else {
         "Nothing was changed. To import now, turn the Git LFS files back into ordinary Git files \
          in a copy of the repository with `git lfs migrate export --everything --include=\"*\"`, \

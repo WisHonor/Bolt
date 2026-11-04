@@ -38,8 +38,9 @@ const DELTA_WORK_PER_INFLATED_BYTE: u64 = 500;
 /// Work counted for each entry header a walk down a delta chain reads past its first: one read
 /// from disk takes about as long as inflating a kilobyte.
 const ENTRY_HEADER_WORK: u64 = 1 << 10;
-/// Pack entries whose type, depth and size are kept once a header walk learns them: at most
-/// about 43 MB.
+/// Pack entries whose type, depth and size are kept once a header walk learns them: about 43 MB
+/// at most, or 64 MB for a moment while the map grows. Past it nothing more is kept, so walks
+/// repeat, each still counted against the work allowance.
 const MAX_KNOWN_ENTRIES: usize = 1 << 19;
 /// The most a loose object may say it holds: 1 TiB.
 const MAX_LOOSE_SIZE: u64 = 1 << 40;
@@ -369,7 +370,8 @@ impl Repo {
 impl Repo {
     /// The type and size of the object at `at` in pack number `n`, as its entry says; for a
     /// delta, what it says it builds, and the type at the bottom of its chain. What the walk
-    /// down the chain learns is kept, so no header walks past an entry twice.
+    /// down the chain learns is kept (up to `MAX_KNOWN_ENTRIES` entries), so no header walks past
+    /// one of those again.
     fn packed_header(
         &self,
         n: usize,

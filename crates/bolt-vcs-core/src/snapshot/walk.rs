@@ -1882,8 +1882,8 @@ mod tests {
             warnings[0].message,
             "Saved 3 new or changed files that .gitignore keeps out but .boltignore takes back:\n  \
              .env\n  deploy.pem\n  secrets/new.key\nGit would leave them out unless they were \
-             added (git add). If they shouldn't be saved, remove the .boltignore lines that take \
-             them back and move them out of the project folder; this save keeps them."
+             forced in with git add -f. If they shouldn't be saved, remove the .boltignore lines \
+             that take them back and move them out of the project folder; this save keeps them."
         );
     }
 
