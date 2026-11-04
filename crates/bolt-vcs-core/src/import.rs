@@ -525,7 +525,8 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// What the first pass learned of a Git tag object.
+/// What the first pass learned of an object a tag reaches: a tag object, or the commit, tree or
+/// blob a chain ends at, which has no tag objects and no message.
 struct Seen {
     /// Where the chain from it ends: a commit, or nothing Bolt can tag.
     end: Option<GitId>,
@@ -538,7 +539,8 @@ struct Seen {
 /// The commits an import starts from (decision 033): those of the branches and the server
 /// branches, those the tags end at, and a detached `HEAD`'s. Tags are held to every limit
 /// `Converter::tag` holds them to, the size of the tag list they make included, so a tag it would
-/// refuse stops the import before anything is written. Each tag object is read once.
+/// refuse stops the import before anything is written. Each object a tag reaches is looked at
+/// once, however many tags reach it.
 fn roots(
     git: &git::Repo,
     refs: &Refs,
@@ -566,10 +568,15 @@ fn roots(
             let hex = id.to_hex();
             let here = || format!("tag `{name}`, at object `{hex}`");
             let (kind, size) = git.header(&id).map_err(|e| at(e, here))?;
-            match kind {
-                ObjectType::Commit => break (Some(id), Vec::new(), None),
-                ObjectType::Tree | ObjectType::Blob => break (None, Vec::new(), None),
-                ObjectType::Tag => {}
+            if kind != ObjectType::Tag {
+                let end = (kind == ObjectType::Commit).then_some(id);
+                let none = Seen {
+                    end,
+                    objects: Vec::new(),
+                    message: 0,
+                };
+                seen.insert(id, none);
+                break (end, Vec::new(), None);
             }
             check_tag_object(name, &id, size)?;
             check_tag_chain(name, (read.len() as u64).saturating_add(1))?;

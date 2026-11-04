@@ -380,7 +380,6 @@ fn tags_on_a_deep_commit(root: &Path, tags: usize, depth: usize) {
 }
 
 #[test]
-#[ignore = "RT4-2: red-team proof, run once its fix is in"]
 fn rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time() {
     // The same tags on a commit stored whole import at once (0.3 s in a release build).
     let whole = Env::new();

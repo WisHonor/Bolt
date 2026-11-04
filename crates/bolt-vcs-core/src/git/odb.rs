@@ -33,6 +33,12 @@ const MIN_DELTA_WORK: u64 = 4 << 30;
 /// pack still buys 35 to 1,000 times its inflating time in rebuilding. git/git needs at most 46,
 /// a margin of about 11.
 const DELTA_WORK_PER_INFLATED_BYTE: u64 = 500;
+/// Work counted for each entry header a walk down a delta chain reads past its first: one read
+/// from disk takes about as long as inflating a kilobyte.
+const ENTRY_HEADER_WORK: u64 = 1 << 10;
+/// Pack entries whose type, depth and size are kept once a header walk learns them: at most
+/// about 43 MB.
+const MAX_KNOWN_ENTRIES: usize = 1 << 19;
 /// The most a loose object may say it holds: 1 TiB.
 const MAX_LOOSE_SIZE: u64 = 1 << 40;
 /// A loose object's header fits in this many bytes with its NUL, as Git requires.
@@ -58,6 +64,9 @@ pub(super) struct Objects {
     /// Packs opened for reading, by number, the most recently used first.
     open: RefCell<Vec<(usize, File)>>,
     cache: RefCell<BaseCache>,
+    /// What header walks learned of pack entries, by pack number and offset. An entry never
+    /// changes, so nothing here goes stale.
+    known: RefCell<HashMap<(usize, u64), Known>>,
     /// Bytes inflated and built so far to rebuild objects through deltas.
     work: Cell<u64>,
     /// Compressed bytes of the pack entries inflated so far, each entry counted once.
@@ -68,6 +77,17 @@ impl fmt::Debug for Objects {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Objects").finish_non_exhaustive()
     }
+}
+
+/// What a header walk learned of a pack entry.
+#[derive(Clone, Copy)]
+struct Known {
+    /// The type at the bottom of its chain: its own, if it is stored whole.
+    kind: ObjectType,
+    /// How many deltas deep it is.
+    depth: u32,
+    /// What it holds or builds, once a header was asked for it.
+    size: Option<u64>,
 }
 
 /// Where an object is.
@@ -84,7 +104,7 @@ impl Repo {
             Place::Loose(loose) => Ok((loose.kind, loose.size)),
             Place::Packed(n, pack, at) => {
                 let file = self.open_pack(n, pack)?;
-                let header = packed_header(pack, &file, at);
+                let header = self.packed_header(n, pack, &file, at);
                 self.keep_open(n, file);
                 header
             }
@@ -206,11 +226,13 @@ impl Repo {
     /// apply is counted against the import's budget before each step.
     fn unpack(&self, n: usize, pack: &Pack, file: &File, at: u64) -> Result<Object, GitError> {
         let cache = &self.objects.cache;
-        let chain = chain(pack, file, at, &mut |base| {
-            cache.try_borrow_mut().ok()?.take((n, base))
+        let chain = self.chain(pack, file, at, &mut |base| {
+            let base = cache.try_borrow_mut().ok()?.take((n, base))?;
+            let depth = base.depth;
+            Some((base, depth))
         })?;
         let mut base = match chain.bottom {
-            Bottom::Cached(base) => base,
+            Bottom::Cached(base, _) => base,
             Bottom::Whole(kind, entry) => {
                 if !chain.deltas.is_empty() {
                     self.spend(entry.size)?;
@@ -295,18 +317,167 @@ impl Repo {
     }
 }
 
-/// The type and size of the object at `at` in `pack`, as its entry says; for a delta, what it
-/// says it builds, and the type at the bottom of its chain.
-fn packed_header(pack: &Pack, file: &File, at: u64) -> Result<(ObjectType, u64), GitError> {
-    let entry = pack.entry(file, at)?;
-    if let EntryKind::Whole(kind) = entry.kind {
-        return Ok((kind, entry.size));
+impl Repo {
+    /// The type and size of the object at `at` in pack number `n`, as its entry says; for a
+    /// delta, what it says it builds, and the type at the bottom of its chain. What the walk
+    /// down the chain learns is kept, so no header walks past an entry twice.
+    fn packed_header(
+        &self,
+        n: usize,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+    ) -> Result<(ObjectType, u64), GitError> {
+        let known = self.known(n, at);
+        if let Some(Known {
+            kind,
+            size: Some(size),
+            ..
+        }) = known
+        {
+            return Ok((kind, size));
+        }
+        let entry = pack.entry(file, at)?;
+        let (kind, depth, size) = match entry.kind {
+            EntryKind::Whole(kind) => (kind, 0, entry.size),
+            EntryKind::OfsDelta(_) | EntryKind::RefDelta(_) => {
+                let size = built_size(pack, file, at, &entry)?;
+                let (kind, depth) = match known {
+                    Some(known) => (known.kind, known.depth),
+                    None => self.chain_kind(n, pack, file, at)?,
+                };
+                (kind, depth, size)
+            }
+        };
+        let learned = Known {
+            kind,
+            depth,
+            size: Some(size),
+        };
+        self.learn(n, at, learned);
+        Ok((kind, size))
     }
-    let size = built_size(pack, file, at, &entry)?;
-    let kind = match chain(pack, file, at, &mut |_| None)?.bottom {
-        Bottom::Whole(kind, _) | Bottom::Cached(Base { kind, .. }) => kind,
-    };
-    Ok((kind, size))
+
+    /// The type at the bottom of the chain from the entry at `at` in pack number `n`, and how
+    /// many deltas deep that entry is. The walk stops at an entry learned before, and every
+    /// entry it passes is learned.
+    fn chain_kind(
+        &self,
+        n: usize,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+    ) -> Result<(ObjectType, u32), GitError> {
+        let chain = self.chain(pack, file, at, &mut |here| {
+            self.known(n, here).map(|known| (known.kind, known.depth))
+        })?;
+        let (kind, mut depth) = match chain.bottom {
+            Bottom::Cached(kind, depth) => (kind, depth),
+            Bottom::Whole(kind, entry) => {
+                let whole = Known {
+                    kind,
+                    depth: 0,
+                    size: Some(entry.size),
+                };
+                self.learn(n, chain.bottom_at, whole);
+                (kind, 0)
+            }
+        };
+        for &(here, _) in chain.deltas.iter().rev() {
+            depth = depth.saturating_add(1);
+            let delta = Known {
+                kind,
+                depth,
+                size: None,
+            };
+            self.learn(n, here, delta);
+        }
+        Ok((kind, depth))
+    }
+
+    /// What a header walk learned of the entry at `at` in pack number `n`, if anything.
+    fn known(&self, n: usize, at: u64) -> Option<Known> {
+        self.objects.known.try_borrow().ok()?.get(&(n, at)).copied()
+    }
+
+    /// Keeps what was learned of the entry at `at` in pack number `n`: in place of what was
+    /// known of it, or beside the rest while there is room.
+    fn learn(&self, n: usize, at: u64, known: Known) {
+        let Ok(mut map) = self.objects.known.try_borrow_mut() else {
+            return;
+        };
+        if let Some(was) = map.get_mut(&(n, at)) {
+            *was = known;
+        } else if map.len() < MAX_KNOWN_ENTRIES {
+            map.insert((n, at), known);
+        }
+    }
+
+    /// Follows the deltas from the entry at `at` to an object stored whole, or to an entry
+    /// `cached` gives something for with how many deltas deep it is, without recursion: at most
+    /// `MAX_DELTA_DEPTH` deltas in all, the cached entry's counted too, and never round a loop.
+    /// Each entry header read past the first counts against the work allowance.
+    fn chain<T>(
+        &self,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+        cached: &mut dyn FnMut(u64) -> Option<(T, u32)>,
+    ) -> Result<Chain<T>, GitError> {
+        let shown = pack.path.display();
+        let too_deep = || {
+            broken(format!(
+                "the object at offset {at} in {shown} is more than {MAX_DELTA_DEPTH} deltas deep"
+            ))
+        };
+        let mut deltas = Vec::new();
+        let mut seen = HashSet::new();
+        let mut here = at;
+        loop {
+            if let Some((found, below)) = cached(here) {
+                let depth = u32::try_from(deltas.len()).unwrap_or(u32::MAX);
+                if depth.saturating_add(below) > MAX_DELTA_DEPTH {
+                    return Err(too_deep());
+                }
+                return Ok(Chain {
+                    deltas,
+                    bottom_at: here,
+                    bottom: Bottom::Cached(found, below),
+                });
+            }
+            if !seen.insert(here) {
+                return Err(broken(format!(
+                    "the deltas that build the object at offset {at} in {shown} go round in a loop"
+                )));
+            }
+            if !deltas.is_empty() {
+                self.spend(ENTRY_HEADER_WORK)?;
+            }
+            let entry = pack.entry(file, here)?;
+            let base = match entry.kind {
+                EntryKind::Whole(kind) => {
+                    return Ok(Chain {
+                        deltas,
+                        bottom_at: here,
+                        bottom: Bottom::Whole(kind, entry),
+                    });
+                }
+                EntryKind::OfsDelta(base) => base,
+                EntryKind::RefDelta(id) => pack.find(&id).ok_or_else(|| {
+                    broken(format!(
+                        "the delta at offset {here} in {shown} builds on `{}`, which isn't in \
+                         that pack",
+                        id.to_hex()
+                    ))
+                })?,
+            };
+            if deltas.len() >= MAX_DELTA_DEPTH as usize {
+                return Err(too_deep());
+            }
+            deltas.push((here, entry));
+            here = base;
+        }
+    }
 }
 
 /// The most an import may inflate and build through deltas once it has inflated `inflated`
@@ -348,17 +519,18 @@ fn is_blob(id: &GitId, kind: ObjectType) -> Result<(), GitError> {
 }
 
 /// The deltas from an entry down to what they build on, the outermost first.
-struct Chain {
+struct Chain<T> {
     deltas: Vec<(u64, Entry)>,
     bottom_at: u64,
-    bottom: Bottom,
+    bottom: Bottom<T>,
 }
 
 /// What a chain of deltas builds on.
-enum Bottom {
+enum Bottom<T> {
     /// An object stored whole, and its entry.
     Whole(ObjectType, Entry),
-    Cached(Base),
+    /// What was cached for the entry, and how many deltas deep it is.
+    Cached(T, u32),
 }
 
 /// An object rebuilt for deltas to build on.
@@ -368,67 +540,6 @@ struct Base {
     data: Vec<u8>,
     /// How many deltas it was built through.
     depth: u32,
-}
-
-/// Follows the deltas from the entry at `at` to an object stored whole, or to a base `cached`
-/// gives, without recursion: at most `MAX_DELTA_DEPTH` deltas in all, the cached base's
-/// counted too, and never round a loop.
-fn chain(
-    pack: &Pack,
-    file: &File,
-    at: u64,
-    cached: &mut dyn FnMut(u64) -> Option<Base>,
-) -> Result<Chain, GitError> {
-    let shown = pack.path.display();
-    let too_deep = || {
-        broken(format!(
-            "the object at offset {at} in {shown} is more than {MAX_DELTA_DEPTH} deltas deep"
-        ))
-    };
-    let mut deltas = Vec::new();
-    let mut seen = HashSet::new();
-    let mut here = at;
-    loop {
-        if let Some(base) = cached(here) {
-            let depth = u32::try_from(deltas.len()).unwrap_or(u32::MAX);
-            if depth.saturating_add(base.depth) > MAX_DELTA_DEPTH {
-                return Err(too_deep());
-            }
-            return Ok(Chain {
-                deltas,
-                bottom_at: here,
-                bottom: Bottom::Cached(base),
-            });
-        }
-        if !seen.insert(here) {
-            return Err(broken(format!(
-                "the deltas that build the object at offset {at} in {shown} go round in a loop"
-            )));
-        }
-        let entry = pack.entry(file, here)?;
-        let base = match entry.kind {
-            EntryKind::Whole(kind) => {
-                return Ok(Chain {
-                    deltas,
-                    bottom_at: here,
-                    bottom: Bottom::Whole(kind, entry),
-                });
-            }
-            EntryKind::OfsDelta(base) => base,
-            EntryKind::RefDelta(id) => pack.find(&id).ok_or_else(|| {
-                broken(format!(
-                    "the delta at offset {here} in {shown} builds on `{}`, which isn't in that \
-                     pack",
-                    id.to_hex()
-                ))
-            })?,
-        };
-        if deltas.len() >= MAX_DELTA_DEPTH as usize {
-            return Err(too_deep());
-        }
-        deltas.push((here, entry));
-        here = base;
-    }
 }
 
 /// What the delta at `at` says it builds, read from the start of its data.
@@ -1011,9 +1122,11 @@ mod tests {
         repo.read(&id(Blob, base, Sha1)).unwrap();
         repo.read(&id(Tree, tree, Sha1)).unwrap();
         assert_eq!(repo.objects.work.get(), 0);
-        // The bottom inflated, then each delta inflated and applied.
+        // The two entry headers read below the first, the bottom inflated, then each delta
+        // inflated and applied.
         repo.read(&id(Blob, third, Sha1)).unwrap();
-        let rebuilt = base.len()
+        let rebuilt = 2 * ENTRY_HEADER_WORK as usize
+            + base.len()
             + delta(base, second).len()
             + second.len()
             + delta(second, third).len()
@@ -1071,8 +1184,9 @@ mod tests {
         };
         let repo = open(&dir);
         let budget = MIN_DELTA_WORK;
-        // Room for the base and the delta, but not for what the delta builds.
-        let room = base.len() + delta(base, second).len();
+        // Room for the base's entry header, the base and the delta, but not for what the delta
+        // builds.
+        let room = ENTRY_HEADER_WORK as usize + base.len() + delta(base, second).len();
         repo.objects.work.set(budget - room as u64);
         match repo.read(&id(Blob, second, Sha1)) {
             Err(e @ GitError::TooMuchWork { .. }) => {
@@ -1091,6 +1205,55 @@ mod tests {
         }
         // The inflating fit exactly; building is what was refused.
         assert_eq!(repo.objects.work.get(), budget + second.len() as u64);
+    }
+
+    #[test]
+    fn a_header_walks_down_a_chain_once_counting_what_it_reads() {
+        let (dir, git) = craft(Sha1);
+        // 100 deltas, each on the one before, over a blob stored whole.
+        let versions: Vec<Vec<u8>> = (0..=100).map(|i| format!("v{i}").into_bytes()).collect();
+        let mut entries = vec![PackEntry::Whole(Blob, versions[0].clone())];
+        for i in 1..versions.len() {
+            entries.push(PackEntry::OfsDelta {
+                base: i - 1,
+                delta: delta(&versions[i - 1], &versions[i]),
+            });
+        }
+        git.pack(&entries);
+        let header = |repo: &Repo, i: usize| repo.header(&id(Blob, &versions[i], Sha1)).unwrap();
+        let repo = open(&dir);
+        // Each entry below the first is read once, and counts.
+        assert_eq!(header(&repo, 100), (Blob, 4));
+        assert_eq!(repo.objects.work.get(), 100 * ENTRY_HEADER_WORK);
+        // No entry of that chain is walked past again, the first included.
+        for i in [100, 50, 0, 99] {
+            assert_eq!(header(&repo, i), (Blob, versions[i].len() as u64), "{i}");
+        }
+        assert_eq!(repo.objects.work.get(), 100 * ENTRY_HEADER_WORK);
+        // A walk past the allowance stops.
+        let repo = open(&dir);
+        repo.objects
+            .work
+            .set(MIN_DELTA_WORK - 99 * ENTRY_HEADER_WORK);
+        let what = repo.header(&id(Blob, &versions[100], Sha1));
+        assert!(
+            matches!(what, Err(GitError::TooMuchWork { .. })),
+            "{what:?}"
+        );
+        // With no room left to keep what it learns, a header walks the whole chain each time.
+        let repo = open(&dir);
+        let other = Known {
+            kind: Tree,
+            depth: 0,
+            size: None,
+        };
+        let full = (0..MAX_KNOWN_ENTRIES as u64).map(|at| ((usize::MAX, at), other));
+        repo.objects.known.borrow_mut().extend(full);
+        for _ in 0..2 {
+            assert_eq!(header(&repo, 100), (Blob, 4));
+        }
+        assert_eq!(repo.objects.work.get(), 200 * ENTRY_HEADER_WORK);
+        assert_eq!(repo.objects.known.borrow().len(), MAX_KNOWN_ENTRIES);
     }
 
     #[test]
