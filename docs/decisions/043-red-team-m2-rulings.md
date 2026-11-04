@@ -4,6 +4,7 @@
 - **Date:** 2026-11-03
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md))
 - **Refines:** [decision 019](019-review-clarifications.md) (which names a save leaves out); [decision 032](032-exact-repeatable-commit-import.md) (when a commit's change-id header is used); [decision 038](038-gitignore-and-saved-files.md) (saved files that an ignore rule matches); [decision 039](039-first-save-after-import.md) (sparse checkouts set up through an include)
+- **Refined by:** [decision 044](044-red-team-m2-final-rulings.md) (a change-id header equal to any commit's own ID is refused too; folders kept whole keep what the last save holds)
 
 ## Context
 
