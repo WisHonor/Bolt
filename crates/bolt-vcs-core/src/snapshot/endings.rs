@@ -6,12 +6,9 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use super::{Folders, Kind, SaveError, open_project_file, stamp};
+use super::{Folders, Kind, NAMED, SaveError, open_project_file, stamp};
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::store::Store;
-
-/// How many files the error names.
-const NAMED: usize = 5;
 
 /// How many saved bytes are held up against the file at a time.
 const PIECE: usize = 64 << 10;

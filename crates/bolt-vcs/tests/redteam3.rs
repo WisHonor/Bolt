@@ -659,7 +659,6 @@ fn rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT3-5: red-team proof, run once its fix is in"]
 fn rt3_5_save_leaves_out_every_name_import_takes_for_git() {
     let env = Env::new();
     one_commit(&env, &[("readme.txt", b"hello\n")]);
@@ -692,7 +691,6 @@ fn rt3_5_save_leaves_out_every_name_import_takes_for_git() {
 /// RT3-5 on every system: the spellings that can be made anywhere, a `.git` pointer file in a
 /// plain folder (a submodule added after the import) and `.git` with a character HFS+ ignores.
 #[test]
-#[ignore = "RT3-5B: red-team proof, run once its fix is in"]
 fn rt3_5b_save_leaves_out_a_git_file_and_an_hfs_spelling_of_git_everywhere() {
     let env = Env::new();
     one_commit(&env, &[("readme.txt", b"hello\n")]);

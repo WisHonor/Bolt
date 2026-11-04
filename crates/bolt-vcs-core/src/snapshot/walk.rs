@@ -2,7 +2,7 @@
 //! save holds along the way, and the entries a save keeps as they were, in folders gone from disk
 //! too.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,12 +11,12 @@ use std::thread;
 
 use ignore::WalkBuilder;
 
-use super::{Child, Folders, Kind, SaveError};
+use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
-use crate::names::{holdable_here, validate_name};
+use crate::names::{holdable_here, is_git_alias, validate_name};
 use crate::repo::RepoError;
 use crate::safe_fs;
 use crate::store::{Store, StoreError};
@@ -89,7 +89,8 @@ fn path_bytes(rel: &Path) -> Vec<u8> {
 }
 
 /// The save a new one builds on. A walk reads its listings along the folders it keeps, which its
-/// own depth limit holds, and below the folders gone from disk, which `limits` holds.
+/// own depth limit holds, and below the folders gone from disk, which `limits` holds. They come
+/// without the names Git treats as `.git`, which no save keeps, even from the last one.
 pub(super) struct Base<'a> {
     store: &'a Store,
     root: Id,
@@ -115,7 +116,7 @@ impl<'a> Base<'a> {
         self.limits
             .add(listing.entries().len())
             .map_err(|detail| StoreError::SaveTooLarge { detail })?;
-        Ok(listing)
+        without_git_names(listing)
     }
 
     /// The listing `id` of a folder `depth` levels down that is gone from disk, or `None` from
@@ -132,8 +133,17 @@ impl<'a> Base<'a> {
             self.spent = true;
             return Ok(None);
         }
-        Ok(Some(listing))
+        without_git_names(listing).map(Some)
     }
+}
+
+/// `listing` without its names Git treats as `.git`.
+fn without_git_names(listing: Listing) -> Result<Listing, SaveError> {
+    if !listing.entries().iter().any(|e| is_git_alias(&e.name)) {
+        return Ok(listing);
+    }
+    let rest = listing.entries().iter().filter(|e| !is_git_alias(&e.name));
+    Ok(Listing::new(rest.cloned().collect()).map_err(StoreError::from)?)
 }
 
 /// The walk met `path` before reading what the base save holds in the folder above it. It hands
@@ -158,6 +168,10 @@ struct WalkState {
     problem: Option<SaveError>,
     /// One for each `.gitignore` skipped.
     warnings: Vec<Warning>,
+    /// The first few, by path, of the names Git treats as `.git` that the walk left out, and how
+    /// many it left out.
+    git_names: BTreeSet<String>,
+    git_name_count: u64,
     /// The base save's listing of each folder the walk has noted, by project path, or `None`
     /// where the base save has no such folder. A folder not here hasn't been noted.
     old: HashMap<String, Option<Listing>>,
@@ -179,6 +193,8 @@ impl WalkState {
             read: 0,
             problem: None,
             warnings: Vec::new(),
+            git_names: BTreeSet::new(),
+            git_name_count: 0,
             old: HashMap::new(),
             held: HashSet::new(),
             drive,
@@ -337,8 +353,9 @@ impl WalkState {
     }
 
     /// Whether the walk keeps `path`: never what it leaves untouched, and what Git would ignore
-    /// stays out, unless the base save has it. After a problem, such as an ignore file that
-    /// fails, the problem is kept and nothing more is: the save will stop anyway.
+    /// stays out, unless the base save has it. A name Git treats as `.git` stays out too, noted
+    /// for the warning. After a problem, such as an ignore file that fails, the problem is kept
+    /// and nothing more is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         if self.problem.is_some() {
             return false;
@@ -357,11 +374,26 @@ impl WalkState {
         {
             return self.saved_before(&folder, rel, is_dir);
         }
+        // After the rules: an ignored one stays out without a word, and `Base` dropped saved ones.
+        let name = rel.file_name().and_then(|n| n.to_str());
+        if name.is_some_and(is_git_alias) {
+            self.leave_out(shown(rel));
+            return false;
+        }
         if is_dir && let Err(problem) = self.enter(path) {
             self.problem.get_or_insert(problem);
             return false;
         }
         true
+    }
+
+    /// Notes `rel`, left out because Git treats its name as `.git`, keeping the first few by path.
+    fn leave_out(&mut self, rel: String) {
+        self.git_name_count += 1;
+        self.git_names.insert(rel);
+        if self.git_names.len() > NAMED {
+            self.git_names.pop_last();
+        }
     }
 
     /// Whether the base save has the ignored `rel` under that name in `folder`, as a folder if
@@ -397,7 +429,7 @@ pub(super) struct Scan {
     pub(super) old: HashMap<String, Option<Listing>>,
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
-    /// One for each `.gitignore` skipped.
+    /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` left out.
     pub(super) warnings: Vec<Warning>,
 }
 
@@ -558,12 +590,38 @@ fn scan_folder(
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
     }
+    if rules.git_name_count > 0 {
+        let left_out = git_names_left_out(rules.git_name_count, &rules.git_names);
+        rules.warnings.push(left_out);
+    }
     Ok(Scan {
         folders,
         old: std::mem::take(&mut rules.old),
         rebuilt,
         warnings: std::mem::take(&mut rules.warnings),
     })
+}
+
+/// Says the walk left out `count` entries whose names Git treats as `.git`, naming `first`.
+fn git_names_left_out(count: u64, first: &BTreeSet<String>) -> Warning {
+    let (what, next) = if count == 1 {
+        (
+            "1 entry whose name Git treats as .git, with everything in it".to_owned(),
+            "Rename it to save it, or list it in .boltignore to leave it out without this warning.",
+        )
+    } else {
+        (
+            format!("{count} entries whose names Git treats as .git, with everything in them"),
+            "Rename them to save them, or list them in .boltignore to leave them out without this \
+             warning.",
+        )
+    };
+    let message = format!(
+        "Left out {what}:{}\nGit keeps such names for itself (some spellings only on Windows or \
+         macOS), so Bolt leaves them out of saves, as it does on import. {next}",
+        listed(first, count)
+    );
+    Warning::new(warning::GIT_NAMES_LEFT_OUT, message)
 }
 
 /// A folder gone from disk, back with only what is kept as it was below it.
@@ -940,28 +998,113 @@ mod tests {
     }
 
     #[test]
-    fn a_git_folder_is_never_saved_in_any_letter_case_where_git_reads_it_so() {
+    fn a_git_folder_is_never_saved_in_any_letter_case() {
         let (dir, mut repo) = project();
         let root = dir.path();
         write(root, "keep.txt", b"x");
         write(root, ".GIT/config", b"x");
         write(root, "sub/.Git/HEAD", b"x");
         let saved = save_now(&mut repo).unwrap();
-        // Only where the drive ignores letter case is `.GIT` Git's folder; elsewhere it is an
-        // ordinary one.
-        let want: &[&str] = if this_drive().ignores_case {
-            &["keep.txt", "sub"]
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
+        // Where the drive ignores letter case they are Git's folder, skipped without a word like
+        // `.git`; elsewhere they are what Windows and macOS would take for it.
+        if this_drive().ignores_case {
+            assert!(warnings.is_empty(), "{warnings:?}");
         } else {
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert_eq!(warnings[0].kind, "git_names_left_out");
+            let listed = ":\n  .GIT\n  sub/.Git\nGit keeps";
+            assert!(warnings[0].message.contains(listed), "{warnings:?}");
+        }
+    }
+
+    #[test]
+    fn every_name_git_treats_as_git_is_left_out_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        // First, so that on Windows no other name's 8.3 short name can take it.
+        write(root, "git~1/hooks/post-checkout", b"#!/bin/sh\n");
+        // A `.git` file, and spellings with characters macOS's HFS+ ignores, any system can hold.
+        write(root, "sub/.git", b"gitdir: /elsewhere\n");
+        write(root, "sub/notes.txt", b"mine");
+        write(root, ".g\u{200c}it/config", b"[core]\n");
+        write(root, "a/.git\u{feff}/config", b"[core]\n");
+        // An ignored one stays out without a word.
+        write(root, ".gitignore", b"/b/.git\n");
+        write(root, "b/.git", b"gitdir: /elsewhere\n");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        // The rest of a nested repository is saved as before.
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".gitignore", "a", "b", "sub", "sub/notes.txt"]
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "git_names_left_out");
+        assert_eq!(
+            warnings[0].message,
+            "Left out 4 entries whose names Git treats as .git, with everything in them:\n  \
+             .g\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/.git\nGit keeps such names for \
+             itself (some spellings only on Windows or macOS), so Bolt leaves them out of saves, \
+             as it does on import. Rename them to save them, or list them in .boltignore to leave \
+             them out without this warning."
+        );
+        // Said again when nothing changed, since they are still there.
+        let again = save_now(&mut repo).unwrap();
+        assert!(
+            matches!(again, SaveOutcome::NothingChanged { .. }),
+            "{again:?}"
+        );
+        assert_eq!(warnings_of(&again), warnings);
+    }
+
+    #[test]
+    fn the_names_left_out_are_counted_past_the_first_few() {
+        let (dir, mut repo) = project();
+        for i in (1..=7).rev() {
+            write(dir.path(), &format!("sub{i}/.git"), b"gitdir: /elsewhere\n");
+        }
+        let saved = save_now(&mut repo).unwrap();
+        let message = &warnings_of(&saved)[0].message;
+        let listed = "Left out 7 entries whose names Git treats as .git, with everything in them:\n  \
+                      sub1/.git\n  sub2/.git\n  sub3/.git\n  sub4/.git\n  sub5/.git\n  and 2 more\n";
+        assert!(message.starts_with(listed), "{message}");
+    }
+
+    #[test]
+    fn names_git_treats_as_git_are_dropped_from_what_the_last_save_holds() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        // As a shared project could hold them: entries a save would keep as they were (a project
+        // link, and another in a folder gone from disk), and an ignored file the last save holds.
+        plant_save(
+            &mut repo,
             &[
-                ".GIT",
-                ".GIT/config",
-                "keep.txt",
-                "sub",
-                "sub/.Git",
-                "sub/.Git/HEAD",
-            ]
-        };
-        assert_eq!(saved_paths(&repo, saved), want);
+                ("git~1", EntryKind::ProjectLink, COMMIT),
+                ("gone/.g\u{200c}it", EntryKind::ProjectLink, COMMIT),
+                ("lib/.git", EntryKind::File, b"gitdir: /elsewhere\n"),
+                ("lib/a.txt", EntryKind::File, b"x"),
+            ],
+        );
+        write(root, ".gitignore", b".git\n");
+        write(root, "lib/.git", b"gitdir: /elsewhere\n");
+        write(root, "lib/a.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".gitignore", "lib", "lib/a.txt"]
+        );
+        // None was kept as it was, and none is in the folder unignored.
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_names_left_out_are_shown_escaped() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        let first = BTreeSet::from([format!("{HOSTILE}/.git")]);
+        assert_hostile_text_escaped(&git_names_left_out(1, &first).message);
     }
 
     #[test]

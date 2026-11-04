@@ -15,6 +15,8 @@ pub const CHANGED_FILES_NOT_COUNTED: &str = "changed_files_not_counted";
 pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
 /// Entries this computer doesn't hold as they are were kept as the last save has them.
 pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
+/// A save left out entries whose names Git treats as `.git`.
+pub const GIT_NAMES_LEFT_OUT: &str = "git_names_left_out";
 /// The project opens only from an administrator terminal.
 pub const ELEVATED_ONLY: &str = "elevated_only";
 /// `start` made the project but couldn't read its first save back to show it.

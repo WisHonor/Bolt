@@ -135,9 +135,27 @@ fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     text
 }
 
+/// How many paths a message names; it counts the rest.
+const NAMED: usize = 5;
+
+/// The paths `first` of `count`, escaped, one to a line, and how many more there are.
+fn listed<'a>(first: impl IntoIterator<Item = &'a String>, count: u64) -> String {
+    let mut text = String::new();
+    let mut shown = 0;
+    for path in first {
+        let _ = write!(text, "\n  {}", escape(path, false));
+        shown += 1;
+    }
+    let more = count.saturating_sub(shown);
+    if more > 0 {
+        let _ = write!(text, "\n  and {more} more");
+    }
+    text
+}
+
 /// What Git did, then the files named, one to a line, and how many more there are.
 fn line_endings_changed(count: u64, first: &[String]) -> String {
-    let mut text = if count == 1 {
+    let text = if count == 1 {
         "1 file differs from what Git stored only in line endings: Git turned LF into CRLF when \
          it wrote it out (core.autocrlf)."
             .to_owned()
@@ -147,14 +165,7 @@ fn line_endings_changed(count: u64, first: &[String]) -> String {
              CRLF when it wrote them out (core.autocrlf)."
         )
     };
-    for path in first {
-        let _ = write!(text, "\n  {}", escape(path, false));
-    }
-    let more = count.saturating_sub(first.len() as u64);
-    if more > 0 {
-        let _ = write!(text, "\n  and {more} more");
-    }
-    text
+    text + &listed(first, count)
 }
 
 impl SaveError {
