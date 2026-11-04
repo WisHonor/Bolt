@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use bolt_platform::Owner;
 
 use crate::config::ConfigError;
+use crate::ignore::Rules;
 use crate::names::MAX_NAME_BYTES;
 use crate::repo::{self, RepoError};
 use crate::safe_fs;
@@ -471,9 +472,9 @@ impl Repo {
         exists(&self.git.join("lfs"))
     }
 
-    /// How many patterns `.git/info/exclude`, Git's personal list of files to ignore, holds: its
-    /// lines that aren't blank or comments. Bolt doesn't use them (decision 038), so the import
-    /// says so. `None` if it can't be read to count them, as when it is over 1 MiB or a link.
+    /// How many patterns `.git/info/exclude`, Git's personal list of files to ignore, holds, read
+    /// with Git's rules for such lines. Bolt doesn't use them (decision 038), so the import says
+    /// so. `None` if it can't be read to count them, as when it is over 1 MiB or a link.
     #[must_use]
     pub fn exclude_patterns(&self) -> Option<u64> {
         let info = self.git.join("info");
@@ -484,12 +485,8 @@ impl Repo {
         }
         let path = info.join("exclude");
         let text = read_optional(&path, safe_fs::MAX_IGNORE_FILE_BYTES).ok()?;
-        let lines = text.unwrap_or_default();
-        let patterns = lines
-            .split(|&b| b == b'\n')
-            .map(trim_end)
-            .filter(|line| !line.is_empty() && !line.starts_with(b"#"));
-        Some(patterns.count() as u64)
+        let rules = Rules::parse(&text.unwrap_or_default(), "", true);
+        Some(rules.pattern_count() as u64)
     }
 }
 

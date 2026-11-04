@@ -14,7 +14,7 @@ use crate::git::{
     looks_like_lfs_pointer, parse_tag, parse_tree, shown,
 };
 use crate::id::{ChangeId, Id, hash_record};
-use crate::listing::EntryKind;
+use crate::listing::{EntryKind, SaveLimits};
 use crate::names::{NameError, is_git_alias, validate_name};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{self, ChangeLock, RepoError, Repository};
@@ -325,7 +325,7 @@ fn plan(root: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Plan,
     if let Some(name) = tracked_bolt(&git, &head_commit)? {
         return Err(tracked_stop(&name));
     }
-    stop_at_lfs_in_head(&git, &head_commit)?;
+    stop_at_lfs_in_head(&git, &head_commit, SaveLimits::default())?;
     let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS, progress)?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
@@ -906,17 +906,26 @@ const MAX_ATTRIBUTES_BYTES: u64 = 1 << 20;
 /// Git LFS: a `.git/lfs` folder, or `filter=lfs` in the top `.gitattributes`. A sign alone doesn't
 /// stop it: `.git/lfs` stays after `git lfs migrate export` has turned the pointers back into
 /// files, and a `.gitattributes` can name the filter for files a repository doesn't have. The
-/// converter stops at a pointer anywhere else.
-fn stop_at_lfs_in_head(git: &git::Repo, head: &GitId) -> Result<(), ImportError> {
+/// converter stops at a pointer anywhere else. Each tree read counts against `limits`, as the
+/// converter counts it; past them this gives up, and the converter stops the import there.
+fn stop_at_lfs_in_head(
+    git: &git::Repo,
+    head: &GitId,
+    mut limits: SaveLimits,
+) -> Result<(), ImportError> {
     let tree = outline(git, head)?.tree;
     if !git.has_lfs_folder()? && !lfs_attribute(git, &tree)? {
         return Ok(());
     }
     let commit = head.to_hex();
-    // Each tree and blob is looked at once.
+    // Each tree and blob is looked at once, so this counts no more than the converter does.
     let mut seen = HashSet::from([tree]);
+    let top = kept_entries(git, &tree)?;
+    if limits.add(top.len()).is_err() {
+        return Ok(());
+    }
     // Each folder on the way down, by name, with the entries in it still to look at.
-    let mut stack = vec![(String::new(), kept_entries(git, &tree)?.into_iter())];
+    let mut stack = vec![(String::new(), top.into_iter())];
     while let Some((_, left)) = stack.last_mut() {
         let Some((name, kind, id)) = left.next() else {
             stack.pop();
@@ -926,8 +935,15 @@ fn stop_at_lfs_in_head(git: &git::Repo, head: &GitId) -> Result<(), ImportError>
             continue;
         }
         if kind == EntryKind::Folder {
-            let inner = kept_entries(git, &id)?.into_iter();
-            stack.push((name, inner));
+            // The new folder's level: the top folder is level 0.
+            if limits.check_depth(stack.len()).is_err() {
+                return Ok(());
+            }
+            let inner = kept_entries(git, &id)?;
+            if limits.add(inner.len()).is_err() {
+                return Ok(());
+            }
+            stack.push((name, inner.into_iter()));
             continue;
         }
         let path = || {
@@ -954,8 +970,8 @@ fn stop_at_lfs_in_head(git: &git::Repo, head: &GitId) -> Result<(), ImportError>
     Ok(())
 }
 
-/// Whether the top `.gitattributes` in the tree `tree` sends files through Git LFS's filter, or is
-/// too big to tell.
+/// Whether a line of the top `.gitattributes` in the tree `tree` that isn't a comment names Git
+/// LFS's filter, or the file is too big to tell.
 fn lfs_attribute(git: &git::Repo, tree: &GitId) -> Result<bool, ImportError> {
     let place = || "the top `.gitattributes` of `HEAD`".to_owned();
     let entries = kept_entries(git, tree)?;
@@ -972,7 +988,14 @@ fn lfs_attribute(git: &git::Repo, tree: &GitId) -> Result<bool, ImportError> {
     }
     let object = git.read(&id).map_err(|e| at(e, place))?;
     expect_kind(object.kind, ObjectType::Blob, &id, place)?;
-    Ok(object.data.windows(10).any(|w| w == b"filter=lfs"))
+    // Git skips the blanks a line starts with, then a line starting with `#` is a comment.
+    let lines = object
+        .data
+        .split(|&b| b == b'\n')
+        .map(<[u8]>::trim_ascii_start);
+    Ok(lines
+        .filter(|line| !line.starts_with(b"#"))
+        .any(|line| line.windows(10).any(|w| w == b"filter=lfs")))
 }
 
 /// The entries of the Git tree `id` that saves keep, as the converter judges their names.
@@ -1601,6 +1624,55 @@ mod tests {
         );
         assert!(!hint.contains("Nothing was changed"), "{hint}");
         assert!(opened.is_some());
+    }
+
+    /// The look for Git LFS pointers before anything is written counts each tree it reads
+    /// against a save's limits, as the converter does, and past them leaves the stop to the
+    /// converter. A comment in `.gitattributes` is no sign of Git LFS.
+    #[test]
+    fn the_look_for_lfs_pointers_keeps_to_a_saves_limits() {
+        let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:\
+            4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+        // `art/deep/big.psd`: two levels below the top, and three entries with the top's one.
+        let made = |attributes: Option<&[u8]>| {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Craft::new(dir.path(), HashKind::Sha1);
+            let blob = git.object(ObjectType::Blob, pointer);
+            let deep = git.tree(&[(b"100644", b"big.psd", blob)]);
+            let art = git.tree(&[(b"40000", b"deep", deep)]);
+            let tree = match attributes {
+                Some(text) => {
+                    let attrs = git.object(ObjectType::Blob, text);
+                    git.tree(&[
+                        (b"100644", b".gitattributes", attrs),
+                        (b"40000", b"art", art),
+                    ])
+                }
+                None => git.tree(&[(b"40000", b"art", art)]),
+            };
+            let commit = commit_on(&git, &tree, &[], "One\n");
+            (dir, commit)
+        };
+        let scan = |dir: &Path, commit: &GitId, depth, entries| {
+            let repo = git::Repo::open(dir).unwrap();
+            stop_at_lfs_in_head(&repo, commit, SaveLimits::new(depth, entries))
+        };
+        let pointer_found = |r| matches!(r, Err(ImportError::LfsPointer { .. }));
+        let (dir, commit) = made(None);
+        assert!(
+            scan(dir.path(), &commit, 2, 3).is_ok(),
+            "no sign of Git LFS"
+        );
+        std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
+        assert!(pointer_found(scan(dir.path(), &commit, 2, 3)));
+        assert!(scan(dir.path(), &commit, 1, 3).is_ok(), "a level short");
+        assert!(scan(dir.path(), &commit, 2, 2).is_ok(), "an entry short");
+        let line = b"*.psd filter=lfs diff=lfs merge=lfs -text\n";
+        let commented = [&b" \t# "[..], line].concat();
+        let (dir, commit) = made(Some(commented.as_slice()));
+        assert!(scan(dir.path(), &commit, 2, 4).is_ok(), "only a comment");
+        let (dir, commit) = made(Some(line));
+        assert!(pointer_found(scan(dir.path(), &commit, 2, 4)));
     }
 
     /// The first pass says how many commits it has read, as it goes, before it knows how many

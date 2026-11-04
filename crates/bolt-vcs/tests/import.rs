@@ -247,8 +247,8 @@ fn a_detached_head_puts_you_at_its_save() {
 }
 
 const NOT_ON_A_LINE: &str = "This version of Bolt can only save on a line. Delete the hidden \
-    .bolt folder here, switch Git to a branch (`git switch <branch>`) and run bolt import again, \
-    or import a fresh clone that is on a branch.";
+    .bolt folder at the top of the project, switch Git to a branch (`git switch <branch>`) and \
+    run bolt import there again, or import a fresh clone that is on a branch.";
 
 #[test]
 fn an_unborn_branch_stops_the_import() {
@@ -567,13 +567,15 @@ fn a_personal_exclude_list_with_patterns_is_warned_about() {
             .find(|w| w["kind"] == "info_exclude_ignored")
             .map(|w| w["message"].as_str().unwrap().to_owned())
     };
-    let sample = "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start \
-                  with '#' are comments.\n\n   \n";
+    // Read as Git reads it: a byte order mark is skipped, so the first line is a comment too.
+    let sample = "\u{feff}# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that \
+                  start with '#' are comments.\n\n   \n";
     assert_eq!(import_with(sample), None);
-    let message = import_with(&format!("{sample}secrets.env\r\n*.log\n")).unwrap();
+    // Git trims only spaces, so a tab is a pattern.
+    let message = import_with(&format!("{sample}secrets.env\r\n*.log\n\t\n")).unwrap();
     assert_eq!(
         message,
-        "Git's personal exclude list here, .git/info/exclude, has 2 patterns. Bolt doesn't use \
+        "Git's personal exclude list here, .git/info/exclude, has 3 patterns. Bolt doesn't use \
          Git's personal exclude lists, so files they hide will be saved; copy the lines into \
          .boltignore to keep those files out."
     );

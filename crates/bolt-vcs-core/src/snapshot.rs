@@ -190,8 +190,8 @@ impl SaveError {
                 }
                 SaveError::NotOnALine => {
                     "This version of Bolt can only save on a line. Delete the hidden .bolt folder \
-                     here, switch Git to a branch (`git switch <branch>`) and run bolt import \
-                     again, or import a fresh clone that is on a branch."
+                     at the top of the project, switch Git to a branch (`git switch <branch>`) and \
+                     run bolt import there again, or import a fresh clone that is on a branch."
                 }
                 SaveError::Unreadable { .. } => {
                     "Nothing was saved. Let Bolt read it, or list it in .boltignore."
