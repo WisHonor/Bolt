@@ -321,6 +321,51 @@ fn an_import_that_stops_partway_says_its_bolt_folder_is_kept() {
     }
 }
 
+/// A project that had saves and lost only its `format` is damage: neither command writes a new
+/// first entry over its saves, which would leave them for clean-up.
+#[test]
+fn import_and_start_refuse_a_project_that_lost_only_its_format() {
+    let env = Env::new();
+    let refused_over_saves = |dir: &Path, command: &str| {
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let saved = env
+            .bolt_in(dir)
+            .args(["save", "Add a file"])
+            .output()
+            .unwrap();
+        assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
+        std::fs::remove_file(dir.join(".bolt/format")).unwrap();
+        let head = std::fs::read(dir.join(".bolt/state/head")).unwrap();
+        let out = env.bolt_in(dir).arg(command).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{command}: {}",
+            text(&out.stdout)
+        );
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("has saves, but no .bolt/format file.\n")
+                && err.contains(
+                    "hint: Nothing was changed. Ask for help before trying to repair it.\n"
+                ),
+            "{command}: {err}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join(".bolt/state/head")).unwrap(),
+            head,
+            "{command}"
+        );
+        assert!(!dir.join(".bolt/format").exists(), "{command}");
+    };
+    env.commit("a.txt", "a\n", "First");
+    env.import();
+    refused_over_saves(env.root(), "import");
+    let started = tempfile::tempdir().unwrap();
+    env.bolt_in(started.path()).arg("start").assert().success();
+    refused_over_saves(started.path(), "start");
+}
+
 /// A sign of Git LFS has the first pass look for a pointer in `HEAD`'s files, so the usual Git
 /// LFS repository stops before `.bolt` is made, with the stop the converter gives.
 #[test]

@@ -68,11 +68,12 @@ pub enum RepoError {
     #[error("The .bolt folder was made, but the project isn't finished. {refusal}")]
     StartStopped { refusal: Box<RepoError> },
     /// A command found the `.bolt` of a start or import that stopped before it wrote `format`.
+    /// `committed`: it wrote its diary's one entry, which holds all it made.
     #[error(
         "An import or start began a Bolt project at {} and didn't finish it.",
         escape(&root.display().to_string(), false)
     )]
-    Unfinished { root: PathBuf },
+    Unfinished { root: PathBuf, committed: bool },
     /// A command found the `.bolt` of a start or import that is still running.
     #[error(
         "A Bolt import or start is still making the project at {}.",
@@ -80,12 +81,12 @@ pub enum RepoError {
     )]
     BeingMade { root: PathBuf },
     /// `bolt start` found files an unfinished import stored, which an empty project would leave
-    /// unused.
+    /// unused. `committed` as for `Unfinished`.
     #[error(
         "An import began a Bolt project here and didn't finish, and bolt start won't make an empty \
          project over what it stored."
     )]
-    ImportUnfinished,
+    ImportUnfinished { committed: bool },
     #[error(
         "This project uses {}, which this version of Bolt doesn't understand.",
         escape(detail, false)
@@ -138,14 +139,27 @@ impl RepoError {
                 RepoError::StartStopped { refusal } => {
                     return refusal.hint_then("Then run `bolt start` again to finish.");
                 }
-                RepoError::Unfinished { .. } => {
+                // Once its entry is written, the folder holds all the command made, which running
+                // it again rebuilds; deleting it could lose a history Git no longer has.
+                RepoError::Unfinished {
+                    committed: false, ..
+                } => {
                     "Run `bolt import` (or `bolt start`, if that began it) in that folder again to \
                      finish, or delete its hidden .bolt folder."
                 }
+                RepoError::Unfinished {
+                    committed: true, ..
+                } => {
+                    "Run `bolt import` (or `bolt start`, if that began it) in that folder again to \
+                     finish."
+                }
                 RepoError::BeingMade { .. } => "Run the command again once it has finished.",
-                RepoError::ImportUnfinished => {
+                RepoError::ImportUnfinished { committed: false } => {
                     "Run `bolt import` again to finish the import, or delete the hidden .bolt \
                      folder and run `bolt start` again."
+                }
+                RepoError::ImportUnfinished { committed: true } => {
+                    "Run `bolt import` again to finish the import."
                 }
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
@@ -490,37 +504,67 @@ fn unfinished_here(folder: &Path) -> Option<RepoError> {
         return None;
     }
     let root = folder.to_owned();
+    // Nothing in it is opened through a link.
+    if let Err(e) = check_shape(&bolt) {
+        return Some(e);
+    }
     if lock_is_held(&bolt) {
         return Some(RepoError::BeingMade { root });
     }
-    Some(match had_saves(&bolt) {
-        Ok(false) => RepoError::Unfinished { root },
-        Ok(true) => damaged(format!(
-            "the project at {} has saves, but no .bolt/format file",
-            root.display()
-        )),
+    Some(match diary_of(&bolt) {
+        Ok(Diary::Empty) => RepoError::Unfinished {
+            root,
+            committed: false,
+        },
+        Ok(Diary::First) => RepoError::Unfinished {
+            root,
+            committed: true,
+        },
+        Ok(Diary::Saves) => lost_format(&root),
         Err(e) => e,
     })
 }
 
 /// Whether a command holds the change lock of the `.bolt` folder `bolt`. Only looks: a lock file
-/// that isn't there was never taken.
+/// that isn't there was never taken, and a failure other than a busy lock says nothing either way.
 fn lock_is_held(bolt: &Path) -> bool {
     let path = bolt.join("state").join("lock");
-    safe_fs::open_regular(&path, fs::OpenOptions::new().read(true))
-        .is_ok_and(|file| file.try_lock().is_err())
+    // Opened as `lock_for_change` opens it: some drives lock only a file open for writing.
+    let opened = safe_fs::open_regular(&path, fs::OpenOptions::new().read(true).write(true));
+    opened.is_ok_and(|file| matches!(file.try_lock(), Err(TryLockError::WouldBlock)))
 }
 
-/// Whether the diary of the `.bolt` folder `bolt` has more than its first entry. A start or an
-/// import writes one entry only, and its head only as it finishes.
-fn had_saves(bolt: &Path) -> Result<bool, RepoError> {
-    check_shape(bolt)?;
+/// How far the diary of a `.bolt` without `format` got.
+enum Diary {
+    /// No head: nothing was committed.
+    Empty,
+    /// Only the one entry a start or import commits, just before it writes `format`.
+    First,
+    /// Saves past that entry: a project that lost only its `format`.
+    Saves,
+}
+
+/// How far the diary of the `.bolt` folder `bolt`, whose shape was checked, got.
+fn diary_of(bolt: &Path) -> Result<Diary, RepoError> {
     let Some(head) = read_head(bolt)? else {
-        return Ok(false);
+        return Ok(Diary::Empty);
     };
     let store = Store::open(&bolt.join("store").join("packs"))?;
     let entry = store.read_record(&head, ObjectKind::DiaryEntry)?;
-    Ok(DiaryEntry::decode(&entry)?.parent.is_some())
+    Ok(if DiaryEntry::decode(&entry)?.parent.is_some() {
+        Diary::Saves
+    } else {
+        Diary::First
+    })
+}
+
+/// The project at `root` had saves and lost only its `format`: damage, whatever the cause, and
+/// never a project to make again over its saves.
+fn lost_format(root: &Path) -> RepoError {
+    damaged(format!(
+        "the project at {} has saves, but no .bolt/format file",
+        root.display()
+    ))
 }
 
 /// Whether `root/.bolt` holds an entry named `format`, of any kind (`open` checks it), without
@@ -569,7 +613,9 @@ impl Repository {
         let (mut repo, lock) = Repository::begin_with(root, owner_check)?;
         // A start stores no file, so files are an import's.
         if repo.store.holds_content() {
-            return Err(RepoError::ImportUnfinished);
+            return Err(RepoError::ImportUnfinished {
+                committed: repo.head.is_some(),
+            });
         }
         let mut packs = repo.new_packs()?;
         let listing = packs.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
@@ -608,8 +654,9 @@ impl Repository {
     }
 
     /// Refuses to make `root` a project when it or its `.bolt` isn't the user's, when it is a
-    /// project already, when another tool made its `.bolt`, or when it is inside another project.
-    /// Makes nothing, so a command can ask before its own slow checks.
+    /// project already, when another tool made its `.bolt`, when it is a project that had saves
+    /// and lost only its `format` (damage), or when it is inside another project. Makes nothing,
+    /// so a command can ask before its own slow checks.
     pub fn check_new(root: &Path) -> Result<(), RepoError> {
         Repository::check_new_with(root, &check_owner).map(drop)
     }
@@ -631,6 +678,10 @@ impl Repository {
             return Err(RepoError::OtherToolsFolder {
                 root: root.to_owned(),
             });
+        }
+        // Its first entry would be written over the saves' diary, leaving them for clean-up.
+        if found && matches!(diary_of(&root.join(".bolt"))?, Diary::Saves) {
+            return Err(lost_format(root));
         }
         if let Some(outer) = enclosing_project(root, owner_check)? {
             return Err(RepoError::InsideAnotherProject {
@@ -1306,16 +1357,26 @@ mod tests {
         let dir = begun(true);
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
+        // Nothing was committed, so deleting the folder loses only what running again redoes.
         match Repository::discover(&sub) {
-            Err(RepoError::Unfinished { root }) => assert_eq!(root, dir.path()),
+            Err(
+                e @ RepoError::Unfinished {
+                    committed: false, ..
+                },
+            ) => {
+                assert!(e.hint().unwrap().contains("or delete"), "{e}");
+                let at_root =
+                    matches!(&e, RepoError::Unfinished { root, .. } if root == dir.path());
+                assert!(at_root, "{e:?}");
+            }
             other => panic!("{:?}", other.map(|_| ())),
         }
-        let refused = Repository::init(dir.path(), &who);
-        assert!(
-            matches!(refused, Err(RepoError::ImportUnfinished)),
-            "{:?}",
-            refused.map(|_| ())
-        );
+        match Repository::init(dir.path(), &who) {
+            Err(e @ RepoError::ImportUnfinished { committed: false }) => {
+                assert!(e.hint().unwrap().contains("or delete"), "{e}");
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
         assert!(!dir.path().join(".bolt/format").exists());
         // Another tool's folder is nothing of Bolt's to finish.
         std::fs::write(dir.path().join(".bolt/prompt"), b"").unwrap();
@@ -1325,6 +1386,29 @@ mod tests {
         ));
         let dir = begun(false);
         Repository::init(dir.path(), &who).unwrap();
+
+        // Once its one entry is written, it holds all the import made: nobody is told to delete
+        // it, only to run the import again.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut repo, lock) = Repository::begin(dir.path()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        packs.add_content(b"a file an import stored").unwrap();
+        repo.commit(&lock, packs, &entry(0)).unwrap();
+        drop((lock, repo));
+        match Repository::discover(dir.path()) {
+            Err(
+                e @ RepoError::Unfinished {
+                    committed: true, ..
+                },
+            ) => assert!(!e.hint().unwrap().contains("delete"), "{e}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        match Repository::init(dir.path(), &who) {
+            Err(e @ RepoError::ImportUnfinished { committed: true }) => {
+                assert!(!e.hint().unwrap().contains("delete"), "{e}");
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
     }
 
     /// While a start or import still holds the lock, a command says so instead of calling the
@@ -1354,7 +1438,10 @@ mod tests {
         std::fs::remove_file(&format).unwrap();
         assert!(matches!(
             Repository::discover(dir.path()),
-            Err(RepoError::Unfinished { .. })
+            Err(RepoError::Unfinished {
+                committed: true,
+                ..
+            })
         ));
         std::fs::write(&format, FORMAT_TEXT).unwrap();
         let mut second = entry(1);
@@ -1372,6 +1459,30 @@ mod tests {
             }
             other => panic!("{:?}", other.map(|_| ())),
         }
+    }
+
+    /// The lock is never probed through a `state` that is a link: such a `.bolt` is damage, even
+    /// where the link leads to a lock some command holds.
+    #[test]
+    fn a_linked_state_is_damage_before_its_lock_is_probed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bolt = dir.path().join(".bolt");
+        std::fs::create_dir_all(bolt.join("store/packs")).unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let held = fsio::open_lock_file(&elsewhere.join("lock")).unwrap();
+        held.lock().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, bolt.join("state")).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&bolt.join("state"), &elsewhere);
+        let found = Repository::discover(dir.path());
+        assert!(
+            matches!(found, Err(RepoError::Damaged { .. })),
+            "{:?}",
+            found.map(|_| ())
+        );
+        drop(held);
     }
 
     /// A run that finishes an interrupted one starts without the half-written pack it left.
@@ -2298,6 +2409,7 @@ mod tests {
             },
             RepoError::Unfinished {
                 root: PathBuf::from(HOSTILE),
+                committed: false,
             },
             RepoError::BeingMade {
                 root: PathBuf::from(HOSTILE),

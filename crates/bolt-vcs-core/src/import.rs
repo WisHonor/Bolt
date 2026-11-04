@@ -906,8 +906,8 @@ const MAX_ATTRIBUTES_BYTES: u64 = 1 << 20;
 /// Git LFS: a `.git/lfs` folder, or `filter=lfs` in the top `.gitattributes`. A sign alone doesn't
 /// stop it: `.git/lfs` stays after `git lfs migrate export` has turned the pointers back into
 /// files, and a `.gitattributes` can name the filter for files a repository doesn't have. The
-/// converter stops at a pointer anywhere else. Each tree read counts against `limits`, as the
-/// converter counts it; past them this gives up, and the converter stops the import there.
+/// converter stops at a pointer anywhere else. Each tree read counts against `limits`, never
+/// more than the converter counts; past them this gives up, and the converter stops the import.
 fn stop_at_lfs_in_head(
     git: &git::Repo,
     head: &GitId,
