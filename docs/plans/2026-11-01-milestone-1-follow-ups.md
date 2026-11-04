@@ -48,6 +48,9 @@ The review of Git's published vulnerabilities (2026-11-02) also left write-out c
 
 ## For the owner to decide
 
+- The line-ending stop never asks (from milestone 2's build, 2026-11-03). [Decision 039](../decisions/039-first-save-after-import.md) says the stop offers two ways on, and that without a terminal it names the flag; Bolt never asks, even in a terminal: the hint always offers both ways. Confirm, or ask for a question in a terminal.
+- Git's personal exclude lists (from milestone 2's final review, 2026-11-04). Bolt reads neither `.git/info/exclude` nor the user's global excludes file ([decision 038](../decisions/038-gitignore-and-saved-files.md)); `bolt import` now warns when `.git/info/exclude` holds patterns. Whether to mention or read the global file is for the owner to decide.
+- A shared change ID from Git ([decision 044](../decisions/044-red-team-m2-final-rulings.md)) goes past decision 043's wording: a change-id header that equals any commit's own ID is refused too, so two saves can't share one. Confirm.
 - Rebuilding Git's deltas (from the reviews of RT3-4's fix, 2026-11-03; for this milestone the allowance stays as built). An import may rebuild through deltas at most 4 GiB, or 500 bytes for each compressed byte it has inflated, each entry once. That bounds repositories built to make importing slow, but only so far: zeros a hole leaves inside a stream are inflated and count, so a hostile archive still buys 35 to 1,000 times its inflating time in rebuilding (the import can be stopped, commits nothing, and reuses what it stored when run again). It also refuses honest version histories of files from roughly 80 MiB up (design.md §5.16). The redesign that ends both has three parts (deferred above): rebuild each chain once from its bottom base, as Git's `index-pack` does; keep rebuilt objects in the cache; and rebuild a deltified big file once for both of `Converter::stream`'s reads. Should it come before v0.1, for Bolt's big-file audience, or later, with the repack hint meanwhile?
 - A write limit for imports (from milestone 2's second red-team session, RT4-1, 2026-11-03; [decision 044](../decisions/044-red-team-m2-final-rulings.md)). Bolt stores each save's message and each distinct file whole, compressed, where Git stores similar ones as small deltas, so a small Git repository can import into a very large `.bolt` (976 KB became 1.46 GB). A full disk stops the import with nothing committed. A limit on what an import writes, relative to what it read, would stop this, but would also refuse real repositories whose history Git compresses well, until the storage engine's chunks and deltas arrive (decision 009, milestone 5).
 - Links Git wrote on Windows (found by milestone 2's differential tests, 2026-11-03). With real links (`core.symlinks=true`), Git for Windows writes a link's target with `\`. Bolt saves a target as it reads it, so the first save after an import records those links as changed. Whether to store `/` in link targets read on Windows, as Git does, is for the owner to decide ([design.md](../design.md) §7). Evidence: the nightly job "Links Git for Windows writes keep their target when saved", [run 41644016857](https://github.com/WisHonor/Bolt/actions/runs/41644016857) ([testing.md](../testing.md) §3). Until then the test is ignored on Windows.
@@ -91,3 +94,46 @@ The review of Git's published vulnerabilities (2026-11-02) also left write-out c
 - Task 12: minor (deferred): sanitize shows \r/\t as \x0d/\x09 (CRLF messages ugly); ~~bidi/line-separator chars (U+202E, U+2028) pass through~~ (done 2026-11-01, RT-7; every invisible format character since 2026-11-02, RT2-3).
 - Task 13: minor (deferred): ~24/38 corpus names skipped on Windows (OS can't hold them); skip lines only visible with --nocapture; fuzz corpus cache entries accumulate; ~~push trigger on milestone-1 must change after merge~~ (done 2026-11-01, before this branch: the nightly workflow runs on pushes to `main`).
 - Final: deferred — ~~Windows rename durability (MOVEFILE_WRITE_THROUGH) to add to milestone 4 list~~ (done 2026-11-01: it is in the must-do table); StoreError::Missing lacks hint/damage framing; Repository::head() doc note (use current() for store reads); pack.rs temp-file removals outside fsio; init now refuses a garbled head in an unfinished .bolt (untested).
+
+## Smaller items from milestone 2's reviews (2026-11-04)
+
+The task reviews, both red-team sessions and the final review left these small items open. None loses data or lets a repository escape its limits. Each names where it is. The red-team reports list their unproven suspicions separately.
+
+**Messages and wording**
+- `owner_allows` (repo.rs) still spells decision 030's rule inline beside `counts_as_users`: one place per rule.
+- The elevated-only note repeats the `safe-folders` instruction, and shows even when the folder is already listed.
+- `error_json` (output.rs) has no safety-net escape, although json.md calls messages already escaped.
+- The `copy_unreadable` warning doesn't say what to do next.
+- A `history`/`show` document closed by an error doesn't echo its warnings on stderr.
+- The ref-limit messages print raw counts (7600000, 536870912 bytes) where "512 MiB" reads better.
+- A detached `HEAD` holding the all-zero ID is refused as "isn't a branch"; say it names no commit.
+- The Windows special-name ref message cuts names at 255 bytes and can hide the last part (refs.rs).
+- A `config`, `HEAD` or loose ref over Bolt's cap still gets the `git fsck` hint, which can't help.
+- When Git tracks a live Bolt project (`git add -A`), the import's tracked-`.bolt` stop doesn't say it is a project.
+- "Other accounts on this computer" is wrong for a share root. The planted-`.bolt` case doesn't say what to do with the planted folder, and the identity cap of 256 counts characters before escaping.
+- `unnoted` blames Bolt when a folder was swapped for a link mid-walk. `store_file` reports an `InvalidInput` open as `ChangedDuringSave`. Both fail safe; the wording is off.
+
+**Code**
+- `pack.rs` and `odb.rs` import each other. `odb.rs` mixes lookup, chains, loose objects, input, zlib, streaming and the cache; move `Input`/`Inflater` out. Test helpers are written twice.
+- The short-ID-or-whole-ID fallback is written twice (snapshot.rs, main.rs).
+- `Default` on `TagList`/`ServerLines` encodes to what `decode` refuses.
+- The HEAD-to-commit step is written twice (import.rs `plan` and `tracked_at`).
+- `has_promisor_pack` reads `objects/pack` unbounded, and compares `.promisor` case-sensitively.
+- The base cache counts only base bytes; zero-length bases never evict.
+- A tag of a tree or blob is judged from the target's header, which isn't checked against its ID.
+- The line-ending check opens every file with a base entry. Carrying the walk's file length would skip most.
+- `gone()` copies the walked parent's path once per gone folder.
+- The `.bolt` check splits names at the first backslash only, while the `.git` check looks at every part. A NUL could end a name in `is_git_alias` as in C Git. `is_hfs_dotgit` checks the whole name, not each backslash part. All are unreachable while names holding `\` are never written.
+- A case-only rename of a folder holding a kept entry (`Docs` → `docs`) is refused as not portable on a drive that ignores case. An ignored saved file re-created in the other Unicode form on macOS drops out.
+
+**Tests**
+- Error documents have no byte-exact snapshot.
+- No test pins tag names that differ only by case, a 256-byte name inside server lines, or a decode-then-encode round trip in the fuzz decoders.
+- No test drives `save_folder` across a pack roll-over.
+- No test covers names that are non-ASCII or very long right after `.git`, or `clean_tmp` on a real `tmp-<hex>-é` leftover.
+- The reference `dowild` calls the product's `named_class`.
+- No test covers `.gitignore` bytes across folders and the 16 MiB per-save total, a file-to-link change staying kept, or `--json` nothing-changed carrying `gitignore_skipped`.
+- No test covers a link at `refs/`, `objects/`, `objects/info`, `shallow` or `config.worktree`.
+- Git reader gaps: loops longer than two, streaming a whole SHA-256 blob, a pack deleted after opening, the 17th open pack, LRU recency, a loose file shrinking mid-read.
+- Some speed tests can't tell n² from n at their size.
+- `assert_matches_git` is one long function.
