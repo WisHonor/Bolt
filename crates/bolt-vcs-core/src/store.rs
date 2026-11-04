@@ -4,6 +4,8 @@ use crate::id::Id;
 use crate::listing::Listing;
 use crate::pack::{IndexEntry, ObjectKind, PackError, PackReader};
 use crate::save::Save;
+use crate::text::escape;
+use crate::warning::{self, Warning};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -52,6 +54,9 @@ struct Checked {
     bad: HashMap<At, String>,
     /// Each pack that held a bad copy, with the first problem found in it.
     damaged: BTreeMap<PathBuf, String>,
+    /// Each pack with a copy that couldn't be read for a reason other than damage, though another
+    /// copy of the same object could, with the first reason found.
+    unreadable: BTreeMap<PathBuf, String>,
 }
 
 impl Store {
@@ -111,6 +116,23 @@ impl Store {
         self.packs.len()
     }
 
+    /// The IDs of the diary entries the packs hold, as their indexes list them.
+    pub(crate) fn diary_entries(&self) -> impl Iterator<Item = Id> + '_ {
+        let entries = self.packs.iter().flat_map(|pack| pack.entries().iter());
+        entries
+            .filter(|e| e.kind == ObjectKind::DiaryEntry)
+            .map(|e| e.id)
+    }
+
+    /// Whether any pack holds a file's content, as its index lists it.
+    #[must_use]
+    pub fn holds_content(&self) -> bool {
+        let content = |e: &IndexEntry| e.kind == ObjectKind::Content;
+        self.packs
+            .iter()
+            .any(|pack| pack.entries().iter().any(content))
+    }
+
     /// Whether a copy of `id` reads back whole and matches its fingerprint, so storing it can be
     /// skipped. A copy recording another `size` than the object's is damage, and is never read.
     pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {
@@ -145,6 +167,29 @@ impl Store {
                 reason: reason.clone(),
             })
             .collect()
+    }
+
+    /// A warning for each pack found holding a bad copy of an object, then one for each pack with
+    /// a copy that couldn't be read, though another copy could.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<Warning> {
+        let mut warnings: Vec<Warning> = self
+            .damaged_packs()
+            .iter()
+            .map(|pack| Warning::new(warning::DAMAGED_PACK, format!("{pack}.")))
+            .collect();
+        let checked = self.checked();
+        warnings.extend(checked.unreadable.iter().map(|(path, reason)| {
+            Warning::new(
+                warning::COPY_UNREADABLE,
+                format!(
+                    "Bolt couldn't read a copy in pack {}: {}.",
+                    escape(&path.display().to_string(), false),
+                    escape(reason.trim_end_matches('.'), false)
+                ),
+            )
+        }));
+        warnings
     }
 
     /// Reads a structured record of the given kind, fingerprint checked.
@@ -213,6 +258,7 @@ impl Store {
             copies.sort_by_key(|&(at, _, e)| (!checked.good.contains(&at), e.uncompressed_size));
         }
         let (mut wrong_kind, mut damage, mut other) = (None, None, None);
+        let mut unreadable = Vec::new();
         for (at, pack, entry) in copies {
             if entry.kind != kind {
                 wrong_kind.get_or_insert(entry.kind);
@@ -225,12 +271,18 @@ impl Store {
                 Some(reason) => Some(reason),
                 None => match read(pack, entry) {
                     Ok(value) => {
-                        self.checked().good.insert(at);
+                        let mut checked = self.checked();
+                        checked.good.insert(at);
+                        // Worth a warning only now: with no good copy the read fails, saying why.
+                        for (path, reason) in unreadable {
+                            checked.unreadable.entry(path).or_insert(reason);
+                        }
                         return Ok(value);
                     }
                     Err(e) if is_damage(&e) => Some(self.note_damage(at, pack, &e)),
                     // Memory or I/O: the copy may be fine, so it is neither remembered nor damage.
                     Err(e) => {
+                        unreadable.push((pack.path().to_owned(), e.to_string()));
                         other.get_or_insert(e);
                         None
                     }
@@ -409,6 +461,11 @@ mod tests {
             .collect();
         assert_eq!(damaged.len(), 1, "{damaged:?}");
         assert!(damaged[0].contains("00.pack is damaged"), "{damaged:?}");
+        // The same pack, as a warning.
+        let warnings = store.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "damaged_pack");
+        assert_eq!(warnings[0].message, format!("{}.", damaged[0]));
     }
 
     #[test]
@@ -465,6 +522,64 @@ mod tests {
         assert_eq!(tried.len(), 2);
         assert_eq!(read.unwrap(), tried[1]);
         assert!(store.damaged_packs().is_empty());
+        // Not damage, but the user should hear that a copy couldn't be read.
+        let warnings = store.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "copy_unreadable");
+        assert!(
+            warnings[0]
+                .message
+                .contains(&tried[0].display().to_string()),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[0].message.contains("ran out of memory"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_copy_that_cant_be_read_is_reported_only_when_another_copy_worked() {
+        let (_root, tmp, packs) = dirs();
+        let content = b"held in two packs".to_vec();
+        let id = hash_content(&content);
+        pack_of(&tmp, &packs, std::slice::from_ref(&content));
+        pack_of(&tmp, &packs, &[content.clone(), b"other".to_vec()]);
+        let store = Store::open(&packs).unwrap();
+        let no_disk = || -> Result<(), PackError> {
+            Err(io::Error::other("the disk\u{1b}[2J said no.").into())
+        };
+        // Every copy fails: that is the read's error, and nothing else is said.
+        let read = store.first_good(&id, ObjectKind::Content, false, |_, _| no_disk());
+        assert!(
+            matches!(read, Err(StoreError::Pack(PackError::Io(_)))),
+            "{read:?}"
+        );
+        assert!(store.warnings().is_empty());
+
+        // The first copy fails and the second works. The failure's text is escaped, and the full
+        // stop it ends with isn't doubled.
+        let mut failed = None;
+        store
+            .first_good(&id, ObjectKind::Content, false, |pack, entry| {
+                if failed.is_none() {
+                    failed = Some(pack.path().to_owned());
+                    return no_disk();
+                }
+                pack.copy_content(entry, &mut io::sink())
+            })
+            .unwrap();
+        let failed = failed.unwrap();
+        let warnings = store.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "copy_unreadable");
+        assert_eq!(
+            warnings[0].message,
+            format!(
+                "Bolt couldn't read a copy in pack {}: the disk\\x1b[2J said no.",
+                failed.display()
+            )
+        );
     }
 
     #[test]
@@ -531,6 +646,30 @@ mod tests {
                 assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
             }
         }
+    }
+
+    /// Streaming is what finds the only copy bad here, and it is the streaming that must say so
+    /// the second time, without reading the copy again.
+    #[test]
+    fn a_lone_bad_copy_is_damage_each_time_it_is_streamed() {
+        let (_root, _tmp, packs) = dirs();
+        let content = b"bytes with one copy, and a bad one".to_vec();
+        plant_damaged_copies(&packs, &[(ObjectKind::Content, &content)]);
+        let store = Store::open(&packs).unwrap();
+        let id = hash_content(&content);
+        let damage = |e: StoreError| {
+            let StoreError::Pack(PackError::Corrupt { path, .. }) = &e else {
+                panic!("{e:?}");
+            };
+            assert!(path.ends_with("00.pack"), "{e:?}");
+            assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
+        };
+        // What the first stream wrote is untrusted, as always.
+        damage(store.copy_content(&id, &mut Vec::new()).unwrap_err());
+        let mut again = Vec::new();
+        damage(store.copy_content(&id, &mut again).unwrap_err());
+        assert!(again.is_empty(), "a copy known to be bad was read again");
+        assert_eq!(store.damaged_packs().len(), 1);
     }
 
     #[test]

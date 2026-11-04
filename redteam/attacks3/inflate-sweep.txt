@@ -1,0 +1,40 @@
+RT3-3 evidence, captured in the sandbox on 2026-11-03.
+
+1. End to end: `bolt import` (release) of a one-commit repository whose only file is N KiB of zeros,
+   one loose object compressed by Python's zlib (the same library Git uses), level 6 unless shown.
+   Made with: python3 -I redteam/attacks3/zeros.py <dir> <KiB> <level>
+
+KiB=1024..150000 (15 sizes, level 6): ok
+KiB=204800 (209715200 bytes): holds 209714891 bytes, not the 209715200 it says, in the file `zeros` of commit
+KiB=261120 (267386880 bytes): holds 267386313 bytes, not the 267386880 it says, in the file `zeros` of commit
+KiB=262144 (268435456 bytes): ok
+KiB=262145 (268436480 bytes): holds 268435913 bytes, not the 268436480 it says, in the file `zeros` of commit
+KiB=266240 (272629760 bytes): holds 272629193 bytes, not the 272629760 it says, in the file `zeros` of commit
+KiB=288000 (294912000 bytes): ok
+KiB=307200 level=9: error: Bolt can't import this Git repository: .../.git/objects/c1/b9db4e5b6315e62cb005de4e3ec8aaf8c286d1 holds 314572233 bytes, not th…
+KiB=307200 level=6: (same, 314572233 bytes)
+KiB=307200 level=1: (same object) holds 314572727 bytes
+
+   Python's own zlib decompresses each of these streams whole (e.g. 300 MiB: "decompressed
+   314572800 eof True unused 0", fed 16 KiB at a time).
+
+2. The same streams through Bolt's Inflater loop alone (inflate-replay.rs, miniz_oxide 0.9.1,
+   MZFlush::None, 16 KiB of input a call), 200 MiB of zeros plus the 15-byte header:
+   out buffer 16384: ... in=4 consumed=4 written=15 status=Ok(StreamEnd) total=209714906
+   out buffer 8192:  ... in=4 consumed=4 written=15 status=Ok(StreamEnd) total=209714906
+   out buffer 1:     ... status=Ok(StreamEnd) total=209715214
+   Python: 209715215. The whole input in one call (RT3_IN=1000000 or 300000): 209715215, correct.
+   So miniz_oxide reports the end of the stream early when its input comes a piece at a time.
+
+3. Sweep (inflate-replay.rs `sweep`), zlib level 6 streams made in 1 MiB steps:
+   zeros 110..170, 190 and 250 MiB: right; zeros 180, 200, 210, 220, 230, 240, 260, 270, 280, 290
+   and 300 MiB: short by 309 to 567 bytes; text (a repeated log) 150..300 MiB: right; "sparse" (1 MiB pages of zeros
+   ending in 4 KiB of random bytes) 250 MiB: short by 466 bytes.
+   SWEEP 24 short of 28 streams (each counted at two output-buffer sizes)
+   Below 100 MiB (36 streams: zeros, text, sparse, one byte repeated; 1 to 100 MiB): SWEEP 0 short
+
+4. miniz_oxide's own compressor (the one Craft uses), zeros, no header:
+   miniz level 1 180 MiB: right      miniz level 6 180 MiB: Ok(188743670) want 188743680
+   miniz level 1 200 MiB: right      miniz level 6 200 MiB: Ok(209715190) want 209715200
+   miniz level 1 240 MiB: right      miniz level 6 240 MiB: Ok(251658230) want 251658240
+   miniz level 1 300 MiB: Ok(314572542) want 314572800   miniz level 6/9 300 MiB: 10 bytes short

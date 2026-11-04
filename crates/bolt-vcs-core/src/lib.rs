@@ -4,10 +4,15 @@
 pub mod config;
 pub mod diary;
 pub mod diff;
+pub mod drive;
 pub mod encoding;
 pub mod fsio;
+pub mod git;
 pub mod history;
 pub mod id;
+pub mod ignore;
+pub mod import;
+pub mod link;
 pub mod listing;
 pub mod names;
 pub mod pack;
@@ -18,6 +23,7 @@ pub mod snapshot;
 pub mod store;
 pub mod text;
 pub mod verify;
+pub mod warning;
 
 #[cfg(test)]
 pub(crate) mod test_support;

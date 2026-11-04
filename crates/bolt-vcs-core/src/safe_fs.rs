@@ -1,5 +1,5 @@
 //! The one way Bolt opens files it doesn't trust (everything in `.bolt/`, settings files and
-//! `.boltignore`): links are never followed (except to the user's own settings), only regular
+//! ignore files): links are never followed (except to the user's own settings), only regular
 //! files are accepted, and reads are capped (storage-format.md §10 and §12).
 
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -11,15 +11,18 @@ pub const MAX_FORMAT_BYTES: u64 = 4096;
 pub const MAX_HEAD_BYTES: u64 = 65;
 pub const MAX_LOCK_INFO_BYTES: u64 = 4096;
 pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
-pub const MAX_BOLTIGNORE_BYTES: u64 = 1 << 20;
-/// The `.boltignore` files in force at one folder (its own and those above it), together.
-pub const MAX_BOLTIGNORE_IN_FORCE_BYTES: u64 = 1 << 20;
-/// All the `.boltignore` files one save reads, together.
-pub const MAX_BOLTIGNORE_SAVE_BYTES: u64 = 16 << 20;
+/// One `.gitignore` or `.boltignore`.
+pub const MAX_IGNORE_FILE_BYTES: u64 = 1 << 20;
+/// The ignore files in force at one folder (its own and those above it), together.
+pub const MAX_IGNORE_IN_FORCE_BYTES: u64 = 1 << 20;
+/// All the ignore files one save reads, together.
+pub const MAX_IGNORE_SAVE_BYTES: u64 = 16 << 20;
 
 /// Opens `path` with `options` (custom flags are replaced) without following a link at its
 /// last part, and only if it is a regular file. A link, folder, pipe or device gives
 /// `InvalidInput`; any other error from the open, `NotFound` included, comes back unchanged.
+/// Don't pass `truncate`: it acts when the file is opened, before a file that isn't a regular one
+/// is refused. No caller does.
 pub fn open_regular(path: &Path, options: &OpenOptions) -> io::Result<File> {
     let file = match bolt_platform::no_follow(&mut options.clone()).open(path) {
         Ok(file) => file,
@@ -56,7 +59,7 @@ pub fn read_capped(path: &Path, max: u64) -> io::Result<Vec<u8>> {
 /// Like `read_capped`, but follows links. Only for the user's own settings files, which dotfile
 /// managers keep as links; never for a file a project can bring. What the link reaches must
 /// still be a regular file.
-pub fn read_capped_following_links(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+pub(crate) fn read_capped_following_links(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     // Looked at before opening, because opening a named pipe waits for a writer.
     // shortcut: a pipe swapped in between the look and the open still waits, which needs write
     // access to the user's own files; open without blocking (platform crate) if that matters.
@@ -77,6 +80,19 @@ fn read_to_cap(file: File, path: &Path, max: u64) -> io::Result<Vec<u8>> {
         ));
     }
     Ok(bytes)
+}
+
+/// Reads into `buf` from offset `pos` of `file`, as much as one read gives, so readers of one
+/// file never share a cursor.
+pub fn read_at(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, buf, pos)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, buf, pos)
+    }
 }
 
 /// Checks that `path` is a real folder: not a link, junction or other reparse point, and not a
@@ -108,7 +124,8 @@ pub fn is_reparse_file(meta: &Metadata) -> bool {
 }
 
 /// A plain file: not a link, folder, pipe or device, and on Windows no reparse point at all.
-fn is_regular(meta: &Metadata) -> bool {
+/// `meta` comes from `symlink_metadata`.
+pub fn is_regular(meta: &Metadata) -> bool {
     meta.is_file() && !is_reparse_point(meta)
 }
 

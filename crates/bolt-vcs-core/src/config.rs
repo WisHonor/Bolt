@@ -28,6 +28,12 @@ pub enum ConfigError {
         escape(detail, false)
     )]
     Invalid { path: PathBuf, detail: String },
+    /// A `safe-folders` line below a `[section]` belongs to that section, so Bolt never sees it.
+    #[error(
+        "safe-folders must be at the top of {}, before any [section]",
+        escape(&path.display().to_string(), false)
+    )]
+    SafeFoldersNotAtTop { path: PathBuf },
 }
 
 const SNIPPET: &str = "[user]\nname = \"Your Name\"\nemail = \"you@example.com\"";
@@ -45,6 +51,9 @@ impl ConfigError {
                 "Set BOLT_CONFIG_DIR to a folder and add this to config.toml there:\n{SNIPPET}"
             )),
             ConfigError::Invalid { .. } => None,
+            ConfigError::SafeFoldersNotAtTop { .. } => {
+                Some("Move that line above [user] and every other [section].".to_owned())
+            }
         }
     }
 }
@@ -58,6 +67,10 @@ struct ConfigFile {
     /// Folders to use although another account owns them; only the user's own file is asked.
     #[serde(default, rename = "safe-folders")]
     safe_folders: Vec<String>,
+    /// Set after reading: `safe-folders` was also written below a `[section]`, where it belongs to
+    /// that section and is no list.
+    #[serde(skip)]
+    misplaced_safe_folders: bool,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +84,18 @@ struct ProjectEntry {
     folder: Option<String>,
     name: Option<String>,
     email: Option<String>,
+}
+
+/// Whether a table in `value`, however deep, has a `safe-folders` key. The toml parser stops at 80
+/// levels, so this does too.
+fn holds_safe_folders(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(table) => {
+            table.contains_key("safe-folders") || table.values().any(holds_safe_folders)
+        }
+        toml::Value::Array(items) => items.iter().any(holds_safe_folders),
+        _ => false,
+    }
 }
 
 fn both(name: Option<String>, email: Option<String>) -> Option<Identity> {
@@ -105,11 +130,27 @@ fn read_file(
     let bytes = match read(path, safe_fs::MAX_CONFIG_BYTES) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(invalid(e.to_string())),
+        Err(e) => {
+            // `safe_fs` starts its messages with the path, which the error names already.
+            let said = e.to_string();
+            let reason = match said.strip_prefix(&path.display().to_string()) {
+                Some(rest) => format!("it{rest}"),
+                None => said,
+            };
+            return Err(invalid(reason));
+        }
     };
-    toml::from_slice(&bytes)
-        .map(Some)
-        .map_err(|e| invalid(e.message().to_owned()))
+    let parsed: toml::Value =
+        toml::from_slice(&bytes).map_err(|e| invalid(e.message().to_owned()))?;
+    // The top level is where the list belongs, so only what is below it counts.
+    let misplaced = parsed
+        .as_table()
+        .is_some_and(|top| top.values().any(holds_safe_folders));
+    let mut file: ConfigFile = parsed
+        .try_into()
+        .map_err(|e| invalid(e.message().to_owned()))?;
+    file.misplaced_safe_folders = misplaced;
+    Ok(Some(file))
 }
 
 /// The identity in a `config.toml`, if it exists and names both: the `[[project]]` entry for
@@ -163,12 +204,14 @@ pub fn user_config_path() -> Option<PathBuf> {
 /// (`BOLT_USER_NAME`, `BOLT_USER_EMAIL`), the user's own `config.toml` (the `[[project]]` entry for
 /// `project_root`, then `[user]`). The project's own `.bolt/config.toml` is never used.
 pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigError> {
+    identity_from(identity_from_env(), user_config_path(), project_root)
+}
+
+/// The identity the environment names: `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, both set. One alone
+/// names nobody.
+fn identity_from_env() -> Option<Identity> {
     let env = |key| std::env::var(key).ok();
-    identity_from(
-        both(env("BOLT_USER_NAME"), env("BOLT_USER_EMAIL")),
-        user_config_path(),
-        project_root,
-    )
+    both(env("BOLT_USER_NAME"), env("BOLT_USER_EMAIL"))
 }
 
 /// `load_identity` with the places it looks in given, so that tests can choose them: the
@@ -213,7 +256,12 @@ fn ignored_given(project_root: &Path, used: Option<&Identity>) -> Option<Identit
 /// the lines that would make it the user's choice here (decision 025). Project text is escaped.
 #[must_use]
 pub fn ignored_identity_note(ignored: &Identity, project_root: &Path) -> String {
-    note_for(ignored, project_root, user_config_path().as_deref())
+    note_for(
+        ignored,
+        project_root,
+        user_config_path().as_deref(),
+        identity_from_env().is_some(),
+    )
 }
 
 /// `text` as a TOML string for a line the user is shown to add. The TOML writer quotes it and
@@ -222,9 +270,39 @@ fn toml_string(text: &str) -> String {
     toml::Value::String(escape(text, false)).to_string()
 }
 
-/// `ignored_identity_note`, given the path of the user's `config.toml`.
-fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> String {
-    let (name, email) = (escape(&ignored.name, false), escape(&ignored.email, false));
+/// The most characters of a name or email a note shows.
+const MAX_SHOWN: usize = 256;
+
+/// `text` escaped and, past `MAX_SHOWN` characters, cut there and ended with `…`; and whether it
+/// was cut.
+fn shown(text: &str) -> (String, bool) {
+    match text.char_indices().nth(MAX_SHOWN) {
+        Some((end, _)) => (format!("{}…", escape(&text[..end], false)), true),
+        None => (escape(text, false), false),
+    }
+}
+
+/// `ignored_identity_note`, given the path of the user's `config.toml` and whether the environment
+/// names the user, which comes before the settings.
+fn note_for(
+    ignored: &Identity,
+    project_root: &Path,
+    config: Option<&Path>,
+    env_first: bool,
+) -> String {
+    let ((name, name_cut), (email, email_cut)) = (shown(&ignored.name), shown(&ignored.email));
+    let said = format!(
+        "note: This project's settings name {name} <{email}>; \
+         Bolt ignores identities from project settings."
+    );
+    if name_cut || email_cut {
+        // Lines with the name cut short would save as someone else.
+        return format!(
+            "{said}\nhint: That name or email is longer than the {MAX_SHOWN} characters Bolt \
+             shows, so it offers no lines to save as them. If you mean to, add them to your own \
+             settings yourself."
+        );
+    }
     let snippet = format!(
         "[[project]]\nfolder = {}\nname = {}\nemail = {}",
         toml_string(&project_root.to_string_lossy()),
@@ -238,10 +316,14 @@ fn note_for(ignored: &Identity, project_root: &Path, config: Option<&Path>) -> S
         ),
         None => "set BOLT_CONFIG_DIR to a folder and add this to config.toml there:".to_owned(),
     };
+    let first = if env_first {
+        "BOLT_USER_NAME and BOLT_USER_EMAIL are set, and they come before your settings, so the \
+         lines below take no effect until you unset them. "
+    } else {
+        ""
+    };
     format!(
-        "note: This project's settings name {name} <{email}>; \
-         Bolt ignores identities from project settings.\n\
-         hint: To save as them in this project, {place}\n{}",
+        "{said}\nhint: {first}To save as them in this project, {place}\n{}",
         // The lines are Bolt's own, so their newlines stay.
         escape(&snippet, true)
     )
@@ -260,6 +342,11 @@ fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
     let Some(file) = read_file(path, safe_fs::read_capped_following_links)? else {
         return Ok(Vec::new());
     };
+    if file.misplaced_safe_folders {
+        return Err(ConfigError::SafeFoldersNotAtTop {
+            path: path.to_owned(),
+        });
+    }
     file.safe_folders
         .into_iter()
         .map(|entry| {
@@ -278,14 +365,40 @@ fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 
 /// What the user can do about a project Bolt may not use (another account owns the folder or its
 /// `.bolt`, or Bolt can't tell who does): the line that trusts its folder `root`, and where it goes
-/// (decisions 025 to 027).
+/// (decisions 025 to 027). For a folder other accounts can write to, why Bolt offers none.
 #[must_use]
 pub fn trust_hint(root: &Path) -> String {
     trust_hint_for(root, user_config_path().as_deref())
 }
 
+/// Whether other accounts can put a project in `folder`: on Unix, when anyone may write to it (the
+/// sticky bit of `/tmp` only stops them removing each other's files); on Windows, when it is a
+/// drive's root, where any account may make folders.
+pub(crate) fn others_can_write(folder: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(folder).is_ok_and(|meta| meta.permissions().mode() & 0o002 != 0)
+    }
+    #[cfg(windows)]
+    {
+        // Also a link that leads to a root.
+        folder.parent().is_none()
+            || std::fs::canonicalize(folder).is_ok_and(|resolved| resolved.parent().is_none())
+    }
+}
+
 /// `trust_hint`, given the path of the user's `config.toml`.
 fn trust_hint_for(root: &Path, config: Option<&Path>) -> String {
+    // Anyone could have planted a project there (CVE-2022-24765), so no line is offered.
+    if others_can_write(root) {
+        return format!(
+            "Bolt doesn't suggest adding {} to safe-folders: other accounts on this computer \
+             can write there, so anyone could put a project in it that Bolt would then trust. \
+             Move your project into a folder of your own.",
+            escape(&root.display().to_string(), false)
+        );
+    }
     let place = config.map_or_else(
         || "your Bolt settings file".to_owned(),
         |path| escape(&path.display().to_string(), false),
@@ -360,6 +473,12 @@ mod tests {
         let shown = invalid.to_string();
         assert_hostile_text_escaped(&shown);
         assert_eq!(shown.matches("b\\u{202e}c").count(), 2, "{shown}");
+        let misplaced = ConfigError::SafeFoldersNotAtTop {
+            path: PathBuf::from(HOSTILE),
+        };
+        let shown = misplaced.to_string();
+        assert_hostile_text_escaped(&shown);
+        assert_eq!(shown.matches("b\\u{202e}c").count(), 1, "{shown}");
         let missing = ConfigError::MissingIdentity {
             path: Some(PathBuf::from(HOSTILE)),
         };
@@ -630,7 +749,7 @@ mod tests {
     fn the_note_says_what_was_ignored_and_offers_the_lines() {
         let mallory = person("Mallory", "mallory@evil.example");
         let cfg = Path::new("/home/me/.config/bolt/config.toml");
-        let note = note_for(&mallory, Path::new("/home/me/Work"), Some(cfg));
+        let note = note_for(&mallory, Path::new("/home/me/Work"), Some(cfg), false);
         let expected = [
             MALLORY_NOTE,
             "hint: To save as them in this project, add this to /home/me/.config/bolt/config.toml:",
@@ -643,7 +762,12 @@ mod tests {
 
         // A Windows folder keeps its backslashes, in the quoting TOML gives them
         // (decision 025's example).
-        let note = note_for(&mallory, Path::new(r"C:\Users\me\Projects\Work"), None);
+        let note = note_for(
+            &mallory,
+            Path::new(r"C:\Users\me\Projects\Work"),
+            None,
+            false,
+        );
         assert!(
             note.contains("\nfolder = 'C:\\Users\\me\\Projects\\Work'\n"),
             "{note}"
@@ -678,7 +802,7 @@ mod tests {
             ("/tmp/café 日本語", "Zoë 日本語", "zoe@example.com"),
         ];
         for (folder, name, email) in cases {
-            let note = note_for(&person(name, email), Path::new(folder), None);
+            let note = note_for(&person(name, email), Path::new(folder), None, false);
             let parsed: toml::Table = toml::from_str(snippet(&note)).unwrap_or_else(|e| {
                 panic!("{folder:?}, {name:?}: {e}\n{note}");
             });
@@ -781,7 +905,7 @@ mod tests {
         use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
         let planted = person(HOSTILE, &format!("{HOSTILE}@evil.example"));
         let cfg = PathBuf::from(HOSTILE);
-        let note = note_for(&planted, Path::new(HOSTILE), Some(&cfg));
+        let note = note_for(&planted, Path::new(HOSTILE), Some(&cfg), false);
         assert_hostile_text_escaped(&note);
         // Two lines of words and four of snippet, whatever the project put in its name: no
         // line break of its own, and no text that would pass for the lines Bolt writes.
@@ -794,9 +918,199 @@ mod tests {
         );
         // A name that is a whole TOML table, or a line of the note.
         let sneaky = "x\"\n[user]\nname = \"Mallory\"\nhint: do something";
-        let note = note_for(&person(sneaky, "m@evil.example"), Path::new("/p"), None);
+        let note = note_for(
+            &person(sneaky, "m@evil.example"),
+            Path::new("/p"),
+            None,
+            false,
+        );
         assert_eq!(note.lines().count(), 6, "{note}");
         let parsed: toml::Table = toml::from_str(snippet(&note)).unwrap();
         assert!(parsed.get("user").is_none(), "{note}");
+    }
+
+    #[test]
+    fn the_identity_note_is_short_and_honest() {
+        let root = Path::new("/home/me/Work");
+        let cfg = Path::new("/home/me/.config/bolt/config.toml");
+        // At most 256 characters of a name or an email, cut between characters (these take two
+        // bytes each), then `…`. Exactly 256 are shown whole.
+        let (long, whole) = ("é".repeat(300), "x".repeat(256));
+        let note = note_for(&person(&long, &whole), root, Some(cfg), false);
+        let said = format!(
+            "note: This project's settings name {}… <{whole}>; \
+             Bolt ignores identities from project settings.",
+            "é".repeat(256)
+        );
+        assert_eq!(note.lines().next(), Some(said.as_str()), "{note}");
+        // Lines that save as a name cut short would save as someone else, so none are offered.
+        assert!(!note.contains("[[project]]"), "{note}");
+        assert!(note.len() < 2_000, "{note}");
+        let note = note_for(&person("Ada", &"y".repeat(257)), root, Some(cfg), false);
+        assert!(note.contains(&format!("<{}…>", "y".repeat(256))), "{note}");
+        assert!(!note.contains("[[project]]"), "{note}");
+        let fits = note_for(&person(&whole, &whole), root, Some(cfg), false);
+        assert!(
+            fits.contains("[[project]]") && !fits.contains('…'),
+            "{fits}"
+        );
+        // The cut comes before the escaping, so what is shown stays safe to print.
+        let hidden = "\u{202e}".repeat(300);
+        let note = note_for(&person(&hidden, "m@evil.example"), root, Some(cfg), false);
+        assert!(!note.contains('\u{202e}'), "{note}");
+        assert_eq!(note.matches("\\u{202e}").count(), 256, "{note}");
+
+        // While BOLT_USER_NAME and BOLT_USER_EMAIL are set they come before the user's settings,
+        // so the lines the hint offers would change nothing.
+        let mallory = person("Mallory", "mallory@evil.example");
+        let plain = note_for(&mallory, root, Some(cfg), false);
+        let first = note_for(&mallory, root, Some(cfg), true);
+        assert!(!plain.contains("BOLT_USER"), "{plain}");
+        let hint = first.lines().nth(1).unwrap();
+        assert!(
+            hint.starts_with("hint: BOLT_USER_NAME and BOLT_USER_EMAIL are set")
+                && hint.contains("take no effect until you unset them. To save as them"),
+            "{hint}"
+        );
+        assert!(hint.ends_with("add this to /home/me/.config/bolt/config.toml:"));
+        assert_eq!(snippet(&first), snippet(&plain));
+    }
+
+    // The settings file's own mistakes
+
+    #[test]
+    fn safe_folders_in_a_table_is_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let work = quoted(&dir.path().join("work").display().to_string());
+        let user = "[user]\nname = \"Ada\"\nemail = \"ada@example.com\"\n";
+        let project = format!("[[project]]\nfolder = {work}\nname = \"Ada\"\nemail = \"a@b\"\n");
+        // The line the trust hint offers, added at the bottom of a file that has tables: it then
+        // belongs to the last one, where Bolt never looks for it.
+        for text in [
+            format!("{user}safe-folders = [{work}]\n"),
+            format!("{project}safe-folders = [{work}]\n"),
+            format!("user.safe-folders = [{work}]\n"),
+            format!("[editor]\nsafe-folders = [{work}]\n"),
+            format!("{user}[user.extra]\nsafe-folders = [{work}]\n"),
+            format!("safe-folders = [{work}]\n{user}safe-folders = [{work}]\n"),
+        ] {
+            std::fs::write(&path, &text).unwrap();
+            let err = safe_folders_in(&path).unwrap_err();
+            let want = format!(
+                "safe-folders must be at the top of {}, before any [section]",
+                path.display()
+            );
+            assert_eq!(err.to_string(), want, "{text}");
+            assert!(err.hint().unwrap().contains("above"), "{err:?}");
+        }
+        // At the top it is the list, whatever tables follow.
+        std::fs::write(&path, format!("safe-folders = [{work}]\n{user}{project}")).unwrap();
+        assert_eq!(safe_folders_in(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_settings_file_that_cant_be_read_is_named_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let shown = path.display().to_string();
+        std::fs::create_dir(&path).unwrap();
+        let folder = safe_folders_in(&path).unwrap_err().to_string();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, vec![b'#'; (1 << 20) + 1]).unwrap();
+        let big = safe_folders_in(&path).unwrap_err().to_string();
+        for said in [&folder, &big] {
+            assert_eq!(said.matches(&shown).count(), 1, "{said}");
+            assert!(
+                said.starts_with(&format!("{shown} is not a valid Bolt")),
+                "{said}"
+            );
+        }
+        assert!(
+            folder.ends_with(": it is not a regular file (it is a link, folder or special file)"),
+            "{folder}"
+        );
+        assert!(big.ends_with(": it is larger than 1048576 bytes"), "{big}");
+    }
+
+    /// The search for a misplaced `safe-folders` walks the parsed file, which is only safe while
+    /// the parser stops a file nested too deep.
+    #[test]
+    fn a_settings_file_nested_too_deep_is_refused_not_walked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let deep = 100_000;
+        for text in [
+            format!("a = {}{}\n", "[".repeat(deep), "]".repeat(deep)),
+            format!("a = {}1{}\n", "{a=".repeat(deep), "}".repeat(deep)),
+            format!("[{}]\n", "a.".repeat(deep) + "a"),
+        ] {
+            std::fs::write(&path, &text).unwrap();
+            let got = safe_folders_in(&path);
+            assert!(matches!(got, Err(ConfigError::Invalid { .. })), "{got:?}");
+        }
+    }
+
+    // A folder anyone can put a project in is never offered for trust (CVE-2022-24765)
+
+    #[cfg(unix)]
+    #[test]
+    fn the_trust_hint_never_offers_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+        let offers = |folder: &Path| trust_hint_for(folder, None).contains("safe-folders = [");
+        // The sticky bit only stops removing other accounts' files; anyone can still add a project.
+        let hint = trust_hint_for(Path::new("/tmp"), None);
+        assert!(!hint.contains("safe-folders = ["), "{hint}");
+        assert!(
+            hint.starts_with("Bolt doesn't suggest adding /tmp to safe-folders: "),
+            "{hint}"
+        );
+        assert!(hint.contains("other accounts on this computer can write there"));
+        assert!(
+            hint.ends_with("Move your project into a folder of your own."),
+            "{hint}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        for (mode, offered) in [
+            (0o1777, false),
+            (0o777, false),
+            (0o757, false),
+            (0o770, true),
+            (0o755, true),
+            (0o700, true),
+        ] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(offers(dir.path()), offered, "mode {mode:o}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_trust_hint_never_offers_a_drive_root() {
+        // Any account may make a folder at the top of a drive, so a project planted there is
+        // anyone's.
+        for root in [r"C:\", r"D:\", r"\\server\share\", r"\\?\C:\"] {
+            let hint = trust_hint_for(Path::new(root), None);
+            assert!(!hint.contains("safe-folders = ["), "{root}: {hint}");
+            assert!(
+                hint.starts_with(&format!(
+                    "Bolt doesn't suggest adding {root} to safe-folders: "
+                )),
+                "{root}: {hint}"
+            );
+            assert!(
+                hint.ends_with("Move your project into a folder of your own."),
+                "{hint}"
+            );
+        }
+        // A folder on the drive is a different matter.
+        let hint = trust_hint_for(Path::new(r"C:\Shared"), None);
+        assert!(hint.ends_with("safe-folders = ['C:\\Shared']"), "{hint}");
+        // A link that leads to a drive's root is that root, which is what safe-folders would trust.
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("to-the-root");
+        crate::test_support::junction(&link, Path::new(r"C:\"));
+        let hint = trust_hint_for(&link, None);
+        assert!(!hint.contains("safe-folders = ["), "{hint}");
     }
 }

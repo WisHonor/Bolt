@@ -22,10 +22,16 @@ pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
     Ok((file, path))
 }
 
-/// Whether `name` is one `create_temp` makes: `tmp-` and 16 lowercase hex digits.
+/// What `drive::probe` adds to a temp name: `-e` and a separate accent, which a drive may not tell
+/// from `-é`.
+pub(crate) const ACCENTED_SUFFIX: &str = "-e\u{301}";
+
+/// Whether `name` is one Bolt makes: `tmp-` and 16 lowercase hex digits, as `create_temp` names a
+/// file, and then `ACCENTED_SUFFIX` as well when `drive::probe` has renamed it.
 pub fn is_temp_name(name: &OsStr) -> bool {
     name.to_str()
         .and_then(|n| n.strip_prefix("tmp-"))
+        .map(|rest| rest.strip_suffix(ACCENTED_SUFFIX).unwrap_or(rest))
         .is_some_and(|hex| {
             hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         })
@@ -127,8 +133,8 @@ pub fn fault_point(label: &'static str) -> io::Result<()> {
     }
 }
 
-/// Fault injection for crash tests: per-thread errors (`arm`) or a process abort
-/// (`BOLT_FAULT_AT=N`).
+/// Fault injection for crash tests: per-thread errors (`arm`), a process abort
+/// (`BOLT_FAULT_AT=N`), or an error at one named point (`BOLT_FAULT_FAIL=label`).
 #[cfg(feature = "fault-injection")]
 pub mod fault {
     use std::cell::Cell;
@@ -158,6 +164,14 @@ pub mod fault {
         *AT.get_or_init(|| std::env::var("BOLT_FAULT_AT").ok()?.parse().ok())
     }
 
+    /// The label of the one point that fails every time it is reached, for a test that runs the
+    /// command in a process of its own and wants it to carry on after the error.
+    fn fails_at() -> Option<&'static str> {
+        static AT: OnceLock<Option<String>> = OnceLock::new();
+        AT.get_or_init(|| std::env::var("BOLT_FAULT_FAIL").ok())
+            .as_deref()
+    }
+
     pub(super) fn hit(label: &'static str) -> io::Result<()> {
         if let Some(n) = ARMED.get() {
             let count = COUNT.get() + 1;
@@ -165,6 +179,9 @@ pub mod fault {
             if count == n {
                 return Err(io::Error::other(format!("injected fault at {label}")));
             }
+        }
+        if fails_at() == Some(label) {
+            return Err(io::Error::other(format!("injected fault at {label}")));
         }
         if let Some(n) = crash_at()
             && PROCESS_COUNT.fetch_add(1, Ordering::SeqCst) + 1 == n
@@ -189,6 +206,30 @@ mod tests {
         write_atomic(root.path(), &dest, b"new").unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn temp_names_are_the_ones_bolt_makes() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, made) = create_temp(root.path()).unwrap();
+        assert!(is_temp_name(made.file_name().unwrap()));
+        let hex = "0123456789abcdef";
+        let probe_name = format!("tmp-{hex}{ACCENTED_SUFFIX}");
+        assert_eq!(probe_name, format!("tmp-{hex}-e\u{301}"));
+        assert!(is_temp_name(OsStr::new(&probe_name)));
+        for other in [
+            format!("tmp-{hex}-\u{e9}"),
+            format!("tmp-{hex}-e"),
+            format!("tmp-{hex}-e\u{301}x"),
+            format!("tmp-{hex}{ACCENTED_SUFFIX}{ACCENTED_SUFFIX}"),
+            format!("{hex}{ACCENTED_SUFFIX}"),
+            format!("tmp-{}", hex.to_uppercase()),
+            format!("tmp-{}", &hex[1..]),
+            format!("tmp-{ACCENTED_SUFFIX}"),
+            "notes.txt".to_owned(),
+        ] {
+            assert!(!is_temp_name(OsStr::new(&other)), "{other:?}");
+        }
     }
 
     #[test]

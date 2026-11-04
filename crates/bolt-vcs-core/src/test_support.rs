@@ -1,7 +1,160 @@
-//! Helpers shared by unit tests: hex, making links, hostile text and damaged packs.
+//! Helpers shared by unit tests: hex, making links, hostile text, damaged packs, planted saves and
+//! the shared tag and server-line records.
 
-use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackWriter};
-use std::path::Path;
+use crate::diary::{Position, ServerLines, Tag, TagList};
+use crate::id::{ChangeId, Id};
+use crate::link::ProjectLink;
+use crate::listing::{Entry, EntryKind, Listing};
+use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader, PackSet, PackWriter};
+use crate::repo::Repository;
+use crate::save::Save;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// One tag and one server line, both at a made-up save.
+pub(crate) fn sample_records() -> (TagList, ServerLines) {
+    let save = Id([0x5a; 32]);
+    let tag = Tag {
+        save,
+        message: "First playable".into(),
+        git_tags: vec![],
+    };
+    let tags = TagList {
+        tags: BTreeMap::from([("v1".to_owned(), tag)]),
+    };
+    let servers = ServerLines {
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([("main".to_owned(), save)]),
+        )]),
+    };
+    (tags, servers)
+}
+
+/// Commits an entry like the current one that points at `tags` and `servers`, stored with it.
+/// Returns the IDs of the two records.
+pub(crate) fn commit_records(
+    repo: &mut Repository,
+    tags: &TagList,
+    servers: &ServerLines,
+) -> (Id, Id) {
+    let lock = repo.lock_for_change("tag", &mut |_| {}).expect("the lock");
+    let (head, mut entry) = repo.current().expect("a current entry");
+    let mut packs = repo.new_packs().expect("a pack set");
+    let tags = packs
+        .add_record(ObjectKind::TagList, &tags.encode())
+        .expect("store the tag list");
+    let servers = packs
+        .add_record(ObjectKind::ServerLines, &servers.encode())
+        .expect("store the server lines");
+    entry.parent = Some(head);
+    entry.command = "tag".into();
+    entry.state.tags = Some(tags);
+    entry.state.server_lines = Some(servers);
+    repo.commit(&lock, packs, &entry).expect("commit");
+    (tags, servers)
+}
+
+/// Commits a save on the current line that holds `entries` and the folders above them, whatever
+/// the project folder holds, and returns its top listing. Each entry is a path with `/` between
+/// names, a kind, and bytes: a file's contents, a link's target, or a Git submodule's commit ID.
+pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u8])]) -> Listing {
+    let mut top = None;
+    plant_root(repo, |packs| {
+        let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
+        for &(path, kind, bytes) in entries {
+            let (id, size) = if kind == EntryKind::ProjectLink {
+                (add_link(packs, bytes), 0)
+            } else {
+                let id = packs.add_content(bytes).expect("store an entry");
+                (id, bytes.len() as u64)
+            };
+            let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+            folders.entry(up.to_owned()).or_default().push(Entry {
+                name: name.to_owned(),
+                kind,
+                id,
+                size,
+            });
+        }
+        // Longest path first, so a folder's listing is stored before the folder that holds it.
+        loop {
+            let path = folders
+                .keys()
+                .max_by_key(|p| p.len())
+                .cloned()
+                .expect("a folder");
+            let entries = folders.remove(&path).expect("its entries");
+            let (id, listing) = add_listing(packs, entries);
+            if path.is_empty() {
+                top = Some(listing);
+                return id;
+            }
+            let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+            folders.entry(up.to_owned()).or_default().push(Entry {
+                name: name.to_owned(),
+                kind: EntryKind::Folder,
+                id,
+                size: 0,
+            });
+        }
+    });
+    top.expect("the top listing")
+}
+
+/// Stores a Git submodule's link to `commit`, as an import makes it (storage-format.md §7).
+pub(crate) fn add_link(packs: &mut PackSet, commit: &[u8]) -> Id {
+    packs
+        .add_record(
+            ObjectKind::ProjectLink,
+            &ProjectLink::submodule(commit).encode(),
+        )
+        .expect("store a link")
+}
+
+/// Stores a listing of `entries`, returning its ID and the listing.
+pub(crate) fn add_listing(packs: &mut PackSet, entries: Vec<Entry>) -> (Id, Listing) {
+    let listing = Listing::new(entries).expect("a listing");
+    let id = packs
+        .add_record(ObjectKind::FolderListing, &listing.encode())
+        .expect("store a listing");
+    (id, listing)
+}
+
+/// Commits a save on the current line whose top listing `build` stores and returns the ID of,
+/// whatever the project folder holds.
+pub(crate) fn plant_root(repo: &mut Repository, build: impl FnOnce(&mut PackSet) -> Id) {
+    let lock = repo.lock_for_change("save", &mut |_| {}).expect("the lock");
+    let (head, mut diary) = repo.current().expect("a current entry");
+    let Position::OnLine(line) = diary.state.position.clone() else {
+        panic!("the project is not on a line");
+    };
+    let parent_id = diary.state.lines[&line];
+    let parent = repo
+        .store()
+        .save(&parent_id, false)
+        .expect("the line's save");
+    let mut packs = repo.new_packs().expect("a pack set");
+    let root = build(&mut packs);
+    let save = Save {
+        root,
+        parents: vec![parent_id],
+        author: parent.author,
+        saver: parent.saver,
+        message: "Planted".into(),
+        change_id: ChangeId::random().expect("a change ID"),
+        move_notes: vec![],
+        signature: vec![],
+        extra: parent.extra,
+    };
+    let save_id = packs
+        .add_record(ObjectKind::Save, &save.encode())
+        .expect("store the save");
+    diary.parent = Some(head);
+    diary.command = "save".into();
+    diary.state.lines.insert(line, save_id);
+    repo.commit(&lock, packs, &diary).expect("commit");
+}
 
 /// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte
 /// flipped so it fails its fingerprint. The name sorts before every pack Bolt names.
@@ -22,6 +175,23 @@ pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]
         pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).expect("an offset")] ^= 1;
     }
     std::fs::write(packs.join("00.pack"), pack).expect("write the pack");
+}
+
+/// A folder other accounts can write to, as `trust_hint` sees one: the root of the C: drive on
+/// Windows; elsewhere `dir`, opened to everyone.
+pub(crate) fn open_to_all(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        PathBuf::from(r"C:\")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777))
+            .expect("open the folder to everyone");
+        dir.to_owned()
+    }
 }
 
 /// Text no terminal may be shown as it is: an escape sequence, a right-to-left override and a

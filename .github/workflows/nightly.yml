@@ -1,4 +1,4 @@
-name: Nightly fuzzing
+name: Nightly
 
 on:
   schedule:
@@ -32,7 +32,7 @@ jobs:
           restore-keys: fuzz-corpus-
       - name: Fuzz every target
         run: |
-          for t in decode_listing decode_save decode_diary open_pack name_rules format_file; do
+          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config; do
             cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 || exit 1
           done
       - name: Upload crash files
@@ -42,3 +42,67 @@ jobs:
           name: fuzz-crashes
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # Imports Git's own repository, then compares every commit, tree, file and ref with Git. The
+  # test prints how long the import took and its peak memory. Nightly and by hand, not on pushes.
+  differential:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Clone git/git with its whole history
+        run: git clone --quiet --no-checkout https://github.com/git/git "$RUNNER_TEMP/git"
+      - name: Import it and compare with Git
+        shell: bash
+        env:
+          BOLT_DIFF_REPO: ${{ runner.temp }}/git
+        run: |
+          cargo test --release -p bolt-vcs --test import_vs_git -- --ignored --nocapture --exact a_real_repository_matches_git 2>&1 | tee differential.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" differential.txt
+
+  # Inflates zeros and sparse data of 110 to 300 MiB at three levels and checks every byte
+  # (testing.md §3). Too slow for every push, so it is ignored there and runs here.
+  inflate-sweep:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Inflate big, mostly-zero streams
+        shell: bash
+        run: |
+          cargo test --release -p bolt-vcs-core --lib -- --ignored --exact git::odb::tests::big_mostly_zero_streams_inflate_whole 2>&1 | tee sweep.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" sweep.txt
+
+  # Evidence for the owner, not a gate (testing.md §3): Git for Windows writes the `/` in a link's
+  # target as `\`, and this shows whether the first save after an import keeps the target Git
+  # stored. GitHub's Windows runners can make links.
+  windows-link-targets:
+    name: Links Git for Windows writes keep their target when saved
+    if: github.event_name != 'push'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Save a link Git wrote
+        shell: bash
+        run: |
+          cargo test -p bolt-vcs --test import_vs_git -- --ignored --nocapture --exact a_link_git_wrote_keeps_its_target_when_saved 2>&1 | tee links.txt
+          grep -q "test result: ok. 1 passed" links.txt
+          if grep -q "Skipped:" links.txt; then
+            echo "Git couldn't make the link here, so this run shows nothing."
+            exit 1
+          fi

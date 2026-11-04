@@ -38,6 +38,14 @@ impl Writer {
         Writer::default()
     }
 
+    /// A writer whose buffer holds `capacity` bytes before it grows.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Writer {
+        Writer {
+            buf: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }
@@ -92,6 +100,12 @@ impl Writer {
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf
     }
+}
+
+/// How many bytes `Writer::varint` writes for `v`: seven bits a byte, and at least one.
+#[must_use]
+pub fn varint_len(v: u64) -> u64 {
+    u64::from((u64::BITS - v.leading_zeros()).div_ceil(7).max(1))
 }
 
 /// Reads encoded values, rejecting anything that is not the one valid encoding.
@@ -226,6 +240,16 @@ mod tests {
             enc(u64::MAX),
             [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]
         );
+    }
+
+    #[test]
+    fn varint_len_is_what_the_writer_writes() {
+        for shift in 0..64 {
+            let v = 1u64 << shift;
+            for v in [v - 1, v, v + 1, u64::MAX] {
+                assert_eq!(varint_len(v), enc(v).len() as u64, "{v}");
+            }
+        }
     }
 
     #[test]

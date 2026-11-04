@@ -1,0 +1,13 @@
+$ sh redteam/attacks4/boltignore-takes-back.sh /tmp/t/release/bolt
+$ bolt import
+Imported 1 commit from Git: 1 line, 0 tags.
+You're on line main.
+$ bolt save "Say hello"
+Saved tkss  "Say hello"  (3 files)
+$ bolt show
+Save tkss · T · just now
+    Say hello
+
+  modified  .env  (23 B → 28 B)
+  modified  app.py  (12 B → 15 B)
+  added     deploy.pem  (36 B)

@@ -4,6 +4,7 @@
 - **Date:** 2026-11-02
 - **Agenda topic:** none (milestone 2 planning, question 1)
 - **Refined by:** [decision 039](039-first-save-after-import.md) (the reader also takes `core.sparseCheckout`, only to refuse a sparse checkout)
+- **Refines:** [decision 019](019-review-clarifications.md) #6 (how import reads Git)
 
 ## Context
 

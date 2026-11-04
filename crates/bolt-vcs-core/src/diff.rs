@@ -466,8 +466,10 @@ mod tests {
         let got = collect(&store, Some(old), new, 9).unwrap();
         assert_eq!(got.len(), 3);
         // Either one alone is too big for 8, whichever side of the comparison it is on.
-        assert!(collect(&store, Some(old), small, 8).is_err());
-        assert!(collect(&store, Some(small), new, 8).is_err());
+        for (before, after) in [(old, small), (small, new)] {
+            let err = collect(&store, Some(before), after, 8).unwrap_err();
+            assert!(matches!(err, StoreError::SaveTooLarge { .. }), "{err:?}");
+        }
     }
 
     #[test]

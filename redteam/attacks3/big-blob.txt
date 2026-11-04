@@ -1,0 +1,7 @@
+one 128 MiB deltified file, .git 44 KB:
+  /tmp/t/release/bolt import: exit 0, 1.0 s, peak 393 MB
+one 256 MiB deltified file, .git 44 KB:
+  /tmp/t/release/bolt import: exit 0, 1.9 s, peak 776 MB
+one 512 MiB deltified file, .git 44 KB:
+  /tmp/t/release/bolt import: exit 0, 2.2 s, peak 1541 MB
+with drop(blob) added after hasher.finish() (patch reverted): one 512 MiB deltified file: peak 1029 MB

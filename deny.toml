@@ -21,6 +21,11 @@ allow = [
     "Unlicense",
 ]
 
+# libFuzzer's sources, bundled in libfuzzer-sys, keep LLVM's old NCSA license. Only fuzz/ uses it.
+[[licenses.exceptions]]
+allow = ["NCSA"]
+crate = "libfuzzer-sys"
+
 [bans]
 multiple-versions = "warn"
 

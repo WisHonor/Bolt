@@ -1,0 +1,18 @@
+objects claimed: 25M; .idx 700001072 bytes apparent, 44 KB on disk
+  tar --sparse -czf of .git: 468 bytes
+  /tmp/t/release/bolt import: exit 1, 1.6 s, peak 481 MB
+    stderr: error: Bolt can't import this Git repository: /tmp/tmp.VyqdDphlFO/.git/objects/pack/pack-abababababababababababababababababababab.idx lists its objects out of order, in commit `1111111111111111111111111111111111111111`.
+  hint: Nothing was changed. Check the repository with `git fsck`, or import a fre
+objects claimed: 100M; .idx 2800001072 bytes apparent, 44 KB on disk
+  tar --sparse -czf of .git: 465 bytes
+  /tmp/t/release/bolt import: exit 1, 6.7 s, peak 1911 MB
+    stderr: error: Bolt can't import this Git repository: /tmp/tmp.Pukwp7oNS4/.git/objects/pack/pack-abababababababababababababababababababab.idx lists its objects out of order, in commit `1111111111111111111111111111111111111111`.
+  hint: Nothing was changed. Check the repository with `git fsck`, or import a fre
+objects claimed: 200M; .idx 5600001072 bytes apparent, 44 KB on disk
+  tar --sparse -czf of .git: 463 bytes
+  /tmp/t/release/bolt import: exit 1, 11.6 s, peak 3819 MB
+    stderr: error: Bolt can't import this Git repository: /tmp/tmp.A1Nm7ipqnZ/.git/objects/pack/pack-abababababababababababababababababababab.idx lists its objects out of order, in commit `1111111111111111111111111111111111111111`.
+  hint: Nothing was changed. Check the repository with `git fsck`, or import a fre
+objects claimed: 230M; .idx 6440001072 bytes apparent, 44 KB on disk
+  tar --sparse -czf of .git: 468 bytes
+  /tmp/t/release/bolt import: exit killed by signal 9, 3.3 s, peak 4080 MB

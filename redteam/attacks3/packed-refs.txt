@@ -1,0 +1,2 @@
+packed-refs 480000046 bytes; gzip: 19201073 bytes
+/tmp/t/release/bolt import: exit 0, 7.1 s, peak 1489 MB

@@ -123,6 +123,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_checks_tag_lists_and_server_lines() {
+        let (root, packs, _) = make(0);
+        let (tags, servers) = crate::test_support::sample_records();
+        let mut w = PackWriter::create(&root.path().join("tmp")).unwrap();
+        let tags_id = w.add_record(ObjectKind::TagList, &tags.encode()).unwrap();
+        w.add_record(ObjectKind::ServerLines, &servers.encode())
+            .unwrap();
+        let path = w.finish(&packs).unwrap().unwrap();
+        let report = verify_store(&packs);
+        assert!(report.is_ok(), "{:?}", report.problems);
+        assert_eq!(report.objects_checked, 2);
+
+        let entry = *PackReader::open(&path).unwrap().find(&tags_id).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[(entry.offset + ENTRY_HEADER_LEN) as usize] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        let report = verify_store(&packs);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(report.problems[0].contains(&tags_id.to_hex()));
+    }
+
+    #[test]
     fn problems_show_pack_names_escaped() {
         let (_root, packs, _paths) = make(0);
         std::fs::write(packs.join("a\u{202e}b.pack"), b"short").unwrap();

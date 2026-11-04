@@ -5,7 +5,7 @@
 - **Agenda topic:** none (refines [decision 025](025-red-team-m1-rulings.md) and [decision 026](026-ownership-check-details.md))
 - **Decided by:** Claude, while the owner was away, under the owner's instruction of 2026-11-01 to finish the milestone and merge. The owner can reverse it.
 - **Reviewed:** 2026-11-02 with the owner, who left the call to Claude; kept.
-- **Refined by:** [decision 030](030-administrators-only-when-elevated.md) (the Administrators group counts only in an elevated terminal)
+- **Refined by:** [decision 030](030-administrators-only-when-elevated.md) (the Administrators group counts only in an elevated terminal); [decision 042](042-trust-hint-skips-folders-anyone-can-write-to.md) (the hint never offers `safe-folders` for a folder other accounts can write to)
 
 ## Context
 

@@ -1,0 +1,729 @@
+//! Bolt's ignore rules against Git itself: the files a save keeps, and the verdict on each path,
+//! for rule files drawn at random, and the cases of Git's own `t/t0008-ignores.sh`.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::OnceLock;
+
+use bolt_core::drive::{self, Drive};
+use bolt_core::id::Id;
+use bolt_core::ignore::{Decision, Matcher, Rules};
+use bolt_core::listing::EntryKind;
+use bolt_core::repo::Repository;
+use bolt_core::save::Person;
+use bolt_core::snapshot::{SaveRequest, save_folder};
+use bolt_core::store::Store;
+use proptest::prelude::*;
+use support::{git, git_with_input};
+use unicode_normalization::UnicodeNormalization;
+
+/// A project for one case: its files, and the rules of some of its folders.
+#[derive(Clone, Debug)]
+struct Tree {
+    files: Vec<String>,
+    /// Rule file text by folder (`""` is the top one), written as `.gitignore` for Git and
+    /// `.boltignore` for Bolt.
+    rules: BTreeMap<String, Vec<u8>>,
+}
+
+/// Names for files and folders: both letter cases, `é` composed and not, and characters patterns
+/// treat specially, where a name on every system may hold them.
+const NAMES: &[&str] = &[
+    "a", "b", "A", "B", "ab", "Ab", "aB", "x.log", "Y.LOG", "\u{e9}", "e\u{301}", "[a]", "a]",
+    "!a", "^b", "a-b", "#c", "{a,b}", "a b", "foo", "bar.txt", "d", "Dd", ".hidden",
+];
+
+/// What random pattern lines are made of.
+const PIECES: &[&str] = &[
+    "a",
+    "A",
+    "b",
+    "B",
+    "\u{e9}",
+    "e\u{301}",
+    "x",
+    ".log",
+    "*",
+    "**",
+    "?",
+    "[",
+    "]",
+    "!",
+    "^",
+    "-",
+    "\\",
+    "/",
+    " ",
+    "#",
+    "{",
+    "}",
+    "[a-z]",
+    "[!a]",
+    "[[:upper:]]",
+    "\\ ",
+];
+const BEFORE: &[&str] = &["", "", "", "!", "/", "**/", "!/"];
+/// For a `.boltignore` beside a `.gitignore`: mostly lines that take a path back.
+const TAKE_BACK: &[&str] = &["!", "!", "!", "!/", "!**/", ""];
+const AFTER: &[&str] = &["", "", "", "/", "  ", "\\ ", "/**", "*", "\\"];
+
+/// Within a folder no two names may differ only by letter case or Unicode form, as on Windows
+/// and macOS, and Bolt saves only names that work everywhere; no name is both file and folder.
+fn tidy(raw: Vec<(Vec<&str>, &str)>) -> Vec<String> {
+    let key = |name: &str| name.nfc().collect::<String>().to_lowercase();
+    let mut seen: BTreeMap<(String, String), (String, bool)> = BTreeMap::new();
+    let mut files = Vec::new();
+    for (folders, file) in raw {
+        let parts: Vec<(&str, bool)> = folders
+            .iter()
+            .map(|&f| (f, true))
+            .chain([(file, false)])
+            .collect();
+        let mut fits = true;
+        let mut path = String::new();
+        for &(name, folder) in &parts {
+            if let Some((had, was_folder)) = seen.get(&(path.clone(), key(name))) {
+                fits &= had == name && *was_folder == folder;
+            }
+            path = join(&path, name);
+        }
+        if !fits {
+            continue;
+        }
+        let mut path = String::new();
+        for &(name, folder) in &parts {
+            seen.insert((path.clone(), key(name)), (name.to_owned(), folder));
+            path = join(&path, name);
+        }
+        files.push(path);
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn join(folder: &str, name: &str) -> String {
+    if folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{folder}/{name}")
+    }
+}
+
+/// Every folder that holds a file, the top one (`""`) included.
+fn folders_of(files: &[String]) -> Vec<String> {
+    let mut out = vec![String::new()];
+    for file in files {
+        let mut at = file.as_str();
+        while let Some((up, _)) = at.rsplit_once('/') {
+            out.push(up.to_owned());
+            at = up;
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The files and folders below `folder`, as paths from it.
+fn below(files: &[String], folder: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for file in files {
+        let rest = if folder.is_empty() {
+            file.as_str()
+        } else if let Some(rest) = file.strip_prefix(&format!("{folder}/")) {
+            rest
+        } else {
+            continue;
+        };
+        out.push(rest.to_owned());
+        out.extend(folders_of(&[rest.to_owned()]).into_iter().skip(1));
+    }
+    out
+}
+
+/// One character of a path as a pattern line may write it.
+fn respell(c: char, how: u8) -> String {
+    match how {
+        1 => "?".into(),
+        2 => "*".into(),
+        3 if c.is_lowercase() => c.to_uppercase().collect(),
+        3 => c.to_lowercase().collect(),
+        4 => format!("\\{c}"),
+        5 => format!("[{c}]"),
+        6 => format!("[!{c}]"),
+        _ => c.into(),
+    }
+}
+
+/// Git's version, as major and minor.
+fn git_version() -> (u32, u32) {
+    static VERSION: OnceLock<(u32, u32)> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let out = String::from_utf8(git(dir.path(), &["version"])).unwrap();
+        let mut numbers = out
+            .trim_start_matches("git version ")
+            .split(['.', ' '])
+            .map(|n| n.trim().parse::<u32>().unwrap());
+        let version = (numbers.next().unwrap(), numbers.next().unwrap());
+        if version < (2, 52) {
+            eprintln!(
+                "note: git {}.{} reads a `**` right after the start of a pattern with a `/` (as \
+                 in foo**/bar) as Git 2.52 no longer does, and Bolt does as 2.52 does; such lines \
+                 are left out",
+                version.0, version.1
+            );
+        }
+        version
+    })
+}
+
+/// Whether Git 2.52 changed what `line` means: its `match_pathname` keeps one byte of a
+/// pattern's literal start since, so a `**` right after it is no longer a whole folder name.
+/// Errs towards yes.
+fn changed_in_git_2_52(line: &str) -> bool {
+    let text = line.strip_prefix('!').unwrap_or(line);
+    let text = text.strip_suffix('/').unwrap_or(text);
+    if !text.contains('/') {
+        return false;
+    }
+    let text = text.strip_prefix('/').unwrap_or(text);
+    let literal = text.find(['*', '?', '[', '\\']).unwrap_or(text.len());
+    literal > 0 && text[literal..].starts_with("**") && !text[..literal].ends_with('/')
+}
+
+/// A rule file: random lines, and lines made from the paths below its folder, so that some
+/// match and some don't.
+fn rule_text(paths: Vec<String>) -> impl Strategy<Value = Vec<u8>> {
+    rule_lines(paths, BEFORE)
+}
+
+/// `rule_text`, with lines made from paths beginning with one of `before`.
+fn rule_lines(
+    paths: Vec<String>,
+    before: &'static [&'static str],
+) -> impl Strategy<Value = Vec<u8>> {
+    let old_git = git_version() < (2, 52);
+    let random = prop::collection::vec(prop::sample::select(PIECES), 1..5).prop_map(|p| p.concat());
+    let from_path = (
+        prop::sample::select(paths),
+        prop::sample::select(before),
+        prop::sample::select(AFTER),
+        any::<prop::sample::Index>(),
+        0..10u8,
+    )
+        .prop_map(|(path, before, after, at, how)| {
+            let chars: Vec<char> = path.chars().collect();
+            let at = at.index(chars.len());
+            let mid: String = chars
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| if i == at { respell(c, how) } else { c.into() })
+                .collect();
+            format!("{before}{mid}{after}")
+        });
+    let line = prop_oneof![2 => random, 3 => from_path];
+    (
+        any::<bool>(),
+        any::<bool>(),
+        prop::collection::vec(line, 1..7),
+    )
+        .prop_map(move |(bom, crlf, mut lines)| {
+            if old_git {
+                lines.retain(|line| !changed_in_git_2_52(line));
+            }
+            let mut text = if bom {
+                "\u{feff}".to_owned()
+            } else {
+                String::new()
+            };
+            text.push_str(&lines.join(if crlf { "\r\n" } else { "\n" }));
+            text.push('\n');
+            text.into_bytes()
+        })
+}
+
+/// Nested folders of files, with rule files at the top and in some folders.
+fn ignore_tree() -> impl Strategy<Value = Tree> {
+    let path = (
+        prop::collection::vec(prop::sample::select(NAMES), 0..3),
+        prop::sample::select(NAMES),
+    );
+    prop::collection::vec(path, 1..12)
+        .prop_flat_map(|raw| {
+            let files = tidy(raw);
+            let rules: Vec<_> = folders_of(&files)
+                .into_iter()
+                .map(|folder| {
+                    let odds = if folder.is_empty() { 0.9 } else { 0.4 };
+                    let text = prop::option::weighted(odds, rule_text(below(&files, &folder)));
+                    (Just(folder), text)
+                })
+                .collect();
+            (Just(files), rules)
+        })
+        .prop_map(|(files, rules)| Tree {
+            files,
+            rules: rules
+                .into_iter()
+                .filter_map(|(folder, text)| Some((folder, text?)))
+                .collect(),
+        })
+}
+
+/// A tree and the `.boltignore` texts to lay beside its `.gitignore` files, by folder.
+type WithBoltignore = (Tree, BTreeMap<String, Vec<u8>>);
+
+/// Trees of `ignore_tree`'s kind with a `.boltignore` of lines that mostly take paths back in
+/// some folders, `.gitignore` or not.
+fn tree_with_boltignore() -> impl Strategy<Value = WithBoltignore> {
+    ignore_tree()
+        .prop_flat_map(|tree| {
+            let texts: Vec<_> = folders_of(&tree.files)
+                .into_iter()
+                .map(|folder| {
+                    let paths = below(&tree.files, &folder);
+                    let text = prop::option::weighted(0.6, rule_lines(paths, TAKE_BACK));
+                    (Just(folder), text)
+                })
+                .collect();
+            (Just(tree), texts)
+        })
+        .prop_map(|(tree, texts)| {
+            let boltignore = texts
+                .into_iter()
+                .filter_map(|(folder, text)| Some((folder, text?)))
+                .collect();
+            (tree, boltignore)
+        })
+}
+
+/// The tree with a `.boltignore` beside every `.gitignore`, the same lines in both.
+fn write_tree(root: &Path, tree: &Tree) {
+    write_for_git(root, tree);
+    for (folder, text) in &tree.rules {
+        std::fs::write(root.join(folder).join(".boltignore"), text).unwrap();
+    }
+}
+
+/// The tree's files and `.gitignore` files: all Git sees.
+fn write_for_git(root: &Path, tree: &Tree) {
+    for file in &tree.files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    for (folder, text) in &tree.rules {
+        let dir = root.join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), text).unwrap();
+    }
+}
+
+/// The drive the tests run on, as `save` finds it.
+fn this_drive() -> Drive {
+    static DRIVE: OnceLock<Drive> = OnceLock::new();
+    *DRIVE.get_or_init(|| drive::probe(tempfile::tempdir().unwrap().path()).unwrap())
+}
+
+/// A path as Git's walk reads it on this drive.
+fn as_git_reads(path: &str, drive: Drive) -> String {
+    if drive.composes_unicode {
+        path.nfc().collect()
+    } else {
+        path.to_owned()
+    }
+}
+
+/// Git told what this drive is like, and kept from the user's own ignore list.
+fn git_args(drive: Drive, command: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-c".into(),
+        "core.excludesFile=".into(),
+        "-c".into(),
+        format!("core.ignorecase={}", drive.ignores_case),
+        "-c".into(),
+        format!("core.precomposeunicode={}", drive.composes_unicode),
+    ]
+    .into();
+    args.extend(command.iter().map(|&a| a.to_owned()));
+    args
+}
+
+fn who() -> Person {
+    Person {
+        name: "Test".into(),
+        email: "test@example.com".into(),
+        time_ms: 1_700_000_000_000,
+        tz_offset_min: 0,
+    }
+}
+
+fn file_paths(store: &Store, id: Id, prefix: &str, out: &mut Vec<String>) {
+    for e in store.listing(&id).unwrap().entries() {
+        let path = format!("{prefix}{}", e.name);
+        if e.kind == EntryKind::Folder {
+            file_paths(store, e.id, &format!("{path}/"), out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// The files of the line's newest save.
+fn saved_files(repo: &Repository) -> Vec<String> {
+    let (_, entry) = repo.current().unwrap();
+    let id = entry.state.lines["main"];
+    let save = repo.store().save(&id, repo.signatures_allowed()).unwrap();
+    let mut out = Vec::new();
+    file_paths(repo.store(), save.root, "", &mut out);
+    out
+}
+
+/// Every file and folder of the tree, the rule files too, and whether each is a folder.
+fn every_path(tree: &Tree) -> Vec<(String, bool)> {
+    let mut files = tree.files.clone();
+    for folder in tree.rules.keys() {
+        files.push(join(folder, ".gitignore"));
+        files.push(join(folder, ".boltignore"));
+    }
+    let mut out: Vec<(String, bool)> = folders_of(&files)
+        .into_iter()
+        .skip(1)
+        .map(|f| (f, true))
+        .collect();
+    out.extend(files.into_iter().map(|f| (f, false)));
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What Git's `check-ignore` says of `path`: the rules of the folders above it, read as a walk
+/// meets them, so that a folder they ignore ignores what it holds too.
+fn walk_verdict(
+    rules: &BTreeMap<String, Vec<u8>>,
+    drive: Drive,
+    path: &str,
+    is_dir: bool,
+) -> Decision {
+    let mut matcher = Matcher::new(drive);
+    let mut folder = String::new();
+    let parts: Vec<&str> = path.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if let Some(text) = rules.get(&folder) {
+            matcher.enter(&folder, vec![Rules::parse(text, &folder, true)]);
+        }
+        let here = join(&folder, part);
+        if i + 1 == parts.len() {
+            return matcher.decide(&here, is_dir);
+        }
+        if matcher.decide(&here, true) == Decision::Ignored {
+            return Decision::Ignored;
+        }
+        folder = here;
+    }
+    unreachable!("a path has a last part")
+}
+
+/// `walk_verdict` for Bolt's verdict from the `.gitignore` lines alone, with each folder's
+/// `.boltignore` in the matcher after its `.gitignore`, as a save puts them.
+fn git_only_verdict(
+    gitignore: &BTreeMap<String, Vec<u8>>,
+    boltignore: &BTreeMap<String, Vec<u8>>,
+    drive: Drive,
+    path: &str,
+    is_dir: bool,
+) -> Decision {
+    let mut matcher = Matcher::new(drive);
+    let mut folder = String::new();
+    let parts: Vec<&str> = path.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        let mut level = Vec::new();
+        if let Some(text) = gitignore.get(&folder) {
+            level.push(Rules::parse(text, &folder, true));
+        }
+        if let Some(text) = boltignore.get(&folder) {
+            level.push(Rules::parse(text, &folder, false));
+        }
+        if !level.is_empty() {
+            matcher.enter(&folder, level);
+        }
+        let here = join(&folder, part);
+        if i + 1 == parts.len() {
+            return matcher.verdict(&here, is_dir).git;
+        }
+        if matcher.verdict(&here, true).git == Decision::Ignored {
+            return Decision::Ignored;
+        }
+        folder = here;
+    }
+    unreachable!("a path has a last part")
+}
+
+/// What Git's `check-ignore` says of each of `paths` in the repository at `root`, and the file,
+/// line and pattern that say it.
+fn check_ignore(root: &Path, drive: Drive, paths: &[(String, bool)]) -> Vec<(Decision, String)> {
+    let mut input = Vec::new();
+    for (path, _) in paths {
+        input.extend(as_git_reads(path, drive).into_bytes());
+        input.push(0);
+    }
+    let args = git_args(
+        drive,
+        &["check-ignore", "--no-index", "-v", "-n", "-z", "--stdin"],
+    );
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = git_with_input(root, &args, &input);
+    assert!(
+        matches!(out.status.code(), Some(0 | 1)),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Four fields a path: the file, the line, the pattern and the path.
+    let fields: Vec<&[u8]> = out.stdout.split(|&b| b == 0).collect();
+    let (records, _) = fields.as_chunks::<4>();
+    assert_eq!(records.len(), paths.len());
+    records
+        .iter()
+        .map(|record| {
+            let pattern = record[2];
+            let says = if pattern.is_empty() {
+                Decision::NoRule
+            } else if pattern.starts_with(b"!") {
+                Decision::Kept
+            } else {
+                Decision::Ignored
+            };
+            let why = format!(
+                "{}, line {}: {:?}",
+                String::from_utf8_lossy(record[0]),
+                String::from_utf8_lossy(record[1]),
+                String::from_utf8_lossy(pattern)
+            );
+            (says, why)
+        })
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    #[test]
+    fn bolt_keeps_exactly_the_files_git_keeps(tree in ignore_tree()) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_tree(root, &tree);
+        git(root, &["init", "-q"]);
+        let drive = this_drive();
+        let args = git_args(drive, &["ls-files", "--others", "--exclude-standard", "-z"]);
+        let listed = git(root, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut want: Vec<String> = listed
+            .split(|&b| b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8(p.to_vec()).unwrap())
+            .collect();
+        let who = who();
+        let mut repo = Repository::init(root, &who).unwrap();
+        let req = SaveRequest { message: "Save", who: &who, command: "save", accept_crlf: false };
+        save_folder(&mut repo, &req, &mut |_| {}).unwrap();
+        let mut got: Vec<String> =
+            saved_files(&repo).iter().map(|p| as_git_reads(p, drive)).collect();
+        got.sort();
+        want.sort();
+        prop_assert_eq!(got, want);
+    }
+
+    #[test]
+    fn single_path_verdicts_match_check_ignore(tree in ignore_tree()) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_tree(root, &tree);
+        git(root, &["init", "-q"]);
+        let drive = this_drive();
+        let paths = every_path(&tree);
+        let says = check_ignore(root, drive, &paths);
+        for ((path, is_dir), (git_says, why)) in paths.iter().zip(says) {
+            prop_assert_eq!(
+                walk_verdict(&tree.rules, drive, path, *is_dir),
+                git_says,
+                "{:?}: {}",
+                path,
+                why
+            );
+        }
+    }
+
+    /// Where a `.boltignore` line takes back what a `.gitignore` line keeps out, Bolt still says
+    /// what Git says of the `.gitignore` files alone, which are all Git is given.
+    #[test]
+    fn git_only_verdicts_match_check_ignore_beside_boltignore_lines(
+        (tree, boltignore) in tree_with_boltignore()
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_for_git(root, &tree);
+        git(root, &["init", "-q"]);
+        let drive = this_drive();
+        let paths = every_path(&tree);
+        let says = check_ignore(root, drive, &paths);
+        for ((path, is_dir), (git_says, why)) in paths.iter().zip(says) {
+            prop_assert_eq!(
+                git_only_verdict(&tree.rules, &boltignore, drive, path, *is_dir),
+                git_says,
+                "{:?}: {}",
+                path,
+                why
+            );
+        }
+    }
+}
+
+/// Paths, whether each is a folder, and what Git says of it.
+type Verdicts<'a> = &'a [(&'a str, bool, Decision)];
+
+/// Rules by folder, as t0008 writes them.
+fn rules_of(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+    files
+        .iter()
+        .map(|&(folder, text)| (folder.to_owned(), text.as_bytes().to_vec()))
+        .collect()
+}
+
+#[test]
+fn gits_own_ignore_cases_match() {
+    use Decision::*;
+    let drive = Drive {
+        ignores_case: false,
+        composes_unicode: false,
+    };
+    // t0008's set-up, without the user's own lists, which Bolt never reads.
+    let setup = rules_of(&[
+        ("", "one\nignored-*\ntop-level-dir/\n"),
+        ("a", "two*\n*three\n"),
+        (
+            "a/b",
+            "four\nfive\n# this comment should affect the line numbers\nsix\nignored-dir/\n\
+             # and so should this blank line:\n\n!on*\n!two\n",
+        ),
+        ("a/b/ignored-dir", "seven\n"),
+    ]);
+    let rule_cases: &[(&BTreeMap<String, Vec<u8>>, Verdicts)] = &[
+        (
+            &setup,
+            &[
+                ("non-existent", false, NoRule),
+                ("a/non-existent", false, NoRule),
+                ("one", false, Ignored),
+                ("a/one", false, Ignored),
+                ("not-ignored", false, NoRule),
+                ("a/not-ignored", false, NoRule),
+                // With --no-index, a file in the index is judged like any other.
+                ("ignored-but-in-index", false, Ignored),
+                ("a/ignored-but-in-index", false, Ignored),
+                ("ignored-and-untracked", false, Ignored),
+                ("a/ignored-and-untracked", false, Ignored),
+                ("a/3-three", false, Ignored),
+                ("a/three-not-this-one", false, NoRule),
+                ("a/b/one", false, Kept),
+                ("a/b/ignored-dir", true, Ignored),
+                ("a/b/ignored-dir/foo", false, Ignored),
+                ("a/b/ignored-dir/twoooo", false, Ignored),
+                ("a/b/ignored-dir/seven", false, Ignored),
+                ("a/b/on", false, Kept),
+                ("a/b/one one", false, Kept),
+                ("a/b/one two", false, Kept),
+                ("a/b/one\"three", false, Kept),
+                ("a/b/not-ignored", false, NoRule),
+                ("a/b/two", false, Kept),
+                ("a/b/twooo", false, Ignored),
+                ("globaltwo", false, NoRule),
+                ("a/globaltwo", false, NoRule),
+                ("a/b/globaltwo", false, NoRule),
+                ("b/globaltwo", false, NoRule),
+                ("c/not-ignored", false, NoRule),
+                ("top-level-dir", true, Ignored),
+            ],
+        ),
+        // "exact prefix matching", with root and without.
+        (
+            &rules_of(&[("a", "/git/\n")]),
+            &[
+                ("a/git", true, Ignored),
+                ("a/git/foo", false, Ignored),
+                ("a/git-foo", true, NoRule),
+                ("a/git-foo/bar", false, NoRule),
+            ],
+        ),
+        (
+            &rules_of(&[("a", "git/\n")]),
+            &[
+                ("a/git", true, Ignored),
+                ("a/git/foo", false, Ignored),
+                ("a/git-foo", true, NoRule),
+                ("a/git-foo/bar", false, NoRule),
+            ],
+        ),
+        // "directories and ** matches"
+        (
+            &rules_of(&[("", "data/**\n!data/**/\n!data/**/*.txt\n")]),
+            &[
+                ("file", false, NoRule),
+                ("data/file", false, Ignored),
+                ("data/data1/file1", false, Ignored),
+                ("data/data1/file1.txt", false, Kept),
+                ("data/data2/file2", false, Ignored),
+                ("data/data2/file2.txt", false, Kept),
+            ],
+        ),
+        // "** not confused by matching leading prefix"
+        (
+            &rules_of(&[("", "foo**/bar\n")]),
+            &[("foobar", false, NoRule), ("foo/bar", false, Ignored)],
+        ),
+        // "trailing whitespace is ignored", and "quoting allows trailing whitespace"
+        (
+            &rules_of(&[("", "whitespace/trailing   \n")]),
+            &[
+                ("whitespace/trailing", false, Ignored),
+                ("whitespace/untracked", false, NoRule),
+            ],
+        ),
+        (
+            &rules_of(&[("", "whitespace/trailing\\ \\ \n")]),
+            &[
+                ("whitespace/trailing  ", false, Ignored),
+                ("whitespace/untracked", false, NoRule),
+            ],
+        ),
+        // "correct handling of backslashes"
+        (
+            &rules_of(&[(
+                "",
+                "whitespace/trailing 1 \\    \n\
+                 whitespace/trailing 2 \\\\\\\\\n\
+                 whitespace/trailing 3 \\\\\\\\ \n\
+                 whitespace/trailing 4   \\\\\\    \n\
+                 whitespace/trailing 5 \\\\ \\\\\\   \n\
+                 whitespace/trailing 6 \\\\a\\\\\n",
+            )]),
+            &[
+                ("whitespace/trailing 1  ", false, Ignored),
+                ("whitespace/trailing 2 \\\\", false, Ignored),
+                ("whitespace/trailing 3 \\\\", false, Ignored),
+                ("whitespace/trailing 4   \\ ", false, Ignored),
+                ("whitespace/trailing 5 \\ \\ ", false, Ignored),
+                ("whitespace/trailing 6 \\a\\", false, Ignored),
+                ("whitespace/untracked", false, NoRule),
+            ],
+        ),
+    ];
+    for (rules, cases) in rule_cases {
+        for &(path, is_dir, want) in *cases {
+            assert_eq!(walk_verdict(rules, drive, path, is_dir), want, "{path:?}");
+        }
+    }
+}

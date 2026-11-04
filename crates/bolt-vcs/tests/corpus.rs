@@ -3,19 +3,10 @@
 //! Names the operating system cannot create are skipped, so Linux and macOS run the most.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use assert_cmd::Command;
-use std::path::Path;
-use tempfile::TempDir;
+mod support;
 
-fn bolt(dir: &Path, config: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("bolt").unwrap();
-    cmd.current_dir(dir)
-        .env("BOLT_USER_NAME", "Test")
-        .env("BOLT_USER_EMAIL", "test@example.com")
-        .env_remove("BOLT_FAULT_AT")
-        .env("BOLT_CONFIG_DIR", config);
-    cmd
-}
+use std::path::Path;
+use support::Env;
 
 /// Creates each file; true only if the folder really lists exactly these names.
 fn create_all(dir: &Path, names: &[&str]) -> bool {
@@ -79,8 +70,8 @@ const CASES: &[&[&str]] = &[
     &["\u{e9}", "e\u{301}"],
 ];
 
-fn history_of(root: &Path, config: &Path) -> Vec<u8> {
-    let out = bolt(root, config).arg("history").output().unwrap();
+fn history_of(env: &Env) -> Vec<u8> {
+    let out = env.bolt().arg("history").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("good save"));
     out.stdout
@@ -90,26 +81,19 @@ fn history_of(root: &Path, config: &Path) -> Vec<u8> {
 fn every_malicious_name_stops_the_save() {
     let mut ran = 0;
     for case in CASES {
-        let work = TempDir::new().unwrap();
-        let config = TempDir::new().unwrap();
-        let root = work.path();
-        bolt(root, config.path()).arg("start").assert().success();
+        let env = Env::empty();
+        let root = env.root();
+        env.bolt().arg("start").assert().success();
         std::fs::write(root.join("good.txt"), "good").unwrap();
-        bolt(root, config.path())
-            .args(["save", "good save"])
-            .assert()
-            .success();
+        env.bolt().args(["save", "good save"]).assert().success();
         if !create_all(root, case) {
             eprintln!("skipped (this system cannot hold these names): {case:?}");
             continue;
         }
         ran += 1;
-        let history_before = history_of(root, config.path());
+        let history_before = history_of(&env);
 
-        let out = bolt(root, config.path())
-            .args(["save", "bad"])
-            .output()
-            .unwrap();
+        let out = env.bolt().args(["save", "bad"]).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         assert_eq!(out.status.code(), Some(1), "{case:?}: {stderr}{stdout}");
@@ -131,7 +115,7 @@ fn every_malicious_name_stops_the_save() {
             "{case:?}: {stderr}"
         );
 
-        assert_eq!(history_of(root, config.path()), history_before, "{case:?}");
+        assert_eq!(history_of(&env), history_before, "{case:?}");
     }
     assert!(ran > 0, "no case could be created on this system");
 }

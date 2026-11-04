@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (refines [decision 025](025-red-team-m1-rulings.md))
-- **Refined by:** [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too)
+- **Refined by:** [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too); [decision 042](042-trust-hint-skips-folders-anyone-can-write-to.md) (the hint never offers `safe-folders` for a folder other accounts can write to)
 - **Partly superseded by:** [decision 030](030-administrators-only-when-elevated.md) (#1: the Administrators group counts only in an elevated terminal, as in Git)
 
 ## Context

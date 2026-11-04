@@ -1,0 +1,104 @@
+   Compiling bolt-vcs v0.0.0 (/work/crates/bolt-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running tests/redteam3.rs (/tmp/t/debug/deps/redteam3-4d0ec90044307212)
+
+running 11 tests
+test rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows ... FAILED
+test rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size ... FAILED
+test rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory ... FAILED
+test rt3_3_a_valid_200_mib_file_of_zeros_imports ... FAILED
+test rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time ... FAILED
+test rt3_5_save_leaves_out_every_name_import_takes_for_git ... FAILED
+test rt3_5b_save_leaves_out_a_git_file_and_an_hfs_spelling_of_git_everywhere ... FAILED
+test rt3_6_a_tracked_but_ignored_env_is_not_saved_silently ... FAILED
+test rt3_7_a_sparse_checkout_turned_on_through_an_include_is_refused ... FAILED
+test rt3_8_streaming_a_deltified_blob_holds_it_at_most_twice ... FAILED
+test rt3_9_storing_a_tag_list_takes_at_most_twice_its_size ... FAILED
+
+failures:
+
+---- rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows stdout ----
+
+thread 'rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows' (10253) panicked at crates/bolt-vcs/tests/redteam3.rs:602:5:
+two saves show as "klmnopqrstuvwxyzklmnopqrstuvwxyz" in `bolt history`, and `bolt show klmnopqrstuvwxyzklmnopqrstuvwxyz` said: error: "klmnopqrstuvwxyzklmnopqrstuvwxyz" matches more than one save: klmnopqrstuvwxyzklmnopqrstuvwxyz, klmnopqrstuvwxyzklmnopqrstuvwxyz.
+hint: Type more of the ID to pick one.
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size stdout ----
+
+thread 'rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size' (10257) panicked at crates/bolt-vcs/tests/redteam3.rs:322:5:
+`bolt import` of a repository whose only pack index is a 1602 MB hole took 1155 MB: Ended { code: Some(1), timed_out: false, secs: 44.588419146, peak_mb: 1155, stderr: "error: Bolt can't import this Git repository: /tmp/.tmpXIW7Se/.git/objects/pack/pack-abababababababababababababababababababab.idx lists its objects out of order, in commit `1111111111111111111111111111111111111111`.\nhint: Nothing was changed. Check the repository with `git fsck`, or import a fresh clone of it.\n" }
+
+---- rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory stdout ----
+
+thread 'rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory' (10259) panicked at crates/bolt-vcs/tests/redteam3.rs:401:5:
+`bolt import` of a 1009001-byte Git repository took 650 MB of memory and wrote a 264566534-byte .bolt: Ended { code: Some(0), timed_out: false, secs: 158.815716758, peak_mb: 650, stderr: "" }
+
+---- rt3_3_a_valid_200_mib_file_of_zeros_imports stdout ----
+
+thread 'rt3_3_a_valid_200_mib_file_of_zeros_imports' (10302) panicked at crates/bolt-vcs/tests/redteam3.rs:424:5:
+assertion `left == right` failed: a valid repository (its object is miniz_oxide's own zlib output) was refused: error: Bolt can't import this Git repository: /tmp/.tmpcCTTrr/.git/objects/10/f1a0bf47fca0d7b287e96142ffbf7fdfedf059 holds 209714386 bytes, not the 209715200 it says, in the file `disk.img` of commit `229ccf3dbc42e30d21b08b15a1f825f943b28bf3`.
+hint: Check the repository with `git fsck`, or import a fresh clone of it.
+Nothing was committed. Bolt kept the .bolt folder it began here, so that running bolt import again can finish the import from what it stored; or delete that folder.
+
+  left: Some(1)
+ right: Some(0)
+
+---- rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time stdout ----
+
+thread 'rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time' (10308) panicked at crates/bolt-vcs/tests/redteam3.rs:477:5:
+`bolt import` of 16 commits in a 6149-byte Git repository was still running after 20 s: Ended { code: None, timed_out: true, secs: 20.025205187, peak_mb: 612, stderr: "" }
+
+---- rt3_5_save_leaves_out_every_name_import_takes_for_git stdout ----
+
+thread 'rt3_5_save_leaves_out_every_name_import_takes_for_git' (10314) panicked at crates/bolt-vcs/tests/redteam3.rs:642:5:
+the save holds names Bolt's import never brings in: [".GIT", ".GIT/config", ".GIT/hooks", ".GIT/hooks/post-checkout", ".git\u{feff}", ".git\u{feff}/config", ".git\u{feff}/hooks", ".git\u{feff}/hooks/post-checkout", ".g\u{200c}it", ".g\u{200c}it/config", ".g\u{200c}it/hooks", ".g\u{200c}it/hooks/post-checkout", "git~1", "git~1/config", "git~1/hooks", "git~1/hooks/post-checkout", "sub/.git"]
+
+---- rt3_5b_save_leaves_out_a_git_file_and_an_hfs_spelling_of_git_everywhere stdout ----
+
+thread 'rt3_5b_save_leaves_out_a_git_file_and_an_hfs_spelling_of_git_everywhere' (10318) panicked at crates/bolt-vcs/tests/redteam3.rs:667:5:
+the save holds names Bolt's import never brings in: [".g\u{200c}it", ".g\u{200c}it/config", "sub/.git"]
+
+---- rt3_6_a_tracked_but_ignored_env_is_not_saved_silently stdout ----
+
+thread 'rt3_6_a_tracked_but_ignored_env_is_not_saved_silently' (10322) panicked at crates/bolt-vcs/tests/redteam3.rs:695:5:
+the save took the user's .env ("API_KEY=sk_live_REAL_SECRET\n") and said only: Saved prtp  "Say hello"  (2 files)
+
+
+---- rt3_7_a_sparse_checkout_turned_on_through_an_include_is_refused stdout ----
+
+thread 'rt3_7_a_sparse_checkout_turned_on_through_an_include_is_refused' (10326) panicked at crates/bolt-vcs/tests/redteam3.rs:717:5:
+assertion `left == right` failed: the import went ahead in a sparse checkout: Imported 1 commit from Git: 1 line, 0 tags.
+You're on line main.
+
+  left: Some(0)
+ right: Some(1)
+
+---- rt3_8_streaming_a_deltified_blob_holds_it_at_most_twice stdout ----
+
+thread 'rt3_8_streaming_a_deltified_blob_holds_it_at_most_twice' (10328) panicked at crates/bolt-vcs/tests/redteam3.rs:528:5:
+importing one 300 MiB deltified file took 912 MB: Ended { code: Some(0), timed_out: false, secs: 20.697628312, peak_mb: 912, stderr: "" }
+
+---- rt3_9_storing_a_tag_list_takes_at_most_twice_its_size stdout ----
+
+thread 'rt3_9_storing_a_tag_list_takes_at_most_twice_its_size' (10336) panicked at crates/bolt-vcs/tests/redteam3.rs:558:5:
+importing 300 tags (a 300 MiB tag list) took 1249 MB: Ended { code: Some(0), timed_out: false, secs: 14.171124632, peak_mb: 1249, stderr: "" }
+
+
+failures:
+    rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows
+    rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size
+    rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory
+    rt3_3_a_valid_200_mib_file_of_zeros_imports
+    rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time
+    rt3_5_save_leaves_out_every_name_import_takes_for_git
+    rt3_5b_save_leaves_out_a_git_file_and_an_hfs_spelling_of_git_everywhere
+    rt3_6_a_tracked_but_ignored_env_is_not_saved_silently
+    rt3_7_a_sparse_checkout_turned_on_through_an_include_is_refused
+    rt3_8_streaming_a_deltified_blob_holds_it_at_most_twice
+    rt3_9_storing_a_tag_list_takes_at_most_twice_its_size
+
+test result: FAILED. 0 passed; 11 failed; 0 ignored; 0 measured; 0 filtered out; finished in 302.31s
+
+error: test failed, to rerun pass `-p bolt-vcs --test redteam3`

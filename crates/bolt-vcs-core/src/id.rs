@@ -44,6 +44,8 @@ pub enum Flavor {
     ProjectLink,
     Conflict,
     DiaryEntry,
+    TagList,
+    ServerLines,
 }
 
 impl Flavor {
@@ -56,6 +58,8 @@ impl Flavor {
             Flavor::ProjectLink => "bolt-vcs 2026-10-31 project-link v1",
             Flavor::Conflict => "bolt-vcs 2026-10-31 conflict v1",
             Flavor::DiaryEntry => "bolt-vcs 2026-10-31 diary-entry v1",
+            Flavor::TagList => "bolt-vcs 2026-11-02 tag-list v1",
+            Flavor::ServerLines => "bolt-vcs 2026-11-02 server-lines v1",
         }
     }
 }
@@ -116,18 +120,41 @@ impl ChangeId {
     /// Exactly 32 letters `k`-`z`.
     #[must_use]
     pub fn from_letters(s: &str) -> Option<ChangeId> {
-        let s = s.as_bytes();
-        if s.len() != 32 {
-            return None;
-        }
-        let mut out = [0u8; 16];
-        for (o, pair) in out.iter_mut().zip(s.chunks(2)) {
-            let hi = pair[0].checked_sub(b'k').filter(|h| *h < 16)?;
-            let lo = pair[1].checked_sub(b'k').filter(|l| *l < 16)?;
-            *o = hi << 4 | lo;
-        }
-        Some(ChangeId(out))
+        from_halves(s.as_bytes(), |c| c.checked_sub(b'k'))
     }
+
+    /// The change ID Jujutsu's rule gives a Git commit without a `change-id` header: the last 16
+    /// bytes of its ID, last first, with each byte's bits reversed (storage-format.md section 5).
+    /// Whether an imported commit's header is used instead is the converter's to decide.
+    #[must_use]
+    pub fn from_git_commit(commit_id: &[u8]) -> ChangeId {
+        let mut out = [0u8; 16];
+        for (o, b) in out.iter_mut().zip(commit_id.iter().rev()) {
+            *o = b.reverse_bits();
+        }
+        ChangeId(out)
+    }
+
+    /// The change ID a `change-id` header gives, if it spells 16 bytes in Jujutsu's letters.
+    #[must_use]
+    pub fn from_jujutsu(letters: &[u8]) -> Option<ChangeId> {
+        // Jujutsu's letters run the other way, `z` for 0, and it reads them in either case.
+        from_halves(letters, |c| b'z'.checked_sub(c.to_ascii_lowercase()))
+    }
+}
+
+/// 32 letters as 16 bytes, two to a byte; `half` gives each letter's value, which must be under
+/// 16.
+fn from_halves(s: &[u8], half: impl Fn(u8) -> Option<u8>) -> Option<ChangeId> {
+    if s.len() != 32 {
+        return None;
+    }
+    let half = |c| half(c).filter(|h| *h < 16);
+    let mut out = [0u8; 16];
+    for (o, pair) in out.iter_mut().zip(s.chunks(2)) {
+        *o = half(pair[0])? << 4 | half(pair[1])?;
+    }
+    Some(ChangeId(out))
 }
 
 #[cfg(test)]
@@ -174,6 +201,11 @@ mod tests {
             Flavor::DiaryEntry.context(),
             "bolt-vcs 2026-10-31 diary-entry v1"
         );
+        assert_eq!(Flavor::TagList.context(), "bolt-vcs 2026-11-02 tag-list v1");
+        assert_eq!(
+            Flavor::ServerLines.context(),
+            "bolt-vcs 2026-11-02 server-lines v1"
+        );
     }
 
     #[test]
@@ -184,6 +216,8 @@ mod tests {
             hash_record(Flavor::FolderListing, b),
             hash_record(Flavor::Save, b),
             hash_record(Flavor::DiaryEntry, b),
+            hash_record(Flavor::TagList, b),
+            hash_record(Flavor::ServerLines, b),
         ];
         for i in 0..all.len() {
             for j in i + 1..all.len() {

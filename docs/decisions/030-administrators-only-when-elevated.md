@@ -4,7 +4,9 @@
 - **Date:** 2026-11-02
 - **Agenda topic:** none (the owner's review of decisions 026 to 029, before milestone 2)
 - **Supersedes:** [decision 026](026-ownership-check-details.md) #1
+- **Refines:** [decision 025](025-red-team-m1-rulings.md) and [decision 027](027-project-folder-must-be-yours.md) (the Administrators group counts only in an elevated terminal)
 - **Decided by:** Claude, at the owner's request ("Do what you think is best"). The same review kept decisions 027, 028 and 029 unchanged.
+- **Refined by:** [decision 042](042-trust-hint-skips-folders-anyone-can-write-to.md) (the hint never offers `safe-folders` for a folder other accounts can write to)
 
 ## Context
 

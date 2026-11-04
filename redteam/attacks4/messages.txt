@@ -1,0 +1,15 @@
+$ sh redteam/attacks4/messages.sh /tmp/t/release/bolt 100 2000 3000
+N=100 commits sharing one 1 MB message: .git 784 KB on disk
+  tar -czf of .git: 760400 bytes
+  /tmp/t/release/bolt import: exit 0, 0.9 s, peak 11 MB
+  .bolt afterwards: 73768 KB
+N=2000 commits sharing one 1 MB message: .git 976 KB on disk
+  tar -czf of .git: 888343 bytes
+  /tmp/t/release/bolt import: exit 0, 12.1 s, peak 11 MB
+  .bolt afterwards: 1460692 KB
+N=3000 commits sharing one 1 MB message: .git 1076 KB on disk
+  tar -czf of .git: 955682 bytes
+  /tmp/t/release/bolt import: exit 1, 14.3 s, peak 11 MB
+    stderr: error: Bolt can't import this Git repository: rebuilding objects from Git's deltas would take more than the 4 GiB of work Bolt allows, so the repository looks built to make importing slow; the import stopped while reading commit `17389392fe0f015543f0db22c4c86b495911a2b0`.
+  hint: If you trust this rep
+  .bolt afterwards: 28 KB

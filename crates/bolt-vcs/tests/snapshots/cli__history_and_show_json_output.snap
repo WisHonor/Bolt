@@ -63,5 +63,6 @@ expression: history
         "tz_offset_min": "[redacted]"
       }
     }
-  ]
+  ],
+  "warnings": []
 }

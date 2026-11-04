@@ -1,8 +1,11 @@
 //! Test vectors for the storage format (docs/storage-format.md).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use bolt_core::diary::{Action, DiaryEntry, Position, SafetyCopy, State, Tag};
+use bolt_core::diary::{
+    Action, DiaryEntry, Position, SafetyCopy, ServerLines, State, Tag, TagList,
+};
 use bolt_core::id::{ChangeId, Id};
+use bolt_core::link::ProjectLink;
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
 use bolt_core::save::{MoveNote, Person, Save};
@@ -188,12 +191,54 @@ fn minimal_diary_entry() -> DiaryEntry {
         bolt_version: "0.1.0".into(),
         state: State {
             lines: BTreeMap::from([("main".to_owned(), Id([0; 32]))]),
-            tags: BTreeMap::new(),
+            tags: None,
             position: Position::OnLine("main".into()),
             shelves: vec![],
-            remotes: BTreeMap::new(),
+            server_lines: None,
         },
         safety_copies: vec![],
+    }
+}
+
+/// One lightweight tag and one annotated tag that keeps its Git tag object.
+fn vector_tag_list() -> TagList {
+    let git_tag = "object 2222222222222222222222222222222222222222\n\
+                   type commit\n\
+                   tag v2\n\
+                   tagger Zoé <zoe@example.com> 1793520000 -0500\n\
+                   \n\
+                   Second release ✓\n";
+    TagList {
+        tags: BTreeMap::from([
+            (
+                "v1".to_owned(),
+                Tag {
+                    save: Id([0x07; 32]),
+                    message: String::new(),
+                    git_tags: vec![],
+                },
+            ),
+            (
+                "v2".to_owned(),
+                Tag {
+                    save: Id([0x08; 32]),
+                    message: "Second release ✓".into(),
+                    git_tags: vec![git_tag.as_bytes().to_vec()],
+                },
+            ),
+        ]),
+    }
+}
+
+fn vector_server_lines() -> ServerLines {
+    ServerLines {
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([
+                ("feature/menu".to_owned(), Id([0x1f; 32])),
+                ("main".to_owned(), Id([0x1c; 32])),
+            ]),
+        )]),
     }
 }
 
@@ -215,23 +260,15 @@ fn full_diary_entry() -> DiaryEntry {
                 ("feature/menu".to_owned(), Id([0x0f; 32])),
                 ("main".to_owned(), Id([0x0a; 32])),
             ]),
-            tags: BTreeMap::from([(
-                "v1".to_owned(),
-                Tag {
-                    save: Id([0x07; 32]),
-                    message: "First playable ✓".into(),
-                },
-            )]),
+            // Pointing at the two lists of the other vectors.
+            tags: Some(vector_tag_list().id()),
             position: Position::AtSave(Id([0x5a; 32])),
             // Newest first, deliberately not in name order.
             shelves: vec![
                 ("try-b".into(), Id([0xb2; 32])),
                 ("try-a".into(), Id([0xa1; 32])),
             ],
-            remotes: BTreeMap::from([(
-                "origin".to_owned(),
-                BTreeMap::from([("main".to_owned(), Id([0x0c; 32]))]),
-            )]),
+            server_lines: Some(vector_server_lines().id()),
         },
         safety_copies: vec![
             SafetyCopy {
@@ -283,6 +320,96 @@ fn diary_vectors_hold() {
             DiaryEntry::decode(&unhex(&v.hex)).unwrap_or_else(|err| panic!("{}: {err}", v.name));
         assert_eq!(hex(&e.encode()), v.hex, "{}", v.name);
         assert_eq!(e.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/tag_list.json"]
+fn print_tag_list_vectors() {
+    let list = vector_tag_list();
+    println!(
+        "[\n  {{\"name\": \"lightweight-and-annotated\", \"hex\": \"{}\", \"id\": \"{}\"}}\n]",
+        hex(&list.encode()),
+        list.id()
+    );
+}
+
+#[test]
+fn tag_list_vectors_hold() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/tag_list.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let l = TagList::decode(&unhex(&v.hex)).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(hex(&l.encode()), v.hex, "{}", v.name);
+        assert_eq!(l.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/server_lines.json"]
+fn print_server_lines_vectors() {
+    let list = vector_server_lines();
+    println!(
+        "[\n  {{\"name\": \"one-server-two-lines\", \"hex\": \"{}\", \"id\": \"{}\"}}\n]",
+        hex(&list.encode()),
+        list.id()
+    );
+}
+
+#[test]
+fn server_lines_vectors_hold() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/server_lines.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let l = ServerLines::decode(&unhex(&v.hex)).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(hex(&l.encode()), v.hex, "{}", v.name);
+        assert_eq!(l.id().to_hex(), v.id, "{}", v.name);
+    }
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/project_link.json"]
+fn print_project_link_vectors() {
+    // A submodule in a SHA-1 repository and one in a SHA-256 repository.
+    let rows: Vec<String> = [
+        ("sha1-submodule", ProjectLink::submodule(&[0x5a; 20])),
+        ("sha256-submodule", ProjectLink::submodule(&[0xa5; 32])),
+    ]
+    .iter()
+    .map(|(n, l)| {
+        format!(
+            "  {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
+            hex(&l.encode()),
+            l.id()
+        )
+    })
+    .collect();
+    println!("[\n{}\n]", rows.join(",\n"));
+}
+
+#[test]
+fn project_link_vectors_hold() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/project_link.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    assert!(!vectors.is_empty());
+    for v in vectors {
+        let l = ProjectLink::decode(&unhex(&v.hex)).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(hex(&l.encode()), v.hex, "{}", v.name);
+        assert_eq!(l.id().to_hex(), v.id, "{}", v.name);
     }
 }
 

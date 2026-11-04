@@ -2,7 +2,7 @@
 
 A new version control system with its own engine (not a Git wrapper), written in Rust. One tool for code and large binary assets: friendly commands, undo for everything, great big-file handling.
 
-## Phase: BUILDING — milestone 1 ("First save") done 2026-11-01; milestone 2 ("Coming from Git") next
+## Phase: BUILDING — milestone 1 ("First save") done 2026-11-01; milestone 2 ("Coming from Git") merged 2026-11-04 (done once the owner's two checks pass); milestone 3 ("Working folder") next
 - The owner signed off the design on 2026-10-31. Build milestone by milestone (`docs/milestones.md`), task by task from the plan in `docs/plans/`.
 - The design docs stay the source of truth. Changing a decided behaviour or format needs a new decision record that supersedes the old one, and spec edits come before code.
 
