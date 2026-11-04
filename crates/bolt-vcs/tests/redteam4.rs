@@ -322,7 +322,7 @@ fn commits_sharing_a_big_message(root: &Path, n: usize) -> u64 {
 }
 
 #[test]
-#[ignore = "RT4-1: red-team proof, run once its fix is in"]
+#[ignore = "RT4-1: ruled in decision 044 (whole records accepted until chunked storage)"]
 fn rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt() {
     let env = Env::new();
     let git_bytes = commits_sharing_a_big_message(env.root(), 100);

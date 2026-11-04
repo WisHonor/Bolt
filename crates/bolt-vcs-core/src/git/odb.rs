@@ -32,7 +32,7 @@ pub const DELTA_BASE_CACHE: u64 = 256 << 20;
 const MIN_DELTA_WORK: u64 = 4 << 30;
 /// ...or this many for each compressed byte of the pack entries it has inflated, each counted
 /// once. Zeros a hole puts inside an entry's stream are inflated and count too, so a hostile
-/// pack still buys 35 to 1,000 times its inflating time in rebuilding. git/git needs at most 46,
+/// pack still buys 35 to 1,000 times its inflating time in rebuilding. git/git needs at most 47,
 /// a margin of about 11.
 const DELTA_WORK_PER_INFLATED_BYTE: u64 = 500;
 /// Work counted for each entry header a walk down a delta chain reads past its first: one read
