@@ -643,7 +643,7 @@ fn in_order(
     }
     let own_change_ids = order
         .iter()
-        .map(|id| ChangeId::from_git_commit(id.as_bytes(), None))
+        .map(|id| ChangeId::from_git_commit(id.as_bytes()))
         .filter(|own| walk.headers.contains(own))
         .collect();
     Ok((order, own_change_ids))
@@ -1172,7 +1172,7 @@ mod tests {
     fn a_header_never_takes_the_change_id_another_commits_own_id_gives() {
         let dir = tempfile::tempdir().unwrap();
         let (git, first) = one_commit(dir.path());
-        let own = ChangeId::from_git_commit(first.as_bytes(), None);
+        let own = ChangeId::from_git_commit(first.as_bytes());
         // The same ID in Jujutsu's letters, which run from `z` for 0.
         let letters: String = own
             .to_letters()
@@ -1200,7 +1200,7 @@ mod tests {
         assert_eq!(change_id("main"), own);
         assert_eq!(
             change_id("side"),
-            ChangeId::from_git_commit(side.as_bytes(), None)
+            ChangeId::from_git_commit(side.as_bytes())
         );
         let warning = report
             .warnings

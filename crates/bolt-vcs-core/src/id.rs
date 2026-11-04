@@ -123,15 +123,11 @@ impl ChangeId {
         from_halves(s.as_bytes(), |c| c.checked_sub(b'k'))
     }
 
-    /// An imported commit's change ID (storage-format.md section 5): its `change-id` header if
-    /// that spells 16 bytes in Jujutsu's letters, else Jujutsu's rule for a commit without one,
-    /// the last 16 bytes of its ID, last first, with each byte's bits reversed. An import gives
-    /// a header's ID to one save only, so it passes a commit's header over when another has it.
+    /// The change ID Jujutsu's rule gives a Git commit without a `change-id` header: the last 16
+    /// bytes of its ID, last first, with each byte's bits reversed (storage-format.md section 5).
+    /// Whether an imported commit's header is used instead is the converter's to decide.
     #[must_use]
-    pub fn from_git_commit(commit_id: &[u8], change_id_header: Option<&[u8]>) -> ChangeId {
-        if let Some(id) = change_id_header.and_then(ChangeId::from_jujutsu) {
-            return id;
-        }
+    pub fn from_git_commit(commit_id: &[u8]) -> ChangeId {
         let mut out = [0u8; 16];
         for (o, b) in out.iter_mut().zip(commit_id.iter().rev()) {
             *o = b.reverse_bits();

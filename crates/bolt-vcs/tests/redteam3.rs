@@ -400,8 +400,10 @@ fn rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory() {
     } else {
         0
     };
+    // Decision 043 accepts saves that keep their parents whole: within the import's limit on
+    // them, under about 35 MB. A stop must not leave more behind either.
     assert!(
-        matches!(end.code, Some(0 | 1)) && end.peak_mb < 256,
+        matches!(end.code, Some(0 | 1)) && end.peak_mb < 256 && bolt_bytes < 40 << 20,
         "`bolt import` of a {git_bytes}-byte Git repository took {} MB of memory and wrote a \
          {bolt_bytes}-byte .bolt: {end:?}",
         end.peak_mb

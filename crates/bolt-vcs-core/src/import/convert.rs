@@ -37,7 +37,7 @@ const MAX_WHOLE_BLOB: u64 = 64 << 20;
 const MAX_COMMIT_BYTES: u64 = MAX_EXTRA_VALUE_BYTES as u64 + 1 + MAX_MESSAGE_BYTES as u64;
 
 /// Parents an import may add beyond each commit's first, all commits together: a save keeps its
-/// parents whole, so a few kilobytes of Git merges could otherwise fill the disk (decision 043).
+/// parents whole, so megabytes of Git merges could otherwise take gigabytes of disk (decision 043).
 pub(super) const MAX_EXTRA_PARENTS: u64 = 1_000_000;
 
 /// How many of a kind of thing an import leaves out, or warns about, it lists: skipped entries,
@@ -425,7 +425,7 @@ impl<'r> Converter<'r> {
         if message.as_bytes() != c.message {
             extra.insert(EXTRA_GIT_ORIGINAL_MESSAGE.to_owned(), c.message.to_vec());
         }
-        let own = ChangeId::from_git_commit(id.as_bytes(), None);
+        let own = ChangeId::from_git_commit(id.as_bytes());
         // A header's change ID goes to one save only, so no two saves share one (decision 043).
         let change_id = match c.change_id.and_then(ChangeId::from_jujutsu) {
             Some(wanted) if self.change_ids.insert(wanted) => wanted,
@@ -1111,24 +1111,25 @@ mod tests {
     fn change_ids_follow_jujutsus_rule() {
         let id = [0x01u8; 20];
         let expected: Vec<u8> = id[4..].iter().rev().map(|b| b.reverse_bits()).collect();
-        assert_eq!(ChangeId::from_git_commit(&id, None).0.to_vec(), expected);
+        assert_eq!(ChangeId::from_git_commit(&id).0.to_vec(), expected);
         assert_eq!(
-            ChangeId::from_git_commit(&id, Some(b"zyxwvutsrqponmlkzyxwvutsrqponmlk")).0,
-            [
+            ChangeId::from_jujutsu(b"zyxwvutsrqponmlkzyxwvutsrqponmlk").map(|c| c.0),
+            Some([
                 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
                 0xcd, 0xef
-            ]
+            ])
         );
         // Jujutsu reads its letters in either case.
         assert_eq!(
-            ChangeId::from_git_commit(&id, Some(b"ZYXWVUTSRQPONMLKzyxwvutsrqponmlk")).0[..2],
-            [0x01, 0x23]
+            ChangeId::from_jujutsu(b"ZYXWVUTSRQPONMLKzyxwvutsrqponmlk").map(|c| c.0[..2].to_vec()),
+            Some(vec![0x01, 0x23])
         );
         // The last 16 bytes count, so a SHA-256 ID's first 16 don't.
         let sha256: Vec<u8> = (0..32).collect();
         let want: Vec<u8> = (16..32u8).rev().map(u8::reverse_bits).collect();
-        assert_eq!(ChangeId::from_git_commit(&sha256, None).0.to_vec(), want);
-        // A header that isn't 16 bytes in Jujutsu's letters is passed over, as Jujutsu does.
+        assert_eq!(ChangeId::from_git_commit(&sha256).0.to_vec(), want);
+        // A header that isn't 16 bytes in Jujutsu's letters gives none, so the converter passes
+        // it over for the commit's own ID, as Jujutsu does.
         for header in [
             &b"zyxwvutsrqponmlk"[..],
             b"zyxwvutsrqponmlkzyxwvutsrqponmlkzz",
@@ -1137,8 +1138,8 @@ mod tests {
             b"",
         ] {
             assert_eq!(
-                ChangeId::from_git_commit(&id, Some(header)).0.to_vec(),
-                expected,
+                ChangeId::from_jujutsu(header),
+                None,
                 "{}",
                 String::from_utf8_lossy(header)
             );
@@ -1609,10 +1610,7 @@ mod tests {
             }
         );
         assert_eq!(save.message, "Merge\n\nBody.\n");
-        assert_eq!(
-            save.change_id,
-            ChangeId::from_git_commit(merge.as_bytes(), None)
-        );
+        assert_eq!(save.change_id, ChangeId::from_git_commit(merge.as_bytes()));
         // Only `git-commit`: no `line`, since Git never recorded where a commit was made.
         assert_eq!(
             save.extra,
@@ -1710,17 +1708,19 @@ mod tests {
         let header = "change-id zyxwvutsrqponmlkzyxwvutsrqponmlk\n";
         let first = git.commit(&commit_bytes(&tree, &[], header, b"first\n"));
         let again = git.commit(&commit_bytes(&tree, &[first], header, b"again\n"));
+        let short = "change-id zyxwvutsrqponmlk\n";
+        let odd = git.commit(&commit_bytes(&tree, &[again], short, b"odd\n"));
         let ((saves, counts), store) = convert(dir.path(), "a", |c| {
-            let saves = [c.commit(&first).unwrap(), c.commit(&again).unwrap()];
+            let saves = [first, again, odd].map(|id| c.commit(&id).unwrap());
             (saves, c.counts().clone())
         });
         let change_id = |n: usize| store.save(&saves[n], false).unwrap().change_id;
         let wanted = ChangeId::from_jujutsu(b"zyxwvutsrqponmlkzyxwvutsrqponmlk").unwrap();
         assert_eq!(change_id(0), wanted);
-        assert_eq!(
-            change_id(1),
-            ChangeId::from_git_commit(again.as_bytes(), None)
-        );
+        assert_eq!(change_id(1), ChangeId::from_git_commit(again.as_bytes()));
+        // A header that isn't 16 bytes in Jujutsu's letters is passed over, as Jujutsu does, and
+        // isn't counted.
+        assert_eq!(change_id(2), ChangeId::from_git_commit(odd.as_bytes()));
         assert_eq!(counts.duplicate_change_ids, 1);
     }
 
