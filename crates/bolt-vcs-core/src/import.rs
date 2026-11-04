@@ -113,7 +113,7 @@ pub enum ImportError {
         lookalike: bool,
     },
     /// The import stopped after it began the project: nothing is committed, and the `.bolt` it
-    /// began stays, so running the import again can finish the job (decision 041).
+    /// began stays, for a later run to finish from what it stored (decision 041).
     #[error(transparent)]
     Unfinished(Box<ImportError>),
 }
@@ -127,9 +127,15 @@ impl ImportError {
     pub fn hint(&self) -> Option<String> {
         match self {
             ImportError::Unfinished(e) => {
-                let kept = "Nothing was committed. Bolt kept the .bolt folder it began here, so \
-                            that running bolt import again can finish the import from what it \
-                            stored; or delete that folder.";
+                let kept = if e.may_pass_when_run_again() {
+                    "Nothing was committed. Bolt kept the .bolt folder it began here, so that \
+                     running bolt import again can finish the import from what it stored; or \
+                     delete that folder."
+                } else {
+                    "Nothing was committed. Bolt kept the .bolt folder it began here: bolt import \
+                     stops the same way until the cause is fixed, then finishes from what it \
+                     stored. Or delete that folder."
+                };
                 let advice = e
                     .hint()
                     .map(|hint| match hint.strip_prefix(NOTHING_CHANGED) {
@@ -152,6 +158,18 @@ impl ImportError {
             ),
             ImportError::LfsPointer { lookalike, .. } => Some(lfs_hint(*lookalike)),
         }
+    }
+
+    /// Whether running the import again as things are may get past this stop: Git was busy, or
+    /// reading or writing failed. Any other stop comes again until its cause is fixed.
+    fn may_pass_when_run_again(&self) -> bool {
+        matches!(
+            self,
+            ImportError::Git(GitError::Changed { .. } | GitError::Io { .. })
+                | ImportError::Repo(_)
+                | ImportError::Store(_)
+                | ImportError::Pack(_)
+        )
     }
 }
 
@@ -212,8 +230,8 @@ fn not_utf8_message(first: &[(String, String)], count: u64) -> String {
 /// save. Everything that only reads comes first, so most refusals come before `.bolt` is made.
 /// The project goes into `opened` as soon as it is begun, so a caller can show what its store
 /// noticed even if the import then fails. Nothing is committed until the last step writes
-/// `.bolt/format`, and running it again after an earlier failure finishes the job, reusing what
-/// was stored once it is checked (decision 041).
+/// `.bolt/format`, and running it again once the cause of an earlier failure is gone finishes the
+/// job, reusing what was stored once it is checked (decision 041).
 pub fn import_git(
     root: &Path,
     req: &mut ImportRequest,
@@ -272,6 +290,8 @@ struct Plan {
     head_line: Option<String>,
     head_commit: GitId,
     grafts: bool,
+    /// The patterns in Git's personal exclude list; `None` if it couldn't be read to count them.
+    excludes: Option<u64>,
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
@@ -306,6 +326,7 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
     Ok(Plan {
         skipped_refs: skipped_refs.map(|name| lossy(name)).collect(),
         skipped_ref_count: refs.other.len() as u64,
+        excludes: git.exclude_patterns(),
         git,
         names,
         order,
@@ -336,6 +357,7 @@ fn carry_out(
         head_line,
         head_commit,
         grafts,
+        excludes,
     } = plan;
     let mut packs = repo.new_packs()?;
     let mut converter = Converter::new(&git, repo.store(), &mut packs, own_change_ids);
@@ -414,6 +436,9 @@ fn carry_out(
              sparse-checkout disable` before your first save, or that save will record them as \
              deleted (they stay in history and can be brought back).",
         ));
+    }
+    if excludes != Some(0) {
+        warnings.push(personal_excludes(excludes));
     }
     let mut report = ImportReport {
         commits: total,
@@ -762,6 +787,24 @@ fn duplicate_change_ids(count: u64) -> Warning {
         )
     };
     Warning::new(warning::DUPLICATE_CHANGE_ID, message)
+}
+
+/// The warning for Git's personal exclude list, which holds `patterns` (`None`: it couldn't be
+/// read to count them). Bolt doesn't use it (decision 038), so the files it hides get saved.
+fn personal_excludes(patterns: Option<u64>) -> Warning {
+    let holds = match patterns {
+        Some(1) => "has 1 pattern".to_owned(),
+        Some(n) => format!("has {} patterns", thousands(n)),
+        None => "couldn't be read to count its patterns".to_owned(),
+    };
+    Warning::new(
+        warning::INFO_EXCLUDE_IGNORED,
+        format!(
+            "Git's personal exclude list here, .git/info/exclude, {holds}. Bolt doesn't use Git's \
+             personal exclude lists, so files they hide will be saved; copy the lines into \
+             .boltignore to keep those files out."
+        ),
+    )
 }
 
 /// The lines `refs` become: each name with the save of its commit.

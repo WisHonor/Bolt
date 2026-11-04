@@ -36,6 +36,8 @@ pub const DUPLICATE_CHANGE_ID: &str = "duplicate_change_id";
 /// The Git repository's config includes other files, which the import didn't read, so it can't
 /// tell whether they turn on sparse checkout.
 pub const CONFIG_INCLUDES_IGNORED: &str = "config_includes_ignored";
+/// Git's personal exclude list, `.git/info/exclude`, has patterns, which Bolt doesn't use.
+pub const INFO_EXCLUDE_IGNORED: &str = "info_exclude_ignored";
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

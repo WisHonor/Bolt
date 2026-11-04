@@ -225,7 +225,11 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
                     Some(short_or_whole(repo, id, &save.change_id, &mut warnings))
                 });
                 let short = short.unwrap_or_else(|| id.to_hex());
-                format!("You're at save {short}, where Git's HEAD was detached.")
+                let advice = SaveError::NotOnALine.hint().unwrap_or_default();
+                format!(
+                    "You're at save {short}, where Git's HEAD was detached: not on a line, so bolt \
+                     save won't work here.\n{advice}"
+                )
             }
         };
         import_output::print_import(&report, &standing);

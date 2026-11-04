@@ -1093,7 +1093,7 @@ Decision 039, part 2.
 - Each file or executable whose content changed, and whose size on disk is between the base size + 1 and twice the base size, is compared as a stream. It is flagged when its bytes are exactly the base bytes with each LF turned into CRLF, and the base holds no CR.
 - If any file is flagged, the save stops and writes nothing.
 - The message names up to 5 files and the count: "N files differ from what Git stored only in line endings: Git turned LF into CRLF when it wrote them out (core.autocrlf)."
-- The hint, verbatim: "To keep history as Git stored it, commit or stash your changes in Git, then run `git config core.autocrlf false` and `git checkout -- .`, and save again. To save the files with CRLF anyway: bolt save --accept-crlf "message"".
+- The hint, verbatim: "To keep history as Git stored it, commit or stash your changes in Git, then run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git reset --hard`, and save again. To save the files with CRLF anyway: bolt save --accept-crlf "message"". (`git checkout -- .` alone leaves a file whose stat data matches Git's index as it is.)
 
 - [ ] **Step 1: Write the failing tests.**
 

@@ -154,7 +154,13 @@ fn a_detached_head_puts_you_at_its_save() {
     env.commit("a.txt", "b\n", "Second");
     env.git(&["checkout", "-q", "--detach", &first]);
     let (out, _) = env.import();
-    assert!(out.contains("You're at save "), "{out}");
+    assert!(
+        out.contains(&format!(
+            "where Git's HEAD was detached: not on a line, so bolt save won't work here.\n\
+             {NOT_ON_A_LINE}\n"
+        )),
+        "{out}"
+    );
     let (repo, state) = env.state();
     let Position::AtSave(save) = state.position else {
         panic!("{:?}", state.position);
@@ -164,7 +170,22 @@ fn a_detached_head_puts_you_at_its_save() {
     let history = env.bolt().arg("history").output().unwrap();
     let history = text(&history.stdout);
     assert_eq!(history.lines().count(), 1, "{history}");
+    // There is no line for a save to go on, and the hint names only commands that exist.
+    env.overwrite("a.txt", "changed\n");
+    let out = env.save(&["Change it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "error: You are not on a line, so the save has nowhere to go.\nhint: {NOT_ON_A_LINE}\n"
+        )),
+        "{err}"
+    );
 }
+
+const NOT_ON_A_LINE: &str = "This version of Bolt can only save on a line. Delete the hidden \
+    .bolt folder here, switch Git to a branch (`git switch <branch>`) and run bolt import again, \
+    or import a fresh clone that is on a branch.";
 
 #[test]
 fn an_unborn_branch_stops_the_import() {
@@ -193,13 +214,17 @@ fn an_empty_repository_stops_the_import() {
     assert!(!env.root().join(".bolt").exists());
 }
 
-/// Once `.bolt` is begun, "nothing was changed" isn't so: the hint says what became of it.
+/// A Git LFS pointer, as Git LFS writes it.
+const POINTER: &str = "version https://git-lfs.github.com/spec/v1\noid sha256:\
+    4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+
+/// Once `.bolt` is begun, "nothing was changed" isn't so: the hint says what became of it. A stop
+/// the repository causes comes again, so the hint doesn't say that running it again finishes.
 #[test]
 fn an_import_that_stops_partway_says_its_bolt_folder_is_kept() {
     let env = Env::new();
-    let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:\
-                   4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
-    env.commit("art/big.psd", pointer, "Add a big file");
+    // With no sign of Git LFS but the pointer itself, only the converter finds it.
+    env.commit("art/big.psd", POINTER, "Add a big file");
     let err = env.refused_import();
     assert!(
         err.contains("holds a Git LFS pointer at `art/big.psd`"),
@@ -207,14 +232,65 @@ fn an_import_that_stops_partway_says_its_bolt_folder_is_kept() {
     );
     assert!(
         err.contains(
-            "Nothing was committed. Bolt kept the .bolt folder it began here, so that running \
-             bolt import again can finish the import from what it stored; or delete that folder."
+            "Nothing was committed. Bolt kept the .bolt folder it began here: bolt import stops \
+             the same way until the cause is fixed, then finishes from what it stored. Or delete \
+             that folder."
         ),
         "{err}"
     );
     assert!(!err.contains("Nothing was changed"), "{err}");
     assert!(env.root().join(".bolt").is_dir());
     assert!(!env.root().join(".bolt/format").exists());
+
+    // Other commands say what the folder is, and send nobody to `bolt start` alone.
+    for args in [&["save", "Save it"][..], &["history"], &["show"]] {
+        let out = env.bolt().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = text(&out.stderr);
+        assert!(
+            err.contains("error: An import or start began a Bolt project at ")
+                && err.contains(
+                    "hint: Run `bolt import` (or `bolt start`, if that began it) in that folder \
+                     again to finish, or delete its hidden .bolt folder.\n"
+                ),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+/// An import that stored files before it stopped is finished by `bolt import`, never covered by an
+/// empty project.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let out = env
+        .bolt()
+        .arg("import")
+        .env("BOLT_FAULT_FAIL", "commit:before-head")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("running bolt import again can finish the import"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = env.bolt().arg("start").output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains(
+            "error: An import began a Bolt project here and didn't finish, and bolt start won't \
+             make an empty project over what it stored.\nhint: Run `bolt import` again to finish \
+             the import, or delete the hidden .bolt folder and run `bolt start` again.\n"
+        ),
+        "{err}"
+    );
+    assert!(!env.root().join(".bolt/format").exists());
+    let (out, _) = env.import();
+    assert!(out.contains("Imported 1 commit from Git"), "{out}");
 }
 
 #[test]
@@ -377,6 +453,37 @@ fn nested_bolt_folders_are_warned_about() {
     assert_eq!(json["changes"], serde_json::json!([]));
 }
 
+/// Bolt doesn't use Git's personal exclude list (decision 038), so the import says when it hides
+/// files; Git's own sample of one holds only comments.
+#[test]
+fn a_personal_exclude_list_with_patterns_is_warned_about() {
+    let import_with = |exclude: &str| {
+        let env = Env::new();
+        env.commit("a.txt", "a\n", "First");
+        let info = env.root().join(".git/info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), exclude).unwrap();
+        let out = env.bolt().args(["--json", "import"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let warnings = json["warnings"].as_array().unwrap().clone();
+        warnings
+            .into_iter()
+            .find(|w| w["kind"] == "info_exclude_ignored")
+            .map(|w| w["message"].as_str().unwrap().to_owned())
+    };
+    let sample = "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start \
+                  with '#' are comments.\n\n   \n";
+    assert_eq!(import_with(sample), None);
+    let message = import_with(&format!("{sample}secrets.env\r\n*.log\n")).unwrap();
+    assert_eq!(
+        message,
+        "Git's personal exclude list here, .git/info/exclude, has 2 patterns. Bolt doesn't use \
+         Git's personal exclude lists, so files they hide will be saved; copy the lines into \
+         .boltignore to keep those files out."
+    );
+}
+
 #[test]
 fn progress_is_not_printed_without_a_terminal() {
     let env = Env::new();
@@ -430,8 +537,8 @@ fn import_json_output() {
 }
 
 const CRLF_HINT: &str = "To keep history as Git stored it, commit or stash your changes in Git, \
-    then run `git config core.autocrlf false` and `git checkout -- .`, and save again. To save \
-    the files with CRLF anyway: bolt save --accept-crlf \"message\"";
+    then run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git reset --hard`, \
+    and save again. To save the files with CRLF anyway: bolt save --accept-crlf \"message\"";
 
 /// A repository as Git for Windows leaves it: stored with LF, written out with CRLF.
 fn converted_by_git() -> Env {
@@ -553,6 +660,49 @@ fn later_saves_dont_check() {
         "{}",
         text(&out.stdout)
     );
+}
+
+/// The hint's own Git commands, where Git for Windows wrote the files with CRLF and refreshed its
+/// index, so their stat data matches it and `git checkout` alone would leave them as they are.
+#[test]
+fn following_the_line_ending_hint_saves_what_git_stored() {
+    let env = Env::new();
+    env.commit("a.txt", "one\ntwo\n", "First");
+    env.commit("src/b.txt", "three\nfour\n", "Second");
+    env.import();
+    let crlf = |args: &[&str]| env.git(&[&["-c", "core.autocrlf=true"], args].concat());
+    for file in ["a.txt", "src/b.txt"] {
+        std::fs::remove_file(env.root().join(file)).unwrap();
+    }
+    crlf(&["checkout", "--", "."]);
+    crlf(&["status", "--short"]);
+    // An edit made in an editor that keeps the CRLF.
+    env.overwrite("a.txt", "one\r\ntwo\r\nthree\r\n");
+    let out = env.save(&["Add a line"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("error: 1 file differs from what Git stored only in line endings"));
+    assert!(err.contains(&format!("hint: {CRLF_HINT}\n")), "{err}");
+
+    // What the hint says, in its order: the change committed first, which Git stores with LF.
+    crlf(&["commit", "-q", "-a", "-m", "Add a line"]);
+    env.git(&["config", "core.autocrlf", "false"]);
+    env.git(&["rm", "--cached", "-r", "-q", "."]);
+    env.git(&["reset", "--hard"]);
+    let read = |file: &str| std::fs::read(env.root().join(file)).unwrap();
+    assert_eq!(read("a.txt"), b"one\ntwo\nthree\n");
+    assert_eq!(read("src/b.txt"), b"three\nfour\n");
+    let out = env.save(&["Add a line"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(1 file)"),
+        "{}",
+        text(&out.stdout)
+    );
+    let shown = env.bolt().args(["--json", "show"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(json["changes"][0]["path"], "a.txt");
+    assert_eq!(json["changes"][0]["new_size"], 14);
 }
 
 /// Not bytes the tests wrote: a file as Git itself writes it out with `core.autocrlf`.

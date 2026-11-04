@@ -462,6 +462,27 @@ impl Repo {
         let info = self.git.join("info");
         Ok(matches!(real_dir(&info), Ok(true)) && exists(&info.join("grafts"))?)
     }
+
+    /// How many patterns `.git/info/exclude`, Git's personal list of files to ignore, holds: its
+    /// lines that aren't blank or comments. Bolt doesn't use them (decision 038), so the import
+    /// says so. `None` if it can't be read to count them, as when it is over 1 MiB or a link.
+    #[must_use]
+    pub fn exclude_patterns(&self) -> Option<u64> {
+        let info = self.git.join("info");
+        match real_dir(&info) {
+            Ok(true) => {}
+            Ok(false) => return Some(0),
+            Err(_) => return None,
+        }
+        let path = info.join("exclude");
+        let text = read_optional(&path, safe_fs::MAX_IGNORE_FILE_BYTES).ok()?;
+        let lines = text.unwrap_or_default();
+        let patterns = lines
+            .split(|&b| b == b'\n')
+            .map(trim_end)
+            .filter(|line| !line.is_empty() && !line.starts_with(b"#"));
+        Some(patterns.count() as u64)
+    }
 }
 
 /// Refuses a `.git` that isn't the user's, unless they listed the work tree in safe-folders, as

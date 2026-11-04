@@ -116,6 +116,15 @@ impl Store {
         self.packs.len()
     }
 
+    /// Whether any pack holds a file's content, as its index lists it.
+    #[must_use]
+    pub fn holds_content(&self) -> bool {
+        let content = |e: &IndexEntry| e.kind == ObjectKind::Content;
+        self.packs
+            .iter()
+            .any(|pack| pack.entries().iter().any(content))
+    }
+
     /// Whether a copy of `id` reads back whole and matches its fingerprint, so storing it can be
     /// skipped. A copy recording another `size` than the object's is damage, and is never read.
     pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {

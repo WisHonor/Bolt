@@ -67,6 +67,19 @@ pub enum RepoError {
     /// finishes the project.
     #[error("The .bolt folder was made, but the project isn't finished. {refusal}")]
     StartStopped { refusal: Box<RepoError> },
+    /// A command found the `.bolt` of a start or import that stopped before it wrote `format`.
+    #[error(
+        "An import or start began a Bolt project at {} and didn't finish it.",
+        escape(&root.display().to_string(), false)
+    )]
+    Unfinished { root: PathBuf },
+    /// `bolt start` found files an unfinished import stored, which an empty project would leave
+    /// unused.
+    #[error(
+        "An import began a Bolt project here and didn't finish, and bolt start won't make an empty \
+         project over what it stored."
+    )]
+    ImportUnfinished,
     #[error(
         "This project uses {}, which this version of Bolt doesn't understand.",
         escape(detail, false)
@@ -118,6 +131,14 @@ impl RepoError {
                 }
                 RepoError::StartStopped { refusal } => {
                     return refusal.hint_then("Then run `bolt start` again to finish.");
+                }
+                RepoError::Unfinished { .. } => {
+                    "Run `bolt import` (or `bolt start`, if that began it) in that folder again to \
+                     finish, or delete its hidden .bolt folder."
+                }
+                RepoError::ImportUnfinished => {
+                    "Run `bolt import` again to finish the import, or delete the hidden .bolt \
+                     folder and run `bolt start` again."
                 }
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
@@ -448,6 +469,15 @@ fn has_project(
     Ok(is_link || has_format(folder).unwrap_or(false))
 }
 
+/// Whether `folder` holds a start or import that stopped before it wrote `format`: a real `.bolt`
+/// of Bolt's own names. Only for a folder `has_project` has passed, so its owner was asked.
+fn is_unfinished(folder: &Path) -> bool {
+    let bolt = folder.join(".bolt");
+    safe_fs::check_real_dir(&bolt).is_ok()
+        && matches!(has_format(folder), Ok(false))
+        && matches!(holds_only_bolts_own(&bolt), Ok(true))
+}
+
 /// Whether `root/.bolt` holds an entry named `format`, of any kind (`open` checks it), without
 /// following a link there.
 pub(crate) fn has_format(root: &Path) -> io::Result<bool> {
@@ -478,7 +508,9 @@ fn enclosing_project<'a>(
 
 impl Repository {
     /// Makes `root` a new project: the folders, the first save on line `main`, then `.bolt/format`
-    /// last. A `.bolt` without `format` is an interrupted start or import, which this finishes.
+    /// last. A `.bolt` without `format` is an interrupted start, which this finishes, or an
+    /// interrupted import, which it refuses once the import has stored files: `bolt import`
+    /// finishes that, and an empty project would leave them unused.
     pub fn init(root: &Path, who: &Person) -> Result<Repository, RepoError> {
         Repository::init_with(root, who, &check_owner)
     }
@@ -490,6 +522,10 @@ impl Repository {
         owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
         let (mut repo, lock) = Repository::begin_with(root, owner_check)?;
+        // A start stores no file, so files are an import's.
+        if repo.store.holds_content() {
+            return Err(RepoError::ImportUnfinished);
+        }
         let mut packs = repo.new_packs()?;
         let listing = packs.add_record(ObjectKind::FolderListing, &Listing::empty().encode())?;
         let save = Save {
@@ -638,7 +674,8 @@ impl Repository {
     }
 
     /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one.
-    /// A `.bolt` on the way that Bolt may not use is refused.
+    /// A `.bolt` on the way that Bolt may not use is refused. With none, an unfinished one met on
+    /// the way is named, so that nobody is sent to `bolt start` over an import.
     pub fn discover(start: &Path) -> Result<Repository, RepoError> {
         Repository::discover_with(start, &check_owner)
     }
@@ -648,12 +685,19 @@ impl Repository {
         start: &Path,
         owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
+        let mut unfinished = None;
         for folder in start.ancestors() {
             if has_project(folder, owner_check)? {
                 return Repository::open(folder);
             }
+            if unfinished.is_none() && is_unfinished(folder) {
+                unfinished = Some(folder.to_owned());
+            }
         }
-        Err(RepoError::NotAProject)
+        Err(match unfinished {
+            Some(root) => RepoError::Unfinished { root },
+            None => RepoError::NotAProject,
+        })
     }
 
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
@@ -1187,6 +1231,49 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// A start or import that stopped before `format` is named to every command, and `start`
+    /// takes over what a start stores, but never the files an import stored.
+    #[test]
+    fn an_unfinished_project_is_named_and_kept_for_the_import_that_began_it() {
+        let who = entry(0).who;
+        let begun = |content: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let (repo, lock) = Repository::begin(dir.path()).unwrap();
+            let mut packs = repo.new_packs().unwrap();
+            if content {
+                packs.add_content(b"a file an import stored").unwrap();
+            } else {
+                let empty = Listing::empty().encode();
+                packs.add_record(ObjectKind::FolderListing, &empty).unwrap();
+            }
+            packs.finish().unwrap();
+            drop((lock, repo));
+            dir
+        };
+        let dir = begun(true);
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        match Repository::discover(&sub) {
+            Err(RepoError::Unfinished { root }) => assert_eq!(root, dir.path()),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        let refused = Repository::init(dir.path(), &who);
+        assert!(
+            matches!(refused, Err(RepoError::ImportUnfinished)),
+            "{:?}",
+            refused.map(|_| ())
+        );
+        assert!(!dir.path().join(".bolt/format").exists());
+        // Another tool's folder is nothing of Bolt's to finish.
+        std::fs::write(dir.path().join(".bolt/prompt"), b"").unwrap();
+        assert!(matches!(
+            Repository::discover(&sub),
+            Err(RepoError::NotAProject)
+        ));
+        let dir = begun(false);
+        Repository::init(dir.path(), &who).unwrap();
     }
 
     #[test]
@@ -2095,6 +2182,9 @@ mod tests {
                 refusal: Box::new(RepoError::NotYours {
                     path: PathBuf::from(HOSTILE),
                 }),
+            },
+            RepoError::Unfinished {
+                root: PathBuf::from(HOSTILE),
             },
             // The path of a damaged pack has the project folder's name in it.
             PackError::Corrupt {

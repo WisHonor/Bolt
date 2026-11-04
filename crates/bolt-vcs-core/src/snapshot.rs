@@ -181,11 +181,17 @@ impl SaveError {
                         escape(path, false)
                     ));
                 }
+                // `git checkout` alone skips files whose stat data the index matches.
                 SaveError::LineEndingsChanged { .. } => {
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
-                     run `git config core.autocrlf false` and `git checkout -- .`, and save \
-                     again. To save the files with CRLF anyway: bolt save --accept-crlf \
-                     \"message\""
+                     run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git \
+                     reset --hard`, and save again. To save the files with CRLF anyway: bolt save \
+                     --accept-crlf \"message\""
+                }
+                SaveError::NotOnALine => {
+                    "This version of Bolt can only save on a line. Delete the hidden .bolt folder \
+                     here, switch Git to a branch (`git switch <branch>`) and run bolt import \
+                     again, or import a fresh clone that is on a branch."
                 }
                 SaveError::Unreadable { .. } => {
                     "Nothing was saved. Let Bolt read it, or list it in .boltignore."
@@ -208,7 +214,6 @@ impl SaveError {
                 SaveError::TooLarge { .. } => {
                     "Nothing was saved. List the deep or huge folder in .boltignore."
                 }
-                _ => return None,
             }
             .to_owned(),
         )
