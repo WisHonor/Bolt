@@ -10,6 +10,8 @@
 
 **Spec:** decisions [030](../decisions/030-administrators-only-when-elevated.md) to [041](../decisions/041-several-packs-per-command.md), with 002, 004, 019, 020 and 022–029; [design.md](../design.md) §5.16; [storage-format.md](../storage-format.md) §2–§5, §7, §9, §11, §12; [security.md](../security.md) §4 and §7; [testing.md](../testing.md); the milestone 2 rows of [the follow-ups](2026-11-01-milestone-1-follow-ups.md).
 
+**Rulings made while building:** [2026-11-02-milestone-2-rulings.md](2026-11-02-milestone-2-rulings.md).
+
 ## Global Constraints
 
 - Everything in CLAUDE.md applies.
