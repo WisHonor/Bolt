@@ -426,10 +426,14 @@ impl WalkState {
         let folder = shown(rel.parent().unwrap_or(rel));
         // The walk is depth first, so the rules of folders `path` is not in are done with.
         self.matcher.leave_to(&folder);
+        // Inside an ignored folder everything is ignored, as in Git: no line takes a name back,
+        // so none is matched.
+        if self.held.contains(&folder) {
+            return self.saved_before(&folder, rel, is_dir);
+        }
         // Before `path`'s own ignore files are read, if it is a folder: they are for what it holds.
         let verdict = self.matcher.verdict(path_bytes(rel), is_dir);
-        // Inside an ignored folder everything is ignored, as in Git: no line takes a name back.
-        if self.held.contains(&folder) || verdict.bolt == Decision::Ignored {
+        if verdict.bolt == Decision::Ignored {
             return self.saved_before(&folder, rel, is_dir);
         }
         let git_ignores = self.git_held.contains(&folder) || verdict.git == Decision::Ignored;

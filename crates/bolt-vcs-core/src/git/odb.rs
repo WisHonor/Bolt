@@ -44,6 +44,8 @@ const ENTRY_HEADER_WORK: u64 = 1 << 10;
 const MAX_KNOWN_ENTRIES: usize = 1 << 19;
 /// The most a loose object may say it holds: 1 TiB.
 const MAX_LOOSE_SIZE: u64 = 1 << 40;
+/// The most deflate expands its input: a 258-byte match takes 2 bits.
+const MAX_EXPANSION: u64 = 1032;
 /// A loose object's header fits in this many bytes with its NUL, as Git requires.
 const MAX_HEADER_LEN: usize = 32;
 /// Compressed bytes read at a time, and inflated ones handed on.
@@ -699,6 +701,8 @@ fn parse_header(header: &[u8]) -> Option<(ObjectType, u64)> {
 pub(super) struct Input<'p, F> {
     file: F,
     path: Cow<'p, Path>,
+    /// Where it began.
+    start: u64,
     pos: u64,
     end: u64,
 }
@@ -708,9 +712,15 @@ impl<'p, F: Borrow<File>> Input<'p, F> {
         Input {
             file,
             path: path.into(),
+            start: pos,
             pos,
             end,
         }
+    }
+
+    /// How many bytes it was given to read.
+    fn len(&self) -> u64 {
+        self.end.saturating_sub(self.start)
     }
 
     /// Reads as much as one read gives; 0 only at `end`. A file that ends sooner got shorter
@@ -806,16 +816,18 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
                 Ok(_) | Err(MZError::Buf) if result.bytes_written > 0 => {
                     return Ok(result.bytes_written);
                 }
-                // It took all it was given: read more.
+                // It took all it was given: read more. A read that fails leaves the buffer as it
+                // was, so it can't be taken for new input.
                 Ok(_) | Err(MZError::Buf) if self.start >= self.end => {
-                    self.start = 0;
-                    self.end = self.input.read(&mut self.buf)?;
-                    if self.end == 0 {
+                    let got = self.input.read(&mut self.buf)?;
+                    if got == 0 {
                         return Err(broken(format!(
                             "{} ends in the middle of its compressed data",
                             self.what()
                         )));
                     }
+                    self.start = 0;
+                    self.end = got;
                 }
                 _ => {
                     return Err(broken(format!(
@@ -835,6 +847,18 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
                  into memory",
                 self.what()
             )));
+        }
+        // A size the bytes can't hold is refused before any room is made for it.
+        let most = self.input.len().saturating_mul(MAX_EXPANSION);
+        if size > most {
+            return Err(GitError::EndedEarly {
+                what: format!(
+                    "{} says it holds {size} bytes, but the {} bytes of compressed data it has \
+                     can't hold more than {most}",
+                    self.what(),
+                    self.input.len()
+                ),
+            });
         }
         let len = usize::try_from(size).unwrap_or(usize::MAX);
         let mut data = Vec::new();
@@ -901,13 +925,16 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
 }
 
 /// A blob's bytes, checked against its ID as they end: if they don't match, the read that would
-/// finish them fails instead, and so does every read after it.
+/// finish them fails instead, and so does every read after it. So does a read that fails for any
+/// other reason.
 pub struct BlobReader<'r>(Reading<'r>);
 
 enum Reading<'r> {
     /// Checked already: rebuilt from deltas, or a stream that passed.
     Memory(io::Cursor<Vec<u8>>),
     Stream(Box<Stream<'r>>),
+    /// A read failed, with this message: so does every read after it.
+    Failed(String),
 }
 
 impl fmt::Debug for BlobReader<'_> {
@@ -923,13 +950,19 @@ impl Read for BlobReader<'_> {
         }
         match &mut self.0 {
             Reading::Memory(data) => data.read(buf),
-            Reading::Stream(stream) => {
-                let got = stream.read(buf).map_err(io::Error::other)?;
-                if stream.left == 0 {
-                    self.0 = Reading::Memory(io::Cursor::default());
+            Reading::Stream(stream) => match stream.read(buf) {
+                Ok(got) => {
+                    if stream.left == 0 {
+                        self.0 = Reading::Memory(io::Cursor::default());
+                    }
+                    Ok(got)
                 }
-                Ok(got)
-            }
+                Err(e) => {
+                    self.0 = Reading::Failed(e.to_string());
+                    Err(io::Error::other(e))
+                }
+            },
+            Reading::Failed(message) => Err(io::Error::other(message.clone())),
         }
     }
 }
@@ -1469,6 +1502,76 @@ mod tests {
             assert!(set.add_content_from(&mut reader, expected).is_err());
             assert!(set.is_empty());
         }
+    }
+
+    #[test]
+    fn a_streamed_blob_keeps_failing_after_a_read_fails() {
+        let (dir, git) = craft(Sha1);
+        // Bytes deflate can't shrink, so the file holds more than one chunk of them.
+        let mut x = 0x2545_f491_4f6c_dd1d_u64;
+        let data: Vec<u8> = (0..100_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        let blob = git.object(Blob, &data);
+        let repo = open(&dir);
+        let mut reader = repo.blob_reader(&blob).unwrap();
+        let mut buf = [0; 4096];
+        reader.read_exact(&mut buf).unwrap();
+        // The file gets shorter while Bolt reads it: the next chunk can't be read.
+        let hex = blob.to_hex();
+        let path = dir
+            .path()
+            .join(".git/objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(20)
+            .unwrap();
+        let first = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => panic!("the blob ended"),
+                Ok(_) => {}
+                Err(e) => break e,
+            }
+        };
+        for _ in 0..3 {
+            let again = reader.read(&mut buf).unwrap_err();
+            assert_eq!(again.to_string(), first.to_string());
+        }
+    }
+
+    #[test]
+    fn a_size_the_compressed_bytes_cannot_hold_is_refused_before_room_is_made() {
+        let (dir, git) = craft(Sha1);
+        // 500 MiB said, a few bytes stored.
+        let liar = id(Blob, b"liar", Sha1);
+        git.raw_loose(&liar.to_hex(), &deflate(b"blob 524288000\0x"));
+        // Zeros shrink about as much as deflate can make anything, about 1,000 to 1.
+        let zeros = vec![0u8; 8 << 20];
+        let stored = [b"blob 8388608\0".as_slice(), &zeros].concat();
+        let squeezed = id(Blob, &zeros, Sha1);
+        git.raw_loose(&squeezed.to_hex(), &deflate(&stored));
+        let repo = open(&dir);
+        match repo.read(&liar) {
+            Err(e @ GitError::EndedEarly { .. }) => {
+                let message = e.to_string();
+                assert!(
+                    message.contains("says it holds 524288000 bytes, but the")
+                        && message.contains("can't hold more than"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(repo.read(&squeezed).unwrap().data == zeros);
     }
 
     #[test]

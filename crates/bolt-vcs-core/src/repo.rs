@@ -87,25 +87,34 @@ pub enum RepoError {
 }
 
 impl RepoError {
+    /// The project folder, for the refusals whose hint is to trust it. The one place that says
+    /// which they are.
+    fn trust_path(&self) -> Option<&Path> {
+        match self {
+            RepoError::NotYours { path }
+            | RepoError::OwnerUnknown { path }
+            | RepoError::OwnerLookupFailed { path, .. }
+            | RepoError::AdminsNotElevated { path } => Some(path.as_path()),
+            _ => None,
+        }
+    }
+
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
+        if let Some(path) = self.trust_path() {
+            let trust = config::trust_hint(path);
+            return Some(if matches!(self, RepoError::AdminsNotElevated { .. }) {
+                format!("Open a terminal as administrator and run the command there.\n{trust}")
+            } else {
+                trust
+            });
+        }
         Some(
             match self {
                 RepoError::NotAProject => "Run `bolt start` to make this folder a Bolt project.",
                 RepoError::InsideAnotherProject { .. } => {
                     "Run Bolt commands there, or pick a folder outside it."
-                }
-                RepoError::NotYours { path }
-                | RepoError::OwnerUnknown { path }
-                | RepoError::OwnerLookupFailed { path, .. } => {
-                    return Some(config::trust_hint(path));
-                }
-                RepoError::AdminsNotElevated { path } => {
-                    return Some(format!(
-                        "Open a terminal as administrator and run the command there.\n{}",
-                        config::trust_hint(path)
-                    ));
                 }
                 RepoError::StartStopped { refusal } => {
                     return refusal.hint_then("Then run `bolt start` again to finish.");
@@ -126,13 +135,7 @@ impl RepoError {
     /// `then` is left off.
     pub(crate) fn hint_then(&self, then: &str) -> Option<String> {
         let hint = self.hint()?;
-        let moves = match self {
-            RepoError::NotYours { path }
-            | RepoError::OwnerUnknown { path }
-            | RepoError::OwnerLookupFailed { path, .. }
-            | RepoError::AdminsNotElevated { path } => config::others_can_write(path),
-            _ => false,
-        };
+        let moves = self.trust_path().is_some_and(config::others_can_write);
         Some(if moves {
             hint
         } else {
@@ -573,14 +576,14 @@ impl Repository {
             fsio::create_dir_durable(&bolt)?;
             // Some drives give a new folder another owner, or none, and every later command
             // would refuse it.
-            let made = check_bolt(root, owner_check).map_err(|e| match e {
-                e @ (RepoError::NotYours { .. }
-                | RepoError::AdminsNotElevated { .. }
-                | RepoError::OwnerUnknown { .. }
-                | RepoError::OwnerLookupFailed { .. }) => RepoError::StartStopped {
-                    refusal: Box::new(e),
-                },
-                other => other,
+            let made = check_bolt(root, owner_check).map_err(|e| {
+                if e.trust_path().is_some() {
+                    RepoError::StartStopped {
+                        refusal: Box::new(e),
+                    }
+                } else {
+                    e
+                }
             })?;
             if !made {
                 return Err(io::Error::new(
