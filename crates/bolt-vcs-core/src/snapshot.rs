@@ -1,7 +1,7 @@
 //! `bolt save`: walks the project folder, stores its files, and commits the save.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -259,6 +259,7 @@ pub fn save_folder(
         folders,
         old,
         rebuilt,
+        ignored,
         mut warnings,
     } = walk(repo.root(), base, SaveLimits::default(), drive)?;
     check_names(&folders, &old)?;
@@ -270,9 +271,12 @@ pub fn save_folder(
     for listing in &rebuilt {
         store_listing(repo.store(), &mut packs, listing)?;
     }
-    let (root, kept) = build(repo.store(), &mut packs, &folders, &old)?;
+    let (root, kept, changed) = build(repo.store(), &mut packs, &folders, &old, &ignored)?;
     if kept > 0 {
         warnings.push(kept_warning(kept));
+    }
+    if !changed.is_empty() {
+        warnings.push(ignored_changes_saved(changed));
     }
     if root == parent.root {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
@@ -364,6 +368,34 @@ fn kept_warning(count: usize) -> Warning {
     Warning::new(warning::KEPT_AS_THEY_WERE, message)
 }
 
+/// Says the save took changes to `paths`, files an ignore rule matches that stay saved because
+/// the last save holds them (decision 038), naming the first few.
+fn ignored_changes_saved(mut paths: Vec<String>) -> Warning {
+    let count = paths.len() as u64;
+    paths.sort_unstable();
+    paths.truncate(NAMED);
+    let (what, why) = if count == 1 {
+        (
+            "a change to 1 file".to_owned(),
+            "The last save holds it, so it stays saved, but Git would leave such a change out \
+             unless the file was added (git add). Bolt keeps saving it until it is deleted or \
+             moved out of the project folder.",
+        )
+    } else {
+        (
+            format!("changes to {count} files"),
+            "The last save holds them, so they stay saved, but Git would leave such changes out \
+             unless the files were added (git add). Bolt keeps saving them until they are deleted \
+             or moved out of the project folder.",
+        )
+    };
+    let message = format!(
+        "Saved {what} that an ignore rule matches:{}\n{why}",
+        listed(&paths, count)
+    );
+    Warning::new(warning::IGNORED_CHANGES_SAVED, message)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     File,
@@ -424,14 +456,15 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
     }
 }
 
-/// Stores every file and listing, deepest folders first. Returns the top listing's ID and how
-/// many entries were kept as they were.
+/// Stores every file and listing, deepest folders first. Returns the top listing's ID, how many
+/// entries were kept as they were, and which of the files and links in `ignored` changed.
 fn build(
     store: &Store,
     packs: &mut PackSet,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
-) -> Result<(Id, usize), SaveError> {
+    ignored: &HashSet<String>,
+) -> Result<(Id, usize, Vec<String>), SaveError> {
     let mut order: Vec<&String> = folders.keys().collect();
     order.sort_by_key(|rel| {
         Reverse(if rel.is_empty() {
@@ -443,6 +476,7 @@ fn build(
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
     let mut kept = 0;
+    let mut changed = Vec::new();
     for rel in order {
         let before = old.get(rel).and_then(Option::as_ref);
         let mut entries = Vec::new();
@@ -489,6 +523,12 @@ fn build(
                     (EntryKind::Folder, id, 0)
                 }
             };
+            if ignored.contains(&c.rel) {
+                let was = before.and_then(|l| l.get(&c.name));
+                if was.is_none_or(|e| (e.kind, e.id) != (kind, id)) {
+                    changed.push(c.rel.clone());
+                }
+            }
             entries.push(Entry {
                 name: c.name.clone(),
                 kind,
@@ -500,7 +540,7 @@ fn build(
         built.insert(rel, store_listing(store, packs, &listing)?);
     }
     let root = built.remove("").ok_or_else(missing)?;
-    Ok((root, kept))
+    Ok((root, kept, changed))
 }
 
 /// Stores `listing` unless a good copy is held already, and returns its ID.
@@ -1230,6 +1270,17 @@ mod tests {
     }
 
     #[test]
+    fn the_ignored_files_a_save_changed_are_named_escaped_and_counted() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        assert_hostile_text_escaped(&ignored_changes_saved(vec![HOSTILE.to_owned()]).message);
+        let paths = (1..=7).rev().map(|i| format!("f{i}.dll")).collect();
+        let message = ignored_changes_saved(paths).message;
+        let listed = "Saved changes to 7 files that an ignore rule matches:\n  f1.dll\n  f2.dll\n  \
+                      f3.dll\n  f4.dll\n  f5.dll\n  and 2 more\nThe last save holds them";
+        assert!(message.starts_with(listed), "{message}");
+    }
+
+    #[test]
     fn the_boltignore_hint_does_not_blame_a_pattern() {
         // A link, a pipe, a huge file or one Bolt can't read has no pattern to fix.
         let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
@@ -1267,7 +1318,13 @@ mod tests {
             return;
         }
         let mut packs = repo.new_packs().unwrap();
-        match build(repo.store(), &mut packs, &folders, &HashMap::new()) {
+        match build(
+            repo.store(),
+            &mut packs,
+            &folders,
+            &HashMap::new(),
+            &HashSet::new(),
+        ) {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),
             other => panic!("{other:?}"),
         }

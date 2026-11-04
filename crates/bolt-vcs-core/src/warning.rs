@@ -17,6 +17,9 @@ pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
 pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
 /// A save left out entries whose names Git treats as `.git`.
 pub const GIT_NAMES_LEFT_OUT: &str = "git_names_left_out";
+/// A save took changes to files an ignore rule matches, which stay saved because the last save
+/// holds them.
+pub const IGNORED_CHANGES_SAVED: &str = "ignored_changes_saved";
 /// The project opens only from an administrator terminal.
 pub const ELEVATED_ONLY: &str = "elevated_only";
 /// `start` made the project but couldn't read its first save back to show it.

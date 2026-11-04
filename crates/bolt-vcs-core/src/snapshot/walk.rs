@@ -177,6 +177,8 @@ struct WalkState {
     old: HashMap<String, Option<Listing>>,
     /// Ignored folders the walk goes into only for the base save's entries in them.
     held: HashSet<String>,
+    /// Files and links an ignore rule matches, kept because the base save holds them.
+    ignored: HashSet<String>,
     drive: Drive,
     /// The base save's entries the walk leaves untouched, by project path: the new save keeps
     /// them as they were, whatever the folder holds there.
@@ -197,6 +199,7 @@ impl WalkState {
             git_name_count: 0,
             old: HashMap::new(),
             held: HashSet::new(),
+            ignored: HashSet::new(),
             drive,
             untouched: HashMap::new(),
         };
@@ -398,7 +401,8 @@ impl WalkState {
 
     /// Whether the base save has the ignored `rel` under that name in `folder`, as a folder if
     /// and only if it is one now: what is saved stays saved, as in Git (decision 038). A folder
-    /// kept this way is held: its ignore files aren't read, and it keeps only what was saved.
+    /// kept this way is held: its ignore files aren't read, and it keeps only what was saved. A
+    /// file or link kept this way is noted, so that a change to it can be warned about.
     fn saved_before(&mut self, folder: &str, rel: &Path, is_dir: bool) -> bool {
         // Taking "not read" for "not saved" would record saved files as removed.
         let Some(listing) = self.old.get(folder) else {
@@ -412,6 +416,8 @@ impl WalkState {
             .is_some_and(|e| (e.kind == EntryKind::Folder) == is_dir);
         if saved && is_dir {
             self.held.insert(shown(rel));
+        } else if saved {
+            self.ignored.insert(shown(rel));
         }
         saved
     }
@@ -429,6 +435,9 @@ pub(super) struct Scan {
     pub(super) old: HashMap<String, Option<Listing>>,
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
+    /// The project paths of the files and links an ignore rule matches, kept because the base
+    /// save holds them.
+    pub(super) ignored: HashSet<String>,
     /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` left out.
     pub(super) warnings: Vec<Warning>,
 }
@@ -598,6 +607,7 @@ fn scan_folder(
         folders,
         old: std::mem::take(&mut rules.old),
         rebuilt,
+        ignored: std::mem::take(&mut rules.ignored),
         warnings: std::mem::take(&mut rules.warnings),
     })
 }
@@ -1656,6 +1666,67 @@ mod tests {
             save_now(&mut repo).unwrap(),
             SaveOutcome::NothingChanged { .. }
         ));
+    }
+
+    #[test]
+    fn a_change_to_a_saved_file_a_rule_matches_is_warned_about() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "a.dll", b"1");
+        write(root, "b.dll", b"2");
+        write(root, "gone.dll", b"3");
+        write(root, "Library/keep.txt", b"x");
+        save_now(&mut repo).unwrap();
+        // Unchanged, the files a rule now matches say nothing.
+        write(root, ".gitignore", b"*.dll\nLibrary/\n");
+        let saved = save_now(&mut repo).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        write(root, "a.dll", b"changed");
+        write(root, "Library/keep.txt", b"changed");
+        // Neither a new file, which the rule keeps out, nor a deleted one counts.
+        write(root, "c.dll", b"new");
+        fs::remove_file(root.join("gone.dll")).unwrap();
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [
+                ".gitignore",
+                "Library",
+                "Library/keep.txt",
+                "a.dll",
+                "b.dll"
+            ]
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "ignored_changes_saved");
+        assert_eq!(
+            warnings[0].message,
+            "Saved changes to 2 files that an ignore rule matches:\n  Library/keep.txt\n  a.dll\n\
+             The last save holds them, so they stay saved, but Git would leave such changes out \
+             unless the files were added (git add). Bolt keeps saving them until they are deleted \
+             or moved out of the project folder."
+        );
+    }
+
+    #[test]
+    fn a_saved_file_a_rule_matches_that_became_a_link_is_warned_about() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "a.dll", b"no-such-file");
+        save_now(&mut repo).unwrap();
+        write(root, ".gitignore", b"*.dll\n");
+        // A link holding the file's bytes as its target: only the kind changed.
+        fs::remove_file(root.join("a.dll")).unwrap();
+        if !crate::test_support::symlink(Path::new("no-such-file"), &root.join("a.dll")) {
+            return;
+        }
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "ignored_changes_saved");
+        let listed = "a change to 1 file that an ignore rule matches:\n  a.dll\n";
+        assert!(warnings[0].message.contains(listed), "{warnings:?}");
     }
 
     #[test]

@@ -719,7 +719,6 @@ fn rt3_5b_save_leaves_out_a_git_file_and_an_hfs_spelling_of_git_everywhere() {
 // the file (`git add .env`, `-a`, `-A`), and `git status` lists it as modified first.
 
 #[test]
-#[ignore = "RT3-6: red-team proof, run once its fix is in"]
 fn rt3_6_a_tracked_but_ignored_env_is_not_saved_silently() {
     let env = Env::new();
     one_commit(
