@@ -1,0 +1,12 @@
+$ sh redteam/attacks4/deep-tags.sh /tmp/t/release/bolt 1000 10000 100000
+T=1000 tags on a commit 4,096 deltas deep: .git 328 KB on disk
+  tar -czf of .git: 136951 bytes
+  /tmp/t/release/bolt import: exit 0, 4.5 s, peak 10 MB
+T=10000 tags on a commit 4,096 deltas deep: .git 848 KB on disk
+  tar -czf of .git: 162870 bytes
+  /tmp/t/release/bolt import: exit 0, 42.9 s, peak 10 MB
+T=100000 tags on a commit 4,096 deltas deep: .git 6032 KB on disk
+  tar -czf of .git: 390186 bytes
+  /tmp/t/release/bolt import: exit 0, 407.5 s, peak 40 MB
+T=100000 tags on a commit stored whole: .git 5808 KB on disk
+  /tmp/t/release/bolt import: exit 0, 0.3 s, peak 40 MB

@@ -1,0 +1,46 @@
+   Compiling bolt-vcs v0.0.0 (/work/crates/bolt-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.89s
+     Running tests/redteam4.rs (/tmp/t/debug/deps/redteam4-182f29454ef7df86)
+
+running 4 tests
+test rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt ... FAILED
+test rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time ... FAILED
+test rt4_3_a_boltignore_from_the_repository_does_not_save_what_git_ignores_silently ... FAILED
+test rt4_4_rebuilding_a_deltified_file_holds_it_at_most_twice ... FAILED
+
+failures:
+
+---- rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt stdout ----
+
+thread 'rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt' (6479) panicked at crates/bolt-vcs/tests/redteam4.rs:338:5:
+`bolt import` of a 765269-byte Git repository (100 commits, no merges) wrote a 74747365-byte .bolt: Ended { code: Some(0), timed_out: false, secs: 8.313490115, peak_mb: 17, stderr: "" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time stdout ----
+
+thread 'rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time' (6481) panicked at crates/bolt-vcs/tests/redteam4.rs:393:5:
+`bolt import` of 100,000 tags on one commit 4,096 deltas deep (a 6133777-byte Git repository) was still running after 20 s: Ended { code: None, timed_out: true, secs: 20.019684074, peak_mb: 46, stderr: "" }
+
+---- rt4_3_a_boltignore_from_the_repository_does_not_save_what_git_ignores_silently stdout ----
+
+thread 'rt4_3_a_boltignore_from_the_repository_does_not_save_what_git_ignores_silently' (6484) panicked at crates/bolt-vcs/tests/redteam4.rs:437:5:
+with .gitignore keeping out .env and *.pem, the save took the user's .env ("API_KEY=sk_live_REAL_SECRET\n") and deploy.pem (true), and Bolt said only: Imported 1 commit from Git: 1 line, 0 tags.
+You're on line main.
+Saved nwpl  "Say hello"  (3 files)
+
+
+---- rt4_4_rebuilding_a_deltified_file_holds_it_at_most_twice stdout ----
+
+thread 'rt4_4_rebuilding_a_deltified_file_holds_it_at_most_twice' (6488) panicked at crates/bolt-vcs/tests/redteam4.rs:484:5:
+importing one 300 MiB deltified file took 914 MB: Ended { code: Some(0), timed_out: false, secs: 32.909956812, peak_mb: 914, stderr: "" }
+
+
+failures:
+    rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt
+    rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time
+    rt4_3_a_boltignore_from_the_repository_does_not_save_what_git_ignores_silently
+    rt4_4_rebuilding_a_deltified_file_holds_it_at_most_twice
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 94.59s
+
+error: test failed, to rerun pass `-p bolt-vcs --test redteam4`

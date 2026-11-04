@@ -1,0 +1,7 @@
+$ sh redteam/attacks4/many-packs.sh /tmp/t/release/bolt 20000 0 49999
+N=20000 files beside P=0 empty packs: .git 1428 KB on disk
+  tar -czf of .git: 1104076 bytes
+  /tmp/t/release/bolt import: exit 0, 0.4 s, peak 18 MB
+N=20000 files beside P=49999 empty packs: .git 409848 KB on disk
+  tar -czf of .git: 2862621 bytes
+  /tmp/t/release/bolt import: exit 0, 9.6 s, peak 36 MB
