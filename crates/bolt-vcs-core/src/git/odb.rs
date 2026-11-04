@@ -8,14 +8,16 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
 
 use super::id::Hasher;
-use super::pack::{self, Entry, EntryKind, Pack, PackFolder, apply_delta, delta_sizes};
+use super::pack::{
+    self, DeltaError, Entry, EntryKind, Pack, PackFolder, build_delta, delta_sizes, delta_start,
+};
 use super::{GitError, GitId, ObjectType, Repo, broken, read_error, real_dir, shrank};
 use crate::safe_fs;
 
@@ -253,15 +255,7 @@ impl Repo {
         };
         let mut base_at = chain.bottom_at;
         for (delta_at, entry) in chain.deltas.into_iter().rev() {
-            self.spend(entry.size)?;
-            let delta = self.inflate_entry(pack, file, delta_at, &entry)?;
-            self.spend(delta_sizes(&delta).map_or(0, |(_, size)| size))?;
-            let built = apply_delta(&base.data, &delta).map_err(|why| {
-                broken(format!(
-                    "the delta at offset {delta_at} in {} {why}",
-                    pack.path.display()
-                ))
-            })?;
+            let built = self.apply(pack, file, delta_at, &entry, &base.data)?;
             let next = Base {
                 kind: base.kind,
                 data: built,
@@ -277,6 +271,54 @@ impl Repo {
             kind: base.kind,
             data: base.data,
         })
+    }
+
+    /// What the delta entry at `at` builds on `base`, applied as it is inflated, so only the base
+    /// and what it builds are held whole. The delta may say it holds at most
+    /// `MAX_IN_MEMORY_OBJECT`, as an object read whole may. Inflating it and building what it
+    /// builds count as work, each before it is done; the compressed bytes it took raise the
+    /// allowance, once.
+    fn apply(
+        &self,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+        entry: &Entry,
+        base: &[u8],
+    ) -> Result<Vec<u8>, GitError> {
+        let damaged = |why: String| {
+            broken(format!(
+                "the delta at offset {at} in {} {why}",
+                pack.path.display()
+            ))
+        };
+        let failed = |e: DeltaError| match e {
+            DeltaError::Damaged(why) => damaged(why),
+            DeltaError::Read(e) => e.downcast::<GitError>().unwrap_or_else(|e| GitError::Io {
+                path: pack.path.clone(),
+                source: e,
+            }),
+        };
+        self.spend(entry.size)?;
+        if entry.size > MAX_IN_MEMORY_OBJECT {
+            return Err(damaged(format!(
+                "says it holds {} bytes, more than the {MAX_IN_MEMORY_OBJECT} Bolt reads of a delta",
+                entry.size
+            )));
+        }
+        let input = Input::new(file, pack.path.as_path(), entry.data, pack.entries_end());
+        let data = DeltaData {
+            inflater: Inflater::new(input, Some(at)),
+            size: entry.size,
+            left: entry.size,
+        };
+        let mut delta = BufReader::with_capacity(CHUNK, data);
+        let size = delta_start(base, &mut delta).map_err(failed)?;
+        self.spend(size)?;
+        let built = build_delta(base, size, &mut delta).map_err(failed)?;
+        let taken = delta.into_inner().inflater.taken;
+        count_inflated(&self.objects.inflated, pack, at, taken);
+        Ok(built)
     }
 
     /// An entry's data inflated whole: exactly the size its header gives, at most
@@ -812,6 +854,22 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
         Ok(data)
     }
 
+    /// Inflates into `out` at most the `left` bytes still to come of the `size` its object gives,
+    /// takes what came off `left`, and says how much that was: 0 only once all have come. The
+    /// read that brings `left` to 0 checks that the stream ends there. `out` mustn't be empty.
+    fn read_part(&mut self, out: &mut [u8], left: &mut u64, size: u64) -> Result<usize, GitError> {
+        let want = out.len().min(usize::try_from(*left).unwrap_or(usize::MAX));
+        let got = self.read(out.get_mut(..want).unwrap_or_default())?;
+        if got == 0 && *left > 0 {
+            return Err(self.ended_early(size.saturating_sub(*left), size));
+        }
+        *left = left.saturating_sub(got as u64);
+        if *left == 0 {
+            self.end(size)?;
+        }
+        Ok(got)
+    }
+
     /// The stream ended after `got` of the `size` bytes its object gives.
     fn ended_early(&self, got: u64, size: u64) -> GitError {
         GitError::EndedEarly {
@@ -889,25 +947,33 @@ struct Stream<'r> {
 impl Stream<'_> {
     /// More of the blob. The read that would end it checks it first.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, GitError> {
-        let want = buf
-            .len()
-            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
-        let buf = buf.get_mut(..want).unwrap_or_default();
-        let got = self.inflater.read(buf)?;
-        if got == 0 && self.left > 0 {
-            let read = self.size.saturating_sub(self.left);
-            return Err(self.inflater.ended_early(read, self.size));
-        }
+        let got = self.inflater.read_part(buf, &mut self.left, self.size)?;
         self.hasher.update(buf.get(..got).unwrap_or_default());
-        self.left = self.left.saturating_sub(got as u64);
         if self.left == 0 {
-            self.inflater.end(self.size)?;
             verify(&self.id, self.hasher.clone())?;
             if let Some((pack, at)) = self.entry {
                 count_inflated(self.inflated, pack, at, self.inflater.taken);
             }
         }
         Ok(got)
+    }
+}
+
+/// A delta entry's data, inflated as it is read: exactly the size its header gives, then the end
+/// of its stream. A failure comes as an `io::Error` holding the `GitError`.
+struct DeltaData<'a> {
+    inflater: Inflater<'a, &'a File>,
+    size: u64,
+    left: u64,
+}
+
+impl Read for DeltaData<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let got = self.inflater.read_part(buf, &mut self.left, self.size);
+        got.map_err(io::Error::other)
     }
 }
 

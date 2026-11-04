@@ -452,7 +452,6 @@ fn rt4_3_a_boltignore_from_the_repository_does_not_save_what_git_ignores_silentl
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT4-4: red-team proof, run once its fix is in"]
 fn rt4_4_rebuilding_a_deltified_file_holds_it_at_most_twice() {
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);

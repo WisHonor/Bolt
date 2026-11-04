@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use super::id::Hasher;
@@ -628,31 +628,63 @@ pub(super) fn delta_sizes(mut delta: &[u8]) -> Option<(u64, u64)> {
     Some((varint(&mut delta, 10)?, varint(&mut delta, 10)?))
 }
 
+/// Why a delta can't be applied.
+pub(super) enum DeltaError {
+    /// Reading it failed.
+    Read(io::Error),
+    /// It is damaged: how, said to follow "the delta …".
+    Damaged(String),
+}
+
 /// The object `delta` builds on `base`, with every instruction checked; `Err` says what is wrong
 /// with the delta.
-pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
-    let mut rest = delta;
-    let damaged_size = || "starts with a damaged size".to_owned();
-    let base_size = varint(&mut rest, 10).ok_or_else(damaged_size)?;
+pub fn apply_delta(base: &[u8], mut delta: &[u8]) -> Result<Vec<u8>, String> {
+    let built = delta_start(base, &mut delta).and_then(|size| build_delta(base, size, &mut delta));
+    built.map_err(|e| match e {
+        DeltaError::Damaged(why) => why,
+        // Reading a slice never fails.
+        DeltaError::Read(e) => e.to_string(),
+    })
+}
+
+/// Reads the sizes a delta starts with, and returns what it builds once its base's size is
+/// checked against `base`.
+pub(super) fn delta_start(base: &[u8], delta: &mut impl BufRead) -> Result<u64, DeltaError> {
+    let damaged_size = || DeltaError::Damaged("starts with a damaged size".to_owned());
+    let base_size = read_varint(delta)?.ok_or_else(damaged_size)?;
     if base_size != base.len() as u64 {
-        return Err(format!(
+        return Err(DeltaError::Damaged(format!(
             "says its base holds {base_size} bytes, but it holds {}",
             base.len()
-        ));
+        )));
     }
-    let size = varint(&mut rest, 10).ok_or_else(damaged_size)?;
+    read_varint(delta)?.ok_or_else(damaged_size)
+}
+
+/// The object of `size` bytes that the rest of `delta` builds on `base`, read an instruction at a
+/// time as it comes, so the delta is never held whole. The size is checked before anything is
+/// allocated, and every instruction before it is carried out.
+pub(super) fn build_delta(
+    base: &[u8],
+    size: u64,
+    delta: &mut impl BufRead,
+) -> Result<Vec<u8>, DeltaError> {
+    let damaged = DeltaError::Damaged;
     if size > MAX_IN_MEMORY_OBJECT {
-        return Err(format!(
+        return Err(damaged(format!(
             "would build {size} bytes, more than the {MAX_IN_MEMORY_OBJECT} Bolt rebuilds in memory"
-        ));
+        )));
     }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
     let mut out = Vec::new();
-    out.try_reserve_exact(size)
-        .map_err(|_| format!("would build {size} bytes, more memory than Bolt could get"))?;
-    let cut = || "ends inside an instruction".to_owned();
-    while let Some((&op, tail)) = rest.split_first() {
-        rest = tail;
+    out.try_reserve_exact(size).map_err(|_| {
+        damaged(format!(
+            "would build {size} bytes, more memory than Bolt could get"
+        ))
+    })?;
+    let cut = || DeltaError::Damaged("ends inside an instruction".to_owned());
+    let mut inserted = [0u8; 0x7f];
+    while let Some(op) = next_byte(delta)? {
         let part = if op & 0x80 != 0 {
             // A copy from the base: the bits of `op` say which bytes of its offset and size
             // follow, least significant first.
@@ -660,9 +692,7 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
             let offset_bytes = offset.iter_mut().zip([0x01, 0x02, 0x04, 0x08]);
             for (byte, bit) in offset_bytes.chain(len.iter_mut().zip([0x10, 0x20, 0x40])) {
                 if op & bit != 0 {
-                    let (&value, tail) = rest.split_first().ok_or_else(cut)?;
-                    *byte = value;
-                    rest = tail;
+                    *byte = next_byte(delta)?.ok_or_else(cut)?;
                 }
             }
             let offset = u32::from_le_bytes(offset) as usize;
@@ -673,26 +703,58 @@ pub fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
             offset
                 .checked_add(len)
                 .and_then(|end| base.get(offset..end))
-                .ok_or("copies from past the end of its base")?
+                .ok_or_else(|| damaged("copies from past the end of its base".to_owned()))?
         } else if op != 0 {
-            let (insert, tail) = rest.split_at_checked(usize::from(op)).ok_or_else(cut)?;
-            rest = tail;
-            insert
+            let bytes = inserted.get_mut(..usize::from(op)).unwrap_or_default();
+            delta.read_exact(bytes).map_err(|e| match e.kind() {
+                io::ErrorKind::UnexpectedEof => cut(),
+                _ => DeltaError::Read(e),
+            })?;
+            &*bytes
         } else {
-            return Err("uses instruction 0, which Git reserves".into());
+            return Err(damaged("uses instruction 0, which Git reserves".to_owned()));
         };
         if part.len() > size.saturating_sub(out.len()) {
-            return Err(format!("builds more than the {size} bytes it says"));
+            return Err(damaged(format!(
+                "builds more than the {size} bytes it says"
+            )));
         }
         out.extend_from_slice(part);
     }
     if out.len() != size {
-        return Err(format!(
+        return Err(damaged(format!(
             "builds {} bytes, not the {size} it says",
             out.len()
-        ));
+        )));
     }
     Ok(out)
+}
+
+/// The next byte of `delta`, or `None` at its end.
+fn next_byte(delta: &mut impl BufRead) -> Result<Option<u8>, DeltaError> {
+    let byte = delta.fill_buf().map_err(DeltaError::Read)?.first().copied();
+    if byte.is_some() {
+        delta.consume(1);
+    }
+    Ok(byte)
+}
+
+/// A number in Git's size encoding read from `delta`, as `varint` reads one: `None` if it is
+/// damaged.
+fn read_varint(delta: &mut impl BufRead) -> Result<Option<u64>, DeltaError> {
+    let mut bytes = [0u8; 10];
+    let mut len = 0usize;
+    for slot in &mut bytes {
+        let Some(byte) = next_byte(delta)? else {
+            break;
+        };
+        *slot = byte;
+        len = len.saturating_add(1);
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    Ok(varint(&mut bytes.get(..len).unwrap_or_default(), 10))
 }
 
 /// A number in Git's size encoding, seven bits a byte, least significant first, while the top
@@ -1110,6 +1172,72 @@ mod tests {
         assert!(message.contains(&(1u64 << 40).to_string()), "{message}");
         // The header only reports what the delta says.
         assert_eq!(repo.header(&id(Blob, &huge)).unwrap(), (Blob, 1 << 62));
+    }
+
+    #[test]
+    fn a_delta_is_applied_as_it_inflates_and_holds_exactly_what_its_entry_says() {
+        let size = |mut n: usize| {
+            let mut out = Vec::new();
+            while n >= 0x80 {
+                out.push(n as u8 | 0x80);
+                n >>= 7;
+            }
+            out.push(n as u8);
+            out
+        };
+        let base: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        // Inserts of every length and copies from all over the base, about 200 KiB of them, so
+        // instructions fall across the buffers the delta is read through.
+        let (mut ops, mut built) = (Vec::new(), Vec::new());
+        for i in 0..3000u32 {
+            let insert: Vec<u8> = (0..i % 127 + 1).map(|j| (i ^ j) as u8).collect();
+            ops.push(insert.len() as u8);
+            ops.extend_from_slice(&insert);
+            built.extend_from_slice(&insert);
+            let (offset, len) = (i * 31 % 90_000, i % 500 + 1);
+            ops.push(0x80 | 0x0f | 0x30);
+            ops.extend_from_slice(&offset.to_le_bytes());
+            ops.extend_from_slice(&(len as u16).to_le_bytes());
+            built.extend_from_slice(&base[offset as usize..(offset + len) as usize]);
+        }
+        let delta = [size(base.len()), size(built.len()), ops].concat();
+        // Entries saying the delta holds a byte more, and a byte less, than it does.
+        let says = |len: usize| {
+            let base = id(Blob, &base);
+            [
+                entry_header(7, len as u64),
+                base.as_bytes().to_vec(),
+                deflate(&delta),
+            ]
+            .concat()
+        };
+        let (long, short) = (says(delta.len() + 1), says(delta.len() - 1));
+        let (dir, git) = craft();
+        git.pack(&[
+            PackEntry::Whole(Blob, base.clone()),
+            PackEntry::OfsDelta {
+                base: 0,
+                delta: delta.clone(),
+            },
+            PackEntry::Raw(long.clone()),
+            PackEntry::Raw(short.clone()),
+        ]);
+        let repo = open(&dir);
+        assert!(repo.read(&id(Blob, &built)).unwrap().data == built);
+        match repo.read(&id(Blob, &long)) {
+            Err(e @ GitError::EndedEarly { .. }) => {
+                let says = format!(
+                    "ended after {} of the {} bytes",
+                    delta.len(),
+                    delta.len() + 1
+                );
+                assert!(e.to_string().contains(&says), "{e}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let message = broken(repo.read(&id(Blob, &short)));
+        let says = format!("holds more than the {} bytes it says", delta.len() - 1);
+        assert!(message.contains(&says), "{message}");
     }
 
     #[test]
