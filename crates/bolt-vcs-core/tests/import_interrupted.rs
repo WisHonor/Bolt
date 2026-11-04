@@ -79,7 +79,7 @@ fn an_interrupted_import_can_be_run_again() {
     import(clean.path()).unwrap();
     let records = state(clean.path());
     assert!(records.tags.is_some() && records.server_lines.is_some());
-    let mut between_packs = false;
+    let (mut between_packs, mut after_head) = (false, false);
     for n in 1.. {
         assert!(n < 100, "the import never finished");
         let dir = tempfile::tempdir().unwrap();
@@ -94,10 +94,20 @@ fn an_interrupted_import_can_be_run_again() {
         // Every fault point is met once `.bolt` is made, the first while `begin` takes the lock,
         // so each stop says the folder is kept.
         assert!(
-            matches!(stopped, ImportError::Unfinished(_)),
+            matches!(stopped, ImportError::Unfinished { .. }),
             "fault {n}: {stopped:?}"
         );
         between_packs |= stopped.to_string().ends_with("packs:rolled-over");
+        // Deleting the folder is offered only while no head was written, whose entry holds the
+        // whole import.
+        let head = dir.path().join(".bolt/state/head").exists();
+        after_head |= head;
+        let hint = stopped.hint().unwrap();
+        assert_eq!(
+            hint.contains("delete that folder"),
+            !head,
+            "fault {n}: {hint}"
+        );
         // Running it again finishes the job, with the saves a clean import gives.
         import(dir.path()).unwrap();
         assert_eq!(state(dir.path()), state(clean.path()), "fault {n}");
@@ -106,4 +116,5 @@ fn an_interrupted_import_can_be_run_again() {
     }
     set_test_pack_limit(None);
     assert!(between_packs, "no fault point sat between two packs");
+    assert!(after_head, "no fault point came after the head was written");
 }

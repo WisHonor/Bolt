@@ -116,10 +116,14 @@ pub enum ImportError {
         path: String,
         lookalike: bool,
     },
-    /// The import stopped after it began the project: nothing is committed, and the `.bolt` it
-    /// began stays, for a later run to finish from what it stored (decision 041).
-    #[error(transparent)]
-    Unfinished(Box<ImportError>),
+    /// The import stopped after it began the project, before `format`: the `.bolt` it began
+    /// stays, for a later run to finish from what it stored (decision 041). `committed`: it holds
+    /// a head, whose entry may hold the whole import.
+    #[error("{stop}")]
+    Unfinished {
+        stop: Box<ImportError>,
+        committed: bool,
+    },
 }
 
 /// How an import's hints begin when it stopped before it wrote anything.
@@ -130,8 +134,12 @@ impl ImportError {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
-            ImportError::Unfinished(e) => {
-                let kept = if e.may_pass_when_run_again() {
+            ImportError::Unfinished { stop: e, committed } => {
+                // Deleting is offered only while no head was written.
+                let kept = if *committed {
+                    "The import's history is stored, but the .bolt folder isn't a finished project \
+                     yet. Run bolt import again here to finish it from what was stored."
+                } else if e.may_pass_when_run_again() {
                     "Nothing was committed. Bolt kept the .bolt folder it began here, so that \
                      running bolt import again can finish the import from what it stored; or \
                      delete that folder."
@@ -265,13 +273,16 @@ fn begun(root: &Path, e: RepoError) -> ImportError {
 }
 
 /// `e`, met once the project may be begun, as an import says it. While a real `.bolt` is there
-/// without `format`, nothing is committed and the folder stays for a run to finish. With
-/// `format`, the project was made and only the flush after it failed; with no `.bolt`, there is
-/// nothing to keep. Either way `e` is said as it is.
+/// without `format`, the project isn't made and the folder stays for a run to finish, noting
+/// whether it holds a head. With `format`, the project was made and only the flush after it
+/// failed; with no `.bolt`, there is nothing to keep. Either way `e` is said as it is.
 fn after_begin(root: &Path, e: ImportError) -> ImportError {
     let bolt = safe_fs::check_real_dir(&root.join(".bolt")).is_ok();
     if bolt && matches!(repo::has_format(root), Ok(false)) {
-        ImportError::Unfinished(Box::new(e))
+        ImportError::Unfinished {
+            stop: Box::new(e),
+            committed: repo::has_head(root),
+        }
     } else {
         e
     }
@@ -1516,7 +1527,36 @@ mod tests {
         ));
         std::fs::create_dir(dir.path().join(".bolt")).unwrap();
         let kept = after_begin(dir.path(), stop());
-        assert!(matches!(kept, ImportError::Unfinished(_)), "{kept:?}");
+        assert!(
+            matches!(
+                kept,
+                ImportError::Unfinished {
+                    committed: false,
+                    ..
+                }
+            ),
+            "{kept:?}"
+        );
+        assert!(kept.hint().unwrap().ends_with("Or delete that folder."));
+        // Once a head is written its entry may hold the whole import: no deleting is offered.
+        std::fs::create_dir(dir.path().join(".bolt/state")).unwrap();
+        std::fs::write(dir.path().join(".bolt/state/head"), b"").unwrap();
+        let kept = after_begin(dir.path(), stop());
+        assert!(
+            matches!(
+                kept,
+                ImportError::Unfinished {
+                    committed: true,
+                    ..
+                }
+            ),
+            "{kept:?}"
+        );
+        let hint = kept.hint().unwrap();
+        assert!(
+            hint.contains("Run bolt import again here to finish it") && !hint.contains("delete"),
+            "{hint}"
+        );
         std::fs::write(dir.path().join(".bolt/format"), crate::repo::FORMAT_TEXT).unwrap();
         assert!(matches!(
             after_begin(dir.path(), stop()),
@@ -1602,18 +1642,22 @@ mod tests {
             },
             &mut opened,
         );
-        let Err(ImportError::Unfinished(e)) = result else {
+        let Err(stopped @ ImportError::Unfinished { .. }) = result else {
             panic!("{result:?}");
         };
         assert!(
-            matches!(*e, ImportError::Git(GitError::Changed { .. })),
-            "{e:?}"
+            matches!(
+                &stopped,
+                ImportError::Unfinished { stop, committed: false }
+                    if matches!(**stop, ImportError::Git(GitError::Changed { .. }))
+            ),
+            "{stopped:?}"
         );
         assert!(!later.exists(), "the pack was removed");
         assert!(!dir.path().join(".bolt/format").exists());
         // The `.bolt` begun stays, for a run to finish, and the hint says so instead of saying
         // that nothing was changed. The caller holds the project, to show what its store noticed.
-        let hint = ImportError::Unfinished(e).hint().unwrap();
+        let hint = stopped.hint().unwrap();
         assert!(
             hint.starts_with("Run bolt import again once Git has finished."),
             "{hint}"
@@ -1627,8 +1671,8 @@ mod tests {
     }
 
     /// The look for Git LFS pointers before anything is written counts each tree it reads
-    /// against a save's limits, as the converter does, and past them leaves the stop to the
-    /// converter. A comment in `.gitattributes` is no sign of Git LFS.
+    /// against a save's limits, no more than the converter counts, and past them leaves the stop
+    /// to the converter. A comment in `.gitattributes` is no sign of Git LFS.
     #[test]
     fn the_look_for_lfs_pointers_keeps_to_a_saves_limits() {
         let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:\

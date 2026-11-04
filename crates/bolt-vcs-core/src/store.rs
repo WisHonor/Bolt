@@ -116,6 +116,14 @@ impl Store {
         self.packs.len()
     }
 
+    /// The IDs of the diary entries the packs hold, as their indexes list them.
+    pub(crate) fn diary_entries(&self) -> impl Iterator<Item = Id> + '_ {
+        let entries = self.packs.iter().flat_map(|pack| pack.entries().iter());
+        entries
+            .filter(|e| e.kind == ObjectKind::DiaryEntry)
+            .map(|e| e.id)
+    }
+
     /// Whether any pack holds a file's content, as its index lists it.
     #[must_use]
     pub fn holds_content(&self) -> bool {

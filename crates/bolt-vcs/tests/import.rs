@@ -424,7 +424,7 @@ fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
         err.contains(
             "error: An import began a Bolt project here and didn't finish, and bolt start won't \
              make an empty project over what it stored.\nhint: Run `bolt import` again to finish \
-             the import, or delete the hidden .bolt folder and run `bolt start` again.\n"
+             the import.\n"
         ),
         "{err}"
     );
