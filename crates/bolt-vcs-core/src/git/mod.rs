@@ -179,6 +179,9 @@ pub enum GitError {
     /// More objects in its packs than Bolt keeps the indexes of; `what` names the limit.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     TooManyObjects { what: String },
+    /// More packs than Bolt reads; `what` names the limit.
+    #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
+    TooManyPacks { what: String },
     /// More work rebuilding objects through deltas than the import's budget; `what` says how
     /// much.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
@@ -230,6 +233,10 @@ impl GitError {
                 GitError::TooManyObjects { .. } => {
                     "Nothing was changed. If its packs hold copies of the same objects, or objects \
                      nothing uses, merge them with `git repack -a -d`, then run bolt import again."
+                }
+                GitError::TooManyPacks { .. } => {
+                    "Nothing was changed. Merge them into one with `git repack -a -d`, then run \
+                     bolt import again."
                 }
                 GitError::TooMuchWork { .. } => {
                     "Nothing was changed. If you trust this repository, have Git store its big \
@@ -981,6 +988,9 @@ mod tests {
                 what: HOSTILE.into(),
             },
             GitError::TooManyObjects {
+                what: HOSTILE.into(),
+            },
+            GitError::TooManyPacks {
                 what: HOSTILE.into(),
             },
             GitError::TooMuchWork {

@@ -67,6 +67,8 @@ pub(super) struct Objects {
     /// What header walks learned of pack entries, by pack number and offset. An entry never
     /// changes, so nothing here goes stale.
     known: RefCell<HashMap<(usize, u64), Known>>,
+    /// The number of the pack the last packed object was found in.
+    last_pack: Cell<usize>,
     /// Bytes inflated and built so far to rebuild objects through deltas.
     work: Cell<u64>,
     /// Compressed bytes of the pack entries inflated so far, each entry counted once.
@@ -195,11 +197,16 @@ impl Repo {
         }
     }
 
-    /// Where `id` is: in the first pack that holds it, as Git looks, or else in its loose file.
+    /// Where `id` is: in the pack that found the last object if it holds it, else in the first
+    /// pack that does, as Git looks (objects read one after another are mostly packed together),
+    /// or else in its loose file.
     fn find(&self, id: &GitId) -> Result<Place<'_>, GitError> {
         let folder = self.packs()?;
-        for (n, pack) in folder.packs.iter().enumerate() {
+        let last = self.objects.last_pack.get();
+        let last = folder.packs.get(last).map(|pack| (last, pack));
+        for (n, pack) in last.into_iter().chain(folder.packs.iter().enumerate()) {
             if let Some(at) = pack.find(id) {
+                self.objects.last_pack.set(n);
                 return Ok(Place::Packed(n, pack, at));
             }
         }
@@ -1108,6 +1115,41 @@ mod tests {
             assert_eq!((object.kind, &object.data), (*kind, data), "{i}");
         }
         assert!(repo.objects.cache.borrow().bytes > 0);
+    }
+
+    #[test]
+    fn objects_are_found_among_many_packs_the_one_that_found_the_last_asked_first() {
+        let (dir, git) = craft(Sha1);
+        let blobs: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("blob {i}\n").into_bytes())
+            .collect();
+        for pair in blobs.chunks(2) {
+            let pair: Vec<PackEntry> = pair
+                .iter()
+                .map(|b| PackEntry::Whole(Blob, b.clone()))
+                .collect();
+            git.pack(&pair);
+        }
+        // Packs of no objects under names of their own, as an archive can hold them.
+        let (pack, idx) = git.pack(&[]);
+        for i in 0..100 {
+            fs::copy(&pack, pack.with_file_name(format!("pack-empty{i}.pack"))).unwrap();
+            fs::copy(&idx, idx.with_file_name(format!("pack-empty{i}.idx"))).unwrap();
+        }
+        let repo = open(&dir);
+        for blob in &blobs {
+            let id = id(Blob, blob, Sha1);
+            assert_eq!(&repo.read(&id).unwrap().data, blob);
+            let folder = repo.packs().unwrap();
+            assert!(
+                folder.packs[repo.objects.last_pack.get()]
+                    .find(&id)
+                    .is_some()
+            );
+        }
+        // Packs of no objects are listed, so a change to them is noticed, but never searched.
+        let folder = repo.packs().unwrap();
+        assert_eq!((folder.listed.len(), folder.packs.len()), (201, 100));
     }
 
     #[test]

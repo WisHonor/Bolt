@@ -17,6 +17,9 @@ use crate::safe_fs;
 
 /// Entries `objects/pack` may hold, of any kind: room for tens of thousands of packs.
 const MAX_PACK_FOLDER_ENTRIES: u64 = 100_000;
+/// Packs Bolt reads, since an object may be looked for in each: Git merges them once there are
+/// 50 (`gc.autoPackLimit`).
+const MAX_PACKS: usize = 4096;
 /// Objects Bolt reads from all of a repository's packs, whose indexes it keeps in memory (32 to
 /// 44 bytes an object): git/git has about 0.4 million, and Linux about 10 million.
 pub(super) const MAX_GIT_OBJECTS: u64 = 1 << 24;
@@ -33,7 +36,8 @@ const MAX_ENTRY_HEADER: usize = 10 + 32;
 pub(super) struct PackFolder {
     /// The names listed, `pack-<checksum>`, to tell later whether Git has changed the folder.
     pub(super) listed: Vec<String>,
-    /// The packs read, each checked against its index; one Git removed after the listing isn't.
+    /// The packs read, each checked against its index, that list objects. One Git removed after
+    /// the listing isn't here, nor is one of no objects, where nothing can be found.
     pub(super) packs: Vec<Pack>,
 }
 
@@ -74,16 +78,34 @@ pub(super) struct Entry {
 
 /// The packs in `folder` (`objects/pack`), each index read and each pack checked against it.
 pub(super) fn load(folder: &Path, hash: HashKind) -> Result<PackFolder, GitError> {
-    load_at_most(folder, hash, MAX_GIT_OBJECTS)
+    load_at_most(folder, hash, MAX_GIT_OBJECTS, MAX_PACKS)
 }
 
-/// `load`, refusing indexes that list more than `max_objects` in all.
-fn load_at_most(folder: &Path, hash: HashKind, max_objects: u64) -> Result<PackFolder, GitError> {
+/// `load`, refusing more than `max_packs` packs before any is read, and indexes that list more
+/// than `max_objects` in all.
+fn load_at_most(
+    folder: &Path,
+    hash: HashKind,
+    max_objects: u64,
+    max_packs: usize,
+) -> Result<PackFolder, GitError> {
     let listed = list(folder)?;
+    if listed.len() > max_packs {
+        return Err(GitError::TooManyPacks {
+            what: format!(
+                "{} holds {} packs, more than the {max_packs} Bolt reads, since it may look for \
+                 each object in every one",
+                folder.display(),
+                listed.len()
+            ),
+        });
+    }
     let mut packs: Vec<Pack> = Vec::new();
     let mut objects = 0u64;
     for name in &listed {
-        if let Some(pack) = Pack::load(folder, name, hash, objects, max_objects)? {
+        if let Some(pack) = Pack::load(folder, name, hash, objects, max_objects)?
+            && !pack.offsets.is_empty()
+        {
             objects = objects.saturating_add(pack.offsets.len() as u64);
             packs.push(pack);
         }
@@ -892,9 +914,9 @@ mod tests {
             PackEntry::Whole(Blob, b"four".to_vec()),
         ]);
         let folder = dir.path().join(".git/objects/pack");
-        let loaded = load_at_most(&folder, HashKind::Sha1, 4).unwrap();
+        let loaded = load_at_most(&folder, HashKind::Sha1, 4, MAX_PACKS).unwrap();
         assert_eq!(loaded.packs.len(), 2);
-        match load_at_most(&folder, HashKind::Sha1, 3).err() {
+        match load_at_most(&folder, HashKind::Sha1, 3, MAX_PACKS).err() {
             Some(GitError::TooManyObjects { what }) => {
                 let says = "lists 2 objects, which with the 2 in the packs before it makes more \
                             than the 3";
@@ -1271,5 +1293,36 @@ mod tests {
         let message = broken(list_at_most(dir.path(), 10));
         assert!(message.contains("more than 10 entries"), "{message}");
         assert!(list_at_most(dir.path(), 11).unwrap().is_empty());
+    }
+
+    #[test]
+    fn packs_of_no_objects_are_skipped_and_too_many_packs_refused_before_any_is_read() {
+        let (_dir, git) = craft();
+        git.pack(&[PackEntry::Whole(Blob, b"one".to_vec())]);
+        // Git never writes a pack of no objects, but an archive can hold any number of copies.
+        let (pack, idx) = git.pack(&[]);
+        for i in 0..3 {
+            fs::copy(&pack, pack.with_file_name(format!("pack-copy{i}.pack"))).unwrap();
+            fs::copy(&idx, idx.with_file_name(format!("pack-copy{i}.idx"))).unwrap();
+        }
+        let folder = pack.parent().unwrap();
+        let loaded = load_at_most(folder, HashKind::Sha1, MAX_GIT_OBJECTS, 5).unwrap();
+        assert_eq!((loaded.listed.len(), loaded.packs.len()), (5, 1));
+        // One past the limit, refused even though a damaged index would be refused too.
+        patch_index(&idx, |b| b[0] = 0);
+        match load_at_most(folder, HashKind::Sha1, MAX_GIT_OBJECTS, 4).err() {
+            Some(e @ GitError::TooManyPacks { .. }) => {
+                let message = e.to_string();
+                assert!(
+                    message.contains("holds 5 packs, more than the 4"),
+                    "{message}"
+                );
+                assert!(e.hint().unwrap().contains("git repack -a -d"), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let loaded = load_at_most(folder, HashKind::Sha1, MAX_GIT_OBJECTS, 5);
+        let message = broken(loaded.map(drop));
+        assert!(message.contains("not a pack index"), "{message}");
     }
 }
