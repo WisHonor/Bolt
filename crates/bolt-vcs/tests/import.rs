@@ -198,7 +198,9 @@ fn entries_left_out_show_their_hidden_characters() {
         author Ada Lovelace <ada@example.com> 1700000000 +0000\n\
         committer Ada Lovelace <ada@example.com> 1700000000 +0000\n\
         data 6\nFirst\n\nM 100644 :1 a.txt\nM 100644 :1 .g\u{200c}it/x\n\n";
-    let made = git_with_input(env.root(), &["fast-import", "--quiet"], stream.as_bytes());
+    // Git for macOS refuses this spelling of .git unless told not to.
+    let args = ["-c", "core.protectHFS=false", "fast-import", "--quiet"];
+    let made = git_with_input(env.root(), &args, stream.as_bytes());
     assert!(made.status.success(), "{}", text(&made.stderr));
     let (out, _) = env.import();
     assert!(
