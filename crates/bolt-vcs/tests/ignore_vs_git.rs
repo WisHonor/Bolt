@@ -370,7 +370,7 @@ fn walk_verdict(
     let parts: Vec<&str> = path.split('/').collect();
     for (i, part) in parts.iter().enumerate() {
         if let Some(text) = rules.get(&folder) {
-            matcher.enter(&folder, vec![Rules::parse(text, &folder)]);
+            matcher.enter(&folder, vec![Rules::parse(text, &folder, true)]);
         }
         let here = join(&folder, part);
         if i + 1 == parts.len() {

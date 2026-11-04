@@ -22,11 +22,13 @@ fuzz_target!(|data: &[u8]| {
                 ignores_case,
                 composes_unicode,
             });
-            matcher.enter("", vec![Rules::parse(data, "")]);
-            matcher.enter("a/b", vec![Rules::parse(data, "a/b")]);
+            // A `.gitignore` at the top and a `.boltignore` below, so Git's verdict is looked
+            // for again where the `.boltignore` decides.
+            matcher.enter("", vec![Rules::parse(data, "", true)]);
+            matcher.enter("a/b", vec![Rules::parse(data, "a/b", false)]);
             for path in paths {
                 for is_dir in [false, true] {
-                    let _ = matcher.decide(path, is_dir);
+                    let _ = matcher.verdict(path, is_dir);
                 }
             }
         }

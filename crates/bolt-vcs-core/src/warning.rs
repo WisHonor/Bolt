@@ -20,6 +20,8 @@ pub const GIT_NAMES_LEFT_OUT: &str = "git_names_left_out";
 /// A save took changes to files an ignore rule matches, which stay saved because the last save
 /// holds them.
 pub const IGNORED_CHANGES_SAVED: &str = "ignored_changes_saved";
+/// A save took new or changed files that `.gitignore` keeps out but `.boltignore` takes back.
+pub const GITIGNORED_FILES_SAVED: &str = "gitignored_files_saved";
 /// The project opens only from an administrator terminal.
 pub const ELEVATED_ONLY: &str = "elevated_only";
 /// `start` made the project but couldn't read its first save back to show it.

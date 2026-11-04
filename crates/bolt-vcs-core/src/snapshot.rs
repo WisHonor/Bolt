@@ -260,6 +260,7 @@ pub fn save_folder(
         old,
         rebuilt,
         ignored,
+        gitignored,
         mut warnings,
     } = walk(repo.root(), base, SaveLimits::default(), drive)?;
     check_names(&folders, &old)?;
@@ -271,12 +272,22 @@ pub fn save_folder(
     for listing in &rebuilt {
         store_listing(repo.store(), &mut packs, listing)?;
     }
-    let (root, kept, changed) = build(repo.store(), &mut packs, &folders, &old, &ignored)?;
+    let (root, kept, changed, taken_back) = build(
+        repo.store(),
+        &mut packs,
+        &folders,
+        &old,
+        &ignored,
+        &gitignored,
+    )?;
     if kept > 0 {
         warnings.push(kept_warning(kept));
     }
     if !changed.is_empty() {
         warnings.push(ignored_changes_saved(changed));
+    }
+    if !taken_back.is_empty() {
+        warnings.push(gitignored_files_saved(taken_back));
     }
     if root == parent.root {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
@@ -396,6 +407,34 @@ fn ignored_changes_saved(mut paths: Vec<String>) -> Warning {
     Warning::new(warning::IGNORED_CHANGES_SAVED, message)
 }
 
+/// Says the save took `paths`, new or changed files that `.gitignore` keeps out but a
+/// `.boltignore` line takes back, naming the first few.
+fn gitignored_files_saved(mut paths: Vec<String>) -> Warning {
+    let count = paths.len() as u64;
+    paths.sort_unstable();
+    paths.truncate(NAMED);
+    let (what, why) = if count == 1 {
+        (
+            "1 new or changed file".to_owned(),
+            "Git would leave it out unless it was added (git add). If it shouldn't be saved, \
+             remove the .boltignore line that takes it back and move it out of the project \
+             folder; this save keeps it.",
+        )
+    } else {
+        (
+            format!("{count} new or changed files"),
+            "Git would leave them out unless they were added (git add). If they shouldn't be \
+             saved, remove the .boltignore lines that take them back and move them out of the \
+             project folder; this save keeps them.",
+        )
+    };
+    let message = format!(
+        "Saved {what} that .gitignore keeps out but .boltignore takes back:{}\n{why}",
+        listed(&paths, count)
+    );
+    Warning::new(warning::GITIGNORED_FILES_SAVED, message)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     File,
@@ -457,14 +496,16 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
 }
 
 /// Stores every file and listing, deepest folders first. Returns the top listing's ID, how many
-/// entries were kept as they were, and which of the files and links in `ignored` changed.
+/// entries were kept as they were, which of the files and links in `ignored` changed, and which
+/// of those in `gitignored` are new or changed.
 fn build(
     store: &Store,
     packs: &mut PackSet,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
     ignored: &HashSet<String>,
-) -> Result<(Id, usize, Vec<String>), SaveError> {
+    gitignored: &HashSet<String>,
+) -> Result<(Id, usize, Vec<String>, Vec<String>), SaveError> {
     let mut order: Vec<&String> = folders.keys().collect();
     order.sort_by_key(|rel| {
         Reverse(if rel.is_empty() {
@@ -476,7 +517,7 @@ fn build(
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
     let mut kept = 0;
-    let mut changed = Vec::new();
+    let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
     for rel in order {
         let before = old.get(rel).and_then(Option::as_ref);
         let mut entries = Vec::new();
@@ -523,10 +564,12 @@ fn build(
                     (EntryKind::Folder, id, 0)
                 }
             };
-            if ignored.contains(&c.rel) {
-                let was = before.and_then(|l| l.get(&c.name));
-                if was.is_none_or(|e| (e.kind, e.id) != (kind, id)) {
+            let was = before.and_then(|l| l.get(&c.name));
+            if was.is_none_or(|e| (e.kind, e.id) != (kind, id)) {
+                if ignored.contains(&c.rel) {
                     changed.push(c.rel.clone());
+                } else if gitignored.contains(&c.rel) {
+                    taken_back.push(c.rel.clone());
                 }
             }
             entries.push(Entry {
@@ -540,7 +583,7 @@ fn build(
         built.insert(rel, store_listing(store, packs, &listing)?);
     }
     let root = built.remove("").ok_or_else(missing)?;
-    Ok((root, kept, changed))
+    Ok((root, kept, changed, taken_back))
 }
 
 /// Stores `listing` unless a good copy is held already, and returns its ID.
@@ -1281,6 +1324,18 @@ mod tests {
     }
 
     #[test]
+    fn the_files_boltignore_takes_back_from_gitignore_are_named_escaped_and_counted() {
+        use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+        assert_hostile_text_escaped(&gitignored_files_saved(vec![HOSTILE.to_owned()]).message);
+        let paths = (1..=6).rev().map(|i| format!("k{i}.pem")).collect();
+        let message = gitignored_files_saved(paths).message;
+        let listed = "Saved 6 new or changed files that .gitignore keeps out but .boltignore takes \
+                      back:\n  k1.pem\n  k2.pem\n  k3.pem\n  k4.pem\n  k5.pem\n  and 1 more\nGit \
+                      would leave them out";
+        assert!(message.starts_with(listed), "{message}");
+    }
+
+    #[test]
     fn the_boltignore_hint_does_not_blame_a_pattern() {
         // A link, a pipe, a huge file or one Bolt can't read has no pattern to fix.
         let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
@@ -1323,6 +1378,7 @@ mod tests {
             &mut packs,
             &folders,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
         ) {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),

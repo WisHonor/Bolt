@@ -404,7 +404,6 @@ fn rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time() {
 // `.env` is then saved without a word, and so is a new file Git ignores, such as a private key.
 
 #[test]
-#[ignore = "RT4-3: red-team proof, run once its fix is in"]
 fn rt4_3_a_boltignore_from_the_repository_does_not_save_what_git_ignores_silently() {
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);

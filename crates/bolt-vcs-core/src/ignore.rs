@@ -389,13 +389,16 @@ pub struct Rules {
     patterns: Vec<Pattern>,
     /// The file's size, which counts against Bolt's limits while its rules are in force.
     bytes: u64,
+    /// Whether the file is a `.gitignore`, whose lines Git reads too, or a `.boltignore`.
+    gitignore: bool,
 }
 
 impl Rules {
     /// Reads `text` as Git reads an ignore file: a UTF-8 byte order mark at the start is skipped,
     /// lines end at LF with one CR before it dropped, a line starting with `#` is a comment, and
     /// a line ends at a NUL. No line is refused; one Git can't use simply matches nothing.
-    pub fn parse(text: &[u8], folder: &str) -> Rules {
+    /// `gitignore` says whether the file is a `.gitignore`.
+    pub fn parse(text: &[u8], folder: &str, gitignore: bool) -> Rules {
         let body = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
         let patterns = body
             .split(|&b| b == b'\n')
@@ -409,6 +412,7 @@ impl Rules {
             folder: folder.to_owned(),
             patterns,
             bytes: u64::try_from(text.len()).unwrap_or(u64::MAX),
+            gitignore,
         }
     }
 
@@ -441,6 +445,15 @@ pub enum Decision {
     Kept,
     /// No line matches.
     NoRule,
+}
+
+/// What the rules in force say about a path: Bolt's verdict, from the lines of every ignore file,
+/// and Git's, from the lines of the `.gitignore` files alone. They differ only where a
+/// `.boltignore` line decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Verdict {
+    pub bolt: Decision,
+    pub git: Decision,
 }
 
 /// The rules of the folders a walk is in, the nearest last.
@@ -493,10 +506,17 @@ impl Matcher {
             .fold(0, |sum, r| sum.saturating_add(r.bytes))
     }
 
+    /// Bolt's verdict on `path`, as `verdict` gives it.
+    pub fn decide(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Decision {
+        self.verdict(path, is_dir).bolt
+    }
+
     /// What the rules in force say about `path`, a project path with `/` between names, as Git's
     /// `last_matching_pattern` decides it: the nearest folder's rules first, and in them the last
-    /// line that matches. Call `leave_to` with the folder that holds `path` first.
-    pub fn decide(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Decision {
+    /// line that matches. Git's verdict is looked for again, among the `.gitignore` lines, only
+    /// when a `.boltignore` line decides Bolt's. Call `leave_to` with the folder that holds `path`
+    /// first.
+    pub fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
         let path = path.as_ref();
         // Where the drive composes Unicode, Git reads names composed (`core.precomposeunicode`).
         let composed: Option<String> = match std::str::from_utf8(path) {
@@ -505,18 +525,40 @@ impl Matcher {
         };
         let path = composed.as_ref().map_or(path, String::as_bytes);
         let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+        let bolt = self.last_match(path, name, is_dir, false);
+        let git = match bolt {
+            Some((_, false)) => self.last_match(path, name, is_dir, true),
+            decided => decided,
+        };
+        let decision = |found: Option<(&Pattern, bool)>| match found {
+            Some((p, _)) if p.negative => Decision::Kept,
+            Some(_) => Decision::Ignored,
+            None => Decision::NoRule,
+        };
+        Verdict {
+            bolt: decision(bolt),
+            git: decision(git),
+        }
+    }
+
+    /// The line that decides `path`, and whether a `.gitignore` holds it: among the lines of
+    /// every ignore file in force, or of the `.gitignore` files alone.
+    fn last_match(
+        &self,
+        path: &[u8],
+        name: &[u8],
+        is_dir: bool,
+        gitignore_only: bool,
+    ) -> Option<(&Pattern, bool)> {
         let casefold = self.drive.ignores_case;
         self.levels
             .iter()
             .rev()
             .flat_map(|(_, rules)| rules.iter().rev())
-            .find_map(|rules| rules.last_match(path, name, is_dir, casefold))
-            .map_or(Decision::NoRule, |p| {
-                if p.negative {
-                    Decision::Kept
-                } else {
-                    Decision::Ignored
-                }
+            .filter(|rules| rules.gitignore || !gitignore_only)
+            .find_map(|rules| {
+                let line = rules.last_match(path, name, is_dir, casefold)?;
+                Some((line, rules.gitignore))
             })
     }
 }
@@ -1067,9 +1109,33 @@ mod tests {
     fn matcher(drive: Drive, files: &[(&str, &str)]) -> Matcher {
         let mut m = Matcher::new(drive);
         for &(folder, text) in files {
-            m.enter(folder, vec![Rules::parse(text.as_bytes(), folder)]);
+            m.enter(folder, vec![Rules::parse(text.as_bytes(), folder, true)]);
         }
         m
+    }
+
+    #[test]
+    fn gits_verdict_comes_from_the_gitignore_lines_alone() {
+        use Decision::*;
+        let both = |bolt, git| Verdict { bolt, git };
+        let mut m = Matcher::new(PLAIN);
+        m.enter(
+            "",
+            vec![
+                Rules::parse(b".env\n*.pem\nlogs/\n", "", true),
+                Rules::parse(b"!.env\n!*.pem\n*.tmp\n!logs/\n", "", false),
+            ],
+        );
+        // A .boltignore line takes back what a .gitignore keeps out.
+        assert_eq!(m.verdict(".env", false), both(Kept, Ignored));
+        assert_eq!(m.verdict("logs", true), both(Kept, Ignored));
+        // It can keep out more; where nothing matches, both say so.
+        assert_eq!(m.verdict("a.tmp", false), both(Ignored, NoRule));
+        assert_eq!(m.verdict("a.txt", false), both(NoRule, NoRule));
+        // Where a .gitignore line decides, Git's verdict is Bolt's.
+        m.enter("sub", vec![Rules::parse(b"!*.tmp\n", "sub", true)]);
+        assert_eq!(m.verdict("sub/a.tmp", false), both(Kept, Kept));
+        assert_eq!(m.verdict("sub/key.pem", false), both(Kept, Ignored));
     }
 
     #[test]

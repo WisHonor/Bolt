@@ -208,6 +208,11 @@ struct WalkState {
     held: HashSet<String>,
     /// Files and links an ignore rule matches, kept because the base save holds them.
     ignored: HashSet<String>,
+    /// Folders the walk keeps that Git would leave out, with all they hold: the `.gitignore`
+    /// lines alone ignore them, or a folder they are in, and a `.boltignore` line takes them back.
+    git_held: HashSet<String>,
+    /// Files and links the walk keeps that Git would leave out, in the same way.
+    gitignored: HashSet<String>,
     drive: Drive,
     /// The base save's entries the walk leaves untouched, by project path: the new save keeps
     /// them as they were, whatever the folder holds there.
@@ -234,6 +239,8 @@ impl WalkState {
             old: HashMap::new(),
             held: HashSet::new(),
             ignored: HashSet::new(),
+            git_held: HashSet::new(),
+            gitignored: HashSet::new(),
             drive,
             untouched: HashMap::new(),
         };
@@ -399,13 +406,14 @@ impl WalkState {
         }
         *in_force += size;
         self.read += size;
-        Ok(Some(Rules::parse(&bytes, folder)))
+        Ok(Some(Rules::parse(&bytes, folder, name == ".gitignore")))
     }
 
-    /// Whether the walk keeps `path`: never what it leaves untouched, and what Git would ignore
-    /// stays out, unless the base save has it. A name Git treats as `.git` stays out too, noted
-    /// for the warning. After a problem, such as an ignore file that fails, the problem is kept
-    /// and nothing more is: the save will stop anyway.
+    /// Whether the walk keeps `path`: never what it leaves untouched, and what the ignore rules
+    /// keep out stays out, unless the base save has it. A name Git treats as `.git` stays out too,
+    /// noted for the warning. What it keeps that Git's rules alone would leave out is noted too.
+    /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
+    /// is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
         if self.problem.is_some() {
             return false;
@@ -418,12 +426,13 @@ impl WalkState {
         let folder = shown(rel.parent().unwrap_or(rel));
         // The walk is depth first, so the rules of folders `path` is not in are done with.
         self.matcher.leave_to(&folder);
+        // Before `path`'s own ignore files are read, if it is a folder: they are for what it holds.
+        let verdict = self.matcher.verdict(path_bytes(rel), is_dir);
         // Inside an ignored folder everything is ignored, as in Git: no line takes a name back.
-        if self.held.contains(&folder)
-            || self.matcher.decide(path_bytes(rel), is_dir) == Decision::Ignored
-        {
+        if self.held.contains(&folder) || verdict.bolt == Decision::Ignored {
             return self.saved_before(&folder, rel, is_dir);
         }
+        let git_ignores = self.git_held.contains(&folder) || verdict.git == Decision::Ignored;
         // After the rules, so an ignored one stays out without a word, unless the base save held
         // it: `Base` dropped and named those.
         let name = rel.file_name().and_then(|n| n.to_str());
@@ -437,6 +446,11 @@ impl WalkState {
         if is_dir && let Err(problem) = self.enter(path) {
             self.problem.get_or_insert(problem);
             return false;
+        }
+        if git_ignores && is_dir {
+            self.git_held.insert(shown(rel));
+        } else if git_ignores {
+            self.gitignored.insert(shown(rel));
         }
         true
     }
@@ -480,6 +494,9 @@ pub(super) struct Scan {
     /// The project paths of the files and links an ignore rule matches, kept because the base
     /// save holds them.
     pub(super) ignored: HashSet<String>,
+    /// The project paths of the files and links kept that Git's rules alone would leave out,
+    /// because a `.boltignore` line takes them back, or a folder they are in.
+    pub(super) gitignored: HashSet<String>,
     /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` left out.
     pub(super) warnings: Vec<Warning>,
 }
@@ -651,6 +668,7 @@ fn scan_folder(
         old: std::mem::take(&mut rules.old),
         rebuilt,
         ignored: std::mem::take(&mut rules.ignored),
+        gitignored: std::mem::take(&mut rules.gitignored),
         warnings: std::mem::take(&mut rules.warnings),
     })
 }
@@ -1818,6 +1836,55 @@ mod tests {
         assert_eq!(warnings[0].kind, "ignored_changes_saved");
         let listed = "a change to 1 file that an ignore rule matches:\n  a.dll\n";
         assert!(warnings[0].message.contains(listed), "{warnings:?}");
+    }
+
+    #[test]
+    fn what_boltignore_takes_back_from_gitignore_is_warned_about_when_new_or_changed() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".env", b"API_KEY=put-yours-here\n");
+        write(root, "secrets/old.key", b"1");
+        save_now(&mut repo).unwrap();
+        // Git keeps out `.env`, every `.pem` and `secrets/`, which .boltignore takes back.
+        write(root, ".gitignore", b".env\n*.pem\nsecrets/\n*.log\n");
+        write(
+            root,
+            ".boltignore",
+            b"!.env\n!*.pem\n!secrets/\n!notes.txt\n",
+        );
+        // Unchanged, they say nothing.
+        let saved = save_now(&mut repo).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        write(root, ".env", b"API_KEY=sk_live_REAL_SECRET\n");
+        write(root, "deploy.pem", b"key");
+        write(root, "secrets/new.key", b"2");
+        // Neither what Git keeps too, nor what both keep out, counts.
+        write(root, "notes.txt", b"n");
+        write(root, "debug.log", b"d");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [
+                ".boltignore",
+                ".env",
+                ".gitignore",
+                "deploy.pem",
+                "notes.txt",
+                "secrets",
+                "secrets/new.key",
+                "secrets/old.key"
+            ]
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "gitignored_files_saved");
+        assert_eq!(
+            warnings[0].message,
+            "Saved 3 new or changed files that .gitignore keeps out but .boltignore takes back:\n  \
+             .env\n  deploy.pem\n  secrets/new.key\nGit would leave them out unless they were \
+             added (git add). If they shouldn't be saved, remove the .boltignore lines that take \
+             them back and move them out of the project folder; this save keeps them."
+        );
     }
 
     #[test]
