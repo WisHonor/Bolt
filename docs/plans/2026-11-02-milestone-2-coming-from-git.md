@@ -990,7 +990,7 @@ Decisions 033, 034, 037, 039 and 040.
 
 **Interfaces:**
 ```rust
-pub struct ImportRequest<'a> { pub who: &'a Person, pub command: &'a str, pub progress: &'a mut dyn FnMut(u64, u64) }
+pub struct ImportRequest<'a> { pub who: &'a Person, pub command: &'a str, pub progress: &'a mut dyn FnMut(u64, Option<u64>) }
 pub struct ImportReport { pub commits: u64, pub lines: u64, pub servers: u64, pub server_lines: u64, pub tags: u64,
     pub position: Position, pub renamed: Vec<Renaming>, pub skipped_refs: Vec<String>,
     pub skipped_tags: Vec<(String, String)>, pub skipped_entries: Vec<(String, String)>,
@@ -1015,8 +1015,8 @@ impl Repository {
    - The roots are branches, server lines, tags (peeled) and a detached `HEAD`.
    - A `HEAD` branch with no commit stops: "Git's current branch `<name>` has no commits yet; switch to a branch with commits, or commit first."
    - No commits at all stops: "There's nothing to import: this Git repository has no commits. bolt start makes a new project here."
-5. **Pass 1** reads every commit's parents iteratively. They are ordered parents first, with ties broken by Git ID.
-6. **Pass 2** converts the commits in that order (Task 12), calling `progress(done, total)` after each, then `Converter::finish()`.
+5. **Pass 1** reads every commit's parents iteratively, calling `progress(read, None)` as it reads each. They are ordered parents first, with ties broken by Git ID.
+6. **Pass 2** converts the commits in that order (Task 12), calling `progress(done, Some(total))` after each, then `Converter::finish()`.
 7. **Tags:** `Converter::tag` for each one, with its renamed Bolt name.
 8. **The state:**
    - the lines;

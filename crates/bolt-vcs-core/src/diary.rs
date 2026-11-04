@@ -513,6 +513,24 @@ impl ServerLines {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<ServerLines, DecodeError> {
+        let mut servers = BTreeMap::new();
+        ServerLines::read(bytes, |name, lines| {
+            servers.insert(name, lines);
+        })?;
+        Ok(ServerLines { servers })
+    }
+
+    /// Checks `bytes` as `decode` does, but lets each server's lines go once they are read: for a
+    /// list too big to hold twice.
+    pub fn check(bytes: &[u8]) -> Result<(), DecodeError> {
+        ServerLines::read(bytes, |_, _| {})
+    }
+
+    /// Reads the list `bytes`, giving `each` every server and its lines in name order.
+    fn read(
+        bytes: &[u8],
+        mut each: impl FnMut(String, BTreeMap<String, Id>),
+    ) -> Result<(), DecodeError> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 1 {
             return Err(DecodeError::Invalid("unknown server lines version"));
@@ -521,7 +539,6 @@ impl ServerLines {
         if n == 0 {
             return Err(DecodeError::Invalid("a server-lines list cannot be empty"));
         }
-        let mut servers = BTreeMap::new();
         let mut folded = BTreeSet::new();
         let mut prev = None;
         for _ in 0..n {
@@ -530,10 +547,9 @@ impl ServerLines {
             if lines.is_empty() {
                 return Err(DecodeError::Invalid("a server cannot be without lines"));
             }
-            servers.insert(name, lines);
+            each(name, lines);
         }
-        r.finish()?;
-        Ok(ServerLines { servers })
+        r.finish()
     }
 
     #[must_use]
@@ -994,11 +1010,13 @@ mod tests {
         ];
         for (what, bytes) in bad {
             assert!(ServerLines::decode(&bytes).is_err(), "{what}");
+            assert!(ServerLines::check(&bytes).is_err(), "{what}");
         }
         // Letter case matters only inside one list of names.
         let same_line_on_two_servers =
             raw_server_lines(&[("a", vec!["Main"]), ("b", vec!["main"])]);
         ServerLines::decode(&same_line_on_two_servers).unwrap();
+        ServerLines::check(&same_line_on_two_servers).unwrap();
     }
 
     #[test]
@@ -1074,6 +1092,7 @@ mod tests {
             let list = ServerLines { servers };
             let bytes = list.encode();
             prop_assert_eq!(ServerLines::decode(&bytes).unwrap(), list.clone());
+            prop_assert!(ServerLines::check(&bytes).is_ok());
             prop_assert_eq!(list.id(), hash_record(Flavor::ServerLines, &bytes));
             let lengths: u64 = list
                 .servers

@@ -384,30 +384,41 @@ fn kept_warning(count: usize) -> Warning {
     Warning::new(warning::KEPT_AS_THEY_WERE, message)
 }
 
+/// What Git does with a change to `count` files an ignore rule matches, whether Git tracks them
+/// or not, for both warnings about such files.
+fn as_git_would(count: u64) -> &'static str {
+    if count == 1 {
+        "Git would leave such a change out unless the file was added (with `git add -f` if Git \
+         doesn't track it yet)."
+    } else {
+        "Git would leave such changes out unless the files were added (with `git add -f` if Git \
+         doesn't track them yet)."
+    }
+}
+
 /// Says the save took changes to `paths`, files an ignore rule matches that stay saved because
 /// the last save holds them (decision 038), naming the first few.
 fn ignored_changes_saved(mut paths: Vec<String>) -> Warning {
     let count = paths.len() as u64;
     paths.sort_unstable();
     paths.truncate(NAMED);
-    let (what, why) = if count == 1 {
+    let (what, held, kept) = if count == 1 {
         (
             "a change to 1 file".to_owned(),
-            "The last save holds it, so it stays saved, but Git would leave such a change out \
-             unless the file was added (git add). Bolt keeps saving it until it is deleted or \
-             moved out of the project folder.",
+            "The last save holds it, so it stays saved.",
+            "Bolt keeps saving it until it is deleted or moved out of the project folder.",
         )
     } else {
         (
             format!("changes to {count} files"),
-            "The last save holds them, so they stay saved, but Git would leave such changes out \
-             unless the files were added (git add). Bolt keeps saving them until they are deleted \
-             or moved out of the project folder.",
+            "The last save holds them, so they stay saved.",
+            "Bolt keeps saving them until they are deleted or moved out of the project folder.",
         )
     };
     let message = format!(
-        "Saved {what} that an ignore rule matches:{}\n{why}",
-        listed(&paths, count)
+        "Saved {what} that an ignore rule matches:{}\n{held} {} {kept}",
+        listed(&paths, count),
+        as_git_would(count)
     );
     Warning::new(warning::IGNORED_CHANGES_SAVED, message)
 }
@@ -418,24 +429,23 @@ fn gitignored_files_saved(mut paths: Vec<String>) -> Warning {
     let count = paths.len() as u64;
     paths.sort_unstable();
     paths.truncate(NAMED);
-    let (what, why) = if count == 1 {
+    let (what, undo) = if count == 1 {
         (
             "1 new or changed file".to_owned(),
-            "Git would leave it out unless it was forced in with git add -f. If it shouldn't be \
-             saved, remove the .boltignore line that takes it back and move it out of the \
-             project folder; this save keeps it.",
+            "If it shouldn't be saved, remove the .boltignore line that takes it back and move it \
+             out of the project folder; this save keeps it.",
         )
     } else {
         (
             format!("{count} new or changed files"),
-            "Git would leave them out unless they were forced in with git add -f. If they \
-             shouldn't be saved, remove the .boltignore lines that take them back and move them \
-             out of the project folder; this save keeps them.",
+            "If they shouldn't be saved, remove the .boltignore lines that take them back and \
+             move them out of the project folder; this save keeps them.",
         )
     };
     let message = format!(
-        "Saved {what} that .gitignore keeps out but .boltignore takes back:{}\n{why}",
-        listed(&paths, count)
+        "Saved {what} that .gitignore keeps out but .boltignore takes back:{}\n{} {undo}",
+        listed(&paths, count),
+        as_git_would(count)
     );
     Warning::new(warning::GITIGNORED_FILES_SAVED, message)
 }
@@ -1336,8 +1346,15 @@ mod tests {
         let message = gitignored_files_saved(paths).message;
         let listed = "Saved 6 new or changed files that .gitignore keeps out but .boltignore takes \
                       back:\n  k1.pem\n  k2.pem\n  k3.pem\n  k4.pem\n  k5.pem\n  and 1 more\nGit \
-                      would leave them out";
+                      would leave such changes out";
         assert!(message.starts_with(listed), "{message}");
+        // The same words, true whether Git tracks a file or not, in both warnings.
+        let one = gitignored_files_saved(vec!["a.pem".into()]).message;
+        let git = "Git would leave such a change out unless the file was added (with `git add -f` \
+                   if Git doesn't track it yet).";
+        assert!(one.contains(git), "{one}");
+        let one = ignored_changes_saved(vec!["a.dll".into()]).message;
+        assert!(one.contains(git), "{one}");
     }
 
     #[test]

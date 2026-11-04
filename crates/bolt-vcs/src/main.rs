@@ -195,17 +195,26 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = std::env::current_dir()?;
     let who = now_person(&load_identity(Some(&root))?);
-    let mut progress = output::Progress::new("Importing commits");
+    let mut reading = output::Progress::new("Reading Git's history", "commits");
+    let mut importing = output::Progress::new("Importing commits", "commits");
     let imported = import_git(
         &root,
         &mut ImportRequest {
             who: &who,
             command: "import",
-            progress: &mut |done, total| progress.update(done, total),
+            // The first pass can't say how many commits there are; the second can.
+            progress: &mut |done, total| match total {
+                None => reading.update(done, None),
+                Some(_) => {
+                    reading.finish();
+                    importing.update(done, total);
+                }
+            },
         },
         opened,
     );
-    progress.finish();
+    reading.finish();
+    importing.finish();
     let report = imported?;
     // A project made from an import opens only where one made by `start` would.
     let mut warnings: Vec<Warning> = elevated_only_note(&root)

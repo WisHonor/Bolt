@@ -375,7 +375,7 @@ fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
 }
 
 /// Most bytes a Git LFS pointer may have (decision 037).
-const MAX_LFS_POINTER_BYTES: usize = 1024;
+pub const MAX_LFS_POINTER_BYTES: usize = 1024;
 
 /// The `version` values of Git LFS's pointers: its own and its pre-release's.
 const LFS_SPECS: [&str; 2] = [

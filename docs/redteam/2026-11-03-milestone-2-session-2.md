@@ -72,7 +72,7 @@ The fixes held where they were aimed: no sparse index, early or long zlib stream
     warning: Saved 2 new or changed files that .gitignore keeps out but .boltignore takes back:
       .env
       deploy.pem
-    Git would leave them out unless they were forced in with git add -f. If they shouldn't be saved, remove the .boltignore lines that take them back and move them out of the project folder; this save keeps them.
+    Git would leave such changes out unless the files were added (with `git add -f` if Git doesn't track them yet). If they shouldn't be saved, remove the .boltignore lines that take them back and move them out of the project folder; this save keeps them.
     ```
 
 - **RT4-4 Low (T7: a delta is held beside its base and what it builds, three times the object; RT3-8's fix says two).**

@@ -9,7 +9,10 @@ use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
-use crate::git::{self, GitError, GitId, Head, ObjectType, Refs, parse_tag, parse_tree, shown};
+use crate::git::{
+    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, is_lfs_pointer,
+    looks_like_lfs_pointer, parse_tag, parse_tree, shown,
+};
 use crate::id::{ChangeId, Id, hash_record};
 use crate::listing::EntryKind;
 use crate::names::{NameError, is_git_alias, validate_name};
@@ -24,10 +27,10 @@ use crate::warning::{self, Warning};
 mod convert;
 mod names;
 
-pub use convert::{Converter, Counts, TagOutcome};
+pub use convert::{Converter, Counts, MAX_LISTED, TagOutcome};
 use convert::{
-    MAX_EXTRA_PARENTS, MAX_LISTED, TagBudget, at, bug, check_tag_chain, check_tag_object,
-    expect_kind, outline, shown_path, tag_message,
+    MAX_EXTRA_PARENTS, TagBudget, at, bug, check_tag_chain, check_tag_object, expect_kind, outline,
+    shown_path, tag_message,
 };
 use names::{Named, Names};
 // For tests that check an import's names against Git's refs.
@@ -40,8 +43,9 @@ pub struct ImportRequest<'a> {
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
-    /// Called after each commit is converted, with how many are done and how many there are.
-    pub progress: &'a mut dyn FnMut(u64, u64),
+    /// Called as the first pass reads each commit, with how many it has read and `None`, then
+    /// after each commit is converted, with how many are done and how many there are.
+    pub progress: &'a mut dyn FnMut(u64, Option<u64>),
 }
 
 /// What an import brought in, and what it left out (decision 033's summary). Names and paths
@@ -237,7 +241,7 @@ pub fn import_git(
     req: &mut ImportRequest,
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
-    let plan = plan(root)?;
+    let plan = plan(root, req.progress)?;
     let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);
     carry_out(plan, repo, &lock, req).map_err(|e| after_begin(root, e))
@@ -295,7 +299,8 @@ struct Plan {
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
-fn plan(root: &Path) -> Result<Plan, ImportError> {
+/// `progress` hears how many commits the first pass has read.
+fn plan(root: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
     let refs = git.refs()?;
@@ -320,7 +325,8 @@ fn plan(root: &Path) -> Result<Plan, ImportError> {
     if let Some(name) = tracked_bolt(&git, &head_commit)? {
         return Err(tracked_stop(&name));
     }
-    let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS)?;
+    stop_at_lfs_in_head(&git, &head_commit)?;
+    let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS, progress)?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -364,7 +370,7 @@ fn carry_out(
     let total = order.len() as u64;
     for (done, id) in (1..).zip(&order) {
         converter.commit(id)?;
-        (req.progress)(done, total);
+        (req.progress)(done, Some(total));
     }
     converter.finish()?;
     // Each tag goes into the list as it is read, in the list's order, and is let go: the tags
@@ -408,13 +414,12 @@ fn carry_out(
         None
     } else {
         let encoded = server_lines.encode();
-        let read_back = |bytes: &[u8]| ServerLines::decode(bytes).map(drop);
         Some(put_record(
             repo.store(),
             &mut packs,
             ObjectKind::ServerLines,
             &encoded,
-            read_back,
+            ServerLines::check,
         )?)
     };
     let mut warnings = bolt_folder_warnings(&git, &head_commit)?;
@@ -642,13 +647,17 @@ fn roots(
 /// have more than `most_extra` parents beyond each one's first. Pass 2 reads each commit's
 /// parents again, so none are kept here. Also gives the change IDs that commits' own IDs give
 /// and some commit's `change-id` header gives too, which no header may give (decision 043).
+/// `progress` hears how many commits it has read, as it reads each.
 fn in_order(
     git: &git::Repo,
     roots: &BTreeSet<GitId>,
     most_extra: u64,
+    progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(Vec<GitId>, HashSet<ChangeId>), ImportError> {
     let mut walk = FirstPass {
         git,
+        progress,
+        read: 0,
         most_extra,
         ids: Vec::new(),
         by_id: HashMap::new(),
@@ -685,6 +694,9 @@ fn in_order(
 /// stack: a commit on the way down costs 4 bytes for each parent it still has to go into.
 struct FirstPass<'g> {
     git: &'g git::Repo,
+    progress: &'g mut dyn FnMut(u64, Option<u64>),
+    /// Commits read so far.
+    read: u64,
     most_extra: u64,
     /// Each commit met, by its index.
     ids: Vec<GitId>,
@@ -734,6 +746,8 @@ impl FirstPass<'_> {
             _ => return Ok(()),
         }
         let commit = outline(self.git, &id)?;
+        self.read = self.read.saturating_add(1);
+        (self.progress)(self.read, None);
         let mut parents = commit.parents;
         self.headers.extend(commit.change_id);
         self.extra = self
@@ -819,9 +833,9 @@ fn lines_of(
 
 /// Stores the record `encoded` of `kind`, a tag list or server lines, unless a good copy is there
 /// already. Their encoders don't check what they write, so `read_back` reads it first, as the
-/// decoder would; for the tag list, without keeping what it reads, since the list can be big. Their
-/// sizes were held to a record's limit before anything was written: the tag list's by `roots`
-/// (and again, as a guard, by the converter), the server lines' by `Names::of`.
+/// decoder would, without keeping what it reads, since either can be big. Their sizes were held
+/// to a record's limit before anything was written: the tag list's by `roots` (and again, as a
+/// guard, by the converter), the server lines' by `Names::of`.
 fn put_record(
     store: &Store,
     packs: &mut PackSet,
@@ -881,6 +895,103 @@ fn tracked_bolt(git: &git::Repo, head: &GitId) -> Result<Option<String>, ImportE
         let name = std::str::from_utf8(e.name).ok()?;
         (validate_name(name) == Err(NameError::BoltSpelling)).then(|| name.to_owned())
     }))
+}
+
+/// Most bytes of the top `.gitattributes` read to look for Git LFS's filter; a bigger one counts
+/// as a sign of it.
+const MAX_ATTRIBUTES_BYTES: u64 = 1 << 20;
+
+/// Stops at the first Git LFS pointer, or file that looks like one, in the snapshot of `HEAD`'s
+/// commit `head` (decision 037), before anything is written, when the repository shows a sign of
+/// Git LFS: a `.git/lfs` folder, or `filter=lfs` in the top `.gitattributes`. A sign alone doesn't
+/// stop it: `.git/lfs` stays after `git lfs migrate export` has turned the pointers back into
+/// files, and a `.gitattributes` can name the filter for files a repository doesn't have. The
+/// converter stops at a pointer anywhere else.
+fn stop_at_lfs_in_head(git: &git::Repo, head: &GitId) -> Result<(), ImportError> {
+    let tree = outline(git, head)?.tree;
+    if !git.has_lfs_folder()? && !lfs_attribute(git, &tree)? {
+        return Ok(());
+    }
+    let commit = head.to_hex();
+    // Each tree and blob is looked at once.
+    let mut seen = HashSet::from([tree]);
+    // Each folder on the way down, by name, with the entries in it still to look at.
+    let mut stack = vec![(String::new(), kept_entries(git, &tree)?.into_iter())];
+    while let Some((_, left)) = stack.last_mut() {
+        let Some((name, kind, id)) = left.next() else {
+            stack.pop();
+            continue;
+        };
+        if kind == EntryKind::ProjectLink || !seen.insert(id) {
+            continue;
+        }
+        if kind == EntryKind::Folder {
+            let inner = kept_entries(git, &id)?.into_iter();
+            stack.push((name, inner));
+            continue;
+        }
+        let path = || {
+            let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, _)| n.as_str()).collect();
+            path.push(&name);
+            shown_path(&path)
+        };
+        let place = || format!("the file `{}` of commit `{commit}`", path());
+        let (_, size) = git.header(&id).map_err(|e| at(e, place))?;
+        if size > MAX_LFS_POINTER_BYTES as u64 {
+            continue;
+        }
+        let object = git.read(&id).map_err(|e| at(e, place))?;
+        expect_kind(object.kind, ObjectType::Blob, &id, place)?;
+        let pointer = is_lfs_pointer(&object.data);
+        if pointer || looks_like_lfs_pointer(&object.data) {
+            return Err(ImportError::LfsPointer {
+                commit,
+                path: path(),
+                lookalike: !pointer,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether the top `.gitattributes` in the tree `tree` sends files through Git LFS's filter, or is
+/// too big to tell.
+fn lfs_attribute(git: &git::Repo, tree: &GitId) -> Result<bool, ImportError> {
+    let place = || "the top `.gitattributes` of `HEAD`".to_owned();
+    let entries = kept_entries(git, tree)?;
+    let file = |kind| matches!(kind, EntryKind::File | EntryKind::Executable);
+    let Some((_, _, id)) = entries
+        .into_iter()
+        .find(|(name, kind, _)| name == ".gitattributes" && file(*kind))
+    else {
+        return Ok(false);
+    };
+    let (_, size) = git.header(&id).map_err(|e| at(e, place))?;
+    if size > MAX_ATTRIBUTES_BYTES {
+        return Ok(true);
+    }
+    let object = git.read(&id).map_err(|e| at(e, place))?;
+    expect_kind(object.kind, ObjectType::Blob, &id, place)?;
+    Ok(object.data.windows(10).any(|w| w == b"filter=lfs"))
+}
+
+/// The entries of the Git tree `id` that saves keep, as the converter judges their names.
+fn kept_entries(
+    git: &git::Repo,
+    id: &GitId,
+) -> Result<Vec<(String, EntryKind, GitId)>, ImportError> {
+    let place = || format!("tree `{}`", id.to_hex());
+    let object = git.read(id).map_err(|e| at(e, place))?;
+    expect_kind(object.kind, ObjectType::Tree, id, place)?;
+    let entries = parse_tree(&object.data, git.hash()).map_err(|e| at(e, place))?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|e| {
+            let name = std::str::from_utf8(e.name).ok()?;
+            let kept = validate_name(name).is_ok() && !is_git_alias(name);
+            kept.then(|| (name.to_owned(), e.kind, e.id))
+        })
+        .collect())
 }
 
 /// A warning for each folder named `.bolt` that Git checked out below the top, from the tree of
@@ -1185,8 +1296,8 @@ mod tests {
         let mut want = vec![a, b, c];
         want.sort();
         want.extend([merge, tip]);
-        assert_eq!(in_order(&repo, &roots, 3).unwrap().0, want);
-        let e = in_order(&repo, &roots, 2).unwrap_err();
+        assert_eq!(in_order(&repo, &roots, 3, &mut |_, _| {}).unwrap().0, want);
+        let e = in_order(&repo, &roots, 2, &mut |_, _| {}).unwrap_err();
         assert!(
             e.to_string()
                 .contains("more than 2 parents beyond their first"),
@@ -1218,7 +1329,7 @@ mod tests {
             ([two, tip_two], [one, tip_one])
         };
         let want: Vec<GitId> = [shared].into_iter().chain(first).chain(second).collect();
-        assert_eq!(in_order(&repo, &roots, 0).unwrap().0, want);
+        assert_eq!(in_order(&repo, &roots, 0, &mut |_, _| {}).unwrap().0, want);
     }
 
     /// Bolt doesn't follow a config's includes, so an import of a repository whose config has one
@@ -1452,8 +1563,9 @@ mod tests {
         let (later, _) = git.pack(&[PackEntry::Whole(Blob, two)]);
         let head = id(Commit, second.as_bytes()).to_hex();
         git.loose_ref("refs/heads/main", &format!("{head}\n"));
-        let mut progress = |done: u64, _: u64| {
-            if done == 1 {
+        // Once the first commit is converted, after the first pass.
+        let mut progress = |done: u64, total: Option<u64>| {
+            if total.is_some() && done == 1 {
                 std::fs::remove_file(&later).unwrap();
             }
         };
@@ -1489,5 +1601,29 @@ mod tests {
         );
         assert!(!hint.contains("Nothing was changed"), "{hint}");
         assert!(opened.is_some());
+    }
+
+    /// The first pass says how many commits it has read, as it goes, before it knows how many
+    /// there are; then the second says how many of them it has converted.
+    #[test]
+    fn progress_counts_the_commits_read_then_those_converted() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        let tree = git.tree(&[]);
+        let first = commit_on(&git, &tree, &[], "one\n");
+        let second = commit_on(&git, &tree, &[first], "two\n");
+        git.loose_ref("refs/heads/main", &format!("{}\n", second.to_hex()));
+        let mut heard = Vec::new();
+        let report = import_git(
+            dir.path(),
+            &mut ImportRequest {
+                who: &who(),
+                command: "import",
+                progress: &mut |done, total| heard.push((done, total)),
+            },
+            &mut None,
+        );
+        assert_eq!(report.unwrap().commits, 2);
+        assert_eq!(heard, [(1, None), (2, None), (1, Some(2)), (2, Some(2))]);
     }
 }

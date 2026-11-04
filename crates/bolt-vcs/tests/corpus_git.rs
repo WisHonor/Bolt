@@ -22,7 +22,7 @@ use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_core::save::Person;
 use bolt_core::store::StoreError;
-use bolt_core::text::escape;
+use bolt_core::text::escape_all;
 use support::{Env, git_commit, text, top_folder};
 
 use ObjectType::{Blob, Commit, Tag, Tree};
@@ -139,9 +139,9 @@ fn content(env: &Env, name: &str) -> Vec<u8> {
     out
 }
 
-/// The line `bolt import` lists an entry it left out with.
+/// The line `bolt import` lists an entry it left out with, every hidden character shown.
 fn left_out(path: &str, commit: &GitId) -> String {
-    let path = escape(path, false);
+    let path = escape_all(path);
     format!("\n  `{path}` in commit {}\n", &commit.to_hex()[..12])
 }
 

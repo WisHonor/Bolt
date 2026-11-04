@@ -851,14 +851,12 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
         // A size the bytes can't hold is refused before any room is made for it.
         let most = self.input.len().saturating_mul(MAX_EXPANSION);
         if size > most {
-            return Err(GitError::EndedEarly {
-                what: format!(
-                    "{} says it holds {size} bytes, but the {} bytes of compressed data it has \
-                     can't hold more than {most}",
-                    self.what(),
-                    self.input.len()
-                ),
-            });
+            return Err(broken(format!(
+                "{} says it holds {size} bytes, but the {} bytes of compressed data it has can't \
+                 hold more than {most}",
+                self.what(),
+                self.input.len()
+            )));
         }
         let len = usize::try_from(size).unwrap_or(usize::MAX);
         let mut data = Vec::new();
@@ -1585,14 +1583,16 @@ mod tests {
         let squeezed = id(Blob, &zeros, Sha1);
         git.raw_loose(&squeezed.to_hex(), &deflate(&stored));
         let repo = open(&dir);
+        // A damaged or hostile object, as the hint says: no fault of Bolt's to report.
         match repo.read(&liar) {
-            Err(e @ GitError::EndedEarly { .. }) => {
+            Err(e @ GitError::Broken { .. }) => {
                 let message = e.to_string();
                 assert!(
                     message.contains("says it holds 524288000 bytes, but the")
                         && message.contains("can't hold more than"),
                     "{message}"
                 );
+                assert!(e.hint().unwrap().contains("git fsck"), "{e:?}");
             }
             other => panic!("{other:?}"),
         }
@@ -1655,8 +1655,8 @@ mod tests {
         assert_eq!(repo.header(&largest).unwrap(), (Blob, 1 << 40));
         broken(repo.read(&largest));
         assert!(broken(repo.read(&long_data)).contains("more than the 5 bytes"));
-        // Data that ends early is a fault to report, which `git fsck` may not see, read whole or
-        // streamed.
+        // Data that ends early, read whole or streamed, is damage `git fsck` may not see, or a fault
+        // in Bolt's reader, and the hint says both.
         let streamed = read_all(repo.blob_reader(&short).unwrap(), 4096).unwrap_err();
         let streamed = streamed
             .into_inner()
@@ -1672,7 +1672,9 @@ mod tests {
             );
             let hint = e.hint().unwrap();
             assert!(
-                hint.contains("please report it") && !hint.contains("fsck"),
+                hint.contains("the repository was damaged or made this way")
+                    && hint.contains("a fault in Bolt's reader")
+                    && hint.contains("please report it"),
                 "{hint}"
             );
         }

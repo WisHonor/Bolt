@@ -1,8 +1,8 @@
 //! What `bolt import` prints: its summary for people, and its `--json` document.
 
 use bolt_core::diary::Position;
-use bolt_core::import::ImportReport;
-use bolt_core::text::{escape, thousands};
+use bolt_core::import::{ImportReport, MAX_LISTED};
+use bolt_core::text::{escape, escape_all, thousands};
 use bolt_core::warning::Warning;
 use serde_json::json;
 
@@ -55,6 +55,7 @@ pub fn print_import(report: &ImportReport, standing: &str) {
     let renamed: Vec<String> = report
         .renamed
         .iter()
+        .take(MAX_LISTED)
         .map(|r| {
             let kind = match r.kind {
                 "server" => "server ",
@@ -68,10 +69,13 @@ pub fn print_import(report: &ImportReport, standing: &str) {
             )
         })
         .collect();
-    let names = counted(renamed.len() as u64, "name", "names");
+    let count = report.renamed.len() as u64;
     print_list(
-        &format!("Renamed {names} that Bolt's names don't allow"),
-        &renamed,
+        &format!(
+            "Renamed {} that Bolt's names don't allow",
+            counted(count, "name", "names")
+        ),
+        &and_the_rest(renamed, count),
     );
     let refs = report.skipped_refs.iter().map(|r| escape(r, false));
     let heading = format!(
@@ -85,22 +89,22 @@ pub fn print_import(report: &ImportReport, standing: &str) {
     let tags: Vec<String> = report
         .skipped_tags
         .iter()
+        .take(MAX_LISTED)
         .map(|(name, why)| format!("{}, as {why}", escape(name, false)))
         .collect();
-    let heading = format!(
-        "Didn't import {}",
-        counted(tags.len() as u64, "tag", "tags")
-    );
-    print_list(&heading, &tags);
+    let count = report.skipped_tags.len() as u64;
+    let heading = format!("Didn't import {}", counted(count, "tag", "tags"));
+    print_list(&heading, &and_the_rest(tags, count));
     let entries: Vec<String> = report
         .skipped_entries
         .iter()
         .map(|(commit, path)| {
-            // A name can be empty, and an empty one at the top has no path to show.
+            // A name can be empty, and an empty one at the top has no path to show. Every hidden
+            // character shows, so that a name left out can't pass for another.
             let path = if path.is_empty() {
                 "an empty name".to_owned()
             } else {
-                format!("`{}`", escape(path, false))
+                format!("`{}`", escape_all(path))
             };
             let commit = commit.get(..12).unwrap_or(commit);
             format!("{path} in commit {}", escape(commit, false))

@@ -147,6 +147,69 @@ fn refs_left_out_are_listed_up_to_100_and_counted() {
     assert_eq!(first[0], pulls[0].as_str());
 }
 
+/// The summary lists the first 100 of each and counts the rest; the JSON document lists them all.
+#[test]
+fn renamed_names_and_skipped_tags_are_listed_up_to_100_and_counted() {
+    let env = Env::new();
+    let id = env.commit("a.txt", "a\n", "First");
+    let tree = env.git(&["rev-parse", "HEAD^{tree}"]);
+    let mut packed = "# pack-refs with: peeled fully-peeled sorted \n".to_owned();
+    for n in 0..150 {
+        packed += &format!("{id} refs/heads/b+{n:03}\n");
+    }
+    for n in 0..150 {
+        packed += &format!("{tree} refs/tags/t{n:03}\n");
+    }
+    std::fs::write(env.root().join(".git/packed-refs"), &packed).unwrap();
+    let copy = tempfile::tempdir().unwrap();
+    copy_dir(env.root(), copy.path());
+    let (out, _) = env.import();
+    for heading in [
+        "Renamed 150 names that Bolt's names don't allow:\n",
+        "Didn't import 150 tags:\n",
+    ] {
+        let list = &out[out.find(heading).unwrap() + heading.len()..];
+        let items: Vec<&str> = list.lines().take_while(|l| l.starts_with("  ")).collect();
+        assert_eq!(items.len(), 101, "{out}");
+        assert_eq!(items[100], "  and 50 more", "{out}");
+    }
+    assert!(out.contains("\n  b+000 → b-000\n"), "{out}");
+    assert!(
+        out.contains("\n  t000, as it tags a folder (a Git tree), not a commit\n"),
+        "{out}"
+    );
+
+    let out = env
+        .bolt_in(copy.path())
+        .args(["--json", "import"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["renamed"].as_array().unwrap().len(), 150);
+    assert_eq!(json["skipped_tags"].as_array().unwrap().len(), 150);
+}
+
+/// Names left out of history show every hidden character, so none passes for another.
+#[test]
+fn entries_left_out_show_their_hidden_characters() {
+    let env = Env::new();
+    let stream = "blob\nmark :1\ndata 2\na\n\n\
+        commit refs/heads/main\nmark :2\n\
+        author Ada Lovelace <ada@example.com> 1700000000 +0000\n\
+        committer Ada Lovelace <ada@example.com> 1700000000 +0000\n\
+        data 6\nFirst\n\nM 100644 :1 a.txt\nM 100644 :1 .g\u{200c}it/x\n\n";
+    let made = git_with_input(env.root(), &["fast-import", "--quiet"], stream.as_bytes());
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    let (out, _) = env.import();
+    assert!(
+        out.contains(
+            "Left out 1 entry whose name Bolt never writes to disk (such as .git and \
+                      .bolt), with everything in it: `.g\\u{200c}it` in commit "
+        ),
+        "{out}"
+    );
+}
+
 #[test]
 fn a_detached_head_puts_you_at_its_save() {
     let env = Env::new();
@@ -256,6 +319,38 @@ fn an_import_that_stops_partway_says_its_bolt_folder_is_kept() {
             "{args:?}: {err}"
         );
     }
+}
+
+/// A sign of Git LFS has the first pass look for a pointer in `HEAD`'s files, so the usual Git
+/// LFS repository stops before `.bolt` is made, with the stop the converter gives.
+#[test]
+fn a_git_lfs_repository_stops_before_anything_is_written() {
+    let lfs_line = "*.psd filter=lfs diff=lfs merge=lfs -text\n";
+    for sign in ["gitattributes", "lfs folder"] {
+        let env = Env::new();
+        env.commit("a.txt", "a\n", "First");
+        if sign == "gitattributes" {
+            env.commit(".gitattributes", lfs_line, "Track art with Git LFS");
+        } else {
+            std::fs::create_dir_all(env.root().join(".git/lfs/objects")).unwrap();
+        }
+        env.commit("art/big.psd", POINTER, "Add a big file");
+        let err = env.refused_import();
+        assert!(
+            err.contains("holds a Git LFS pointer at `art/big.psd`, and this version of Bolt"),
+            "{sign}: {err}"
+        );
+        assert!(err.contains("hint: Nothing was changed."), "{sign}: {err}");
+        assert!(!env.root().join(".bolt").exists(), "{sign}");
+    }
+    // A sign can outlast the pointers, as `.git/lfs` does `git lfs migrate export`, and doesn't
+    // stop the import by itself.
+    let env = Env::new();
+    env.commit(".gitattributes", lfs_line, "Track art with Git LFS");
+    std::fs::create_dir_all(env.root().join(".git/lfs/objects")).unwrap();
+    env.commit("art/big.psd", "the real file\n", "Add a big file");
+    let (out, _) = env.import();
+    assert!(out.contains("Imported 2 commits from Git"), "{out}");
 }
 
 /// An import that stored files before it stopped is finished by `bolt import`, never covered by an
@@ -492,6 +587,7 @@ fn progress_is_not_printed_without_a_terminal() {
     }
     let (_, err) = env.import();
     assert!(!err.contains("Importing commits"), "{err}");
+    assert!(!err.contains("Reading Git's history"), "{err}");
 }
 
 /// A repository made whole by `git fast-import`, so its commits, and their IDs, are the same on

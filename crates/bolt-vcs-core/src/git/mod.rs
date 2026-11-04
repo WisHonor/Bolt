@@ -15,8 +15,8 @@ mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
 pub use object::{
-    Commit, TagObject, TreeEntry, is_lfs_pointer, looks_like_lfs_pointer, parse_commit,
-    parse_person, parse_tag, parse_tree, rebuild_commit,
+    Commit, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_lfs_pointer, looks_like_lfs_pointer,
+    parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit,
 };
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 // For the delta fuzz target.
@@ -163,7 +163,8 @@ pub enum GitError {
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     NotPlain { what: String },
     /// An object whose compressed data ended before the size it gives. Git doesn't write one, and
-    /// `git fsck` doesn't always notice one, so it is reported as a fault; `what` names it.
+    /// `git fsck` doesn't always notice one, so it may be damage, a hostile object or a fault in
+    /// Bolt's reader; `what` names it.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     EndedEarly { what: String },
     /// An object Git reads, but past a limit or a rule of Bolt's that Git doesn't have, so
@@ -213,8 +214,10 @@ impl GitError {
                      fresh clone of it."
                 }
                 GitError::EndedEarly { .. } => {
-                    "Nothing was changed. Git doesn't write objects that end early, so this may be \
-                     a fault in Bolt's reader: please report it, with this message."
+                    "Nothing was changed. Git doesn't write objects that end early, so either the \
+                     repository was damaged or made this way, which `git fsck` may not notice, or \
+                     this is a fault in Bolt's reader. Import a fresh clone of it, and if that \
+                     stops here too, please report it, with this message."
                 }
                 GitError::NotPlain { .. } => {
                     "Nothing was changed. Bolt reads only plain files and real folders in a Git \
@@ -461,6 +464,11 @@ impl Repo {
     pub fn has_grafts(&self) -> Result<bool, GitError> {
         let info = self.git.join("info");
         Ok(matches!(real_dir(&info), Ok(true)) && exists(&info.join("grafts"))?)
+    }
+
+    /// Whether `.git/lfs` is there, where Git LFS keeps its files. Only looked for, never read.
+    pub fn has_lfs_folder(&self) -> Result<bool, GitError> {
+        exists(&self.git.join("lfs"))
     }
 
     /// How many patterns `.git/info/exclude`, Git's personal list of files to ignore, holds: its

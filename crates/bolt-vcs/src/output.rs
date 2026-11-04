@@ -183,39 +183,43 @@ fn date(time_ms: i64, tz_offset_min: i16) -> String {
     zoned.map_or_else(|_| format!("{time_ms} ms"), |z| z.date().to_string())
 }
 
-/// A line such as "Importing commits: 1,234 of 5,678" on stderr while a long step runs, kept up
-/// to date at most four times a second, and only in a terminal.
+/// A line such as "Importing commits: 1,234 of 5,678" on stderr while a long step runs, or
+/// "Reading Git's history: 1,234 commits" while it can't say yet how many there are, kept up to
+/// date at most four times a second, and only in a terminal.
 pub struct Progress<W: Write> {
     what: &'static str,
+    /// What is counted, said after the count when there is no total.
+    unit: &'static str,
     out: W,
     terminal: bool,
     since: Instant,
-    last: (u64, u64),
+    last: (u64, Option<u64>),
     shown: bool,
 }
 
 impl Progress<std::io::Stderr> {
-    pub fn new(what: &'static str) -> Self {
+    pub fn new(what: &'static str, unit: &'static str) -> Self {
         let out = std::io::stderr();
         let terminal = out.is_terminal();
-        Progress::to(what, out, terminal)
+        Progress::to(what, unit, out, terminal)
     }
 }
 
 impl<W: Write> Progress<W> {
     /// Progress written to `out`, which is a terminal or isn't.
-    fn to(what: &'static str, out: W, terminal: bool) -> Self {
+    fn to(what: &'static str, unit: &'static str, out: W, terminal: bool) -> Self {
         Progress {
             what,
+            unit,
             out,
             terminal,
             since: Instant::now(),
-            last: (0, 0),
+            last: (0, None),
             shown: false,
         }
     }
 
-    pub fn update(&mut self, done: u64, total: u64) {
+    pub fn update(&mut self, done: u64, total: Option<u64>) {
         self.last = (done, total);
         if self.terminal && self.since.elapsed() >= Duration::from_millis(250) {
             self.show();
@@ -223,19 +227,23 @@ impl<W: Write> Progress<W> {
         }
     }
 
-    /// Ends the line, with the last count, if it was ever shown.
+    /// Ends the line, with the last count, if one is shown; called again, it does nothing.
     pub fn finish(&mut self) {
         if self.shown {
             self.show();
             let _ = writeln!(self.out);
+            self.shown = false;
         }
     }
 
     /// A failed write only loses the progress line, so it is let go.
     fn show(&mut self) {
         let (done, total) = self.last;
-        let (done, total) = (thousands(done), thousands(total));
-        let _ = write!(self.out, "\r{}: {done} of {total}", self.what);
+        let done = thousands(done);
+        let _ = match total {
+            Some(total) => write!(self.out, "\r{}: {done} of {}", self.what, thousands(total)),
+            None => write!(self.out, "\r{}: {done} {}", self.what, self.unit),
+        };
         let _ = self.out.flush();
         self.shown = true;
     }
@@ -404,26 +412,38 @@ mod tests {
                 .checked_sub(Duration::from_millis(300))
                 .unwrap()
         };
+        let importing =
+            |terminal| Progress::to("Importing commits", "commits", Vec::new(), terminal);
         // Without a terminal, nothing, however long the step takes.
-        let mut quiet = Progress::to("Importing commits", Vec::new(), false);
+        let mut quiet = importing(false);
         quiet.since = a_while_ago();
-        quiet.update(1, 2);
+        quiet.update(1, Some(2));
         quiet.finish();
         assert!(quiet.out.is_empty());
         // In one, nothing for the first quarter of a second, so a quick step shows nothing.
-        let mut quick = Progress::to("Importing commits", Vec::new(), true);
-        quick.update(1, 2);
+        let mut quick = importing(true);
+        quick.update(1, Some(2));
         quick.finish();
         assert!(quick.out.is_empty());
-        // Then at most once a quarter of a second, and the last count when it ends.
-        let mut slow = Progress::to("Importing commits", Vec::new(), true);
+        // Then at most once a quarter of a second, and the last count when it ends, once.
+        let mut slow = importing(true);
         slow.since = a_while_ago();
-        slow.update(2, 1234);
-        slow.update(3, 1234);
+        slow.update(2, Some(1234));
+        slow.update(3, Some(1234));
+        slow.finish();
         slow.finish();
         assert_eq!(
             String::from_utf8(slow.out).unwrap(),
             "\rImporting commits: 2 of 1,234\rImporting commits: 3 of 1,234\n"
+        );
+        // A step that can't say yet how many there are counts what it has done.
+        let mut reading = Progress::to("Reading Git's history", "commits", Vec::new(), true);
+        reading.since = a_while_ago();
+        reading.update(1234, None);
+        reading.finish();
+        assert_eq!(
+            String::from_utf8(reading.out).unwrap(),
+            "\rReading Git's history: 1,234 commits\rReading Git's history: 1,234 commits\n"
         );
     }
 }

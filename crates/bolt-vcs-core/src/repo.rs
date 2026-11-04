@@ -596,7 +596,8 @@ impl Repository {
     }
 
     /// Starts making `root` a project, after `check_new`'s checks: the folders, and the change
-    /// lock. Nothing is committed and there is no `format` yet, so `commit_first` must follow.
+    /// lock, with the leftovers in `tmp/` cleared. Nothing is committed and there is no `format`
+    /// yet, so `commit_first` must follow.
     pub fn begin(root: &Path) -> Result<(Repository, ChangeLock), RepoError> {
         Repository::begin_with(root, &check_owner)
     }
@@ -657,6 +658,8 @@ impl Repository {
                 root: root.to_owned(),
             });
         }
+        // An interrupted run's half-written pack, as opening a project clears it.
+        repo.remove_temp_files(&lock)?;
         Ok((repo, lock))
     }
 
@@ -754,10 +757,15 @@ impl Repository {
     /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
     /// command holds the change lock; otherwise it may be a pack being written right now.
     fn clean_tmp(&self) -> Result<(), RepoError> {
-        let lock = self.open_lock_file()?;
-        if lock.try_lock().is_err() {
+        let file = self.open_lock_file()?;
+        if file.try_lock().is_err() {
             return Ok(());
         }
+        self.remove_temp_files(&ChangeLock { _file: file })
+    }
+
+    /// Deletes the files in `tmp/`, under the lock, so none of them is being written.
+    fn remove_temp_files(&self, _lock: &ChangeLock) -> Result<(), RepoError> {
         for entry in fs::read_dir(&self.tmp)? {
             let path = entry?.path();
             // Only Bolt's own temporary files: never a link, a folder or a name it doesn't make.
@@ -1274,6 +1282,21 @@ mod tests {
         ));
         let dir = begun(false);
         Repository::init(dir.path(), &who).unwrap();
+    }
+
+    /// A run that finishes an interrupted one starts without the half-written pack it left.
+    #[test]
+    fn begin_clears_what_an_interrupted_run_left_in_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Repository::begin(dir.path()).unwrap());
+        let tmp = dir.path().join(".bolt/tmp");
+        let litter = tmp.join("tmp-0123456789abcdef");
+        std::fs::write(&litter, b"half a pack").unwrap();
+        std::fs::write(tmp.join("not-bolts"), b"x").unwrap();
+        let (repo, _lock) = Repository::begin(dir.path()).unwrap();
+        assert!(!litter.exists());
+        assert!(tmp.join("not-bolts").exists());
+        drop(repo);
     }
 
     #[test]

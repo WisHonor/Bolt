@@ -1837,9 +1837,9 @@ mod tests {
         assert_eq!(
             warnings[0].message,
             "Saved changes to 2 files that an ignore rule matches:\n  Library/keep.txt\n  a.dll\n\
-             The last save holds them, so they stay saved, but Git would leave such changes out \
-             unless the files were added (git add). Bolt keeps saving them until they are deleted \
-             or moved out of the project folder."
+             The last save holds them, so they stay saved. Git would leave such changes out \
+             unless the files were added (with `git add -f` if Git doesn't track them yet). Bolt \
+             keeps saving them until they are deleted or moved out of the project folder."
         );
     }
 
@@ -1906,9 +1906,10 @@ mod tests {
         assert_eq!(
             warnings[0].message,
             "Saved 3 new or changed files that .gitignore keeps out but .boltignore takes back:\n  \
-             .env\n  deploy.pem\n  secrets/new.key\nGit would leave them out unless they were \
-             forced in with git add -f. If they shouldn't be saved, remove the .boltignore lines \
-             that take them back and move them out of the project folder; this save keeps them."
+             .env\n  deploy.pem\n  secrets/new.key\nGit would leave such changes out unless the \
+             files were added (with `git add -f` if Git doesn't track them yet). If they \
+             shouldn't be saved, remove the .boltignore lines that take them back and move them \
+             out of the project folder; this save keeps them."
         );
     }
 
