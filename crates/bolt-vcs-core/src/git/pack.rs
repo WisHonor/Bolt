@@ -637,7 +637,8 @@ pub(super) enum DeltaError {
 }
 
 /// The object `delta` builds on `base`, with every instruction checked; `Err` says what is wrong
-/// with the delta.
+/// with the delta. For `Craft` and the delta fuzz target: imports apply deltas as they inflate.
+#[cfg(any(test, feature = "test-support"))]
 pub fn apply_delta(base: &[u8], mut delta: &[u8]) -> Result<Vec<u8>, String> {
     let built = delta_start(base, &mut delta).and_then(|size| build_delta(base, size, &mut delta));
     built.map_err(|e| match e {
