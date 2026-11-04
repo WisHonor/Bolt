@@ -29,7 +29,9 @@ pub const DELTA_BASE_CACHE: u64 = 256 << 20;
 /// Bytes an import may inflate and build to rebuild objects through deltas: at least this...
 const MIN_DELTA_WORK: u64 = 4 << 30;
 /// ...or this many for each compressed byte of the pack entries it has inflated, each counted
-/// once: data a hole in a file can't supply. git/git needs at most 46, a margin of 11.
+/// once. Zeros a hole puts inside an entry's stream are inflated and count too, so a hostile
+/// pack still buys 35 to 1,000 times its inflating time in rebuilding. git/git needs at most 46,
+/// a margin of about 11.
 const DELTA_WORK_PER_INFLATED_BYTE: u64 = 500;
 /// The most a loose object may say it holds: 1 TiB.
 const MAX_LOOSE_SIZE: u64 = 1 << 40;
@@ -278,8 +280,8 @@ impl Repo {
         }
         Err(GitError::TooMuchWork {
             what: format!(
-                "rebuilding its objects from Git's deltas would take more than {} GiB of work, so \
-                 it looks built to make importing slow",
+                "rebuilding objects from Git's deltas would take more than the {} GiB of work Bolt \
+                 allows, so the repository looks built to make importing slow",
                 allowance >> 30
             ),
         })
@@ -1074,7 +1076,10 @@ mod tests {
         repo.objects.work.set(budget - room as u64);
         match repo.read(&id(Blob, second, Sha1)) {
             Err(e @ GitError::TooMuchWork { .. }) => {
-                let says = format!("more than {} GiB of work", MIN_DELTA_WORK >> 30);
+                let says = format!(
+                    "more than the {} GiB of work Bolt allows",
+                    MIN_DELTA_WORK >> 30
+                );
                 assert!(e.to_string().contains(&says), "{e}");
                 assert!(
                     e.to_string().contains("built to make importing slow"),

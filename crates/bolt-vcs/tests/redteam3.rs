@@ -520,7 +520,7 @@ fn rt3_4b_an_empty_pack_full_of_hole_does_not_raise_the_work_allowed() {
     drop(pack);
     let end = run_limited(env.bolt(&["import"]), 20);
     assert!(
-        !end.timed_out && end.code == Some(1) && end.stderr.contains("more than 4 GiB of work"),
+        !end.timed_out && end.code == Some(1) && end.stderr.contains("more than the 4 GiB of work"),
         "with an empty pack of 64 MiB beside it, the import wasn't stopped at the 4 GiB of \
          rebuilding a 6 KB pack allows: {end:?}"
     );
