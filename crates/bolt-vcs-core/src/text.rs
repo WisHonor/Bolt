@@ -38,6 +38,16 @@ fn hides_or_reorders(c: char) -> bool {
     )
 }
 
+/// As [`escape`] without newlines, and the zero-width joiner and non-joiner too, which `escape`
+/// keeps for emoji and scripts: every format character shows. For names that must be told apart
+/// from others that look the same, such as spellings of `.git`.
+#[must_use]
+pub fn escape_all(text: &str) -> String {
+    escape(text, false)
+        .replace('\u{200c}', "\\u{200c}")
+        .replace('\u{200d}', "\\u{200d}")
+}
+
 /// `n` with a comma between each group of three digits, as in 1,234,567: how Bolt writes counts
 /// for people.
 #[must_use]
@@ -185,7 +195,24 @@ mod tests {
                 "U+{:04X}",
                 u32::from(c)
             );
+            // `escape_all` shows the joiners too, so every format character.
+            let joiner = matches!(c, '\u{200c}' | '\u{200d}');
+            assert_eq!(
+                escape_all(&text) != text,
+                c.is_control() || must_hide(c) || joiner,
+                "U+{:04X}",
+                u32::from(c)
+            );
         }
+    }
+
+    #[test]
+    fn escape_all_shows_a_joiner_hidden_in_a_name() {
+        assert_eq!(escape_all(".g\u{200c}it"), ".g\\u{200c}it");
+        assert_eq!(
+            escape_all("a\u{200d}b\nc\u{202e}"),
+            "a\\u{200d}b\\x0ac\\u{202e}"
+        );
     }
 
     /// Any text, with the characters that matter here far likelier than chance would make them.
@@ -222,6 +249,10 @@ mod tests {
             let dangerous = |c: char| (c.is_control() && !(keep && c == '\n')) || must_hide(c);
             prop_assert!(!once.chars().any(dangerous), "{once:?}");
             prop_assert_eq!(escape(&once, keep), once);
+            let all = escape_all(&text);
+            let shown = |c: char| !c.is_control() && !must_hide(c) && !matches!(c, '\u{200c}' | '\u{200d}');
+            prop_assert!(all.chars().all(shown), "{all:?}");
+            prop_assert_eq!(escape_all(&all), all);
         }
     }
 }

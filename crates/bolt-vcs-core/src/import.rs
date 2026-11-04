@@ -1107,6 +1107,16 @@ mod tests {
         assert!(!dir.path().join(".bolt").exists());
     }
 
+    /// Stores a commit of `tree` with `parents` and `message` in `git`.
+    fn commit_on(git: &Craft, tree: &GitId, parents: &[GitId], message: &str) -> GitId {
+        let mut raw = format!("tree {}\n", tree.to_hex());
+        for parent in parents {
+            let _ = writeln!(raw, "parent {}", parent.to_hex());
+        }
+        raw += "author A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\n";
+        git.commit((raw + message).as_bytes())
+    }
+
     /// Pass 1 puts each commit after its parents, smallest Git ID first, and stops once the
     /// commits have more parents beyond each one's first than its limit, before anything is
     /// written.
@@ -1115,14 +1125,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let git = Craft::new(dir.path(), HashKind::Sha1);
         let tree = git.tree(&[]);
-        let commit = |parents: &[GitId], message: &str| {
-            let mut raw = format!("tree {}\n", tree.to_hex());
-            for parent in parents {
-                let _ = writeln!(raw, "parent {}", parent.to_hex());
-            }
-            raw += "author A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\n";
-            git.commit((raw + message).as_bytes())
-        };
+        let commit = |parents: &[GitId], message: &str| commit_on(&git, &tree, parents, message);
         let (a, b, c) = (commit(&[], "a\n"), commit(&[], "b\n"), commit(&[], "c\n"));
         // Three parents past its first, one of them a parent twice.
         let merge = commit(&[c, a, b, a], "merge\n");
@@ -1143,6 +1146,29 @@ mod tests {
             e.hint().unwrap().starts_with("Nothing was changed."),
             "{e:?}"
         );
+    }
+
+    /// The import's fixed order (storage-format.md §5), which decides who keeps a duplicated
+    /// change-id header's ID: depth first from the roots, smallest Git ID first, so the first
+    /// root's whole history comes before the second's, and a commit both reach comes once.
+    #[test]
+    fn the_first_pass_walks_its_roots_depth_first_smallest_id_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        let tree = git.tree(&[]);
+        let commit = |parents: &[GitId], message: &str| commit_on(&git, &tree, parents, message);
+        let shared = commit(&[], "shared\n");
+        let (one, two) = (commit(&[shared], "one\n"), commit(&[shared], "two\n"));
+        let (tip_one, tip_two) = (commit(&[one], "tip one\n"), commit(&[two], "tip two\n"));
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let roots = BTreeSet::from([tip_one, tip_two]);
+        let (first, second) = if tip_one < tip_two {
+            ([one, tip_one], [two, tip_two])
+        } else {
+            ([two, tip_two], [one, tip_one])
+        };
+        let want: Vec<GitId> = [shared].into_iter().chain(first).chain(second).collect();
+        assert_eq!(in_order(&repo, &roots, 0).unwrap().0, want);
     }
 
     /// Bolt doesn't follow a config's includes, so an import of a repository whose config has one

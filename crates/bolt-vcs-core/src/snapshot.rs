@@ -139,11 +139,11 @@ fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
 const NAMED: usize = 5;
 
 /// The paths `first` of `count`, escaped, one to a line, and how many more there are.
-fn listed<'a>(first: impl IntoIterator<Item = &'a String>, count: u64) -> String {
+fn listed<S: AsRef<str>>(first: impl IntoIterator<Item = S>, count: u64) -> String {
     let mut text = String::new();
     let mut shown = 0;
     for path in first {
-        let _ = write!(text, "\n  {}", escape(path, false));
+        let _ = write!(text, "\n  {}", escape(path.as_ref(), false));
         shown += 1;
     }
     let more = count.saturating_sub(shown);
