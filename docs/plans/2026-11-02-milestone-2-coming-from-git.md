@@ -35,12 +35,14 @@
   | A message that isn't UTF-8 | 64 KiB, since its original bytes must fit an extra field |
   | `git-header` | 64 KiB |
   | Extra fields | 64 KiB a value, 64 fields |
-  | Parents | 1,024 |
+  | Parents | 1,024 a commit; 1,000,000 beyond each commit's first in one import, all commits together (decision 043) |
   | Snapshot | 4,096 folder levels; 10,000,000 entries, counting every path |
   | Names | 255 bytes |
   | Lines; servers; lines per server | 100,000; 64; 100,000 |
   | Tags | 100,000; a tag list at most 512 MiB; a Git tag object at most 1 MiB; at most 16 tag objects per chain |
   | Packs | a writer starts a new one at 2^20 objects; the format's limit stays 2^24 |
+  | Git's packs | at most 4,096 read, from an `objects/pack` of at most 100,000 entries, listing at most 2^24 objects in all |
+  | Rebuilding through deltas | at most 4 GiB of work, or 500 bytes for each compressed byte inflated from pack entries if that is more (decision 044) |
   | An LFS pointer | at most 1,024 bytes |
 
 - **Fixed values:**
@@ -892,8 +894,8 @@ Decisions 032, 035, 036 and 037.
 impl ChangeId { pub fn from_git_commit(commit_id: &[u8], change_id_header: Option<&[u8]>) -> ChangeId; }
 pub struct Converter<'r> { /* the Git repo, the store, the packs, memo tables, counters */ }
 impl<'r> Converter<'r> {
-    pub fn new(git: &'r git::Repo, store: &'r Store, packs: &'r mut PackSet) -> Converter<'r>;
-    pub fn commit(&mut self, id: &GitId, parent_saves: &[Id]) -> Result<Id, ImportError>;   // stores the save, its trees and blobs
+    pub fn new(git: &'r git::Repo, store: &'r Store, packs: &'r mut PackSet, own_change_ids: HashSet<ChangeId>) -> Converter<'r>;
+    pub fn commit(&mut self, id: &GitId) -> Result<Id, ImportError>;   // stores the save, its trees and blobs; its parents' saves come from those it made
     pub fn tag(&mut self, name: &str, target: &GitId) -> Result<TagOutcome, ImportError>;   // name: the Bolt tag name, counted in the tag list's budget
     pub fn counts(&self) -> &Counts;    // inexact commits; skipped entries (first 100, plus a count)
     pub fn finish(&self) -> Result<(), ImportError>;   // NotUtf8Names for the whole import; call after the last commit, before committing
@@ -902,12 +904,12 @@ pub enum TagOutcome { Tag(diary::Tag), Skipped { reason: String } }
 pub enum ImportError { Git(GitError), Repo(RepoError), Store(StoreError), Pack(PackError),
                        Stop { what: String, hint: Option<String> },
                        NotUtf8Names { first: Vec<(String, String)>, count: u64 },   // (commit hex, escaped path)
-                       LfsPointer { commit: String, path: String } }
+                       LfsPointer { commit: String, path: String, lookalike: bool } }
 ```
 
 **Blobs:**
 - A memo maps each Git ID to (content ID, size).
-- Blobs of at most 1,024 bytes are read and tested with `is_lfs_pointer`. A pointer stops the import, naming the commit and path (decision 037).
+- Blobs of at most 1,024 bytes are read and tested with `is_lfs_pointer` and `looks_like_lfs_pointer`. A pointer, or a file that only looks like one, stops the import, naming the commit and path (decision 037).
 - Blobs up to 64 MiB are read whole: Bolt computes its ID, checks the store with `has_good_copy`, and stores with `add_content`.
 - Bigger blobs are streamed twice: one `blob_reader` into a hasher, then a second `blob_reader` into `PackSet::add_content_from` with the expected ID.
 
