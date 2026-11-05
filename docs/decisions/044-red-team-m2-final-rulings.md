@@ -4,6 +4,7 @@
 - **Date:** 2026-11-03
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md) and [decision 043](043-red-team-m2-rulings.md))
 - **Refines:** [decision 043](043-red-team-m2-rulings.md) (how far a change-id header is refused; which saved names are left out)
+- **Reviewed:** 2026-11-04; the owner left the call to Claude, who kept it whole. Of the questions it left, rebuilding each delta chain once is scheduled for milestone 5, with big files; and no write limit is added for imports before chunked storage arrives, in the same milestone, when the question comes back.
 
 ## Context
 

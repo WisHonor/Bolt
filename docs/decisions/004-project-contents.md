@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 4
-- **Refined by:** [decision 035](035-git-names-bolt-cant-take.md) (a Git import skips dangerous names and stops at names Bolt can't hold); [decision 036](036-submodules-as-bare-links.md) (a submodule's link holds just the commit, and saves leave it alone); [decision 039](039-first-save-after-import.md) (the first save after an import stops at line endings Git converted); [decision 045](045-link-targets-stored-with-slashes.md) (link targets are stored with `/`, and written with `\` on Windows)
+- **Refined by:** [decision 035](035-git-names-bolt-cant-take.md) (a Git import skips dangerous names and stops at names Bolt can't hold); [decision 036](036-submodules-as-bare-links.md) (a submodule's link holds just the commit, and saves leave it alone); [decision 039](039-first-save-after-import.md) (the first save after an import stops at line endings Git converted); [decision 045](045-link-targets-stored-with-slashes.md) (link targets are stored with `/`, and written with `\` on Windows); [decision 046](046-nested-projects-left-out.md) (a folder holding a `.git` or `.bolt` of its own is left out of saves)
 
 ## Context
 
