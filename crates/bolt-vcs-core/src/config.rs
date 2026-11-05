@@ -217,7 +217,7 @@ const MAX_GIT_SETTINGS_BYTES: u64 = 1 << 20;
 
 /// The user's own Git ignore list (decision 047): the file `core.excludesFile` names in the
 /// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. Git's home folder is `HOME`, as
-/// Git for Windows takes it too. `None` when there is no home folder.
+/// Git for Windows takes it too. `None` when there is no home folder, or the setting is empty.
 pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigError> {
     let env_path = |key| {
         std::env::var_os(key)
@@ -230,7 +230,7 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
         return Ok(None);
     };
     let xdg = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
-    git_excludes_file_in(&home, &xdg, project_root).map(Some)
+    git_excludes_file_in(&home, &xdg, project_root)
 }
 
 /// `git_excludes_file` with the home folder and `XDG_CONFIG_HOME` given, so tests can choose
@@ -240,7 +240,7 @@ fn git_excludes_file_in(
     home: &Path,
     xdg: &Path,
     project_root: &Path,
-) -> Result<PathBuf, ConfigError> {
+) -> Result<Option<PathBuf>, ConfigError> {
     let mut named = None;
     // In Git's order, so that `~/.gitconfig` wins.
     for path in [xdg.join("git").join("config"), home.join(".gitconfig")] {
@@ -262,19 +262,23 @@ fn git_excludes_file_in(
         }
     }
     let Some((value, path)) = named else {
-        return Ok(xdg.join("git").join("ignore"));
+        return Ok(Some(xdg.join("git").join("ignore")));
     };
     let Ok(value) = String::from_utf8(value) else {
         let detail = "its core.excludesFile isn't valid UTF-8".to_owned();
         return Err(ConfigError::GitSettings { path, detail });
     };
+    // Git reads no list from an empty setting, which is how one turns it off.
+    if value.is_empty() {
+        return Ok(None);
+    }
     let in_home = value
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\").filter(|_| cfg!(windows)));
-    Ok(match in_home {
+    Ok(Some(match in_home {
         Some(rest) => home.join(rest),
         None => project_root.join(value),
-    })
+    }))
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
@@ -535,7 +539,7 @@ mod tests {
         let root = home.join("project");
         let find = || git_excludes_file_in(home, &xdg, &root).unwrap();
         // Nothing set: git/ignore in XDG_CONFIG_HOME.
-        assert_eq!(find(), xdg.join("git").join("ignore"));
+        assert_eq!(find(), Some(xdg.join("git").join("ignore")));
         // A relative path is from the project's top, as in Git.
         std::fs::create_dir_all(xdg.join("git")).unwrap();
         std::fs::write(
@@ -543,10 +547,13 @@ mod tests {
             "[core]\n\texcludesFile = list\n",
         )
         .unwrap();
-        assert_eq!(find(), root.join("list"));
+        assert_eq!(find(), Some(root.join("list")));
         // ~/.gitconfig is read after it, so it wins, and `~/` is the home folder.
         std::fs::write(home.join(".gitconfig"), "[core]\n\texcludesFile = ~/mine\n").unwrap();
-        assert_eq!(find(), home.join("mine"));
+        assert_eq!(find(), Some(home.join("mine")));
+        // Set to nothing, it names no list, as in Git.
+        std::fs::write(home.join(".gitconfig"), "[core]\n\texcludesFile =\n").unwrap();
+        assert_eq!(find(), None);
     }
 
     #[test]
