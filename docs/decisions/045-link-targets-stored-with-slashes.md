@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-04
 - **Agenda topic:** none (milestone 3 planning; a question milestone 2's differential tests raised)
+- **Refined by:** [decision 052](052-links-and-executable-bit-on-windows.md) (links and the executable bit when files are written)
 - **Decided by:** the owner.
 - **Refines:** [decision 004](004-project-contents.md) (symlinks are stored as they are)
 

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 9
-- **Refined by:** [decision 041](041-several-packs-per-command.md) (a command writes several packs when it needs more objects than one may hold)
+- **Refined by:** [decision 041](041-several-packs-per-command.md) (a command writes several packs when it needs more objects than one may hold); [decision 057](057-pack-index-on-disk-and-merging.md) (pack indexes searched on disk; packs opened when needed and merged)
 
 ## Context
 

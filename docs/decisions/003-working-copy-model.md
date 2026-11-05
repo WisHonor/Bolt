@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 3
-- **Refined by:** [decision 038](038-gitignore-and-saved-files.md) (ignore rules keep out only files that aren't saved yet)
+- **Refined by:** [decision 038](038-gitignore-and-saved-files.md) (ignore rules keep out only files that aren't saved yet); [decision 050](050-unsaved-work-in-goto-and-discard.md) (what goto and discard do with unsaved work); [decision 054](054-partial-saves.md) (partial saves name files, folders and patterns); [decision 056](056-question-before-large-saves.md) (a large save asks first from milestone 3)
 
 ## Context
 
