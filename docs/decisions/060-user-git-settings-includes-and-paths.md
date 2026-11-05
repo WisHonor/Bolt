@@ -28,7 +28,7 @@ For includes:
 - **Includes.** A plain `[include] path` in the user's own Git settings is read where it appears, as Git reads it: a relative path from the including file's folder, `~/` expanded, at most 10 deep, each file at most 1 MiB, a link followed (these are the user's own files). `[includeIf]` sections aren't followed; [storage-format.md](../storage-format.md) §12 says so.
 - **A list inside the project.** A `core.excludesFile` that names a path inside the project is read there as a `.gitignore` is: without following a link, and skipped with a `gitignore_skipped` warning when it is one.
 - **`~user/`** paths aren't expanded: such a setting stops the save, naming it and asking for the full path.
-- **`.git/info`.** A missing `.git` folder or `info` folder means no list; one that is a link is skipped with a `gitignore_skipped` warning; any other problem stops the save, as for a `.gitignore`.
+- **`.git/info`.** A missing `.git` folder or `info` folder means no list; one that is a link is skipped with a `gitignore_skipped` warning; any other problem stops the save, as for a `.gitignore`. A `.git` that is a file (a worktree's or submodule's pointer) also means no list: Bolt doesn't follow it out of the project (decision 036), so in a Git worktree the main repository's `.git/info/exclude` doesn't apply.
 
 ## Consequences
 
