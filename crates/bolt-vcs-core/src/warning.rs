@@ -38,6 +38,8 @@ pub const DUPLICATE_CHANGE_ID: &str = "duplicate_change_id";
 pub const CONFIG_INCLUDES_IGNORED: &str = "config_includes_ignored";
 /// Git's personal exclude list, `.git/info/exclude`, has patterns, which Bolt doesn't use.
 pub const INFO_EXCLUDE_IGNORED: &str = "info_exclude_ignored";
+/// Folders that hold a repository or project of their own, which saves take nothing new from.
+pub const NESTED_PROJECTS_LEFT_OUT: &str = "nested_projects_left_out";
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

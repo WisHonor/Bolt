@@ -48,6 +48,14 @@ fn is_internal_folder(name: &str, ignores_case: bool) -> bool {
     name == ".bolt" || name == ".git" || (ignores_case && name.eq_ignore_ascii_case(".git"))
 }
 
+/// Whether the folder `dir` holds a Git repository or Bolt project of its own: an entry named
+/// `.git` of any kind (a worktree's or submodule's is a file), or a `.bolt` folder. Where the
+/// drive ignores letter case, `.GIT` is found as `.git` (decision 046).
+fn holds_own_repository(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join(".git")).is_ok()
+        || fs::symlink_metadata(dir.join(".bolt")).is_ok_and(|m| m.is_dir())
+}
+
 /// The project path of `name` in the folder `rel` (`""` for the top folder).
 fn path_in(rel: &str, name: &str) -> String {
     if rel.is_empty() {
@@ -156,15 +164,14 @@ fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String>), SaveErr
     Ok((rest, git.into_iter().map(|e| e.name).collect()))
 }
 
-/// The entries a save leaves out because Git treats their names as `.git`: the first few by
-/// path, and how many.
+/// Paths a warning names: the first few by path, and how many.
 #[derive(Default)]
-struct GitNames {
+struct Named {
     first: BTreeSet<String>,
     count: u64,
 }
 
-impl GitNames {
+impl Named {
     fn add(&mut self, path: String) {
         self.count += 1;
         self.first.insert(path);
@@ -198,7 +205,11 @@ struct WalkState {
     warnings: Vec<Warning>,
     /// What the save leaves out because Git treats its name as `.git`: from the folder, and from
     /// the base save.
-    git_names: GitNames,
+    git_names: Named,
+    /// Folders that hold a repository or project of their own (decision 046), for the warning.
+    nested: Named,
+    /// Those the walk goes into for the base save's entries, and the folders kept inside them.
+    nested_held: HashSet<String>,
     /// The paths of those the base save holds in the folders noted, named already.
     saved_git_names: HashSet<String>,
     /// The base save's listing of each folder the walk has noted, by project path, or `None`
@@ -234,7 +245,9 @@ impl WalkState {
             read: 0,
             problem: None,
             warnings: Vec::new(),
-            git_names: GitNames::default(),
+            git_names: Named::default(),
+            nested: Named::default(),
+            nested_held: HashSet::new(),
             saved_git_names: HashSet::new(),
             old: HashMap::new(),
             held: HashSet::new(),
@@ -447,6 +460,16 @@ impl WalkState {
             }
             return false;
         }
+        // After the rules, so an ignored one stays out without a word.
+        if is_dir && holds_own_repository(path) {
+            let kept_rel = shown(rel);
+            self.nested.add(kept_rel.clone());
+            let kept = self.saved_before(&folder, rel, is_dir);
+            if kept {
+                self.nested_held.insert(kept_rel);
+            }
+            return kept;
+        }
         if is_dir && let Err(problem) = self.enter(path) {
             self.problem.get_or_insert(problem);
             return false;
@@ -474,9 +497,14 @@ impl WalkState {
             .and_then(|name| name.to_str())
             .and_then(|name| listing.as_ref()?.get(name))
             .is_some_and(|e| (e.kind == EntryKind::Folder) == is_dir);
+        // No ignore rule matches what a repository of its own holds, so none is blamed for it.
+        let nested = self.nested_held.contains(folder);
         if saved && is_dir {
             self.held.insert(shown(rel));
-        } else if saved {
+            if nested {
+                self.nested_held.insert(shown(rel));
+            }
+        } else if saved && !nested {
             self.ignored.insert(shown(rel));
         }
         saved
@@ -667,6 +695,10 @@ fn scan_folder(
         let left_out = git_names_left_out(&rules.git_names);
         rules.warnings.push(left_out);
     }
+    if rules.nested.count > 0 {
+        let left_out = nested_projects_left_out(&rules.nested);
+        rules.warnings.push(left_out);
+    }
     Ok(Scan {
         folders,
         old: std::mem::take(&mut rules.old),
@@ -678,7 +710,7 @@ fn scan_folder(
 }
 
 /// Says the save left out entries whose names Git treats as `.git`, naming the first few.
-fn git_names_left_out(names: &GitNames) -> Warning {
+fn git_names_left_out(names: &Named) -> Warning {
     let count = names.count;
     let (what, next) = if count == 1 {
         (
@@ -701,6 +733,29 @@ fn git_names_left_out(names: &GitNames) -> Warning {
         listed(first, count)
     );
     Warning::new(warning::GIT_NAMES_LEFT_OUT, message)
+}
+
+/// Says saves take nothing new from folders that hold a repository or project of their own,
+/// naming the first few (decision 046).
+fn nested_projects_left_out(named: &Named) -> Warning {
+    let listed = listed(&named.first, named.count);
+    let message = if named.count == 1 {
+        format!(
+            "1 folder holds a Git repository or Bolt project of its own, so saves take nothing new \
+             from it:{listed}\nGit and Jujutsu leave such folders out too. To save its files, \
+             remove its .git or .bolt; to leave it out without this warning, list it in \
+             .boltignore."
+        )
+    } else {
+        format!(
+            "{} folders hold a Git repository or Bolt project of their own, so saves take nothing \
+             new from them:{listed}\nGit and Jujutsu leave such folders out too. To save a \
+             folder's files, remove its .git or .bolt; to leave it out without this warning, list \
+             it in .boltignore.",
+            named.count
+        )
+    };
+    Warning::new(warning::NESTED_PROJECTS_LEFT_OUT, message)
 }
 
 /// A folder gone from disk, back with only what is kept as it was below it.
@@ -747,7 +802,7 @@ fn rebuild_gone(
     top: &str,
     id: Id,
     taken: bool,
-    git_names: &mut GitNames,
+    git_names: &mut Named,
 ) -> Result<Option<Gone>, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let depth = top.split('/').count();
@@ -920,7 +975,6 @@ mod tests {
         write(root, "keep.txt", b"x");
         write(root, "Library/x", b"x");
         write(root, ".git/config", b"x");
-        write(root, "sub/.git/config", b"x");
         write(root, "sub/.boltignore", b"local.txt\n");
         write(root, "sub/local.txt", b"x");
         write(root, "local.txt", b"x");
@@ -1094,12 +1148,15 @@ mod tests {
         write(root, "sub/.Git/HEAD", b"x");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
-        assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
-        // Where the drive ignores letter case they are Git's folder, skipped without a word like
-        // `.git`; elsewhere they are what Windows and macOS would take for it.
+        // Where the drive ignores letter case they are Git's folder: the top one is skipped
+        // without a word like `.git`, and `sub` holds a repository of its own (decision 046).
+        // Elsewhere they are what Windows and macOS would take for it.
         if this_drive().ignores_case {
-            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert_eq!(warnings[0].kind, "nested_projects_left_out");
         } else {
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert_eq!(warnings[0].kind, "git_names_left_out");
             let listed = ":\n  .GIT\n  sub/.Git\nGit keeps";
@@ -1113,17 +1170,18 @@ mod tests {
         let root = dir.path();
         // First, so that on Windows no other name's 8.3 short name can take it.
         write(root, "git~1/hooks/post-checkout", b"#!/bin/sh\n");
-        // A `.git` file, and spellings with characters macOS's HFS+ ignores, any system can hold.
-        write(root, "sub/.git", b"gitdir: /elsewhere\n");
+        // Below the top too, and spellings with characters macOS's HFS+ ignores, which any system
+        // can hold. A real `.git` makes its folder a repository of its own (decision 046).
+        write(root, "sub/git~1", b"gitdir: /elsewhere\n");
         write(root, "sub/notes.txt", b"mine");
         write(root, ".g\u{200c}it/config", b"[core]\n");
         write(root, "a/.git\u{feff}/config", b"[core]\n");
         // An ignored one stays out without a word.
-        write(root, ".gitignore", b"/b/.git\n");
-        write(root, "b/.git", b"gitdir: /elsewhere\n");
+        write(root, ".gitignore", b"/b/git~1\n");
+        write(root, "b/git~1", b"gitdir: /elsewhere\n");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
-        // The rest of a nested repository is saved as before.
+        // The rest of the folder is saved.
         assert_eq!(
             saved_paths(&repo, saved),
             [".gitignore", "a", "b", "sub", "sub/notes.txt"]
@@ -1134,7 +1192,7 @@ mod tests {
         assert_eq!(
             warnings[0].message,
             "Left out 4 entries whose names Git treats as .git, with everything in them:\n  \
-             .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/.git\nGit keeps such names for \
+             .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nGit keeps such names for \
              itself (some spellings only on Windows or macOS), so Bolt leaves them out of saves, \
              as it does on import. If Git uses them (a submodule's or worktree's .git file), list \
              them in .boltignore to leave them out without this warning; otherwise rename them to \
@@ -1153,12 +1211,17 @@ mod tests {
     fn the_names_left_out_are_counted_past_the_first_few() {
         let (dir, mut repo) = project();
         for i in (1..=7).rev() {
-            write(dir.path(), &format!("sub{i}/.git"), b"gitdir: /elsewhere\n");
+            write(
+                dir.path(),
+                &format!("sub{i}/git~1"),
+                b"gitdir: /elsewhere\n",
+            );
         }
         let saved = save_now(&mut repo).unwrap();
         let message = &warnings_of(&saved)[0].message;
         let listed = "Left out 7 entries whose names Git treats as .git, with everything in them:\n  \
-                      sub1/.git\n  sub2/.git\n  sub3/.git\n  sub4/.git\n  sub5/.git\n  and 2 more\n";
+                      sub1/git~1\n  sub2/git~1\n  sub3/git~1\n  sub4/git~1\n  sub5/git~1\n  and 2 \
+                      more\n";
         assert!(message.starts_with(listed), "{message}");
     }
 
@@ -1176,12 +1239,14 @@ mod tests {
             ],
         );
         write(root, "keep.txt", b"x");
-        // Still in the folder too, and named once.
+        // Still in the folder too, and named once; it also makes `sub` a repository of its own,
+        // which keeps what the last save holds there (decision 046).
         write(root, "sub/.git", b"gitdir: /elsewhere\n");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
         assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
         let listed = "Left out 2 entries whose names Git treats as .git, with everything in them:\n  \
                       .GIT\n  sub/.git\nGit keeps";
         assert!(warnings[0].message.starts_with(listed), "{warnings:?}");
@@ -1207,23 +1272,26 @@ mod tests {
         write(root, "lib/a.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
-        // None is kept, and the gone folder doesn't come back for one.
+        // None is kept, and the gone folder doesn't come back for one. `lib` holds a repository
+        // of its own, so it keeps what the last save holds there (decision 046).
         assert_eq!(
             saved_paths(&repo, saved),
             [".gitignore", "lib", "lib/a.txt"]
         );
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
         let listed = ":\n  git~1\n  gone/.g\\u{200c}it\n  lib/.git\nGit keeps";
         assert!(warnings[0].message.contains(listed), "{warnings:?}");
-        // Gone from the save, so the next one says nothing.
+        // Gone from the save, so the next one names none; `lib` still holds its `.git`.
         let again = save_now(&mut repo).unwrap();
-        assert!(warnings_of(&again).is_empty(), "{again:?}");
+        let kinds: Vec<&str> = warnings_of(&again).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["nested_projects_left_out"]);
     }
 
     #[test]
     fn the_names_left_out_are_shown_escaped() {
         use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
-        let mut names = GitNames::default();
+        let mut names = Named::default();
         names.add(format!("{HOSTILE}/.g\u{200c}it"));
         let message = git_names_left_out(&names).message;
         assert_hostile_text_escaped(&message);
@@ -1234,7 +1302,7 @@ mod tests {
     fn one_name_left_out_is_said_in_the_singular() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, "sub/.git", b"gitdir: /elsewhere\n");
+        write(root, "sub/git~1", b"gitdir: /elsewhere\n");
         write(root, "sub/notes.txt", b"mine");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
@@ -1243,12 +1311,82 @@ mod tests {
         assert_eq!(warnings[0].kind, "git_names_left_out");
         assert_eq!(
             warnings[0].message,
-            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/.git\n\
+            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/git~1\n\
              Git keeps such names for itself (some spellings only on Windows or macOS), so Bolt \
              leaves them out of saves, as it does on import. If Git uses it (a submodule's or \
              worktree's .git file), list it in .boltignore to leave it out without this warning; \
              otherwise rename it to save it."
         );
+    }
+
+    /// A worktree, a clone and a Bolt project inside the project keep their own history, so a save
+    /// takes nothing from them, and says so each time (decision 046).
+    #[test]
+    fn folders_that_hold_a_repository_of_their_own_are_left_out() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, "wt/.git", b"gitdir: /elsewhere\n");
+        write(root, "wt/src/main.rs", b"fn main() {}\n");
+        write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
+        write(root, "clone/readme.md", b"x");
+        write(root, "game/.bolt/format", b"bolt-repository 1\n");
+        write(root, "game/level.bin", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "nested_projects_left_out");
+        assert_eq!(
+            warnings[0].message,
+            "3 folders hold a Git repository or Bolt project of their own, so saves take nothing \
+             new from them:\n  clone\n  game\n  wt\nGit and Jujutsu leave such folders out too. To \
+             save a folder's files, remove its .git or .bolt; to leave it out without this \
+             warning, list it in .boltignore."
+        );
+        let again = save_now(&mut repo).unwrap();
+        assert!(
+            matches!(again, SaveOutcome::NothingChanged { .. }),
+            "{again:?}"
+        );
+        assert_eq!(warnings_of(&again), warnings);
+    }
+
+    /// What is saved stays saved, as in an ignored folder: a change to it is taken, a new file
+    /// isn't, and no ignore rule is blamed (decisions 038 and 046).
+    #[test]
+    fn a_folder_that_becomes_a_repository_keeps_what_was_saved() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        plant_save(&mut repo, &[("lib/a.txt", EntryKind::File, b"old")]);
+        write(root, "lib/a.txt", b"new");
+        write(root, "lib/b.txt", b"x");
+        write(root, "lib/.git/HEAD", b"ref: refs/heads/main\n");
+        let saved = save_now(&mut repo).unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["nested_projects_left_out"]);
+        assert_eq!(
+            warnings_of(&saved)[0].message,
+            "1 folder holds a Git repository or Bolt project of its own, so saves take nothing new \
+             from it:\n  lib\nGit and Jujutsu leave such folders out too. To save its files, \
+             remove its .git or .bolt; to leave it out without this warning, list it in \
+             .boltignore."
+        );
+        let tree = saved_tree(repo.store(), saved_root(saved));
+        assert_eq!(tree.keys().collect::<Vec<_>>(), ["lib", "lib/a.txt"]);
+        assert_eq!(tree["lib/a.txt"].1, b"new");
+    }
+
+    #[test]
+    fn an_ignored_folder_that_holds_a_repository_stays_out_without_a_word() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".gitignore", b"/wt/\n");
+        write(root, "wt/.git", b"gitdir: /elsewhere\n");
+        write(root, "wt/x.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
     }
 
     #[test]
