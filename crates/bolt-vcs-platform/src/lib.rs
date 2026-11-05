@@ -6,6 +6,8 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
+pub mod dir;
+
 /// Makes `options` never follow a link at the end of the path, so callers can refuse it. Unix:
 /// opening a link fails (`O_NOFOLLOW`); opening a pipe doesn't wait for a writer (`O_NONBLOCK`).
 /// Windows: a link, junction or reparse point opens as itself. Replaces custom flags.

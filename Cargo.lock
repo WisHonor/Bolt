@@ -192,6 +192,7 @@ name = "bolt-vcs-platform"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "rustix",
  "tempfile",
  "windows-sys",
 ]
