@@ -99,16 +99,7 @@ fn save_works_through_a_link_to_the_project_folder() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(env.root(), &link).unwrap();
     #[cfg(windows)]
-    {
-        let made = std::process::Command::new("cmd")
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(env.root())
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(made.success());
-    }
+    support::junction(&link, env.root());
     let out = env.bolt_in(&link).args(["save", "first"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let history = env.bolt().arg("history").output().unwrap();

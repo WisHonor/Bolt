@@ -187,16 +187,7 @@ fn link_folder(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    {
-        let made = std::process::Command::new("cmd")
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(made.success(), "mklink /J {}", link.display());
-    }
+    support::junction(link, target);
 }
 
 /// Makes `link` a link to the file `target`; false, with a note, where Windows lacks the right.

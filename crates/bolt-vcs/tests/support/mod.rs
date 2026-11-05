@@ -100,6 +100,24 @@ pub fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
+/// Makes `link` a junction to the folder `target`, which needs no rights on Windows.
+#[cfg(windows)]
+pub fn junction(link: &Path, target: &Path) {
+    let made = Command::new("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        made.success(),
+        "mklink /J {} {} failed",
+        link.display(),
+        target.display()
+    );
+}
+
 pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

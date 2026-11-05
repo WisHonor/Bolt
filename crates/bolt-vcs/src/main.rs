@@ -15,7 +15,7 @@ use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
-use bolt_core::repo::{RepoError, Repository, elevated_only_note};
+use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::store::StoreError;
@@ -141,7 +141,7 @@ fn read_first_save(repo: &Repository) -> Result<(Id, Save, String), Failure> {
 }
 
 fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let root = std::env::current_dir()?;
+    let root = resolved(&std::env::current_dir()?);
     // The user's own settings may name this folder, so the first save is theirs too.
     let who = now_person(&load_identity(Some(&root))?);
     let repo: &Repository = opened.insert(Repository::init(&root, &who)?);
@@ -193,7 +193,7 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
 }
 
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let root = std::env::current_dir()?;
+    let root = resolved(&std::env::current_dir()?);
     let who = now_person(&load_identity(Some(&root))?);
     let mut reading = output::Progress::new("Reading Git's history", "commits");
     let mut importing = output::Progress::new("Importing commits", "commits");

@@ -533,18 +533,24 @@ pub struct Repository {
 
 /// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
 /// where the plain path leads to the same place, so the path reads as the user would type it.
-fn resolved(path: &Path) -> io::Result<PathBuf> {
-    let full = fs::canonicalize(path)?;
+/// Every command resolves the folder it starts in, so a link to a project is judged by the folder
+/// it leads to. Some drives can't resolve a path (RAM disks, say): there `path` is kept, and a
+/// link on it is refused as before.
+#[must_use]
+pub fn resolved(path: &Path) -> PathBuf {
+    let Ok(full) = fs::canonicalize(path) else {
+        return path.to_owned();
+    };
     let plain = full
         .to_str()
         .and_then(|s| match s.strip_prefix(r"\\?\UNC\") {
             Some(share) => Some(format!(r"\\{share}")),
             None => s.strip_prefix(r"\\?\").map(str::to_owned),
         });
-    Ok(match plain {
+    match plain {
         Some(plain) if fs::canonicalize(&plain).is_ok_and(|again| again == full) => plain.into(),
         _ => full,
-    })
+    }
 }
 
 /// The `.bolt/format` file of the project whose top folder is `root`.
@@ -775,6 +781,7 @@ impl Repository {
         root: &Path,
         owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<bool, RepoError> {
+        let root = &resolved(root);
         // Before anything is made: a folder that isn't the user's is refused at once.
         let found = check_bolt(root, owner_check)?;
         if found && has_format(root)? {
@@ -811,6 +818,7 @@ impl Repository {
         root: &Path,
         owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<(Repository, ChangeLock), RepoError> {
+        let root = &resolved(root);
         let bolt = root.join(".bolt");
         let found = Repository::check_new_with(root, owner_check)?;
         if !found {
@@ -897,8 +905,7 @@ impl Repository {
         start: &Path,
         owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
-        // Some drives can't resolve a path (RAM disks, say); a link there is refused as before.
-        let start = resolved(start).unwrap_or_else(|_| start.to_owned());
+        let start = resolved(start);
         let mut unfinished = None;
         for folder in start.ancestors() {
             if has_project(folder, owner_check)? {
@@ -1200,7 +1207,7 @@ mod tests {
 
     /// A project made by hand: the folder layout and the `format` file, nothing committed.
     fn project() -> (tempfile::TempDir, Repository) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let bolt = dir.path().join(".bolt");
         for sub in ["store/packs", "state", "cache", "tmp"] {
             std::fs::create_dir_all(bolt.join(sub)).unwrap();
@@ -1325,7 +1332,7 @@ mod tests {
 
     #[test]
     fn start_writes_neither_record() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let repo = Repository::init(dir.path(), &entry(0).who).unwrap();
         let state = repo.current().unwrap().1.state;
         assert!(state.tags.is_none() && state.server_lines.is_none());
@@ -1343,7 +1350,7 @@ mod tests {
 
     #[test]
     fn the_records_a_state_points_to_are_read_back() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &entry(0).who).unwrap();
         let (tags, servers) = sample_records();
         let (t, r) = commit_records(&mut repo, &tags, &servers);
@@ -1358,7 +1365,7 @@ mod tests {
 
     #[test]
     fn a_pointer_that_leads_nowhere_good_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &entry(0).who).unwrap();
         let (tags, servers) = sample_records();
         let (t, r) = commit_records(&mut repo, &tags, &servers);
@@ -1552,7 +1559,7 @@ mod tests {
     /// damaged, never one to delete.
     #[test]
     fn a_project_being_made_or_missing_its_format_is_not_called_unfinished() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let (repo, lock) = Repository::begin(dir.path()).unwrap();
         match Repository::discover(dir.path()) {
             Err(e @ RepoError::BeingMade { .. }) => {
@@ -1567,7 +1574,7 @@ mod tests {
         ));
 
         let who = entry(0).who;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &who).unwrap();
         let format = dir.path().join(".bolt/format");
         // Only its first entry: a start that stopped as it wrote `format` looks the same.
@@ -1612,7 +1619,7 @@ mod tests {
     /// where the link leads to a lock some command holds.
     #[test]
     fn a_linked_state_is_damage_before_its_lock_is_probed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let bolt = dir.path().join(".bolt");
         std::fs::create_dir_all(bolt.join("store/packs")).unwrap();
         let elsewhere = dir.path().join("elsewhere");
@@ -1637,7 +1644,7 @@ mod tests {
     /// A run that finishes an interrupted one starts without the half-written pack it left.
     #[test]
     fn begin_clears_what_an_interrupted_run_left_in_tmp() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         drop(Repository::begin(dir.path()).unwrap());
         let tmp = dir.path().join(".bolt/tmp");
         let litter = tmp.join("tmp-0123456789abcdef");
@@ -1651,7 +1658,7 @@ mod tests {
 
     #[test]
     fn open_needs_a_format_file_and_cleans_tmp() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         assert!(matches!(
             Repository::open(dir.path()),
             Err(RepoError::NotAProject)
@@ -1679,13 +1686,13 @@ mod tests {
             ".bolt/tmp",
         ];
         for folder in folders {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             Repository::init(dir.path(), &who).unwrap();
             let link = folder
                 .split('/')
                 .fold(dir.path().to_owned(), |path, name| path.join(name));
             // The real folder moves outside, so the project would still work through the link.
-            let outside = tempfile::tempdir().unwrap();
+            let outside = tempdir();
             let target = outside.path().join("moved");
             std::fs::rename(&link, &target).unwrap();
             let bait = target.join("tmp-0123456789abcdef");
@@ -1714,7 +1721,7 @@ mod tests {
     fn store_packs_swapped_for_a_link_after_the_shape_check_is_refused() {
         let (dir, mut repo) = project();
         let store = dir.path().join(".bolt").join("store");
-        let outside = tempfile::tempdir().unwrap();
+        let outside = tempdir();
         std::fs::rename(store.join("packs"), store.join("checked")).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), store.join("packs")).unwrap();
@@ -1737,7 +1744,7 @@ mod tests {
     fn state_swapped_for_a_link_after_the_shape_check_gets_no_lock_outside() {
         let (dir, mut repo) = project();
         let bolt = dir.path().join(".bolt");
-        let outside = tempfile::tempdir().unwrap();
+        let outside = tempdir();
         std::fs::rename(bolt.join("state"), bolt.join("checked")).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), bolt.join("state")).unwrap();
@@ -1790,7 +1797,7 @@ mod tests {
         let (dir, repo) = project();
         drop(repo);
         let tmp = dir.path().join(".bolt").join("tmp");
-        let outside = tempfile::tempdir().unwrap();
+        let outside = tempdir();
         let (file, folder) = (outside.path().join("file"), outside.path().join("folder"));
         std::fs::write(&file, b"x").unwrap();
         std::fs::create_dir(&folder).unwrap();
@@ -1832,7 +1839,7 @@ mod tests {
 
     #[test]
     fn owner_rule() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let (root, sibling) = (dir.path().join("project"), dir.path().join("sibling"));
         for folder in [&root, &sibling] {
             std::fs::create_dir(folder).unwrap();
@@ -1885,7 +1892,7 @@ mod tests {
     /// to do about that.
     #[test]
     fn a_misplaced_safe_folders_line_is_what_the_user_is_told() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let misplaced = || -> Result<Vec<PathBuf>, ConfigError> {
             Err(ConfigError::SafeFoldersNotAtTop {
                 path: PathBuf::from("config.toml"),
@@ -1902,7 +1909,7 @@ mod tests {
 
     #[test]
     fn administrators_count_only_when_elevated() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path();
         let elevated = Owner::Administrators { elevated: true };
         let normal = Owner::Administrators { elevated: false };
@@ -1930,7 +1937,7 @@ mod tests {
     /// needs safe-folders has to read them.
     #[test]
     fn an_elevated_administrators_project_needs_no_settings() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let broken = || -> Result<Vec<PathBuf>, ConfigError> {
             Err(ConfigError::Invalid {
                 path: PathBuf::from("config.toml"),
@@ -1978,7 +1985,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn look_alike_folders_are_different_folders() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         for (a, b) in [("Kit", "\u{212A}it"), ("\u{C5}ngstrom", "\u{212B}ngstrom")] {
             let (a, b) = (dir.path().join(a), dir.path().join(b));
             for folder in [&a, &b] {
@@ -1996,7 +2003,7 @@ mod tests {
 
     /// A temporary folder named as `discover` names it: on macOS `/var` is a link to `/private/var`.
     fn tempdir() -> tempfile::TempDir {
-        tempfile::tempdir_in(resolved(&std::env::temp_dir()).unwrap()).unwrap()
+        tempfile::tempdir_in(resolved(&std::env::temp_dir())).unwrap()
     }
 
     /// The real owner check, with the answers no test machine can give: `owner(path)` owns each
@@ -2029,7 +2036,7 @@ mod tests {
     #[test]
     fn start_looks_past_an_enclosing_project_it_may_not_use() {
         for drive_says in [Owner::Other, Owner::Unknown] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let top = dir.path().join("top");
             let mid = top.join("mid");
             let root = mid.join("root");
@@ -2069,7 +2076,7 @@ mod tests {
             Owner::Other,
             Owner::Administrators { elevated: false },
         ] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let root = dir.path();
             let owner = |path: &Path| {
                 if path == root {
@@ -2113,7 +2120,7 @@ mod tests {
 
     #[test]
     fn what_counts_as_a_project_in_the_search() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let folder = dir.path();
         let bolt = folder.join(".bolt");
         let (mine, theirs) = (all_owned_by(Owner::User), all_owned_by(Owner::Other));
@@ -2173,7 +2180,7 @@ mod tests {
     /// looked at.
     #[test]
     fn the_owner_of_bolt_is_asked_before_anything_inside_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().join("root");
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir_all(root.join(".bolt")).unwrap();
@@ -2242,7 +2249,7 @@ mod tests {
     #[test]
     fn start_refuses_a_folder_that_isnt_the_users_before_making_anything() {
         for drive_says in [Owner::Other, Owner::Unknown] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let root = dir.path().join("root");
             std::fs::create_dir(&root).unwrap();
             let owner = |path: &Path| {
@@ -2273,7 +2280,7 @@ mod tests {
     /// Fails closed rather than make the project in a `.bolt` nobody checked.
     #[test]
     fn start_stops_if_the_bolt_it_made_vanishes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let bolt = root.join(".bolt");
@@ -2302,7 +2309,7 @@ mod tests {
     /// A link that appears where `bolt start` is about to make `.bolt` is never followed.
     #[test]
     fn start_refuses_a_bolt_link_that_appears_while_it_starts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let (bolt, target) = (root.join(".bolt"), dir.path().join("target"));
@@ -2387,7 +2394,7 @@ mod tests {
     /// computer.
     #[test]
     fn start_never_follows_a_format_link() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path();
         std::fs::create_dir(root.join(".bolt")).unwrap();
         // A link to nothing: followed, it would look like no `format` at all.
@@ -2459,7 +2466,7 @@ mod tests {
     /// A link to the project is judged by the folder it leads to, the one `.bolt` is in.
     #[test]
     fn the_owner_check_judges_the_resolved_folder() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let real = dir.path().join("real");
         std::fs::create_dir(&real).unwrap();
         Repository::init(&real, &entry(0).who).unwrap();
@@ -2491,11 +2498,44 @@ mod tests {
         assert!(Repository::discover(&link).is_ok());
     }
 
+    /// The user's own link into another account's folder: `bolt start` judges the folder, and
+    /// makes nothing there.
+    #[test]
+    fn start_through_a_link_judges_the_folder_it_leads_to() {
+        let dir = tempdir();
+        let theirs = dir.path().join("theirs");
+        std::fs::create_dir(&theirs).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&theirs, &link).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&link, &theirs);
+        let owner = |path: &Path| {
+            if path.starts_with(&theirs) {
+                Owner::Other
+            } else {
+                Owner::User
+            }
+        };
+        let started = start_where(&link, owner, &[]);
+        assert!(
+            matches!(&started, Err(RepoError::NotYours { path }) if *path == theirs),
+            "{:?}",
+            started.map(|_| ())
+        );
+        let checked = Repository::check_new_with(&link, &checked_by(owner, &[]));
+        assert!(
+            matches!(checked, Err(RepoError::NotYours { .. })),
+            "{checked:?}"
+        );
+        assert!(!theirs.join(".bolt").exists());
+    }
+
     /// A `.bolt` that is gone while its owner is asked, then back, was never checked.
     #[cfg(feature = "fault-injection")]
     #[test]
     fn a_bolt_that_vanishes_during_the_owner_check_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         Repository::init(dir.path(), &entry(0).who).unwrap();
         let bolt = dir.path().join(".bolt");
         let away = dir.path().join("away");
@@ -2506,20 +2546,43 @@ mod tests {
             });
         });
         match Repository::discover(dir.path()) {
-            Err(e) => {
-                assert!(e.to_string().contains("changed while Bolt looked"), "{e}");
-                assert!(e.hint().unwrap().contains("again"), "{e}");
+            Err(e @ RepoError::BoltChanged { .. }) => {
+                assert_eq!(e.hint().as_deref(), Some("Run the command again."));
             }
-            Ok(_) => panic!("the .bolt nobody checked was used"),
+            other => panic!("{:?}", other.map(|_| ())),
         }
         assert!(format_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_resolved_path_reads_as_the_user_would_type_it() {
+        let dir = tempdir();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // `..` and the like are resolved; no `\\?\` is added.
+        assert_eq!(resolved(&sub.join("..").join("sub")), sub);
+        // Kept as given where it can't be resolved.
+        let missing = dir.path().join("missing");
+        assert_eq!(resolved(&missing), missing);
+    }
+
+    /// `C:\...\a.` would lead to `a`, so a folder named `a.` keeps its `\\?\`.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_that_means_something_else_plain_stays_verbatim() {
+        let dir = tempdir();
+        let verbatim = PathBuf::from(format!(r"\\?\{}", dir.path().display())).join("a.");
+        std::fs::create_dir(&verbatim).unwrap();
+        assert_eq!(resolved(&verbatim), verbatim);
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        assert_eq!(resolved(&verbatim), verbatim);
     }
 
     /// Reading through the link would never end.
     #[cfg(unix)]
     #[test]
     fn a_format_link_to_dev_zero_is_refused_without_hanging() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let outer = dir.path().to_owned();
         std::fs::create_dir(outer.join(".bolt")).unwrap();
         std::os::unix::fs::symlink("/dev/zero", format_path(&outer)).unwrap();
@@ -2545,7 +2608,7 @@ mod tests {
 
     #[test]
     fn hidden_bolt_folder_is_a_real_folder() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         Repository::init(dir.path(), &entry(0).who).unwrap();
         let bolt = dir.path().join(".bolt");
         assert!(bolt_platform::is_hidden(&bolt).unwrap());
@@ -2662,7 +2725,7 @@ mod tests {
         let stopped = |refusal| RepoError::StartStopped {
             refusal: Box::new(refusal),
         };
-        let folder = tempfile::tempdir().unwrap();
+        let folder = tempdir();
         let open_to_all = crate::test_support::open_to_all(folder.path());
         for refusal in refusals(Path::new("/srv/work")) {
             let hint = stopped(refusal).hint().unwrap();

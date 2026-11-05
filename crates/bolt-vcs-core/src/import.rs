@@ -249,6 +249,7 @@ pub fn import_git(
     req: &mut ImportRequest,
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
+    let root = &repo::resolved(root);
     let plan = plan(root, req.progress)?;
     let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);

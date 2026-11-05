@@ -5,8 +5,6 @@
 
 use std::path::Path;
 use std::process::Command;
-#[cfg(windows)]
-use std::process::Stdio;
 
 use bolt_core::listing::{EntryKind, Listing};
 use bolt_core::pack::ObjectKind;
@@ -107,14 +105,7 @@ fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
     std::fs::write(victim.path().join("thesis.docx"), "four years of work").unwrap();
     let tmp = env.root().join(".bolt").join("tmp");
     std::fs::remove_dir_all(&tmp).unwrap();
-    let st = Command::new("cmd")
-        .args(["/D", "/C", "mklink", "/J"])
-        .arg(&tmp)
-        .arg(victim.path())
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(st.success());
+    support::junction(&tmp, victim.path());
     let _ = env.bolt().arg("history").output().unwrap();
     assert!(victim.path().join("thesis.docx").exists());
 }
@@ -129,14 +120,7 @@ fn win_junction_in_project_is_not_walked_into() {
     env.ok(&["start"]);
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "hunter2").unwrap();
-    let st = Command::new("cmd")
-        .args(["/D", "/C", "mklink", "/J"])
-        .arg(env.root().join("j"))
-        .arg(outside.path())
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(st.success());
+    support::junction(&env.root().join("j"), outside.path());
     env.ok(&["save", "with junction"]);
     let repo = Repository::open(env.root()).unwrap();
     let (_, entry) = repo.current().unwrap();
