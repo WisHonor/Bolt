@@ -42,6 +42,9 @@ pub enum EntryType {
 pub struct DirEntry {
     pub name: OsString,
     pub kind: EntryType,
+    /// Whether the system marks it as a folder: on Windows a folder link or junction too, and a
+    /// reparse point that isn't a link, such as a cloud folder, whose `kind` is `Other`.
+    pub folder: bool,
     /// Windows only: the 8.3 name the drive also gave the entry, if any (`GIT~1` for `.git`).
     pub short_name: Option<OsString>,
 }
@@ -106,6 +109,14 @@ impl Dir {
     pub fn create_new(&self, name: &OsStr, executable: bool) -> io::Result<File> {
         one_name(name)?;
         sys::create_new(&self.handle, name, executable)
+    }
+
+    /// Opens the regular file `name` to read and write, making it if nothing has that name, and
+    /// keeping what is in it. A link there is refused, never followed, so nothing is made where it
+    /// points.
+    pub fn open_or_create(&self, name: &OsStr) -> io::Result<File> {
+        one_name(name)?;
+        sys::open_or_create(&self.handle, name)
     }
 
     /// Moves `from` in this folder to `to_name` in `to`, replacing a file there in one step: the
@@ -368,6 +379,7 @@ mod tests {
             let refused = |e: io::Error| assert!(is_link_refusal(&e), "{name}: {e}");
             refused(d.open_dir(n(name)).unwrap_err());
             refused(d.open_file(n(name)).unwrap_err());
+            refused(d.open_or_create(n(name)).unwrap_err());
             refused(d.remove_dir(n(name)).unwrap_err());
             refused(d.rename_into(n(name), &d, n("moved")).unwrap_err());
             refused(d.rename_into(n("file"), &d, n(name)).unwrap_err());
@@ -478,6 +490,7 @@ mod tests {
             refused(d.open_file(name).map(drop));
             refused(d.metadata(name).map(drop));
             refused(d.create_new(name, false).map(drop));
+            refused(d.open_or_create(name).map(drop));
             refused(d.create_dir(name));
             refused(d.remove_file(name));
             refused(d.remove_dir(name));
@@ -523,6 +536,18 @@ mod tests {
         );
         #[cfg(unix)]
         assert!(entries.iter().all(|e| e.short_name.is_none()));
+        // A link to a folder is marked as one only on Windows, where it is a junction here.
+        let folders: Vec<_> = entries
+            .iter()
+            .filter(|e| e.folder)
+            .map(|e| &e.name)
+            .collect();
+        let marked: &[&str] = if cfg!(windows) {
+            &["folder", "link"]
+        } else {
+            &["folder"]
+        };
+        assert_eq!(folders, marked);
 
         let file = d.metadata(n("file")).unwrap();
         assert_eq!((file.kind, file.size), (EntryType::File, 5));
@@ -595,6 +620,25 @@ mod tests {
         d.remove_file(n("file")).unwrap();
         let left: Vec<OsString> = d.entries().unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(left, [OsString::from("tool")]);
+    }
+
+    /// What the change lock needs: a file made once and opened again after, to read, write and
+    /// lock, never emptied.
+    #[test]
+    fn open_or_create_makes_a_file_or_opens_one_and_keeps_what_is_in_it() {
+        let (_tmp, d) = held();
+        let mut made = d.open_or_create(n("lock")).unwrap();
+        made.write_all(b"held").unwrap();
+        drop(made);
+        let mut again = d.open_or_create(n("lock")).unwrap();
+        let mut text = String::new();
+        again.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "held");
+        again.write_all(b"!").unwrap();
+        again.try_lock().unwrap();
+        d.create_dir(n("folder")).unwrap();
+        let e = d.open_or_create(n("folder")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::IsADirectory, "{e}");
     }
 
     #[cfg(unix)]
@@ -802,6 +846,7 @@ mod tests {
         ] {
             assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
         }
+        assert!(is_link_refusal(&d.open_or_create(n("link")).unwrap_err()));
         assert!(gone(&missing));
         assert_eq!(d.metadata(n("link")).unwrap().kind, EntryType::Symlink);
         assert_eq!(d.read_link(n("link")).unwrap(), target);

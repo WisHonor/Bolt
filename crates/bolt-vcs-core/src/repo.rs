@@ -958,7 +958,8 @@ impl Repository {
     }
 
     fn open_lock_file(&self) -> Result<File, RepoError> {
-        fsio::open_lock_file(&self.bolt.join("state").join("lock")).map_err(refused)
+        let shown = self.bolt.join("state").join("lock");
+        fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown).map_err(refused)
     }
 
     #[must_use]
@@ -974,6 +975,11 @@ impl Repository {
     /// `tmp/`, held open.
     pub(crate) fn tmp_folder(&self) -> &Dir {
         &self.held.tmp
+    }
+
+    /// `.bolt`, held open.
+    pub(crate) fn bolt_folder(&self) -> &Dir {
+        &self.held.bolt
     }
 
     #[must_use]
@@ -1570,7 +1576,9 @@ mod tests {
         std::fs::create_dir_all(bolt.join("store/packs")).unwrap();
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
-        let held = fsio::open_lock_file(&elsewhere.join("lock")).unwrap();
+        let outside = Dir::open_top(&elsewhere).unwrap();
+        let lock = elsewhere.join("lock");
+        let held = fsio::open_lock_file(&outside, OsStr::new("lock"), &lock).unwrap();
         held.lock().unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&elsewhere, bolt.join("state")).unwrap();
@@ -1679,6 +1687,25 @@ mod tests {
             Err(RepoError::Damaged { detail }) => assert!(detail.contains("packs"), "{detail}"),
             other => panic!("{:?}", other.map(|_| ())),
         }
+    }
+
+    /// The change lock is taken through the held `state` folder: one swapped for a link once the
+    /// project is open gets no lock where the link points, so no command can take a lock there
+    /// while another holds the real one.
+    #[test]
+    fn state_swapped_for_a_link_after_the_shape_check_gets_no_lock_outside() {
+        let (dir, mut repo) = project();
+        let bolt = dir.path().join(".bolt");
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::rename(bolt.join("state"), bolt.join("checked")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), bolt.join("state")).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&bolt.join("state"), outside.path());
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(bolt.join("checked").join("lock").is_file());
+        drop(lock);
     }
 
     #[test]

@@ -634,6 +634,19 @@ impl WalkState {
     /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
     /// is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
+        self.judged(path, is_dir, is_dir)
+    }
+
+    /// `keeps` for a folder Bolt can't go into: a Windows reparse point that isn't a link but is
+    /// marked as a folder (a cloud folder, say). The ignore rules take it for a folder, and it is
+    /// never opened, for its ignore files or to see whether it holds a repository.
+    fn keeps_closed_folder(&mut self, path: &Path) -> bool {
+        self.judged(path, true, false)
+    }
+
+    /// `keeps` for what the ignore rules take for a folder when `is_dir`, and the walk opens only
+    /// when `opens`.
+    fn judged(&mut self, path: &Path, is_dir: bool, opens: bool) -> bool {
         if self.problem.is_some() {
             return false;
         }
@@ -668,7 +681,7 @@ impl WalkState {
         }
         // After the rules, so an ignored one stays out without a word. Only now is the folder
         // opened: an ignored one may be one Bolt can't read.
-        let nested = is_dir
+        let nested = opens
             && match self.handles.dir(rel) {
                 Ok(dir) => holds_own_repository(dir),
                 Err(e) => {
@@ -685,7 +698,7 @@ impl WalkState {
             }
             return kept;
         }
-        if is_dir && let Err(problem) = self.enter(rel, None) {
+        if opens && let Err(problem) = self.enter(rel, None) {
             self.problem.get_or_insert(problem);
             return false;
         }
@@ -820,13 +833,20 @@ fn scan_folder(
             continue;
         };
         let (up, depth) = (here.rel.clone(), here.depth + 1);
-        let is_dir = entry.kind == EntryType::Dir;
+        // A Windows reparse point that isn't a link but is marked as a folder: a folder to the
+        // ignore rules, though Bolt never goes into it.
+        let closed = entry.kind == EntryType::Other && entry.folder;
+        let is_dir = entry.kind == EntryType::Dir || closed;
         let own = |name: &str| own_folder(name, drive);
         if is_dir && depth == 1 && entry.name.to_str().is_some_and(own) {
             continue;
         }
         let rel_path = Path::new(&up).join(&entry.name);
-        let kept = rules.keeps(&root.join(&rel_path), is_dir);
+        let kept = if closed {
+            rules.keeps_closed_folder(&root.join(&rel_path))
+        } else {
+            rules.keeps(&root.join(&rel_path), is_dir)
+        };
         // Going on without the rules of an ignore file that failed would save what it keeps out.
         if let Some(problem) = rules.problem.take() {
             return Err(problem);
@@ -3467,6 +3487,24 @@ mod tests {
         let down = |levels: usize| "d/".repeat(levels);
         assert_eq!(tree[&format!("{}x", down(600))].1, b"bottom");
         assert_eq!(tree[&format!("{}e/x", down(299))].1, b"e");
+    }
+
+    /// A Windows reparse point that isn't a link but is marked as a folder (a cloud folder, say) is
+    /// a folder to the ignore rules, so a `name/` line leaves it out without a word; a kept one is
+    /// never opened (and stops the save when read, as a special file).
+    #[test]
+    fn a_folder_bolt_cant_open_is_a_folder_to_the_ignore_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, ".boltignore", b"cloud/\n");
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
+        // Neither is on disk, so a walk that opened one would have a problem.
+        assert!(!rules.keeps_closed_folder(&root.join("cloud")));
+        assert!(rules.keeps_closed_folder(&root.join("other")));
+        assert!(rules.problem.is_none());
+        // Taken for a file, `cloud` is no match for a line about folders.
+        assert!(rules.keeps(&root.join("cloud"), false));
     }
 
     /// A target Windows reads with `\` is stored with `/`, as Git stores it (decision 045).

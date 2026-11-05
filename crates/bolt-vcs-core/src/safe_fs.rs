@@ -63,15 +63,27 @@ pub fn read_capped(path: &Path, max: u64) -> io::Result<Vec<u8>> {
 /// link, folder, pipe or device gives `InvalidInput`, naming it `shown`, and any other error from
 /// the open comes back unchanged.
 pub(crate) fn open_regular_in(dir: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
-    dir.open_file(name).map_err(|e| {
-        // The open has already refused; this look only picks the message.
-        let not_a_file = || dir.metadata(name).is_ok_and(|m| m.kind != EntryType::File);
-        if e.kind() != io::ErrorKind::NotFound && not_a_file() {
-            not_regular(shown)
-        } else {
-            e
-        }
-    })
+    dir.open_file(name)
+        .map_err(|e| refused_in(dir, name, shown, e))
+}
+
+/// Opens the regular file `name` in the folder `dir` to read and write, making it if nothing has
+/// that name and keeping what is in it, with `open_regular_in`'s refusals.
+pub(crate) fn open_or_create_in(dir: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
+    dir.open_or_create(name)
+        .map_err(|e| refused_in(dir, name, shown, e))
+}
+
+/// `e`, from opening `name` in `dir`, as `not_regular` names it when what is there is a link,
+/// folder or special file.
+fn refused_in(dir: &Dir, name: &OsStr, shown: &Path, e: io::Error) -> io::Error {
+    // The open has already refused; this look only picks the message.
+    let not_a_file = || dir.metadata(name).is_ok_and(|m| m.kind != EntryType::File);
+    if e.kind() != io::ErrorKind::NotFound && not_a_file() {
+        not_regular(shown)
+    } else {
+        e
+    }
 }
 
 /// Reads the regular file `name` in the folder `dir` as `read_capped` reads a path; see

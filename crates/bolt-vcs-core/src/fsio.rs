@@ -3,7 +3,7 @@
 //! held open, never by path.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -84,17 +84,11 @@ pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
     dir.remove_file(name)
 }
 
-/// Opens the change-lock file for reading and writing, creating it if needed, never through a
-/// link (`safe_fs::open_regular`). Its contents never matter, so it is never truncated.
-pub fn open_lock_file(path: &Path) -> io::Result<File> {
-    safe_fs::open_regular(
-        path,
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false),
-    )
+/// Opens the change-lock file `name` in the folder `state` for reading and writing, making it if
+/// needed, never through a link (`safe_fs::open_or_create_in`); errors name it `shown`. Its
+/// contents never matter, so it is never truncated.
+pub fn open_lock_file(state: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
+    safe_fs::open_or_create_in(state, name, shown)
 }
 
 /// Flushes a folder's entries to disk. Windows has no such call: a rename there keeps its order
@@ -123,17 +117,28 @@ pub fn fault_point(label: &'static str) -> io::Result<()> {
 }
 
 /// Fault injection for crash tests: per-thread errors (`arm`), a process abort
-/// (`BOLT_FAULT_AT=N`), or an error at one named point (`BOLT_FAULT_FAIL=label`).
+/// (`BOLT_FAULT_AT=N`), an error at one named point (`BOLT_FAULT_FAIL=label`), or a test's own
+/// change to the disk at one named point (`act_at`).
 #[cfg(feature = "fault-injection")]
 pub mod fault {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// What a test does when this thread reaches a named point.
+    type Action = (&'static str, Box<dyn FnOnce()>);
+
     thread_local! {
         static ARMED: Cell<Option<u64>> = const { Cell::new(None) };
         static COUNT: Cell<u64> = const { Cell::new(0) };
+        static ACTION: RefCell<Option<Action>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `action` once, when this thread next reaches the point `label`, so a test can change
+    /// what Bolt finds there.
+    pub fn act_at(label: &'static str, action: impl FnOnce() + 'static) {
+        ACTION.set(Some((label, Box::new(action))));
     }
 
     static PROCESS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -162,6 +167,10 @@ pub mod fault {
     }
 
     pub(super) fn hit(label: &'static str) -> io::Result<()> {
+        let due = ACTION.with_borrow_mut(|action| action.take_if(|(at, _)| *at == label));
+        if let Some((_, action)) = due {
+            action();
+        }
         if let Some(n) = ARMED.get() {
             let count = COUNT.get() + 1;
             COUNT.set(count);

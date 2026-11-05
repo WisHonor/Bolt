@@ -56,6 +56,7 @@ pub(super) fn entries(dir: &OwnedFd) -> io::Result<Vec<DirEntry>> {
         entries.push(DirEntry {
             name: name.to_owned(),
             kind,
+            folder: kind == EntryType::Dir,
             short_name: None,
         });
     }
@@ -90,6 +91,15 @@ pub(super) fn create_new(dir: &OwnedFd, name: &OsStr, executable: bool) -> io::R
         return Err(e.into());
     }
     Ok(File::from(fd))
+}
+
+pub(super) fn open_or_create(dir: &OwnedFd, name: &OsStr) -> io::Result<File> {
+    // O_NONBLOCK, as for reading: a pipe there fails instead of waiting.
+    let flags =
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let fd =
+        rustix::fs::openat(dir, name, flags, mode(false)).map_err(|e| refusal(e, dir, name))?;
+    regular(fd)
 }
 
 pub(super) fn rename_into(

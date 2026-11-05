@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-    FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
-    FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
-    FileRenameInformationEx, NtCreateFile, NtSetInformationFile, REPARSE_DATA_BUFFER,
-    REPARSE_DATA_BUFFER_0_0, REPARSE_DATA_BUFFER_0_1, SYMLINK_FLAG_RELATIVE,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_OPEN, FILE_OPEN_IF,
+    FILE_OPEN_REPARSE_POINT, FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, FILE_RENAME_INFORMATION,
+    FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT,
+    FileRenameInformation, FileRenameInformationEx, NtCreateFile, NtSetInformationFile,
+    REPARSE_DATA_BUFFER, REPARSE_DATA_BUFFER_0_0, REPARSE_DATA_BUFFER_0_1, SYMLINK_FLAG_RELATIVE,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_DELETE_PENDING, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
@@ -151,6 +151,19 @@ pub(super) fn create_new(dir: &OwnedHandle, name: &OsStr, _executable: bool) -> 
     // it, a folder or junction at the name gives "access denied" instead of "already exists".
     let handle = nt_open(dir.as_handle(), name, access, FILE_CREATE, 0)?;
     Ok(File::from(handle))
+}
+
+pub(super) fn open_or_create(dir: &OwnedHandle, name: &OsStr) -> io::Result<File> {
+    let access = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+    // FILE_OPEN_IF opens what is there or makes a file. A link there opens as itself and is
+    // refused below, so nothing is made where it points.
+    let handle = nt_open(dir.as_handle(), name, access, FILE_OPEN_IF, 0)?;
+    let what: FILE_ATTRIBUTE_TAG_INFO = info(handle.as_handle(), FileAttributeTagInfo)?;
+    match kind_of(what.FileAttributes, what.ReparseTag) {
+        EntryType::File => Ok(File::from(handle)),
+        EntryType::Dir => Err(is_a_folder()),
+        EntryType::Symlink | EntryType::Other => Err(link_refused()),
+    }
 }
 
 pub(super) fn rename_into(
@@ -797,6 +810,7 @@ fn read_listing(area: &[u8], entries: &mut Vec<DirEntry>) -> io::Result<()> {
             entries.push(DirEntry {
                 name: OsString::from_wide(&name),
                 kind: kind_of(attributes, tag),
+                folder: attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
                 short_name: (!short.is_empty()).then(|| OsString::from_wide(&short)),
             });
         }
@@ -946,6 +960,13 @@ mod tests {
         ]);
         let mut entries = Vec::new();
         read_listing(&bytes, &mut entries).unwrap();
+        // The folder bit as Windows marks it, a link's and a cloud folder's included.
+        let folders: Vec<_> = entries
+            .iter()
+            .filter(|e| e.folder)
+            .map(|e| &e.name)
+            .collect();
+        assert_eq!(folders, [".git", "junction", "cloud folder"]);
         let found: Vec<_> = entries
             .iter()
             .map(|e| (e.name.to_str().unwrap(), e.kind, e.short_name.as_deref()))

@@ -264,7 +264,7 @@ fn save(
     let repo = opened.insert(Repository::discover(&std::env::current_dir()?)?);
     let who = now_person(&load_identity(Some(repo.root()))?);
     // A project's own settings never say who the user is; if they try, the user is told.
-    let ignored = ignored_project_identity(repo.root());
+    let ignored = ignored_project_identity(repo);
     let git_excludes = git_excludes_file(repo.root())?;
     let req = SaveRequest {
         message: &message,

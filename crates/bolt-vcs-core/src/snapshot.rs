@@ -13,6 +13,7 @@ use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
 use crate::drive;
+use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::link;
@@ -263,6 +264,7 @@ pub fn save_folder(
         drive,
         req.git_excludes,
     )?;
+    fsio::fault_point("save:walked").map_err(RepoError::from)?;
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
@@ -1462,6 +1464,66 @@ mod tests {
             ),
             Err(SaveError::ChangedDuringSave { .. })
         ));
+    }
+
+    /// The packs in the store, by name.
+    #[cfg(feature = "fault-injection")]
+    fn pack_names(repo: &Repository) -> Vec<std::ffi::OsString> {
+        let packs = fs::read_dir(repo.packs_dir()).unwrap();
+        let mut names: Vec<_> = packs.map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        names
+    }
+
+    /// Saves with `change` run between the walk and the reading of what it found: the save must
+    /// stop at `a.txt`, and store and change nothing.
+    #[cfg(feature = "fault-injection")]
+    fn assert_changed_after_the_walk(repo: &mut Repository, change: impl FnOnce() + 'static) {
+        let (head, packs) = (repo.head().unwrap(), pack_names(repo));
+        crate::fsio::fault::act_at("save:walked", change);
+        match save_now(repo) {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "a.txt"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+        assert_eq!(pack_names(repo), packs);
+    }
+
+    /// Sets when `path` last changed.
+    #[cfg(feature = "fault-injection")]
+    fn set_time(path: &Path, time: std::time::SystemTime) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(time).unwrap();
+    }
+
+    /// The file the walk saw, rewritten before it is read with as many bytes and another time.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_rewritten_after_the_walk_is_refused() {
+        let (dir, mut repo) = project();
+        let a = dir.path().join("a.txt");
+        fs::write(&a, b"one").unwrap();
+        let walked = fs::metadata(&a).unwrap().modified().unwrap();
+        assert_changed_after_the_walk(&mut repo, move || {
+            fs::write(&a, b"two").unwrap();
+            set_time(&a, walked + std::time::Duration::from_secs(10));
+        });
+    }
+
+    /// Another file renamed over the one the walk saw, with its size and the time the walk saw:
+    /// only the file ID tells them apart.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_renamed_over_after_the_walk_is_refused_by_its_id() {
+        let (dir, mut repo) = project();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        fs::write(&a, b"one").unwrap();
+        let walked = fs::metadata(&a).unwrap().modified().unwrap();
+        assert_changed_after_the_walk(&mut repo, move || {
+            fs::write(&b, b"two").unwrap();
+            set_time(&b, walked);
+            fs::rename(&b, &a).unwrap();
+        });
     }
 
     /// Scans a project holding `victim.txt`, lets `make_link` put a link in its place (it says

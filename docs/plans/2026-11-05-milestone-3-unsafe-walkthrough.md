@@ -184,7 +184,7 @@ The arguments to `NtCreateFile`, in order:
 | `null()` | No allocation size: that only matters when making a large file. |
 | `FILE_ATTRIBUTE_NORMAL` | Nothing special about a file made here. |
 | `SHARE_ALL` | Others may read, write, rename and delete the entry while Bolt has it open, as with any file the standard library opens. A held folder can still be renamed (the tests do), and a file being read can still be replaced. |
-| `disposition` | `FILE_OPEN` (it must exist) or `FILE_CREATE` (it must not exist: making never replaces anything, so it can't go through a link either). |
+| `disposition` | `FILE_OPEN` (it must exist), `FILE_CREATE` (it must not exist: making never replaces anything, so it can't go through a link either) or, for the change-lock file only, `FILE_OPEN_IF` (what is there, or a new file if nothing is: a link there opens as itself, by `FILE_OPEN_REPARSE_POINT` below, and is refused before anything is read or written, so nothing is made where it points). |
 | `options` | `FILE_DIRECTORY_FILE` where it must be a folder (making one, or listing one), plus `FILE_OPEN_REPARSE_POINT` (a link, junction or other reparse point at the name opens as itself, not what it points to) and `FILE_SYNCHRONOUS_IO_NONALERT` (every later call on the handle waits for its result). A new file gets no `FILE_NON_DIRECTORY_FILE`: `FILE_CREATE` never opens what is there anyway, and with that flag a folder or junction at the name answers "access denied" instead of "already exists". |
 | `null(), 0` | No extended attributes. |
 
@@ -208,7 +208,8 @@ old to know that flag answers `STATUS_INVALID_PARAMETER`; the open is then tried
 that works the flag is dropped for the rest of the run. It is never dropped on the strength of an
 error alone. `open_entry` then asks what was opened (block 4), and each caller refuses what it must:
 `open_dir` anything but a folder, `open_file` anything but a regular file, `rename_into` a link at
-either name.
+either name. `open_or_create`, for the change-lock file, calls `nt_open` with `FILE_OPEN_IF` and
+refuses anything but a regular file the same way; it adds no `unsafe` of its own.
 
 Microsoft: [NtCreateFile][ntcreatefile] (all the flags above are on this page);
 [OBJECT_ATTRIBUTES][object_attributes] (`OBJ_CASE_INSENSITIVE`, `OBJ_DONT_REPARSE`);
@@ -673,10 +674,10 @@ Where the tests ran:
 The tests:
 
 - `a_link_at_a_name_is_refused_at_every_call` *(makes symlinks on Windows)*: links to a folder and
-  a file (and a junction on Windows) are refused by `open_dir`, `open_file`, `remove_dir`,
-  `rename_into` at either name, `open_top`, and on Unix `set_executable`; `metadata` calls each a
-  link; nothing changes on disk. Making `as_folder` accept a link makes this test and the next one
-  fail. The junction part needs no right, so it runs on this machine too.
+  a file (and a junction on Windows) are refused by `open_dir`, `open_file`, `open_or_create`,
+  `remove_dir`, `rename_into` at either name, `open_top`, and on Unix `set_executable`; `metadata`
+  calls each a link; nothing changes on disk. Making `as_folder` accept a link makes this test and
+  the next one fail. The junction part needs no right, so it runs on this machine too.
 - `a_folder_swapped_for_a_link_after_opening_stays_the_folder`: a held folder renamed away and
   replaced by a link (a junction on Windows) still receives the new file and folder; nothing lands
   where the link points.
@@ -705,8 +706,12 @@ The tests:
   file, `rename_into` replaces one, and `remove_dir` removes an empty read-only folder. Before the
   read-only flags, Windows answered "access denied".
 - `nothing_is_made_through_a_dangling_link` (every system): `create_new`, `create_dir` and
-  `symlink` at a name holding a link that points nowhere fail with "already exists"; nothing
-  appears where the link points, and nothing in the scratch folder.
+  `symlink` at a name holding a link that points nowhere fail with "already exists", and
+  `open_or_create` refuses the link; nothing appears where the link points, and nothing in the
+  scratch folder.
+- `open_or_create_makes_a_file_or_opens_one_and_keeps_what_is_in_it` (every system): the file is
+  made once, opened again with what was written still in it, written and locked; a folder at the
+  name is refused.
 - In `dir/windows.rs`: hand-built listings and link data, good and bad; the folder's path equals
   the standard library's `canonicalize`; a name over 255 characters is refused; "file not found"
   ends only the first listing call; a link's temporary names are random, have no extension, and
