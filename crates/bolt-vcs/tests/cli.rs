@@ -88,6 +88,33 @@ fn start_and_save_work_in_a_normal_folder() {
     env.bolt().arg("history").assert().success();
 }
 
+/// A project reached through a link (a junction on Windows) is the folder the link leads to.
+#[test]
+fn save_works_through_a_link_to_the_project_folder() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("project");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(env.root(), &link).unwrap();
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(env.root())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success());
+    }
+    let out = env.bolt_in(&link).args(["save", "first"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let history = env.bolt().arg("history").output().unwrap();
+    assert!(text(&history.stdout).contains("first"));
+}
+
 /// Whether a folder belongs to an elevated Administrators group is up to the computer (an
 /// administrator's terminal does it, as on Windows CI). Where it does, `start` says the project
 /// opens only from such a terminal, on stderr, whatever the output format; with `--json` it is

@@ -116,6 +116,15 @@ pub fn fault_point(label: &'static str) -> io::Result<()> {
     }
 }
 
+/// A place where a test can change the disk (`fault::act_at`); never a crash point, since nothing
+/// is written there.
+pub fn act_point(label: &'static str) {
+    #[cfg(feature = "fault-injection")]
+    fault::act(label);
+    #[cfg(not(feature = "fault-injection"))]
+    let _ = label;
+}
+
 /// Fault injection for crash tests: per-thread errors (`arm`), a process abort
 /// (`BOLT_FAULT_AT=N`), an error at one named point (`BOLT_FAULT_FAIL=label`), or a test's own
 /// change to the disk at one named point (`act_at`).
@@ -166,11 +175,15 @@ pub mod fault {
             .as_deref()
     }
 
-    pub(super) fn hit(label: &'static str) -> io::Result<()> {
+    pub(super) fn act(label: &'static str) {
         let due = ACTION.with_borrow_mut(|action| action.take_if(|(at, _)| *at == label));
         if let Some((_, action)) = due {
             action();
         }
+    }
+
+    pub(super) fn hit(label: &'static str) -> io::Result<()> {
+        act(label);
         if let Some(n) = ARMED.get() {
             let count = COUNT.get() + 1;
             COUNT.set(count);
