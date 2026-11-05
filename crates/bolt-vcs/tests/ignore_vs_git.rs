@@ -528,7 +528,9 @@ proptest! {
             .collect();
         let who = who();
         let mut repo = Repository::init(root, &who).unwrap();
-        let req = SaveRequest { message: "Save", who: &who, command: "save", accept_crlf: false };
+        let req = SaveRequest {
+            message: "Save", who: &who, command: "save", accept_crlf: false, git_excludes: None,
+        };
         save_folder(&mut repo, &req, &mut |_| {}).unwrap();
         let mut got: Vec<String> =
             saved_files(&repo).iter().map(|p| as_git_reads(p, drive)).collect();
@@ -726,4 +728,66 @@ fn gits_own_ignore_cases_match() {
             assert_eq!(walk_verdict(rules, drive, path, is_dir), want, "{path:?}");
         }
     }
+}
+
+/// Git's personal lists (decision 047): the user's own list and `.git/info/exclude` keep out what
+/// they keep out in Git, and the project's own rules win over them.
+#[test]
+fn gits_personal_lists_keep_out_what_git_keeps_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    let own = tempfile::tempdir().unwrap();
+    let list = own.path().join("ignore");
+    std::fs::write(&list, "*.log\n!b.log\nbuild/\n").unwrap();
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    std::fs::write(
+        root.join(".git/info/exclude"),
+        "b.log\nsecret.txt\n!keep.txt\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".gitignore"), "keep.txt\n!c.log\n").unwrap();
+    let files = [
+        "a.log",
+        "b.log",
+        "c.log",
+        "secret.txt",
+        "keep.txt",
+        "build/out.bin",
+        "src/main.rs",
+        "src/d.log",
+    ];
+    for path in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+    let drive = this_drive();
+    let mut args = git_args(drive, &["ls-files", "--others", "--exclude-standard", "-z"]);
+    args[1] = format!("core.excludesFile={}", list.display());
+    let listed = git(root, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    let mut want: Vec<String> = listed
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8(p.to_vec()).unwrap())
+        .collect();
+    let who = who();
+    let mut repo = Repository::init(root, &who).unwrap();
+    let req = SaveRequest {
+        message: "Save",
+        who: &who,
+        command: "save",
+        accept_crlf: false,
+        git_excludes: Some(&list),
+    };
+    save_folder(&mut repo, &req, &mut |_| {}).unwrap();
+    let mut got: Vec<String> = saved_files(&repo)
+        .iter()
+        .map(|p| as_git_reads(p, drive))
+        .collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+    // So that both sides can't agree on nothing.
+    assert_eq!(want, [".gitignore", "c.log", "src/main.rs"]);
 }

@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
@@ -46,6 +46,22 @@ fn executable_bits(_meta: &Metadata) -> Option<bool> {
 /// ignores letter case, Git's folder may be spelled `.GIT`.
 fn is_internal_folder(name: &str, ignores_case: bool) -> bool {
     name == ".bolt" || name == ".git" || (ignores_case && name.eq_ignore_ascii_case(".git"))
+}
+
+/// Whether the folder `dir` holds a Git repository or Bolt project of its own: an entry named
+/// `.git` of any kind (a worktree's or submodule's is a file), or a `.bolt` folder. Where the
+/// drive ignores letter case, `.GIT` is found as `.git` (decision 046).
+fn holds_own_repository(dir: &Path) -> bool {
+    fs::symlink_metadata(dir.join(".git")).is_ok()
+        || fs::symlink_metadata(dir.join(".bolt")).is_ok_and(|m| m.is_dir())
+}
+
+/// The folder holding the project path `rel`, as an error names it.
+fn folder_of(rel: &str) -> String {
+    match rel.rsplit_once('/') {
+        Some((up, _)) => up.to_owned(),
+        None => "the project folder".to_owned(),
+    }
 }
 
 /// The project path of `name` in the folder `rel` (`""` for the top folder).
@@ -156,15 +172,14 @@ fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String>), SaveErr
     Ok((rest, git.into_iter().map(|e| e.name).collect()))
 }
 
-/// The entries a save leaves out because Git treats their names as `.git`: the first few by
-/// path, and how many.
+/// Paths a warning names: the first few by path, and how many.
 #[derive(Default)]
-struct GitNames {
+struct Named {
     first: BTreeSet<String>,
     count: u64,
 }
 
-impl GitNames {
+impl Named {
     fn add(&mut self, path: String) {
         self.count += 1;
         self.first.insert(path);
@@ -198,7 +213,11 @@ struct WalkState {
     warnings: Vec<Warning>,
     /// What the save leaves out because Git treats its name as `.git`: from the folder, and from
     /// the base save.
-    git_names: GitNames,
+    git_names: Named,
+    /// Folders that hold a repository or project of their own (decision 046), for the warning.
+    nested: Named,
+    /// Those the walk goes into for the base save's entries, and the folders kept inside them.
+    nested_held: HashSet<String>,
     /// The paths of those the base save holds in the folders noted, named already.
     saved_git_names: HashSet<String>,
     /// The base save's listing of each folder the walk has noted, by project path, or `None`
@@ -220,13 +239,15 @@ struct WalkState {
 }
 
 impl WalkState {
-    /// The state for a walk of `root` on `drive`, beginning with its own ignore files. `top` is
-    /// the base save's top listing, and `dropped` the names Git treats as `.git` it held.
+    /// The state for a walk of `root` on `drive`, beginning with its own ignore files and Git's
+    /// personal lists, the user's own `own_list` among them. `top` is the base save's top listing,
+    /// and `dropped` the names Git treats as `.git` it held.
     fn new(
         root: &Path,
         drive: Drive,
         top: Listing,
         dropped: Vec<String>,
+        own_list: Option<&Path>,
     ) -> Result<WalkState, SaveError> {
         let mut rules = WalkState {
             root: root.to_owned(),
@@ -234,7 +255,9 @@ impl WalkState {
             read: 0,
             problem: None,
             warnings: Vec::new(),
-            git_names: GitNames::default(),
+            git_names: Named::default(),
+            nested: Named::default(),
+            nested_held: HashSet::new(),
             saved_git_names: HashSet::new(),
             old: HashMap::new(),
             held: HashSet::new(),
@@ -247,7 +270,7 @@ impl WalkState {
         rules.drop_saved("", dropped);
         rules.note_untouched("", &top);
         rules.old.insert(String::new(), Some(top));
-        rules.enter(root)?;
+        rules.enter(root, own_list)?;
         Ok(rules)
     }
 
@@ -320,13 +343,24 @@ impl WalkState {
     }
 
     /// Puts the rules of the ignore files in `dir` in force: its `.gitignore`, then its
-    /// `.boltignore`, whose lines come later so they can add to Git's rules or undo them.
-    fn enter(&mut self, dir: &Path) -> Result<(), SaveError> {
+    /// `.boltignore`, whose lines come later so they can add to Git's rules or undo them. At the
+    /// top, Git's personal lists come first, as in Git: the user's own `own_list`, then
+    /// `.git/info/exclude` (decision 047).
+    fn enter(&mut self, dir: &Path, own_list: Option<&Path>) -> Result<(), SaveError> {
         let folder = shown(dir.strip_prefix(&self.root).unwrap_or(dir));
         let mut in_force = self.matcher.in_force_bytes();
         let mut rules = Vec::new();
-        for name in [".gitignore", ".boltignore"] {
-            rules.extend(self.file_rules(dir, &folder, name, &mut in_force)?);
+        if let Some(list) = own_list {
+            rules.extend(self.own_list_rules(list, &mut in_force)?);
+        }
+        if folder.is_empty() {
+            let exclude = Path::new(".git").join("info").join("exclude");
+            let why = "Bolt reads nothing in .git through a link";
+            rules.extend(self.top_list_rules(&exclude, why, &mut in_force)?);
+        }
+        let gitignore_why = "Git skips a linked .gitignore too";
+        for (name, why) in [(".gitignore", Some(gitignore_why)), (".boltignore", None)] {
+            rules.extend(self.file_rules(&dir.join(name), &folder, why, &mut in_force)?);
         }
         if !rules.is_empty() {
             self.matcher.enter(&folder, rules);
@@ -334,46 +368,120 @@ impl WalkState {
         Ok(())
     }
 
-    /// The rules of the ignore file `name` in `dir`, the project's `folder`, or none if there
-    /// isn't one. Read through `safe_fs` and held to the limits (storage-format.md §12) before a
-    /// rule is read from it: `in_force` is the size of the files in force at `folder` so far. A
-    /// `.gitignore` that isn't a regular file is skipped with a warning, as Git skips a linked
-    /// one. A folder Bolt may not look into is `Unreadable`.
-    fn file_rules(
+    /// The rules of the user's own Git ignore list `file`, or none if it isn't there. It is the
+    /// user's own, so a link to it is followed, unless it is in the project, where a link could
+    /// lead anywhere: there it is read as a `.gitignore` is (decision 060). Any other problem
+    /// stops the save, as for a `.gitignore`.
+    fn own_list_rules(
         &mut self,
-        dir: &Path,
-        folder: &str,
-        name: &str,
+        file: &Path,
         in_force: &mut u64,
     ) -> Result<Option<Rules>, SaveError> {
-        let file = dir.join(name);
-        let rel = shown(file.strip_prefix(&self.root).unwrap_or(&file));
-        let ignore = |detail| SaveError::Ignore { detail };
-        let bytes = match safe_fs::read_capped(&file, safe_fs::MAX_IGNORE_FILE_BYTES) {
+        // shortcut: only a path spelled from the project's top counts as in it, not one with `..`,
+        // in other letter case or through a link of the user's own; compare resolved paths if
+        // settings like that turn up.
+        if let Ok(rel) = file.strip_prefix(&self.root)
+            && !rel.as_os_str().is_empty()
+            && rel.components().all(|c| matches!(c, Component::Normal(_)))
+        {
+            let why = "It is your own Git ignore list (core.excludesFile), which Bolt reads in the \
+                       project without following a link";
+            return self.top_list_rules(rel, why, in_force);
+        }
+        let shown = file.display().to_string();
+        match safe_fs::read_capped_following_links(file, safe_fs::MAX_IGNORE_FILE_BYTES) {
+            Ok(bytes) => self.counted(&bytes, &shown, "", true, in_force).map(Some),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => {
+                let why = e.to_string();
+                let detail = if why.starts_with(&shown) {
+                    why
+                } else {
+                    format!("{shown}: {why}")
+                };
+                Err(SaveError::Ignore { detail })
+            }
+        }
+    }
+
+    /// The rules of a Git list at the project path `rel`, which apply from the top folder, read as
+    /// a `.gitignore` is: no link on the way to it is followed. A folder on the way that is a link
+    /// is skipped with a warning that says `why`; one that isn't there, or isn't a folder (a
+    /// worktree's `.git` is a file), means there is no list, as in Git.
+    fn top_list_rules(
+        &mut self,
+        rel: &Path,
+        why: &str,
+        in_force: &mut u64,
+    ) -> Result<Option<Rules>, SaveError> {
+        let mut dir = self.root.clone();
+        for name in rel.parent().unwrap_or(Path::new("")) {
+            dir.push(name);
+            let folder = shown(dir.strip_prefix(&self.root).unwrap_or(&dir));
+            let meta = match fs::symlink_metadata(&dir) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(source) => {
+                    let path = folder_of(&folder);
+                    return Err(SaveError::Unreadable { path, source });
+                }
+            };
+            if safe_fs::is_link(&meta) {
+                self.warnings.push(Warning::new(
+                    warning::GITIGNORE_SKIPPED,
+                    format!(
+                        "Bolt skipped {}: {folder} is a link, not a real folder, so its rules \
+                         weren't used. {why}. Make {folder} a real folder if they should apply.",
+                        escape(&shown(rel), false),
+                        folder = escape(&folder, false)
+                    ),
+                ));
+                return Ok(None);
+            }
+            if !meta.is_dir() {
+                return Ok(None);
+            }
+        }
+        let file = self.root.join(rel);
+        self.file_rules(&file, "", Some(why), in_force)
+    }
+
+    /// The rules of the ignore file `file`, for the project's `folder`, or none if there isn't
+    /// one. Read through `safe_fs`. One of Git's lists (`why` says why one is skipped) that isn't
+    /// a regular file is skipped with a warning, as Git skips a linked `.gitignore`; for a
+    /// `.boltignore` (`why` is `None`) that stops the save. A folder Bolt may not look into is
+    /// `Unreadable`.
+    fn file_rules(
+        &mut self,
+        file: &Path,
+        folder: &str,
+        why: Option<&str>,
+        in_force: &mut u64,
+    ) -> Result<Option<Rules>, SaveError> {
+        let rel = shown(file.strip_prefix(&self.root).unwrap_or(file));
+        let bytes = match safe_fs::read_capped(file, safe_fs::MAX_IGNORE_FILE_BYTES) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                let meta = match fs::symlink_metadata(&file) {
+                let meta = match fs::symlink_metadata(file) {
                     Ok(meta) => Some(meta),
                     Err(source) if source.kind() == io::ErrorKind::NotFound => None,
                     Err(source) => {
-                        let path = if folder.is_empty() {
-                            "the project folder".to_owned()
-                        } else {
-                            folder.to_owned()
-                        };
+                        let path = folder_of(&rel);
                         return Err(SaveError::Unreadable { path, source });
                     }
                 };
                 // Judged by what the file is: an open can fail for other reasons with the same
                 // error kind, and a regular .gitignore that can't be read must stop the save.
-                if name == ".gitignore" && meta.is_some_and(|m| !safe_fs::is_regular(&m)) {
+                if let Some(why) = why
+                    && meta.is_some_and(|m| !safe_fs::is_regular(&m))
+                {
                     self.warnings.push(Warning::new(
                         warning::GITIGNORE_SKIPPED,
                         format!(
                             "Bolt skipped {}: it is a link, folder or special file, not a regular \
-                             file, so its rules weren't used. Git skips a linked .gitignore too. \
-                             Make it a regular file if its rules should apply.",
+                             file, so its rules weren't used. {why}. Make it a regular file if its \
+                             rules should apply.",
                             escape(&rel, false)
                         ),
                     ));
@@ -381,15 +489,31 @@ impl WalkState {
                 }
                 // `safe_fs` refusals start with the full path; the project path replaces it, so
                 // the file is named once.
-                let why = e.to_string();
-                return Err(ignore(
-                    match why.strip_prefix(&file.display().to_string()) {
+                let said = e.to_string();
+                return Err(SaveError::Ignore {
+                    detail: match said.strip_prefix(&file.display().to_string()) {
                         Some(rest) => format!("{rel}{rest}"),
-                        None => format!("{rel}: {why}"),
+                        None => format!("{rel}: {said}"),
                     },
-                ));
+                });
             }
         };
+        self.counted(&bytes, &rel, folder, why.is_some(), in_force)
+            .map(Some)
+    }
+
+    /// The rules in `bytes`, an ignore file shown as `rel`, for the project's `folder`, held to
+    /// the limits (storage-format.md §12) before a rule is read from it: `in_force` is the size
+    /// of the files in force at `folder` so far. `gits` says whether they are Git's rules.
+    fn counted(
+        &mut self,
+        bytes: &[u8],
+        rel: &str,
+        folder: &str,
+        gits: bool,
+        in_force: &mut u64,
+    ) -> Result<Rules, SaveError> {
+        let ignore = |detail| SaveError::Ignore { detail };
         let size = bytes.len() as u64;
         if *in_force + size > safe_fs::MAX_IGNORE_IN_FORCE_BYTES {
             return Err(ignore(format!(
@@ -406,7 +530,7 @@ impl WalkState {
         }
         *in_force += size;
         self.read += size;
-        Ok(Some(Rules::parse(&bytes, folder, name == ".gitignore")))
+        Ok(Rules::parse(bytes, folder, gits))
     }
 
     /// Whether the walk keeps `path`: never what it leaves untouched, and what the ignore rules
@@ -447,7 +571,17 @@ impl WalkState {
             }
             return false;
         }
-        if is_dir && let Err(problem) = self.enter(path) {
+        // After the rules, so an ignored one stays out without a word.
+        if is_dir && holds_own_repository(path) {
+            let kept_rel = shown(rel);
+            self.nested.add(kept_rel.clone());
+            let kept = self.saved_before(&folder, rel, is_dir);
+            if kept {
+                self.nested_held.insert(kept_rel);
+            }
+            return kept;
+        }
+        if is_dir && let Err(problem) = self.enter(path, None) {
             self.problem.get_or_insert(problem);
             return false;
         }
@@ -474,9 +608,14 @@ impl WalkState {
             .and_then(|name| name.to_str())
             .and_then(|name| listing.as_ref()?.get(name))
             .is_some_and(|e| (e.kind == EntryKind::Folder) == is_dir);
+        // Inside a repository of its own no rule is matched, so none is blamed for what it keeps.
+        let nested = self.nested_held.contains(folder);
         if saved && is_dir {
             self.held.insert(shown(rel));
-        } else if saved {
+            if nested {
+                self.nested_held.insert(shown(rel));
+            }
+        } else if saved && !nested {
             self.ignored.insert(shown(rel));
         }
         saved
@@ -506,17 +645,18 @@ pub(super) struct Scan {
 }
 
 /// Scans the project folder on a thread of its own, so callers don't need a deep stack. `drive`
-/// is what `drive::probe` found there.
+/// is what `drive::probe` found there, and `own_list` the user's own Git ignore list, if any.
 pub(super) fn walk(
     root: &Path,
     base: Base,
     limits: SaveLimits,
     drive: Drive,
+    own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
     thread::scope(|scope| {
         let scan = thread::Builder::new()
             .stack_size(WALK_STACK_BYTES)
-            .spawn_scoped(scope, || scan_folder(root, base, limits, drive))
+            .spawn_scoped(scope, || scan_folder(root, base, limits, drive, own_list))
             .map_err(|e| SaveError::Repo(e.into()))?;
         scan.join().unwrap_or_else(|_| {
             let stopped = io::Error::other("the scan of the project folder stopped unexpectedly");
@@ -530,6 +670,7 @@ fn scan_folder(
     mut base: Base,
     mut limits: SaveLimits,
     drive: Drive,
+    own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
@@ -538,7 +679,9 @@ fn scan_folder(
     let (top, dropped) = base.listing(base.root)?;
     // Bolt reads each ignore file itself: `ignore` would reopen it by path, following links and
     // reading without a limit.
-    let rules = Arc::new(Mutex::new(WalkState::new(root, drive, top, dropped)?));
+    let rules = Arc::new(Mutex::new(WalkState::new(
+        root, drive, top, dropped, own_list,
+    )?));
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -667,6 +810,10 @@ fn scan_folder(
         let left_out = git_names_left_out(&rules.git_names);
         rules.warnings.push(left_out);
     }
+    if rules.nested.count > 0 {
+        let left_out = nested_projects_left_out(&rules.nested);
+        rules.warnings.push(left_out);
+    }
     Ok(Scan {
         folders,
         old: std::mem::take(&mut rules.old),
@@ -678,7 +825,7 @@ fn scan_folder(
 }
 
 /// Says the save left out entries whose names Git treats as `.git`, naming the first few.
-fn git_names_left_out(names: &GitNames) -> Warning {
+fn git_names_left_out(names: &Named) -> Warning {
     let count = names.count;
     let (what, next) = if count == 1 {
         (
@@ -701,6 +848,29 @@ fn git_names_left_out(names: &GitNames) -> Warning {
         listed(first, count)
     );
     Warning::new(warning::GIT_NAMES_LEFT_OUT, message)
+}
+
+/// Says saves take nothing new from folders that hold a repository or project of their own,
+/// naming the first few (decision 046).
+fn nested_projects_left_out(named: &Named) -> Warning {
+    let listed = listed(&named.first, named.count);
+    let message = if named.count == 1 {
+        format!(
+            "1 folder holds a Git repository or Bolt project of its own, so saves take nothing new \
+             from it:{listed}\nGit and Jujutsu leave such folders out too. To save its files, \
+             remove its .git or .bolt; to leave it out without this warning, list it in \
+             .boltignore."
+        )
+    } else {
+        format!(
+            "{} folders hold a Git repository or Bolt project of their own, so saves take nothing \
+             new from them:{listed}\nGit and Jujutsu leave such folders out too. To save a \
+             folder's files, remove its .git or .bolt; to leave it out without this warning, list \
+             it in .boltignore.",
+            named.count
+        )
+    };
+    Warning::new(warning::NESTED_PROJECTS_LEFT_OUT, message)
 }
 
 /// A folder gone from disk, back with only what is kept as it was below it.
@@ -747,7 +917,7 @@ fn rebuild_gone(
     top: &str,
     id: Id,
     taken: bool,
-    git_names: &mut GitNames,
+    git_names: &mut Named,
 ) -> Result<Option<Gone>, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let depth = top.split('/').count();
@@ -906,8 +1076,8 @@ mod tests {
     use crate::repo::Repository;
     use crate::snapshot::SaveOutcome;
     use crate::snapshot::tests::{
-        damage_the_only_copy_of, newest, project, save_now, saved_root, saved_tree, this_drive,
-        walk_project, write,
+        damage_the_only_copy_of, newest, project, save_now, save_with, saved_root, saved_tree,
+        this_drive, walk_project, write,
     };
     use crate::test_support::{add_link, add_listing, plant_root, plant_save};
 
@@ -920,7 +1090,6 @@ mod tests {
         write(root, "keep.txt", b"x");
         write(root, "Library/x", b"x");
         write(root, ".git/config", b"x");
-        write(root, "sub/.git/config", b"x");
         write(root, "sub/.boltignore", b"local.txt\n");
         write(root, "sub/local.txt", b"x");
         write(root, "local.txt", b"x");
@@ -1094,12 +1263,15 @@ mod tests {
         write(root, "sub/.Git/HEAD", b"x");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
-        assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
-        // Where the drive ignores letter case they are Git's folder, skipped without a word like
-        // `.git`; elsewhere they are what Windows and macOS would take for it.
+        // Where the drive ignores letter case they are Git's folder: the top one is skipped
+        // without a word like `.git`, and `sub` holds a repository of its own (decision 046).
+        // Elsewhere they are what Windows and macOS would take for it.
         if this_drive().ignores_case {
-            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert_eq!(warnings[0].kind, "nested_projects_left_out");
         } else {
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert_eq!(warnings[0].kind, "git_names_left_out");
             let listed = ":\n  .GIT\n  sub/.Git\nGit keeps";
@@ -1113,17 +1285,18 @@ mod tests {
         let root = dir.path();
         // First, so that on Windows no other name's 8.3 short name can take it.
         write(root, "git~1/hooks/post-checkout", b"#!/bin/sh\n");
-        // A `.git` file, and spellings with characters macOS's HFS+ ignores, any system can hold.
-        write(root, "sub/.git", b"gitdir: /elsewhere\n");
+        // Below the top too, and spellings with characters macOS's HFS+ ignores, which any system
+        // can hold. A real `.git` makes its folder a repository of its own (decision 046).
+        write(root, "sub/git~1", b"gitdir: /elsewhere\n");
         write(root, "sub/notes.txt", b"mine");
         write(root, ".g\u{200c}it/config", b"[core]\n");
         write(root, "a/.git\u{feff}/config", b"[core]\n");
         // An ignored one stays out without a word.
-        write(root, ".gitignore", b"/b/.git\n");
-        write(root, "b/.git", b"gitdir: /elsewhere\n");
+        write(root, ".gitignore", b"/b/git~1\n");
+        write(root, "b/git~1", b"gitdir: /elsewhere\n");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
-        // The rest of a nested repository is saved as before.
+        // The rest of the folder is saved.
         assert_eq!(
             saved_paths(&repo, saved),
             [".gitignore", "a", "b", "sub", "sub/notes.txt"]
@@ -1134,7 +1307,7 @@ mod tests {
         assert_eq!(
             warnings[0].message,
             "Left out 4 entries whose names Git treats as .git, with everything in them:\n  \
-             .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/.git\nGit keeps such names for \
+             .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nGit keeps such names for \
              itself (some spellings only on Windows or macOS), so Bolt leaves them out of saves, \
              as it does on import. If Git uses them (a submodule's or worktree's .git file), list \
              them in .boltignore to leave them out without this warning; otherwise rename them to \
@@ -1153,12 +1326,17 @@ mod tests {
     fn the_names_left_out_are_counted_past_the_first_few() {
         let (dir, mut repo) = project();
         for i in (1..=7).rev() {
-            write(dir.path(), &format!("sub{i}/.git"), b"gitdir: /elsewhere\n");
+            write(
+                dir.path(),
+                &format!("sub{i}/git~1"),
+                b"gitdir: /elsewhere\n",
+            );
         }
         let saved = save_now(&mut repo).unwrap();
         let message = &warnings_of(&saved)[0].message;
         let listed = "Left out 7 entries whose names Git treats as .git, with everything in them:\n  \
-                      sub1/.git\n  sub2/.git\n  sub3/.git\n  sub4/.git\n  sub5/.git\n  and 2 more\n";
+                      sub1/git~1\n  sub2/git~1\n  sub3/git~1\n  sub4/git~1\n  sub5/git~1\n  and 2 \
+                      more\n";
         assert!(message.starts_with(listed), "{message}");
     }
 
@@ -1176,12 +1354,14 @@ mod tests {
             ],
         );
         write(root, "keep.txt", b"x");
-        // Still in the folder too, and named once.
+        // Still in the folder too, and named once; it also makes `sub` a repository of its own,
+        // which keeps what the last save holds there (decision 046).
         write(root, "sub/.git", b"gitdir: /elsewhere\n");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
         assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
         let listed = "Left out 2 entries whose names Git treats as .git, with everything in them:\n  \
                       .GIT\n  sub/.git\nGit keeps";
         assert!(warnings[0].message.starts_with(listed), "{warnings:?}");
@@ -1207,23 +1387,26 @@ mod tests {
         write(root, "lib/a.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
-        // None is kept, and the gone folder doesn't come back for one.
+        // None is kept, and the gone folder doesn't come back for one. `lib` holds a repository
+        // of its own, so it keeps what the last save holds there (decision 046).
         assert_eq!(
             saved_paths(&repo, saved),
             [".gitignore", "lib", "lib/a.txt"]
         );
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
         let listed = ":\n  git~1\n  gone/.g\\u{200c}it\n  lib/.git\nGit keeps";
         assert!(warnings[0].message.contains(listed), "{warnings:?}");
-        // Gone from the save, so the next one says nothing.
+        // Gone from the save, so the next one names none; `lib` still holds its `.git`.
         let again = save_now(&mut repo).unwrap();
-        assert!(warnings_of(&again).is_empty(), "{again:?}");
+        let kinds: Vec<&str> = warnings_of(&again).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["nested_projects_left_out"]);
     }
 
     #[test]
     fn the_names_left_out_are_shown_escaped() {
         use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
-        let mut names = GitNames::default();
+        let mut names = Named::default();
         names.add(format!("{HOSTILE}/.g\u{200c}it"));
         let message = git_names_left_out(&names).message;
         assert_hostile_text_escaped(&message);
@@ -1234,7 +1417,7 @@ mod tests {
     fn one_name_left_out_is_said_in_the_singular() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, "sub/.git", b"gitdir: /elsewhere\n");
+        write(root, "sub/git~1", b"gitdir: /elsewhere\n");
         write(root, "sub/notes.txt", b"mine");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
@@ -1243,12 +1426,271 @@ mod tests {
         assert_eq!(warnings[0].kind, "git_names_left_out");
         assert_eq!(
             warnings[0].message,
-            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/.git\n\
+            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/git~1\n\
              Git keeps such names for itself (some spellings only on Windows or macOS), so Bolt \
              leaves them out of saves, as it does on import. If Git uses it (a submodule's or \
              worktree's .git file), list it in .boltignore to leave it out without this warning; \
              otherwise rename it to save it."
         );
+    }
+
+    /// A worktree, a clone and a Bolt project inside the project keep their own history, so a save
+    /// takes nothing from them, and says so each time (decision 046).
+    #[test]
+    fn folders_that_hold_a_repository_of_their_own_are_left_out() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, "wt/.git", b"gitdir: /elsewhere\n");
+        write(root, "wt/src/main.rs", b"fn main() {}\n");
+        write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
+        write(root, "clone/readme.md", b"x");
+        write(root, "game/.bolt/format", b"bolt-repository 1\n");
+        write(root, "game/level.bin", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "nested_projects_left_out");
+        assert_eq!(
+            warnings[0].message,
+            "3 folders hold a Git repository or Bolt project of their own, so saves take nothing \
+             new from them:\n  clone\n  game\n  wt\nGit and Jujutsu leave such folders out too. To \
+             save a folder's files, remove its .git or .bolt; to leave it out without this \
+             warning, list it in .boltignore."
+        );
+        let again = save_now(&mut repo).unwrap();
+        assert!(
+            matches!(again, SaveOutcome::NothingChanged { .. }),
+            "{again:?}"
+        );
+        assert_eq!(warnings_of(&again), warnings);
+    }
+
+    /// What is saved stays saved, as in an ignored folder: a change to it is taken, a new file
+    /// isn't, and no ignore rule is blamed (decisions 038 and 046).
+    #[test]
+    fn a_folder_that_becomes_a_repository_keeps_what_was_saved() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        plant_save(&mut repo, &[("lib/a.txt", EntryKind::File, b"old")]);
+        write(root, "lib/a.txt", b"new");
+        write(root, "lib/b.txt", b"x");
+        write(root, "lib/.git/HEAD", b"ref: refs/heads/main\n");
+        let saved = save_now(&mut repo).unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["nested_projects_left_out"]);
+        assert_eq!(
+            warnings_of(&saved)[0].message,
+            "1 folder holds a Git repository or Bolt project of its own, so saves take nothing new \
+             from it:\n  lib\nGit and Jujutsu leave such folders out too. To save its files, \
+             remove its .git or .bolt; to leave it out without this warning, list it in \
+             .boltignore."
+        );
+        let tree = saved_tree(repo.store(), saved_root(saved));
+        assert_eq!(tree.keys().collect::<Vec<_>>(), ["lib", "lib/a.txt"]);
+        assert_eq!(tree["lib/a.txt"].1, b"new");
+    }
+
+    #[test]
+    fn an_ignored_folder_that_holds_a_repository_stays_out_without_a_word() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".gitignore", b"/wt/\n");
+        write(root, "wt/.git", b"gitdir: /elsewhere\n");
+        write(root, "wt/x.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
+    }
+
+    /// The user's own list, then `.git/info/exclude`, then the project's own rules, as in Git: the
+    /// last line that matches decides (decision 047).
+    #[test]
+    fn gits_personal_lists_keep_files_out_behind_the_projects_rules() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let own = tempfile::tempdir().unwrap();
+        let list = own.path().join("ignore");
+        fs::write(&list, "*.log\n!b.log\n.claude/settings.local.json\n").unwrap();
+        write(
+            root,
+            ".git/info/exclude",
+            b"b.log\n/.worktrees/\n!keep.txt\n",
+        );
+        write(root, ".gitignore", b"keep.txt\n!c.log\n");
+        let files = [
+            "a.log",
+            "b.log",
+            "c.log",
+            "keep.txt",
+            ".claude/settings.local.json",
+            ".worktrees/a/x.txt",
+            "plain.txt",
+        ];
+        for path in files {
+            write(root, path, b"x");
+        }
+        let saved = save_with(&mut repo, Some(&list)).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".claude", ".gitignore", "c.log", "plain.txt"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_info_exclude_is_skipped_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("exclude"), "a.txt\n").unwrap();
+        fs::create_dir_all(root.join(".git/info")).unwrap();
+        let link = root.join(".git/info/exclude");
+        std::os::unix::fs::symlink(elsewhere.path().join("exclude"), link).unwrap();
+        write(root, "a.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["gitignore_skipped"]);
+        assert_eq!(saved_paths(&repo, saved), ["a.txt"]);
+    }
+
+    #[test]
+    fn an_own_list_bolt_cant_read_stops_the_save() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"x");
+        let own = tempfile::tempdir().unwrap();
+        let list = own.path().join("ignore");
+        fs::write(&list, comment_of(safe_fs::MAX_IGNORE_FILE_BYTES + 1)).unwrap();
+        let err = save_with(&mut repo, Some(&list)).unwrap_err();
+        assert!(matches!(err, SaveError::Ignore { .. }), "{err}");
+        assert!(err.to_string().contains("ignore"), "{err}");
+        // One that isn't there is none.
+        let gone = own.path().join("none");
+        assert!(save_with(&mut repo, Some(&gone)).is_ok());
+    }
+
+    /// A link to the folder `target`: a junction on Windows, which needs no privilege.
+    fn link_folder(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(link, target);
+    }
+
+    /// Bolt reads nothing in `.git` through a link, so a linked `.git` or `.git/info` is skipped
+    /// with a warning that names it; a worktree's `.git` file means no list (decision 060).
+    #[test]
+    fn a_linked_git_or_info_folder_is_skipped_with_a_warning() {
+        for (linked, kinds) in [
+            (".git", &["gitignore_skipped", "git_names_left_out"][..]),
+            (".git/info", &["gitignore_skipped"]),
+            ("a .git file", &["git_names_left_out"]),
+        ] {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            let elsewhere = tempfile::tempdir().unwrap();
+            write(elsewhere.path(), "info/exclude", b"a.txt\n");
+            match linked {
+                ".git" => link_folder(&root.join(".git"), elsewhere.path()),
+                ".git/info" => {
+                    let info = root.join(".git").join("info");
+                    fs::create_dir(root.join(".git")).unwrap();
+                    link_folder(&info, &elsewhere.path().join("info"));
+                }
+                _ => write(root, ".git", b"gitdir: /elsewhere\n"),
+            }
+            write(root, "a.txt", b"x");
+            let saved = save_now(&mut repo).unwrap();
+            let warnings = warnings_of(&saved).to_vec();
+            let said: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+            assert_eq!(said, kinds, "{linked}: {warnings:?}");
+            if said[0] == "gitignore_skipped" {
+                let named = format!("{linked} is a link");
+                assert!(warnings[0].message.contains(&named), "{warnings:?}");
+            }
+            assert_eq!(saved_paths(&repo, saved), ["a.txt"], "{linked}");
+        }
+    }
+
+    /// Any other problem looking at `.git/info` stops the save, as for a `.gitignore`.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_folder_bolt_may_not_look_into_stops_the_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".git/info/exclude", b"a.txt\n");
+        write(root, "a.txt", b"x");
+        let git = root.join(".git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads everything, so there is nothing to test.
+        let root_user = fs::read_dir(&git).is_ok();
+        let saved = save_now(&mut repo);
+        // Back to normal first, so that the temporary folder can be removed whatever happens.
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            return;
+        }
+        match saved {
+            Err(SaveError::Unreadable { path, .. }) => assert_eq!(path, ".git"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    /// The user's own list, named inside the project, is read there as a `.gitignore` is.
+    #[test]
+    fn an_own_list_inside_the_project_is_read_there() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "a.txt", b"x");
+        write(root, "lists/mine", b"a.txt\n");
+        let saved = save_with(&mut repo, Some(&root.join("lists").join("mine"))).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(saved_paths(&repo, saved), ["lists", "lists/mine"]);
+    }
+
+    /// A project could hold a link where the user's settings name their list, to make Bolt read
+    /// a file outside it, so there a link isn't followed (decision 060).
+    #[test]
+    fn a_linked_own_list_inside_the_project_is_skipped_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join("list");
+        fs::write(&outside, "a.txt\n").unwrap();
+        write(root, "a.txt", b"x");
+        if !crate::test_support::symlink(&outside, &root.join("mine")) {
+            return;
+        }
+        let saved = save_with(&mut repo, Some(&root.join("mine"))).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "gitignore_skipped");
+        assert!(
+            warnings[0].message.contains("skipped mine:"),
+            "{warnings:?}"
+        );
+        // Its rules don't apply, and the link itself is saved as a link.
+        assert_eq!(saved_paths(&repo, saved), ["a.txt", "mine"]);
+    }
+
+    #[test]
+    fn an_own_list_inside_a_linked_folder_is_skipped_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("mine"), "a.txt\n").unwrap();
+        write(root, "a.txt", b"x");
+        link_folder(&root.join("lists"), elsewhere.path());
+        let saved = save_with(&mut repo, Some(&root.join("lists").join("mine"))).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "gitignore_skipped");
+        let named = "skipped lists/mine: lists is a link";
+        assert!(warnings[0].message.contains(named), "{warnings:?}");
+        assert_eq!(saved_paths(&repo, saved), ["a.txt", "lists"]);
     }
 
     #[test]
@@ -1334,7 +1776,8 @@ mod tests {
         );
         write(root, "a/.boltignore", b"#\n");
         write(root, "b/.boltignore", b"#\n");
-        let mut rules = WalkState::new(root, this_drive(), Listing::empty(), Vec::new()).unwrap();
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         assert!(!rules.keeps(&root.join("a"), true));
         // Past the first problem nothing is kept, and no other .boltignore is read.
         assert!(!rules.keeps(&root.join("b"), true));
@@ -1371,7 +1814,8 @@ mod tests {
         write(root, "a/.boltignore", b"!x.log\n");
         fs::create_dir(root.join("b")).unwrap();
         let mut base = newest(&repo);
-        let mut rules = WalkState::new(root, this_drive(), Listing::empty(), Vec::new()).unwrap();
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach. The walk
         // notes each folder it keeps before it looks inside.
         assert!(rules.keeps(&root.join("a"), true));
@@ -1388,7 +1832,8 @@ mod tests {
         let (dir, repo) = project();
         let root = dir.path();
         write(root, ".gitignore", b"*.dll\n");
-        let mut rules = WalkState::new(root, this_drive(), Listing::empty(), Vec::new()).unwrap();
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         // Bolt can't tell whether the last save holds `a/x.dll` without `a`'s listing, so it
         // stops rather than leave out what may be saved.
         assert!(!rules.keeps(&root.join("a").join("x.dll"), false));
@@ -2197,7 +2642,7 @@ mod tests {
                 limits: SaveLimits::new(levels, entries),
                 ..newest(&repo)
             };
-            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive()).unwrap();
+            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive(), None).unwrap();
             scan.folders[""].iter().any(|c| c.name == "a")
         };
         assert!(comes_back_within(4, 5));
@@ -2331,7 +2776,7 @@ mod tests {
         // `gone`, the two kept folders, and the three files they hold.
         let walk_under = |most| {
             let limits = SaveLimits::new(MAX_SAVE_DEPTH, most);
-            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND, None)
         };
         assert!(walk_under(6).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_under(5) else {
@@ -2353,7 +2798,7 @@ mod tests {
         // `Docs/a/b` is three levels down.
         let walk_within = |levels| {
             let limits = SaveLimits::new(levels, MAX_SAVE_ENTRIES);
-            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND, None)
         };
         assert!(walk_within(3).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_within(2) else {
@@ -2375,7 +2820,7 @@ mod tests {
         // None of it is on disk, and `gone/Docs/a` is three levels down.
         let walk_within = |levels| {
             let limits = SaveLimits::new(levels, MAX_SAVE_ENTRIES);
-            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND, None)
         };
         assert!(walk_within(3).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_within(2) else {
@@ -2502,7 +2947,7 @@ mod tests {
             ..newest(&repo)
         };
         let started = std::time::Instant::now();
-        let scan = walk(dir.path(), base, SaveLimits::default(), this_drive()).unwrap();
+        let scan = walk(dir.path(), base, SaveLimits::default(), this_drive(), None).unwrap();
         let took = started.elapsed();
         eprintln!("a tree bomb past the base's limits: walked in {took:?}");
         // Reading on would take thousands of reads of 5,000 entries.
@@ -2531,7 +2976,7 @@ mod tests {
         };
         let walk_under = |most| {
             let limits = SaveLimits::new(MAX_SAVE_DEPTH, most);
-            walk(dir.path(), newest(&repo), limits, drive)
+            walk(dir.path(), newest(&repo), limits, drive, None)
         };
         assert!(walk_under(6).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_under(5) else {
@@ -2630,7 +3075,7 @@ mod tests {
                 limits: SaveLimits::new(MAX_SAVE_DEPTH, paths),
                 ..newest(&repo)
             };
-            walk(dir.path(), base, SaveLimits::default(), this_drive())
+            walk(dir.path(), base, SaveLimits::default(), this_drive(), None)
         };
         assert!(walk_reading(PATHS).is_ok());
         let Err(err) = walk_reading(PATHS - 1) else {
@@ -2669,7 +3114,7 @@ mod tests {
         let refused = on_a_stack_of(64 * 1024, || {
             let limits = SaveLimits::new(299, MAX_SAVE_ENTRIES);
             matches!(
-                walk(dir.path(), base, limits, drive),
+                walk(dir.path(), base, limits, drive, None),
                 Err(SaveError::TooLarge { .. })
             )
         });

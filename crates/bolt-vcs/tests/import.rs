@@ -595,37 +595,32 @@ fn nested_bolt_folders_are_warned_about() {
     assert_eq!(json["changes"], serde_json::json!([]));
 }
 
-/// Bolt doesn't use Git's personal exclude list (decision 038), so the import says when it hides
-/// files; Git's own sample of one holds only comments.
+/// Bolt reads Git's personal exclude list (decision 047), so the first save keeps out what it
+/// hides, and the import has nothing to say about it.
 #[test]
-fn a_personal_exclude_list_with_patterns_is_warned_about() {
-    let import_with = |exclude: &str| {
-        let env = Env::new();
-        env.commit("a.txt", "a\n", "First");
-        let info = env.root().join(".git/info");
-        std::fs::create_dir_all(&info).unwrap();
-        std::fs::write(info.join("exclude"), exclude).unwrap();
-        let out = env.bolt().args(["--json", "import"]).output().unwrap();
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let warnings = json["warnings"].as_array().unwrap().clone();
-        warnings
-            .into_iter()
-            .find(|w| w["kind"] == "info_exclude_ignored")
-            .map(|w| w["message"].as_str().unwrap().to_owned())
-    };
-    // Read as Git reads it: a byte order mark is skipped, so the first line is a comment too.
-    let sample = "\u{feff}# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that \
-                  start with '#' are comments.\n\n   \n";
-    assert_eq!(import_with(sample), None);
-    // Git trims only spaces, so a tab is a pattern.
-    let message = import_with(&format!("{sample}secrets.env\r\n*.log\n\t\n")).unwrap();
-    assert_eq!(
-        message,
-        "Git's personal exclude list here, .git/info/exclude, has 3 patterns. Bolt doesn't use \
-         Git's personal exclude lists, so files they hide will be saved; copy the lines into \
-         .boltignore to keep those files out."
-    );
+fn the_first_save_keeps_out_what_gits_exclude_list_hides() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let info = env.root().join(".git/info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("exclude"), "secret.txt\n").unwrap();
+    std::fs::write(env.root().join("secret.txt"), "API_KEY=x\n").unwrap();
+    std::fs::write(env.root().join("notes.txt"), "mine\n").unwrap();
+    let out = env.bolt().args(["--json", "import"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["warnings"], serde_json::json!([]));
+    let out = env.bolt().args(["save", "Work"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = env.bolt().args(["--json", "show"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let paths: Vec<&str> = json["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["notes.txt"]);
 }
 
 #[test]

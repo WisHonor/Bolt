@@ -6,8 +6,8 @@ mod output;
 use std::process::ExitCode;
 
 use bolt_core::config::{
-    ConfigError, Identity, ignored_identity_note, ignored_project_identity, load_identity,
-    now_person,
+    ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
+    load_identity, now_person,
 };
 use bolt_core::diary::Position;
 use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
@@ -265,11 +265,13 @@ fn save(
     let who = now_person(&load_identity(Some(repo.root()))?);
     // A project's own settings never say who the user is; if they try, the user is told.
     let ignored = ignored_project_identity(repo.root());
+    let git_excludes = git_excludes_file(repo.root())?;
     let req = SaveRequest {
         message: &message,
         who: &who,
         command: "save",
         accept_crlf,
+        git_excludes: git_excludes.as_deref(),
     };
     let outcome = save_folder(repo, &req, &mut |_| {
         eprintln!("Waiting for another Bolt command to finish...");
