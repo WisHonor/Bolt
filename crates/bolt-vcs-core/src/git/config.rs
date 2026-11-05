@@ -1,7 +1,8 @@
 //! `.git/config`, read as Git reads it, keeping only what decides how to read the repository:
 //! `core.repositoryformatversion`, the `extensions.*` keys and `core.sparsecheckout` (decisions
 //! 031 and 039). Includes aren't followed, as Git's own format check doesn't follow them, but
-//! whether there are any is noted: they can set `core.sparsecheckout` (decision 043).
+//! whether there are any is noted: they can set `core.sparsecheckout` (decision 043). The user's
+//! own Git settings are read with the same parser, for their ignore list (decisions 047 and 060).
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use super::{GitError, HashKind, Refusal, broken, is_git_space};
@@ -38,6 +39,32 @@ pub(super) fn read_sparse(text: &[u8], file: &str) -> Result<(Option<bool>, bool
     })
     .map_err(|line| bad_line(file, line))?;
     Ok((sparse, includes))
+}
+
+/// A setting in the user's own Git settings that decides their ignore list (decisions 047 and
+/// 060).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UserSetting {
+    /// A `core.excludesfile`.
+    ExcludesFile(Vec<u8>),
+    /// A plain `[include]` path, whose file Git reads at this place.
+    Include(Vec<u8>),
+}
+
+/// The settings in `text`, the user's own Git settings, that decide their ignore list, in order,
+/// or the number of the first line Git couldn't read. A key with no value is refused, as Git
+/// refuses it for a path. `[includeIf]` paths aren't given: their conditions need a repository.
+pub(crate) fn read_user_settings(text: &[u8]) -> Result<Vec<UserSetting>, usize> {
+    let mut found = Vec::new();
+    parse(text, &mut |name, value| {
+        if name == b"core.excludesfile" {
+            found.push(UserSetting::ExcludesFile(value?.to_vec()));
+        } else if name == b"include.path" {
+            found.push(UserSetting::Include(value?.to_vec()));
+        }
+        Some(())
+    })?;
+    Ok(found)
 }
 
 /// Whether the setting `name` is in an `[include]` or `[includeIf]` section, where Git takes
@@ -840,5 +867,40 @@ mod tests {
             let (_, worktree) = read_sparse(text.as_bytes(), ".git/config.worktree").unwrap();
             assert_eq!(worktree, includes, "{text}");
         }
+    }
+
+    #[test]
+    fn the_users_settings_for_the_list_are_read_as_git_reads_them() {
+        use UserSetting::{ExcludesFile, Include};
+        let read = |text: &str| read_user_settings(text.as_bytes());
+        let excludes = |value: &[u8]| ExcludesFile(value.to_vec());
+        assert_eq!(
+            read("[core]\n\texcludesFile = ~/.gitignore_global\n"),
+            Ok(vec![excludes(b"~/.gitignore_global")])
+        );
+        // Every one, in order; letter case doesn't matter in the name, and a quoted value is
+        // unquoted as Git does it.
+        assert_eq!(
+            read("[core]\nexcludesfile = a\n[CORE]\nEXCLUDESFILE = \"C:\\\\x y\"\n"),
+            Ok(vec![excludes(b"a"), excludes(b"C:\\x y")])
+        );
+        assert_eq!(read("[user]\n\tname = x\n"), Ok(vec![]));
+        // Plain includes come where they stand; the others aren't Git's `include.path`.
+        assert_eq!(
+            read("[core]\nexcludesFile = a\n[Include]\n\tPath = ~/b\n[core]\nexcludesFile = c\n"),
+            Ok(vec![
+                excludes(b"a"),
+                Include(b"~/b".to_vec()),
+                excludes(b"c")
+            ])
+        );
+        assert_eq!(
+            read("[includeIf \"gitdir:~/\"]\n\tpath = x\n[include \"y\"]\n\tpath = z\n"),
+            Ok(vec![])
+        );
+        // A path needs a value, and a line Git can't read is refused.
+        assert_eq!(read("[core]\n\texcludesFile\n"), Err(2));
+        assert_eq!(read("[include]\n\tpath\n"), Err(2));
+        assert_eq!(read("[user]\nname = x\n[core\n"), Err(3));
     }
 }

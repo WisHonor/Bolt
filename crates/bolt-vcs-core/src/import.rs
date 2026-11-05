@@ -305,8 +305,6 @@ struct Plan {
     head_line: Option<String>,
     head_commit: GitId,
     grafts: bool,
-    /// The patterns in Git's personal exclude list; `None` if it couldn't be read to count them.
-    excludes: Option<u64>,
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
@@ -343,7 +341,6 @@ fn plan(root: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Plan,
     Ok(Plan {
         skipped_refs: skipped_refs.map(|name| lossy(name)).collect(),
         skipped_ref_count: refs.other.len() as u64,
-        excludes: git.exclude_patterns(),
         git,
         names,
         order,
@@ -374,7 +371,6 @@ fn carry_out(
         head_line,
         head_commit,
         grafts,
-        excludes,
     } = plan;
     let mut packs = repo.new_packs()?;
     let mut converter = Converter::new(&git, repo.store(), &mut packs, own_change_ids);
@@ -452,9 +448,6 @@ fn carry_out(
              sparse-checkout disable` before your first save, or that save will record them as \
              deleted (they stay in history and can be brought back).",
         ));
-    }
-    if excludes != Some(0) {
-        warnings.push(personal_excludes(excludes));
     }
     let mut report = ImportReport {
         commits: total,
@@ -812,24 +805,6 @@ fn duplicate_change_ids(count: u64) -> Warning {
         )
     };
     Warning::new(warning::DUPLICATE_CHANGE_ID, message)
-}
-
-/// The warning for Git's personal exclude list, which holds `patterns` (`None`: it couldn't be
-/// read to count them). Bolt doesn't use it (decision 038), so the files it hides get saved.
-fn personal_excludes(patterns: Option<u64>) -> Warning {
-    let holds = match patterns {
-        Some(1) => "has 1 pattern".to_owned(),
-        Some(n) => format!("has {} patterns", thousands(n)),
-        None => "couldn't be read to count its patterns".to_owned(),
-    };
-    Warning::new(
-        warning::INFO_EXCLUDE_IGNORED,
-        format!(
-            "Git's personal exclude list here, .git/info/exclude, {holds}. Bolt doesn't use Git's \
-             personal exclude lists, so files they hide will be saved; copy the lines into \
-             .boltignore to keep those files out."
-        ),
-    )
 }
 
 /// The lines `refs` become: each name with the save of its commit.

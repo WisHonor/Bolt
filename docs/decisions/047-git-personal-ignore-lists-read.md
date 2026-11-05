@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning: a question milestone 2's final review left, and the owner's import check)
 - **Decided by:** Claude, at the owner's request ("do what you think is best", 2026-11-04). The owner can reverse any part.
 - **Partly supersedes:** [decision 038](038-gitignore-and-saved-files.md) ("Git's personal lists are not read")
+- **Refined by:** [decision 060](060-user-git-settings-includes-and-paths.md) (plain includes in the user's settings are followed; a list inside the project is read without following links)
 
 ## Context
 
