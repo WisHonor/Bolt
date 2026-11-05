@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 16
+- **Refined by:** [decision 056](056-question-before-large-saves.md) (a large save asks first from milestone 3)
 
 ## Context
 

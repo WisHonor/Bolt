@@ -1,6 +1,6 @@
 # Bolt Milestones
 
-> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). Items milestone 1's reviews deferred, and the ones milestone 2 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
+> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). Items milestone 1's reviews deferred, and the ones milestone 2 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
 
 ## v0.1: solo, local, games first
 
@@ -133,3 +133,54 @@ Each step ends with tests passing on Windows, macOS and Linux; the plan's task n
   - It would then have taken what Git's personal ignore lists hide, since Bolt doesn't read them (decision 038). `.git/info/exclude` hides 44 Git worktrees under `.worktrees/`: 468,000 files and 14 GB on disk, of which the project's `.gitignore` files keep out only part (about 190,000 files and 11 GB stay, by a rough count). The import warned about that list. The global `~/.config/git/ignore` hides `.claude/settings.local.json`, which was saved without a word, since nothing warns about that list.
   - With the exclude lines copied into `.boltignore`, as the warning says, the first save took exactly the 6 files Git showed as untracked, the new `.boltignore` and that settings file; all 1,925 imported files matched. Git's personal lists, and saving the contents of nested repositories and worktrees (decision 043), are the owner's questions in [the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).
 - **A project inside OneDrive** (Files On-Demand on). `start`, eleven saves in a row, `history` and `show` worked, and OneDrive never held a file Bolt needed. After "Free up space" on a file and then on `.bolt`, every command still worked. Windows hides OneDrive's placeholders from programs like Bolt, which run in its "disguise placeholders" mode, so Bolt sees ordinary files, and reading an online-only file downloads it first ([security.md](security.md) §7).
+
+## Milestone 3: Working folder
+
+Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md) (the owner decided 048; Claude decided the rest at the owner's request). Plan: [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets.
+
+**0. Folder handles** (Task 1)
+- Every read and write inside the project goes through a folder Bolt holds open, refusing a link at each name: `rustix` on macOS and Linux, Windows' own calls in the platform crate (decision 048).
+- *Done when:* the handle tests pass on all three systems, and the owner has reviewed the new `unsafe` code line by line.
+
+**1. Names and limits** (Task 2)
+- One module decides what may be written: `.git` and `.bolt` spellings everywhere, real short names, `\`, `:` and device names on Windows; names up to 765 bytes, paths up to 4,096 (decisions 051, 059).
+- *Done when:* each rule has a test, `COM0` and `LPT0` save and write on Windows, and the name fuzz target runs.
+
+**2. The walk through handles, and the owner check** (Tasks 3–4)
+- `save` walks and reads the folder through handles; link targets read on Windows are stored with `/` (decision 045); the owner check resolves the starting folder and refuses a `.bolt` that vanishes mid-check.
+- *Done when:* a folder swapped for a link mid-save is refused, not followed.
+
+**3. Packs** (Tasks 5–6)
+- Pack version 2's index is searched on disk, packs open only when needed, and small packs merge once there are many (decision 057).
+- *Done when:* a planted index costs reads, not memory; a merge stopped at any step loses nothing.
+
+**4. Caches and `status`** (Tasks 7–10)
+- A keyed file-state cache and change-ID cache; `bolt status`; `save` skips files the cache vouches for (decision 053).
+- *Done when:* a planted or edited cache is ignored, unchanged files aren't opened, and `status` on 100,000 unchanged files is measured.
+
+**5. Writing files** (Tasks 11–13)
+- The journal, the write-out (one file at a time, links last, never onto a name the system misreads), and finishing an interrupted switch (decisions 049 to 052).
+- *Done when:* a switch stopped at any write is finished by the next command, with every file wholly old or new.
+
+**6. `goto`, `discard` and lines** (Tasks 14–16)
+- `goto` with safety copies and collisions, `discard`, saving away from a line, `bolt line` (decisions 050, 055).
+- *Done when:* going to a line and back restores every file byte for byte.
+
+**7. Saves** (Tasks 17–18)
+- Partial saves, and the question before a large save (decisions 054, 056).
+- *Done when:* each case of the decisions has a test.
+
+**8. `changes`** (Task 19)
+- Line-by-line differences with `similar` (decision 058).
+- *Done when:* binary, huge and slow files show without lines, and every line is escaped.
+
+**9. Proof** (Tasks 20–21)
+- Hostile saves written out, including the write-out cases of Git's published vulnerabilities; random edits, saves and switches checked against a model.
+- *Done when:* both pass on all three systems.
+
+**10. Follow-ups and docs** (Task 22)
+- *Done when:* the follow-ups list and the docs match the code.
+
+**11. Red team, review and merge** (Tasks 23–24)
+- A red-team session from the sandbox (decision 024), a whole-branch review, the owner's review of the new `unsafe` code, then a pull request whose checks all pass.
+- *Done when:* every proven finding is fixed or ruled on, and the owner has reviewed the `unsafe` code.
