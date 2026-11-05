@@ -2,11 +2,36 @@
 //!
 //! The only crate where `unsafe` is allowed, and only for these calls.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::path::Path;
 
 pub mod dir;
+
+/// A name for what Bolt makes before it has its place: `tmp-` and 16 random lowercase hexadecimal
+/// digits, with no extension, so nothing runs a file by it. It is the one form of the names Bolt
+/// gives what it makes in `.bolt/tmp`. Nobody can guess the digits: `RandomState`'s keys come
+/// from the system's random number generator.
+pub fn temp_name() -> OsString {
+    let random = RandomState::new().hash_one(());
+    OsString::from(format!("tmp-{random:016x}"))
+}
+
+/// An ending a temporary name may also have: `-e` and a separate accent, which a drive may not
+/// tell from `-é`. Bolt adds it to a temporary file's name to see how a drive compares names.
+pub const ACCENTED_SUFFIX: &str = "-e\u{301}";
+
+/// Whether `name` is in `temp_name`'s form, with or without `ACCENTED_SUFFIX` after it.
+pub fn is_temp_name(name: &OsStr) -> bool {
+    name.to_str()
+        .and_then(|n| n.strip_prefix("tmp-"))
+        .map(|rest| rest.strip_suffix(ACCENTED_SUFFIX).unwrap_or(rest))
+        .is_some_and(|hex| {
+            hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
 
 /// Makes `options` never follow a link at the end of the path, so callers can refuse it. Unix:
 /// opening a link fails (`O_NOFOLLOW`); opening a pipe doesn't wait for a writer (`O_NONBLOCK`).
@@ -489,5 +514,33 @@ mod tests {
         assert!(is_hidden(&dot).unwrap());
         assert!(hide_path(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn temp_names_are_random_and_known_again() {
+        let (one, other) = (temp_name(), temp_name());
+        assert_ne!(one, other);
+        for name in [&one, &other] {
+            assert!(is_temp_name(name), "{name:?}");
+            // 16 lowercase hexadecimal digits and no extension, so nothing runs a file by it.
+            let hex = name.to_str().unwrap().strip_prefix("tmp-").unwrap();
+            let lowercase_hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+            assert!(
+                hex.len() == 16 && hex.bytes().all(lowercase_hex),
+                "{name:?}"
+            );
+        }
+        let mut accented = one.clone();
+        accented.push(ACCENTED_SUFFIX);
+        assert!(is_temp_name(&accented));
+        for not_ours in [
+            "tmp-0123456789ABCDEF",
+            "tmp-0123456789abcde",
+            "tmp-0123456789abcdef.txt",
+            "tmp-0123456789abcdef-\u{e9}",
+            "0123456789abcdef",
+        ] {
+            assert!(!is_temp_name(OsStr::new(not_ours)), "{not_ours}");
+        }
     }
 }

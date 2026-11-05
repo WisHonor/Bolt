@@ -1,40 +1,26 @@
 //! The single place every disk write goes through: temp files, atomic replacement, durable
 //! renames, and the fault points that crash tests use.
 
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+// One rule for temporary names, shared with the links the platform crate makes in `.bolt/tmp`.
+pub(crate) use bolt_platform::ACCENTED_SUFFIX;
+pub use bolt_platform::is_temp_name;
+
 use crate::safe_fs;
 
-/// Creates a new, empty file named `tmp-<16 random hex>` in `tmp_dir`.
+/// Creates a new, empty file in `tmp_dir`, named as `bolt_platform::temp_name` says: `tmp-` and 16
+/// random lowercase hex digits.
 pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
-    let mut random = [0u8; 8];
-    getrandom::fill(&mut random).map_err(io::Error::other)?;
-    let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    let path = tmp_dir.join(format!("tmp-{name}"));
+    let path = tmp_dir.join(bolt_platform::temp_name());
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)?;
     Ok((file, path))
-}
-
-/// What `drive::probe` adds to a temp name: `-e` and a separate accent, which a drive may not tell
-/// from `-é`.
-pub(crate) const ACCENTED_SUFFIX: &str = "-e\u{301}";
-
-/// Whether `name` is one Bolt makes: `tmp-` and 16 lowercase hex digits, as `create_temp` names a
-/// file, and then `ACCENTED_SUFFIX` as well when `drive::probe` has renamed it.
-pub fn is_temp_name(name: &OsStr) -> bool {
-    name.to_str()
-        .and_then(|n| n.strip_prefix("tmp-"))
-        .map(|rest| rest.strip_suffix(ACCENTED_SUFFIX).unwrap_or(rest))
-        .is_some_and(|hex| {
-            hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
 }
 
 /// Replaces `dest` with `bytes` so that, even after a crash, it holds either the old or the
@@ -197,6 +183,7 @@ pub mod fault {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn write_atomic_replaces_the_file_whole() {

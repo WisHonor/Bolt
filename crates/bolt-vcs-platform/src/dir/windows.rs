@@ -4,7 +4,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::mem::offset_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -236,9 +235,10 @@ pub(super) fn symlink(
     }
     // Windows makes links only by path, and a folder moved meanwhile would put the link wherever
     // its old path now leads. So the link is made in `scratch`, under a name nobody chose, and
-    // moved to `name` by handle only once `scratch` shows it is this link. A crash meanwhile
-    // leaves it in `scratch`, among names its owner clears.
-    let temp = temp_name();
+    // moved to `name` by handle only once `scratch` shows it is this link. If Bolt stops before
+    // the move, or can't open or remove the link again below, it stays in `scratch`, never at
+    // `name`.
+    let temp = crate::temp_name();
     let mut path = final_path(scratch.as_handle())?;
     if path.last() != Some(&BACKSLASH) {
         path.push(BACKSLASH);
@@ -269,6 +269,7 @@ pub(super) fn symlink(
     let (link, what) = match open_entry(scratch, &temp, DELETE) {
         Ok(found) => found,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(elsewhere()),
+        // Not opened, so it can't be removed by handle either: it stays in `scratch`.
         Err(e) => return Err(e),
     };
     if what.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
@@ -714,15 +715,6 @@ fn final_path(dir: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
     ))
 }
 
-/// A name for a link until it is checked: random, so nobody can choose or guess it; with no
-/// extension, so nothing runs a file by it; and in `.bolt/tmp`'s form (`tmp-` and 16 lowercase
-/// hexadecimal digits, `fsio::is_temp_name`), so what a crash leaves there is cleared.
-fn temp_name() -> OsString {
-    // RandomState's keys come from Windows' random number generator.
-    let random = RandomState::new().hash_one(());
-    OsString::from(format!("tmp-{random:016x}"))
-}
-
 /// `units` with a NUL after them, for Windows; a NUL among them is refused.
 fn with_nul(units: &[u16]) -> io::Result<Vec<u16>> {
     if units.contains(&0) {
@@ -1088,19 +1080,5 @@ mod tests {
         assert!(listing_done(true, &error(ERROR_FILE_NOT_FOUND)));
         assert!(!listing_done(false, &error(ERROR_FILE_NOT_FOUND)));
         assert!(!listing_done(true, &error(ERROR_INVALID_PARAMETER)));
-    }
-
-    /// A link's first name is random, has no extension, and is one `.bolt/tmp` clears on start
-    /// (`fsio::is_temp_name`): `tmp-` and 16 lowercase hexadecimal digits.
-    #[test]
-    fn a_link_is_first_made_under_a_name_nobody_chose() {
-        let (one, other) = (temp_name(), temp_name());
-        assert_ne!(one, other);
-        for name in [one, other] {
-            let name = name.into_string().unwrap();
-            let hex = name.strip_prefix("tmp-").unwrap();
-            let lowercase_hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
-            assert!(hex.len() == 16 && hex.bytes().all(lowercase_hex), "{name}");
-        }
     }
 }

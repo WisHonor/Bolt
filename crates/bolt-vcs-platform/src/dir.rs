@@ -133,10 +133,12 @@ impl Dir {
     /// Makes `name` a link to `target`, unless something already has that name. Windows needs to
     /// know whether it is a folder link (`to_dir`), and Developer Mode or an administrator to make
     /// one at all: without them the system's error comes back. Windows makes links only by path,
-    /// so there the link is made in `scratch` (`.bolt/tmp`, on the same drive) under a random
-    /// `tmp-` name, and moved to `name` once `scratch` shows it holds `target`; an absolute target
-    /// must therefore be written as Windows stores it (`C:\x`, no `.`, `..` or `/`). Unix makes
-    /// the link at `name` directly and leaves `scratch` alone.
+    /// so there the link is made in `scratch` (`.bolt/tmp`, on the same drive) under a name from
+    /// `crate::temp_name`, and moved to `name` once `scratch` shows it holds `target`; an absolute
+    /// target must therefore be written as Windows stores it (`C:\x`, no `.`, `..` or `/`). If
+    /// Bolt stops before the move, or the link can't be opened or removed again, it stays in
+    /// `scratch`, never at `name`. Unix makes the link at `name` directly and leaves `scratch`
+    /// alone.
     pub fn symlink(
         &self,
         name: &OsStr,
@@ -705,8 +707,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(stray.len(), 1, "{stray:?}");
-        let hex = stray[0].strip_prefix("tmp-").unwrap();
-        assert!(hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert!(crate::is_temp_name(OsStr::new(&stray[0])), "{stray:?}");
     }
 
     /// As on Unix, an entry's own read-only flag doesn't stop Bolt removing or replacing it.

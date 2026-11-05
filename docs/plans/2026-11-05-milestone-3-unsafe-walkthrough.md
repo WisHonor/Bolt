@@ -51,6 +51,8 @@ the promises hold.
   `Plain` trait, block 4).
 - Buffers are zeroed before Windows writes into them, and the length passed with a buffer is never
   more than its real length (`len32`).
+- Every `unsafe` block carries a `// SAFETY:` comment, and the compiler checks it: the crate sets
+  Clippy's `undocumented_unsafe_blocks` lint to `deny`, so a block without one doesn't build.
 
 ## Where the plan changed, for the owner to rule on
 
@@ -99,9 +101,15 @@ the promises hold.
    Windows does only by path (block 10), so a folder moved at that moment would send the link
    wherever its old path now leads. With the link made under a meaningless name in `.bolt/tmp`,
    a lost race leaves only a stray link nobody would run, never one at a name the save chose; and
-   a crash before the move leaves it in `.bolt/tmp`, which Bolt clears on start, not in the
-   user's folder. macOS and Linux make the link at its name directly and ignore `scratch`. Block
+   a crash before the move leaves it in `.bolt/tmp`, never in the user's folder. It stays there
+   for now: Bolt's start-up cleanup of `.bolt/tmp` removes only regular files today, and learns to
+   remove such links (through `Dir::remove_file`) with Task 3, which opens `.bolt`'s fixed folders
+   through `Dir`. macOS and Linux make the link at its name directly and ignore `scratch`. Block
    10 has the steps.
+9. **One rule for temporary names** (from the reviews). `tmp-` and 16 random lowercase hexadecimal
+   digits, and the accented ending the engine's drive probe adds, are now defined once, in
+   `bolt_platform::temp_name`, `bolt_platform::is_temp_name` and `bolt_platform::ACCENTED_SUFFIX`.
+   The engine's `fsio::create_temp` and `fsio::is_temp_name` use them, and so does `symlink`.
 
 ## The blocks
 
@@ -499,9 +507,9 @@ steps. Its caller passes two held folders: the one the link belongs in, and a sc
 
 1. Through the held folder, check that nothing has the name yet.
 2. Ask where the scratch folder is now (block 9), and make the link there, by that path, under a
-   name nobody chose: `tmp-` and 16 random lowercase hexadecimal digits. That is the form of
-   `.bolt/tmp`'s own names (`fsio::is_temp_name`), which Bolt clears on start, and it has no
-   extension, so nothing runs it by its name.
+   name nobody chose, from `bolt_platform::temp_name`: `tmp-` and 16 random lowercase hexadecimal
+   digits, the form of every name Bolt gives what it makes in `.bolt/tmp`. It has no extension, so
+   nothing runs it by its name.
 3. Open that random name through the scratch folder's handle, and check that it is a symlink and
    that its target (read by block 11, called as block 12) is exactly the one asked for.
 4. Only then move that very link, through its own handle, into the held folder under the name asked
@@ -509,9 +517,16 @@ steps. Its caller passes two held folders: the one the link belongs in, and a sc
    folders must be on the same drive, as `.bolt/tmp` and the project are.
 
 If step 3 or 4 fails after finding a symlink under the random name, that symlink is removed again
-(removing a link never touches what it points to), and the error comes back. If Bolt stops between
-steps 2 and 4 (a crash, a power cut), the link stays in `.bolt/tmp` under its `tmp-` name, and the
-next start clears it; nothing appears in the user's folder.
+(removing a link never touches what it points to), and the error comes back. In three cases the
+link stays in `.bolt/tmp` under its `tmp-` name, never in the user's folder:
+
+- Bolt stops between steps 2 and 4 (a crash, a power cut).
+- Step 3 can't open it for another reason than "not found" (say, a virus scanner holds it).
+- Removing it again fails.
+
+It stays there for now. Bolt's start-up cleanup of `.bolt/tmp` removes only regular files today;
+it learns to remove such links, through `Dir::remove_file`, with Task 3, which opens `.bolt`'s
+fixed folders through `Dir`.
 
 The arguments: `path` is the scratch folder's path, `\` and the random name, then a NUL. `target`
 is what the link points to, then a NUL; a target that holds a NUL is refused before the call.
@@ -530,9 +545,9 @@ path (block 9) and this call making the link. Someone who renames the scratch fo
 above it) in that moment, and puts a junction at its old path, makes Windows put the link wherever
 the junction points. Step 3 then doesn't find it in the scratch folder, so nothing is moved, and
 Bolt reports the error. What is left is one stray link with a meaningless name and the save's
-target, never a link at a name the save chose (`.git\hooks\pre-commit`, say). The random name is
-from Rust's `RandomState`, whose keys come from Windows' random number generator, so it can't be
-guessed in advance. Decision 048 records that links on Windows are made by path. Only someone who
+target, never a link at a name the save chose (`.git\hooks\pre-commit`, say). The random digits
+come from Rust's `RandomState`, whose keys come from the system's random number generator, so the
+name can't be guessed in advance. Decision 048 records that links on Windows are made by path. Only someone who
 can rename folders inside the project can try this, and the owner checks (decisions 025 and 026)
 keep Bolt out of projects other accounts own. A test runs exactly this race.
 
@@ -590,7 +605,9 @@ specifying FILE_FLAG_OVERLAPPED, lpOverlapped is ignored. If hDevice was opened 
 FILE_FLAG_OVERLAPPED flag, the operation is performed as an overlapped (asynchronous) operation."
 On such a handle, a null `OVERLAPPED` could let Windows write into `area` after this function had
 returned and freed it. Making the function `unsafe` means a future caller can't pass a handle
-without writing `unsafe` and a reason, so no overlapped handle slips in unnoticed.
+without writing `unsafe` and a reason: the compiler refuses the call outside an `unsafe` block, and
+Clippy's `undocumented_unsafe_blocks` lint, set to `deny` in this crate, refuses a block without a
+`// SAFETY:` comment. So no overlapped handle slips in unnoticed.
 
 **Why it is sound.** `FSCTL_GET_REPARSE_POINT` takes no input (null and 0, as Microsoft's page
 shows). `area` is 16 KiB (`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`, the most a link's data can be),
@@ -646,14 +663,10 @@ Microsoft: [reparse point tags][reparse_point_tags]; [IsReparseTagNameSurrogate]
 
 Where the tests ran:
 
-- **CI run 41982908337, on commit 2afb50c:** Windows, macOS and Linux all green, so everything
-  below passed on macOS and Linux, and on Windows everything that doesn't make symlinks. That run
-  can't show whether the Windows tests which make symlinks ran. Until the change after it, a test
-  that Windows refused to let make a link printed a reason and passed, and CI doesn't show what
-  tests print.
-- **From that change on**, those tests fail instead of skipping wherever the `CI` environment
-  variable is set, as GitHub sets it. So the next CI run proves whether they run on Windows; the
-  controller checks it. They are marked *(makes symlinks on Windows)* below.
+- **CI run 41985581123, on commit ef05ef7:** Windows, macOS and Linux all green. On Windows the
+  three tests marked *(makes symlinks on Windows)* below ran and passed. Under CI they fail on
+  error 1314 ("a required privilege is not held") instead of skipping, so "ok" there means they
+  made links.
 - **This machine (Windows 11, no Developer Mode):** everything below. The parts that make symlinks
   print a reason and skip, and with `CI` set here they fail, as they should.
 
