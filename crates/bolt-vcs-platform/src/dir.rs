@@ -132,7 +132,9 @@ impl Dir {
 
     /// Makes `name` a link to `target`, unless something already has that name. Windows needs to
     /// know whether it is a folder link (`to_dir`), and Developer Mode or an administrator to make
-    /// one at all: without them the system's error comes back.
+    /// one at all: without them the system's error comes back. There the link is made under a
+    /// random name and moved to `name` once this folder shows it holds `target`, so an absolute
+    /// target must be written as Windows stores it (`C:\x`, no `.`, `..` or `/`).
     pub fn symlink(&self, name: &OsStr, target: &OsStr, to_dir: bool) -> io::Result<()> {
         one_name(name)?;
         sys::symlink(&self.handle, name, target, to_dir)
@@ -645,5 +647,84 @@ mod tests {
         let e = d.symlink(n("fl"), n("real"), false).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
         assert_eq!(d.read_link(n("fl")).unwrap(), "real\\x");
+        // Nothing is left under the names the links were first made with.
+        let mut names: Vec<_> = d.entries().unwrap().into_iter().map(|e| e.name).collect();
+        names.sort();
+        assert_eq!(names, ["abs", "dl", "fl", "real"]);
+    }
+
+    /// Windows makes a link by its folder's path. A folder swapped for a junction at that moment
+    /// must not get the link at the name asked for, there or where the junction points.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_raced_out_of_its_folder_lands_under_no_chosen_name() {
+        let (tmp, d) = held();
+        let elsewhere = tempfile::tempdir().unwrap();
+        d.create_dir(n("a")).unwrap();
+        let a = d.open_dir(n("a")).unwrap();
+        let (top, outside) = (tmp.path().to_owned(), elsewhere.path().to_owned());
+        windows::BEFORE_LINK.set(Some(Box::new(move || {
+            fs::rename(top.join("a"), top.join("old")).unwrap();
+            folder_link(&top.join("a"), &outside);
+        })));
+        match a.symlink(n("pre-commit"), n("target"), false) {
+            Err(e) if e.raw_os_error() == Some(1314) => {
+                println!("Skipped: this account can't make links ({e}).");
+                return;
+            }
+            made => assert!(made.is_err(), "the link was placed: {made:?}"),
+        }
+        assert_eq!(fs::read_dir(tmp.path().join("old")).unwrap().count(), 0);
+        let stray: Vec<_> = fs::read_dir(elsewhere.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(stray.len(), 1, "{stray:?}");
+        assert!(stray[0].starts_with("bolt-link-"), "{stray:?}");
+    }
+
+    /// As on Unix, a file's own read-only flag doesn't stop Bolt removing or replacing it.
+    #[test]
+    fn a_read_only_file_can_be_removed_or_replaced() {
+        let (tmp, d) = held();
+        let read_only = |name: &str| {
+            let path = tmp.path().join(name);
+            fs::write(&path, name).unwrap();
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&path, permissions).unwrap();
+        };
+        read_only("removed");
+        d.remove_file(n("removed")).unwrap();
+        assert!(gone(&tmp.path().join("removed")));
+        read_only("replaced");
+        fs::write(tmp.path().join("new"), "new").unwrap();
+        d.rename_into(n("new"), &d, n("replaced")).unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("replaced")).unwrap(),
+            "new"
+        );
+    }
+
+    /// Making a file, folder or link at a name that holds a link fails, even when the link points
+    /// nowhere, and nothing appears where it points.
+    #[test]
+    fn nothing_is_made_through_a_dangling_link() {
+        let (tmp, d) = held();
+        let missing = tmp.path().join("missing");
+        fs::create_dir(&missing).unwrap();
+        folder_link(&tmp.path().join("link"), &missing);
+        fs::remove_dir(&missing).unwrap();
+        let target = d.read_link(n("link")).unwrap();
+        for e in [
+            d.create_new(n("link"), false).map(drop).unwrap_err(),
+            d.create_dir(n("link")).unwrap_err(),
+            d.symlink(n("link"), n("elsewhere"), false).unwrap_err(),
+        ] {
+            assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
+        }
+        assert!(gone(&missing));
+        assert_eq!(d.metadata(n("link")).unwrap().kind, EntryType::Symlink);
+        assert_eq!(d.read_link(n("link")).unwrap(), target);
     }
 }

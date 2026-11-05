@@ -83,8 +83,12 @@ pub(super) fn open_file(dir: &OwnedFd, name: &OsStr) -> io::Result<File> {
 pub(super) fn create_new(dir: &OwnedFd, name: &OsStr, executable: bool) -> io::Result<File> {
     let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let fd = rustix::fs::openat(dir, name, flags, mode(executable))?;
-    // The umask may have taken bits away.
-    rustix::fs::fchmod(&fd, mode(executable))?;
+    // The umask may have taken bits away. A drive that can't hold modes (FAT, say) refuses: the
+    // new, empty file goes again, so trying once more doesn't find it in the way.
+    if let Err(e) = rustix::fs::fchmod(&fd, mode(executable)) {
+        let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
+        return Err(e.into());
+    }
     Ok(File::from(fd))
 }
 

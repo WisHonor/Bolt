@@ -4,6 +4,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::mem::offset_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -15,8 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
-    FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+    FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
     FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
     FileRenameInformationEx, NtCreateFile, NtSetInformationFile, REPARSE_DATA_BUFFER,
     REPARSE_DATA_BUFFER_0_0, REPARSE_DATA_BUFFER_0_1, SYMLINK_FLAG_RELATIVE,
@@ -30,16 +31,16 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateSymbolicLinkW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
-    FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
-    FileIdBothDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE,
-    SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo,
+    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+    SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -115,11 +116,12 @@ pub(super) fn entries(dir: &OwnedHandle) -> io::Result<Vec<DirEntry>> {
         };
         if ok == 0 {
             let e = io::Error::last_os_error();
-            // FILE_NOT_FOUND: a folder with no entries at all, not even `.` (a FAT drive's top).
-            let end = [ERROR_NO_MORE_FILES, ERROR_FILE_NOT_FOUND]
-                .iter()
-                .any(|&code| e.raw_os_error() == Some(code as i32));
-            return if end { Ok(entries) } else { Err(e) };
+            let first = class == FileIdBothDirectoryRestartInfo;
+            return if listing_done(first, &e) {
+                Ok(entries)
+            } else {
+                Err(e)
+            };
         }
         read_listing(area, &mut entries)?;
         class = FileIdBothDirectoryInfo;
@@ -146,13 +148,9 @@ pub(super) fn open_file(dir: &OwnedHandle, name: &OsStr) -> io::Result<File> {
 
 pub(super) fn create_new(dir: &OwnedHandle, name: &OsStr, _executable: bool) -> io::Result<File> {
     let access = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
-    let handle = nt_open(
-        dir.as_handle(),
-        name,
-        access,
-        FILE_CREATE,
-        FILE_NON_DIRECTORY_FILE,
-    )?;
+    // FILE_CREATE makes a file and never opens what is there. No FILE_NON_DIRECTORY_FILE: with
+    // it, a folder or junction at the name gives "access denied" instead of "already exists".
+    let handle = nt_open(dir.as_handle(), name, access, FILE_CREATE, 0)?;
     Ok(File::from(handle))
 }
 
@@ -179,15 +177,20 @@ pub(super) fn rename_into(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let mut rename = RenameInfo::new(to.as_raw_handle(), to_name)?;
-    match set_rename(source.as_handle(), &rename, FileRenameInformationEx) {
-        // Drives without POSIX renames (FAT, say): a plain rename, still replacing.
-        Err(e) if unsupported(&e) => {
-            rename.flags = FILE_RENAME_REPLACE_IF_EXISTS;
-            set_rename(source.as_handle(), &rename, FileRenameInformation)
+    // A read-only file at the new name is replaced too, as on Unix. Windows before 10 (1809)
+    // refuses that flag; drives without POSIX renames (FAT, say) refuse both, and get the plain
+    // rename, still replacing.
+    let (source, to) = (source.as_handle(), to.as_raw_handle());
+    let replace = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
+    for flags in [replace | FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, replace] {
+        let rename = RenameInfo::new(to, to_name, flags)?;
+        match set_rename(source, &rename, FileRenameInformationEx) {
+            Err(e) if unsupported(&e) => {}
+            result => return result,
         }
-        result => result,
     }
+    let plain = RenameInfo::new(to, to_name, FILE_RENAME_REPLACE_IF_EXISTS)?;
+    set_rename(source, &plain, FileRenameInformation)
 }
 
 pub(super) fn create_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
@@ -224,49 +227,85 @@ pub(super) fn symlink(
     target: &OsStr,
     to_dir: bool,
 ) -> io::Result<()> {
-    // Windows makes links only by path: the folder's path as it is now, then a check through the
-    // held folder that the link is in it.
-    let mut link = final_path(dir.as_handle())?;
-    if link.last() != Some(&BACKSLASH) {
-        link.push(BACKSLASH);
+    // Nothing may have the name: checked now, and again when the link is moved there.
+    match nt_open(dir.as_handle(), name, FILE_READ_ATTRIBUTES, FILE_OPEN, 0) {
+        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
-    link.extend(name.encode_wide());
-    link.push(0);
-    let target = with_nul(target)?;
+    // Windows makes links only by path, and a folder moved meanwhile would put the link wherever
+    // its old path now leads. So the link is made under a name nobody chose, and moved to `name`
+    // through the held folder only once the held folder shows it is this link.
+    let temp = temp_name();
+    let mut path = final_path(dir.as_handle())?;
+    if path.last() != Some(&BACKSLASH) {
+        path.push(BACKSLASH);
+    }
+    path.extend(temp.encode_wide());
+    path.push(0);
+    let wanted: Vec<u16> = target.encode_wide().collect();
+    let target = with_nul(&wanted)?;
     let mut flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
     if to_dir {
         flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
     }
-    // SAFETY: `link` and `target` are NUL-terminated UTF-16 strings that live through the call;
+    #[cfg(test)]
+    if let Some(race) = BEFORE_LINK.with_borrow_mut(Option::take) {
+        race();
+    }
+    // SAFETY: `path` and `target` are NUL-terminated UTF-16 strings that live through the call;
     // CreateSymbolicLinkW only reads them and keeps no pointer to them.
-    if !unsafe { CreateSymbolicLinkW(link.as_ptr(), target.as_ptr(), flags) } {
+    if !unsafe { CreateSymbolicLinkW(path.as_ptr(), target.as_ptr(), flags) } {
         return Err(io::Error::last_os_error());
     }
     let elsewhere = || {
-        io::Error::other("the link was made outside the folder Bolt holds, which moved meanwhile")
+        io::Error::other(
+            "the link isn't in the folder Bolt holds: the folder moved, or something replaced the \
+             link, while it was made",
+        )
     };
-    match open_entry(dir, name, 0) {
-        Ok((_, what))
-            if what.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                && what.ReparseTag == IO_REPARSE_TAG_SYMLINK =>
-        {
-            Ok(())
-        }
-        Ok(_) => Err(elsewhere()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(elsewhere()),
-        Err(e) => Err(e),
+    let (link, what) = match open_entry(dir, &temp, DELETE) {
+        Ok(found) => found,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(elsewhere()),
+        Err(e) => return Err(e),
+    };
+    if what.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        || what.ReparseTag != IO_REPARSE_TAG_SYMLINK
+    {
+        return Err(elsewhere());
     }
+    // Flags 0: the move fails if something took the name meanwhile.
+    let placed = (|| {
+        if target_of(link.as_handle())? != wanted {
+            return Err(io::Error::other(
+                "the link Windows made doesn't hold the target asked for",
+            ));
+        }
+        let rename = RenameInfo::new(dir.as_raw_handle(), name, 0)?;
+        set_rename(link.as_handle(), &rename, FileRenameInformation)
+    })();
+    // A link left under a name nobody chose would only puzzle; removing it can't touch its target.
+    if placed.is_err() {
+        let _ = delete(link.as_handle());
+    }
+    placed
 }
 
 pub(super) fn read_link(dir: &OwnedHandle, name: &OsStr) -> io::Result<OsString> {
     let link = nt_open(dir.as_handle(), name, FILE_READ_ATTRIBUTES, FILE_OPEN, 0)?;
+    Ok(OsString::from_wide(&target_of(link.as_handle())?))
+}
+
+/// The target of the link `link` has open, as `link_target` shows it. `link` must be open for
+/// synchronous calls, as `nt_open` opens every handle.
+fn target_of(link: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
     let mut buffer = Vec::new();
     let area = aligned(&mut buffer, MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize)?;
     let mut filled = 0u32;
     // SAFETY: there is no input (null, 0 bytes). `area` is writable and Windows is told its
     // length, so it writes nothing past it, and `filled` is a valid place for the count it writes;
-    // it keeps no pointer to either. `link` is open for synchronous calls, so there is no
-    // OVERLAPPED (null).
+    // it keeps no pointer to either. `link` is open for the call, and both callers opened it with
+    // `nt_open`, for synchronous calls, so there is no OVERLAPPED (null).
     let ok = unsafe {
         DeviceIoControl(
             link.as_raw_handle(),
@@ -283,7 +322,7 @@ pub(super) fn read_link(dir: &OwnedHandle, name: &OsStr) -> io::Result<OsString>
         return Err(io::Error::last_os_error());
     }
     let data = area.get(..filled as usize).ok_or_else(unreadable)?;
-    Ok(OsString::from_wide(&link_target(data)?))
+    link_target(data)
 }
 
 pub(super) fn set_executable(
@@ -299,6 +338,13 @@ pub(super) fn sync(_dir: &OwnedHandle) -> io::Result<()> {
     // renames keep their order but can be lost on power failure, as with fsio::sync_dir; make
     // them durable when renames on Windows are.
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test runs between reading a folder's path and making a link in it, to race them.
+    pub(super) static BEFORE_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Whether this Windows takes OBJ_DONT_REPARSE; older ones refuse the flag.
@@ -544,18 +590,22 @@ fn set_info<T>(
 /// Deletes the open entry. Its name goes as soon as this handle closes, even while others still
 /// have it open (POSIX semantics).
 fn delete(handle: BorrowedHandle<'_>) -> io::Result<()> {
-    let posix = FILE_DISPOSITION_INFO_EX {
-        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    };
-    match set_info(handle, FileDispositionInfoEx, &posix) {
-        // Drives without POSIX deletes (FAT, say): the name goes once the last handle closes.
-        Err(e) if unsupported(&e) => set_info(
-            handle,
-            FileDispositionInfo,
-            &FILE_DISPOSITION_INFO { DeleteFile: true },
-        ),
-        result => result,
+    // A read-only file goes too, as on Unix. Windows before 10 (1809) refuses that flag; drives
+    // without POSIX deletes (FAT, say) refuse both, and get the plain delete, whose name goes once
+    // the last handle closes.
+    let posix = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+    for flags in [
+        posix | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        posix,
+    ] {
+        let info = FILE_DISPOSITION_INFO_EX { Flags: flags };
+        match set_info(handle, FileDispositionInfoEx, &info) {
+            Err(e) if unsupported(&e) => {}
+            result => return result,
+        }
     }
+    let plain = FILE_DISPOSITION_INFO { DeleteFile: true };
+    set_info(handle, FileDispositionInfo, &plain)
 }
 
 /// FILE_RENAME_INFORMATION with room for a name of up to MAX_NAME units and a NUL.
@@ -578,11 +628,11 @@ const _: () = assert!(
 );
 
 impl RenameInfo {
-    /// Moving to `name` in the folder `root`, replacing a file there.
-    fn new(root: HANDLE, name: &OsStr) -> io::Result<RenameInfo> {
+    /// Moving to `name` in the folder `root`, as `flags` say.
+    fn new(root: HANDLE, name: &OsStr, flags: u32) -> io::Result<RenameInfo> {
         let wide: Vec<u16> = name.encode_wide().collect();
         let mut rename = RenameInfo {
-            flags: FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
+            flags,
             root,
             name_bytes: len32(wide.len() * 2),
             name: [0; MAX_NAME + 1],
@@ -653,17 +703,23 @@ fn final_path(dir: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
     ))
 }
 
-/// `s` with a NUL after it, for Windows; a NUL inside it is refused.
-fn with_nul(s: &OsStr) -> io::Result<Vec<u16>> {
-    let mut wide: Vec<u16> = s.encode_wide().collect();
-    if wide.contains(&0) {
+/// A name for a link until it is checked: random, so nobody can choose or guess it, and with no
+/// extension, so nothing runs a file by it.
+fn temp_name() -> OsString {
+    // RandomState's keys come from Windows' random number generator.
+    let random = RandomState::new().hash_one(());
+    OsString::from(format!("bolt-link-{random:016x}"))
+}
+
+/// `units` with a NUL after them, for Windows; a NUL among them is refused.
+fn with_nul(units: &[u16]) -> io::Result<Vec<u16>> {
+    if units.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "a link's target can't hold a NUL",
         ));
     }
-    wide.push(0);
-    Ok(wide)
+    Ok(units.iter().copied().chain([0]).collect())
 }
 
 /// The target in the reparse data of a symlink or junction. An absolute target is stored as an NT
@@ -702,6 +758,14 @@ fn link_target(data: &[u8]) -> io::Result<Vec<u16>> {
         _ => (&[BACKSLASH, BACKSLASH, QUESTION, BACKSLASH], rest),
     };
     Ok(start.iter().chain(rest).copied().collect())
+}
+
+/// Whether a listing call that failed with `e` means the listing is whole: no more entries, or, on
+/// the first call only, none at all (a FAT drive's top folder has not even `.`). Later, "not
+/// found" would cut the listing short, and the entries left out would look deleted.
+fn listing_done(first: bool, e: &io::Error) -> bool {
+    let code = e.raw_os_error();
+    code == Some(ERROR_NO_MORE_FILES as i32) || (first && code == Some(ERROR_FILE_NOT_FOUND as i32))
 }
 
 /// Adds the entries in `area`, one batch of FILE_ID_BOTH_DIR_INFO records. Every offset and length
@@ -996,10 +1060,33 @@ mod tests {
     #[test]
     fn a_name_longer_than_windows_holds_is_refused() {
         let root = null_mut();
-        assert!(RenameInfo::new(root, OsStr::new(&"x".repeat(MAX_NAME))).is_ok());
-        let e = RenameInfo::new(root, OsStr::new(&"x".repeat(MAX_NAME + 1)))
+        assert!(RenameInfo::new(root, OsStr::new(&"x".repeat(MAX_NAME)), 0).is_ok());
+        let e = RenameInfo::new(root, OsStr::new(&"x".repeat(MAX_NAME + 1)), 0)
             .err()
             .unwrap();
         assert_eq!(e.kind(), io::ErrorKind::InvalidFilename);
+    }
+
+    /// "File not found" may end only the first call: later, it would cut a listing short.
+    #[test]
+    fn only_the_first_listing_call_may_find_nothing() {
+        let error = |code: u32| io::Error::from_raw_os_error(code as i32);
+        assert!(listing_done(true, &error(ERROR_NO_MORE_FILES)));
+        assert!(listing_done(false, &error(ERROR_NO_MORE_FILES)));
+        assert!(listing_done(true, &error(ERROR_FILE_NOT_FOUND)));
+        assert!(!listing_done(false, &error(ERROR_FILE_NOT_FOUND)));
+        assert!(!listing_done(true, &error(ERROR_INVALID_PARAMETER)));
+    }
+
+    #[test]
+    fn a_link_is_first_made_under_a_name_nobody_chose() {
+        let (one, other) = (temp_name(), temp_name());
+        assert_ne!(one, other);
+        for name in [one, other] {
+            let name = name.into_string().unwrap();
+            assert!(name.starts_with("bolt-link-"), "{name}");
+            // No extension, so nothing runs it by its name.
+            assert!(!name.contains('.'), "{name}");
+        }
     }
 }

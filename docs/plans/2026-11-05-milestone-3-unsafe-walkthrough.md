@@ -48,7 +48,7 @@ the promises hold.
   offset and length against the buffer. No pointer is cast to a structure. A bad offset gives an
   error, never a read outside the buffer, and tests feed the readers bad data on purpose.
 - Every structure Windows fills is made of integers only, so any bytes make a valid value (the
-  `Plain` trait, block 3).
+  `Plain` trait, block 4).
 - Buffers are zeroed before Windows writes into them, and the length passed with a buffer is never
   more than its real length (`len32`).
 
@@ -73,27 +73,48 @@ the promises hold.
    number in one call. It is what the standard library's own `metadata()` uses on Windows. Its
    64-bit number also serves as the file ID on drives without 128-bit IDs (FAT, some network
    shares; Microsoft's `FILE_ID_INFO` page doesn't promise any desktop Windows supports it).
-3. **Fallbacks for drives without POSIX semantics** (FAT and exFAT USB drives). When Windows answers
-   "not supported", "invalid parameter" or "invalid function", a removal falls back to the plain
-   delete (as the standard library does) and a rename to the plain replacing rename.
+3. **Fallbacks for older Windows and for drives without POSIX semantics** (FAT and exFAT USB
+   drives). When Windows answers "not supported", "invalid parameter" or "invalid function", a
+   removal or a replacing rename is tried again without the read-only flag of item 6 (Windows 10
+   before version 1809 doesn't know it), and then as the plain call (as the standard library does
+   for removal).
 4. **Names are matched ignoring case** (`OBJ_CASE_INSENSITIVE`), as every other Windows program sees
    them: `CreateFileW` sets this flag itself.
 5. **`:` is refused in a name on Windows** (`a:b` names a stream inside the file `a`, not an entry),
    and NUL on every system.
-6. **Read-only files are not forced. This one is a question.** With the plan's flags exactly,
-   removing or replacing a file that has the read-only attribute fails with "access denied" on
-   Windows (Microsoft: "STATUS_CANNOT_DELETE indicates that either the file is read-only…"). The
-   standard library and Git for Windows do remove read-only files. On macOS and Linux a file's own
-   permissions never stop its removal or replacement. Adding
-   `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE` and `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE`
-   would make Windows behave the same: one flag each.
+6. **Read-only files are removed and replaced, as on Unix** (ruled during review). Unless told
+   otherwise, Windows refuses to remove or replace a file that has the read-only attribute
+   (Microsoft: "STATUS_CANNOT_DELETE indicates that either the file is read-only…"), while on macOS
+   and Linux a file's own permissions never stop that. Removal passes
+   `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE`, and the replacing rename
+   `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE` (0x40, the NT name of the
+   `FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE` the review named), as Git for Windows and the
+   standard library's `remove_dir_all` do.
 7. **`sync` does nothing on Windows**, as `fsio::sync_dir` already doesn't. Windows flushes only
    handles opened for writing, and a held folder isn't one.
+8. **A link is made under a random name, checked, and only then moved to its name** (from the
+   review). Making a link is the one step Windows does only by path (block 10), so a folder moved
+   at that moment would send the link wherever its old path now leads, under the name the save
+   chose. Now a lost race leaves only a stray link with a meaningless name, never one at a name the
+   save chose. Block 10 has the steps.
 
 ## The blocks
 
 Each block below gives the code exactly as it is, what each argument means, why it is sound, and
 Microsoft's pages for the function and its flags.
+
+| Block | Function in `dir/windows.rs` | What it calls |
+|---|---|---|
+| 1, 2 | `create_file` | `NtCreateFile`, then `OwnedHandle::from_raw_handle` |
+| 3 | `nt_error` | `RtlNtStatusToDosError` |
+| 4 | `info`, with the `Plain` trait | `GetFileInformationByHandleEx` |
+| 5 | `entries` | `GetFileInformationByHandleEx`, to list a folder |
+| 6 | `meta` | `GetFileInformationByHandle` |
+| 7 | `set_info`, used by `delete` | `SetFileInformationByHandle` |
+| 8 | `set_rename`, used by `rename_into` and `symlink` | `NtSetInformationFile` |
+| 9 | `final_path` | `GetFinalPathNameByHandleW` |
+| 10 | `symlink` | `CreateSymbolicLinkW` |
+| 11 | `target_of`, used by `read_link` and `symlink` | `DeviceIoControl` |
 
 ### Block 1 and 2: opening a name inside a held folder (`create_file`)
 
@@ -150,7 +171,7 @@ The arguments to `NtCreateFile`, in order:
 | `FILE_ATTRIBUTE_NORMAL` | Nothing special about a file made here. |
 | `SHARE_ALL` | Others may read, write, rename and delete the entry while Bolt has it open, as with any file the standard library opens. A held folder can still be renamed (the tests do), and a file being read can still be replaced. |
 | `disposition` | `FILE_OPEN` (it must exist) or `FILE_CREATE` (it must not exist: making never replaces anything, so it can't go through a link either). |
-| `options` | `FILE_DIRECTORY_FILE` or `FILE_NON_DIRECTORY_FILE` where the kind is already known, plus `FILE_OPEN_REPARSE_POINT` (a link, junction or other reparse point at the name opens as itself, not what it points to) and `FILE_SYNCHRONOUS_IO_NONALERT` (every later call on the handle waits for its result). |
+| `options` | `FILE_DIRECTORY_FILE` where it must be a folder (making one, or listing one), plus `FILE_OPEN_REPARSE_POINT` (a link, junction or other reparse point at the name opens as itself, not what it points to) and `FILE_SYNCHRONOUS_IO_NONALERT` (every later call on the handle waits for its result). A new file gets no `FILE_NON_DIRECTORY_FILE`: `FILE_CREATE` never opens what is there anyway, and with that flag a folder or junction at the name answers "access denied" instead of "already exists". |
 | `null(), 0` | No extended attributes. |
 
 **Why it is sound.**
@@ -271,7 +292,10 @@ let ok = unsafe {
 
 **In plain words:** "Windows, write as many entries of this folder as fit into this buffer." The
 first call uses `FileIdBothDirectoryRestartInfo` (start from the top); later calls use
-`FileIdBothDirectoryInfo` (go on) until Windows answers "no more files".
+`FileIdBothDirectoryInfo` (go on) until Windows answers "no more files". On the first call only,
+"file not found" also means the end: a folder with no entries at all (a FAT drive's top folder has
+not even `.`). On a later call it is an error, because taking it as the end would cut the listing
+short, and the entries left out would look deleted (`listing_done`, which a test checks).
 
 **Why it is sound.**
 
@@ -338,11 +362,13 @@ let ok = unsafe {
 through the held folder with `DELETE` access, and checked first: `remove_dir` refuses anything but
 a folder, `remove_file` refuses a folder that isn't a link.
 
-`delete` passes `FILE_DISPOSITION_INFO_EX` with `FILE_DISPOSITION_FLAG_DELETE` (delete it) and
+`delete` passes `FILE_DISPOSITION_INFO_EX` with `FILE_DISPOSITION_FLAG_DELETE` (delete it),
 `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` (the name goes as soon as this handle closes, even while
-others still have the file open; they keep using their handles). A drive that can't do that (FAT)
-gets the older `FILE_DISPOSITION_INFO { DeleteFile: true }`: the name then goes once the last
-handle closes.
+others still have the file open; they keep using their handles) and
+`FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE` (a read-only file goes too, as on Unix). Windows
+10 before version 1809 refuses that last flag, so the call is then made without it. A drive that
+can't do POSIX deletes (FAT) refuses both and gets the older
+`FILE_DISPOSITION_INFO { DeleteFile: true }`; the name then goes once the last handle closes.
 
 **Why it is sound.** Windows only reads here, at most the size it is told, which is exactly `value`'s,
 and `value` is a borrow that lives through the call. Reading needs no promise about what the bytes
@@ -372,7 +398,8 @@ let status = unsafe {
 ```
 
 **In plain words:** "Windows, move the file this handle has open to this name, in the folder that
-other handle holds, replacing a file there."
+other handle holds, replacing a file there" (for `rename_into`), or "…only if nothing has that
+name" (for `symlink`, block 10).
 
 What is passed in `rename`, a `RenameInfo`:
 
@@ -401,10 +428,12 @@ Windows' structure ends with a one-character array that "runs on" past the end o
 as long as the name is. `RenameInfo` is the same layout with room for 255 characters (the longest
 name Windows' drives hold) and a NUL; a longer name is refused before the call. The `const _`
 line checks the layout against windows-sys's own definition while compiling: if they ever differ,
-the crate doesn't build. `flags` is `FILE_RENAME_REPLACE_IF_EXISTS` (replace a file at the new
-name) and `FILE_RENAME_POSIX_SEMANTICS` (replace it even while others have it open; they keep
-reading the old file, which a test checks). `root` is the target folder's handle; `name` the new
-name, relative to it.
+the crate doesn't build. For `rename_into`, `flags` is `FILE_RENAME_REPLACE_IF_EXISTS` (replace a
+file at the new name), `FILE_RENAME_POSIX_SEMANTICS` (replace it even while others have it open;
+they keep reading the old file, which a test checks) and `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE`
+(replace it even if it is read-only, which a test checks too). For `symlink` it is 0, with the
+plain `FileRenameInformation`: the move fails if anything has the name. `root` is the target
+folder's handle; `name` the new name, relative to it.
 
 **Why it is sound.** `rename` lives through the call, and Windows reads at most
 `size_of::<RenameInfo>()` bytes, all inside it. It writes only into `status_block`, a local
@@ -414,12 +443,13 @@ open too.
 
 **Around it, in safe code.** `rename_into` opens `from` through the held folder with `DELETE`
 access and refuses it if it is a link; then it looks at `to_name` in the target folder and refuses
-a link or a folder there. A drive without POSIX renames gets `FileRenameInformation` with
-`FILE_RENAME_REPLACE_IF_EXISTS` alone.
+a link or a folder there. Windows 10 before version 1809 refuses the read-only flag, so the call is
+then made without it. A drive without POSIX renames refuses both, and gets `FileRenameInformation`
+with `FILE_RENAME_REPLACE_IF_EXISTS` alone.
 
 Microsoft: [NtSetInformationFile][ntsetinformationfile];
-[FILE_RENAME_INFORMATION][file_rename_information] (both flags are on this page). For why not the
-Win32 call: [FILE_RENAME_INFO][file_rename_info].
+[FILE_RENAME_INFORMATION][file_rename_information] (all three flags are on this page). For why not
+the Win32 call: [FILE_RENAME_INFO][file_rename_info].
 
 ### Block 9: the held folder's path (`final_path`)
 
@@ -450,17 +480,28 @@ Microsoft: [GetFinalPathNameByHandleW][getfinalpathnamebyhandlew].
 ### Block 10: making a link (`symlink`)
 
 ```rust
-// SAFETY: `link` and `target` are NUL-terminated UTF-16 strings that live through the call;
+// SAFETY: `path` and `target` are NUL-terminated UTF-16 strings that live through the call;
 // CreateSymbolicLinkW only reads them and keeps no pointer to them.
-if !unsafe { CreateSymbolicLinkW(link.as_ptr(), target.as_ptr(), flags) } {
+if !unsafe { CreateSymbolicLinkW(path.as_ptr(), target.as_ptr(), flags) } {
 ```
 
-**In plain words:** Windows has no "make a link inside this folder handle" call. So Bolt asks where
-the held folder is now (block 9), adds the name, makes the link at that path, and then opens the
-name through the held folder to check that a symlink is there.
+**In plain words:** Windows has no "make a link inside this folder handle" call, so this is the
+one step Bolt has to do by path. To keep a moved folder from redirecting it, `symlink` goes in four
+steps:
 
-The arguments: `link` is the folder's path, `\` and the name, then a NUL. `target` is what the link
-points to, then a NUL; a target that holds a NUL is refused before the call. `flags` is
+1. Through the held folder, check that nothing has the name yet.
+2. Ask where the held folder is now (block 9), and make the link there under a name nobody chose:
+   `bolt-link-` and 16 random hexadecimal digits, with no extension, so nothing runs it by its name.
+3. Open that random name through the held folder, and check that it is a symlink and that its
+   target (read by block 11) is exactly the one asked for.
+4. Only then move that very link, through its own handle, to the name asked for (block 8, with no
+   replacing: if something took the name meanwhile, the move fails).
+
+If step 3 or 4 fails after finding a symlink under the random name, that symlink is removed again
+(removing a link never touches what it points to), and the error comes back.
+
+The arguments: `path` is the folder's path, `\` and the random name, then a NUL. `target` is what
+the link points to, then a NUL; a target that holds a NUL is refused before the call. `flags` is
 `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` (lets a process that isn't an administrator make
 links when Developer Mode is on), plus `SYMBOLIC_LINK_FLAG_DIRECTORY` for a folder link.
 
@@ -470,26 +511,33 @@ function only reads them. One more point: windows-sys declares this function as 
 Windows returns `TRUE` (1) or `FALSE` (0), and the standard library declares and calls it the same
 way.
 
-**An honest limit.** Between reading the folder's path and making the link, someone could rename
-the folder and put a link where it was; the new link would then be made wherever that points. The
-check after the call notices that the link isn't in the held folder and says so, but it can't undo
-a link made elsewhere. Decision 048 already records this ("Making a link on Windows has no
-handle-relative call, so it is made by path while Bolt holds the folder open"). Only someone who can
-rename folders inside the project can try it, and the owner checks (decisions 025 and 026) keep
-Bolt out of projects other accounts own.
+**What a race can still do.** Someone who renames the held folder (or a folder above it) between
+steps 2 and 3, and puts a junction at its old path, makes Windows put the link wherever the
+junction points. Step 3 then doesn't find it in the held folder, so nothing is moved, and Bolt
+reports the error. What is left is one stray link with a meaningless name and the save's target,
+never a link at a name the save chose (`.git\hooks\pre-commit`, say). The random name is from
+Rust's `RandomState`, whose keys come from Windows' random number generator, so it can't be guessed
+in advance. Decision 048 records that links on Windows are made by path. Only someone who can rename
+folders inside the project can try this, and the owner checks (decisions 025 and 026) keep Bolt out
+of projects other accounts own. A test runs exactly this race.
+
+Step 3 compares the target Windows stored, so an absolute target must be written the way Windows
+stores it (`C:\x`, with no `.`, `..` or `/`); otherwise the check fails. A relative target, the
+only kind Bolt writes as a link (decision 052 writes absolute ones as placeholders), is stored as
+given.
 
 Without Developer Mode or an administrator, Windows answers error 1314 ("a required privilege is
 not held"); `symlink` returns it unchanged, so callers can write a placeholder instead.
 
 Microsoft: [CreateSymbolicLinkW][createsymboliclinkw] (both flags are on this page).
 
-### Block 11: reading a link (`read_link`)
+### Block 11: reading a link's target (`target_of`, used by `read_link` and `symlink`)
 
 ```rust
 // SAFETY: there is no input (null, 0 bytes). `area` is writable and Windows is told its
 // length, so it writes nothing past it, and `filled` is a valid place for the count it writes;
-// it keeps no pointer to either. `link` is open for synchronous calls, so there is no
-// OVERLAPPED (null).
+// it keeps no pointer to either. `link` is open for the call, and both callers opened it with
+// `nt_open`, for synchronous calls, so there is no OVERLAPPED (null).
 let ok = unsafe {
     DeviceIoControl(
         link.as_raw_handle(),
@@ -505,13 +553,17 @@ let ok = unsafe {
 ```
 
 **In plain words:** "Windows, give me the stored data of this link." `link` was opened through the
-held folder with `FILE_OPEN_REPARSE_POINT`, so it is the link itself.
+held folder with `FILE_OPEN_REPARSE_POINT`, so it is the link itself: by `read_link`, or by
+`symlink`'s check (block 10, step 3).
 
 **Why it is sound.** `FSCTL_GET_REPARSE_POINT` takes no input (null and 0, as Microsoft's page
 shows). `area` is 16 KiB (`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`, the most a link's data can be),
 zeroed and 8-byte aligned, and Windows is told its exact length. `filled` is a local `u32`;
-Microsoft: "If lpOverlapped is NULL, lpBytesReturned cannot be NULL", and it isn't. No `OVERLAPPED`
-because the handle was opened for synchronous calls.
+Microsoft: "If lpOverlapped is NULL, lpBytesReturned cannot be NULL", and it isn't. No `OVERLAPPED`,
+because both callers (`read_link` and `symlink`) open the link with `nt_open`, which always asks
+for synchronous calls. With a handle opened for overlapped calls, a null `OVERLAPPED` could let
+Windows write into `area` after the call returned; the function's comment says its handle must be
+synchronous, and no other handle reaches it.
 
 **Around it, in safe code.** `link_target` reads the `REPARSE_DATA_BUFFER` layout from the first
 `filled` bytes: the tag, then for a symlink or junction where the "substitute name" (the path
@@ -542,7 +594,19 @@ Microsoft: [reparse point tags][reparse_point_tags]; [IsReparseTagNameSurrogate]
 
 ## How it was tested
 
-On Windows (this machine) and, through CI, on macOS and Linux:
+Where the tests ran:
+
+- **CI run 41978531079, on commit a05fcf5:** Windows, macOS and Linux all green. The Windows runner
+  works as an administrator, so the link tests ran there too. That run covers everything below
+  except what is marked *(added in review)*: five new tests, and one new check in an older test.
+- **This machine (Windows 11, no Developer Mode):** everything below, except that the parts which
+  make symlinks print a reason and skip.
+- **Not run in CI yet:** what is marked *(added in review)*. It runs on the next push. Two of those
+  make symlinks on Windows, so on Windows they have only skipped so far:
+  `a_link_raced_out_of_its_folder_lands_under_no_chosen_name`, and the "nothing left under a random
+  name" check in `links_are_made_for_folders_and_files`.
+
+The tests:
 
 - `a_link_at_a_name_is_refused_at_every_call`: links to a folder and a file (and a junction on
   Windows) are refused by `open_dir`, `open_file`, `remove_dir`, `rename_into` at either name,
@@ -563,14 +627,29 @@ On Windows (this machine) and, through CI, on macOS and Linux:
 - `short_names_come_with_entries` (Windows): `.git`'s short name equals what Windows' own `cmd`
   shows.
 - `links_are_made_for_folders_and_files` (Windows): folder, file and absolute links made through
-  `Dir` work for Windows and read back as the standard library reads them. This machine has no
-  Developer Mode, so it skips here and runs in CI, where tests run as an administrator.
+  `Dir` work for Windows and read back as the standard library reads them. It skips on this
+  machine; it passed in CI run 41978531079. It now also checks that nothing is left under a random
+  name *(added in review)*.
+- `a_link_raced_out_of_its_folder_lands_under_no_chosen_name` (Windows) *(added in review)*: a
+  test-only hook renames the held folder and puts a junction at its old path between steps 2 and 3
+  of block 10. `symlink` must fail, the held folder must stay empty, and where the junction points
+  there must be only one stray `bolt-link-…`, never `pre-commit`.
+- `a_read_only_file_can_be_removed_or_replaced` (every system) *(added in review)*: `remove_file`
+  removes a read-only file, and `rename_into` replaces one. Before the read-only flags, Windows
+  answered "access denied".
+- `nothing_is_made_through_a_dangling_link` (every system) *(added in review)*: `create_new`,
+  `create_dir` and `symlink` at a name holding a link that points nowhere fail with "already
+  exists", and nothing appears where the link points.
 - In `dir/windows.rs`: hand-built listings and link data, good and bad; the folder's path equals
-  the standard library's `canonicalize`; a name over 255 characters is refused.
+  the standard library's `canonicalize`; a name over 255 characters is refused; "file not found"
+  ends only the first listing call; a link's temporary names are random and have no extension
+  (the last two *(added in review)*).
 
-Not tested anywhere yet: the FAT and exFAT fallbacks (no such drive in CI); OneDrive files opened
-this way and paths over 260 characters (decision 048 lists both for a real machine); a real
-non-link reparse point on disk (only through hand-built listings).
+Not tested anywhere yet: the FAT and exFAT fallbacks, and the older-Windows fallbacks for the
+read-only flags (no such drive or Windows in CI); OneDrive files opened this way and paths over 260
+characters (decision 048 lists both for a real machine); a real non-link reparse point on disk
+(only through hand-built listings); a drive that can't hold Unix modes, where `create_new` now
+removes the file it couldn't set (no such drive in CI).
 
 [file_rename_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info
 [file_rename_information]: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
