@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::git::{UserSetting, read_user_settings};
 use crate::safe_fs;
 use crate::save::Person;
 use crate::text::escape;
@@ -233,9 +234,12 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
     git_excludes_file_in(&home, &xdg, project_root)
 }
 
+/// How many includes deep Git reads settings, its `MAX_INCLUDE_DEPTH`.
+const MAX_INCLUDE_DEPTH: usize = 10;
+
 /// `git_excludes_file` with the home folder and `XDG_CONFIG_HOME` given, so tests can choose
-/// them. Includes aren't followed, and the repository's own config is never read for this: it
-/// could name any file on the computer.
+/// them. The repository's own config is never read for this: it could name any file on the
+/// computer.
 fn git_excludes_file_in(
     home: &Path,
     xdg: &Path,
@@ -244,22 +248,7 @@ fn git_excludes_file_in(
     let mut named = None;
     // In Git's order, so that `~/.gitconfig` wins.
     for path in [xdg.join("git").join("config"), home.join(".gitconfig")] {
-        let text = match safe_fs::read_capped_following_links(&path, MAX_GIT_SETTINGS_BYTES) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                let detail = e.to_string();
-                return Err(ConfigError::GitSettings { path, detail });
-            }
-        };
-        match crate::git::read_excludes_file(&text) {
-            Ok(Some(value)) => named = Some((value, path)),
-            Ok(None) => {}
-            Err(line) => {
-                let detail = format!("line {line} can't be read as Git reads it");
-                return Err(ConfigError::GitSettings { path, detail });
-            }
-        }
+        read_git_settings(&path, home, 0, &mut named)?;
     }
     let Some((value, path)) = named else {
         return Ok(Some(xdg.join("git").join("ignore")));
@@ -272,13 +261,70 @@ fn git_excludes_file_in(
     if value.is_empty() {
         return Ok(None);
     }
-    let in_home = value
-        .strip_prefix("~/")
-        .or_else(|| value.strip_prefix("~\\").filter(|_| cfg!(windows)));
-    Ok(Some(match in_home {
-        Some(rest) => home.join(rest),
-        None => project_root.join(value),
-    }))
+    git_path(&value, home, project_root, &path).map(Some)
+}
+
+/// Reads `path`, a file of the user's own Git settings `depth` includes down, into `named`: the
+/// last `core.excludesFile` so far, and the file that set it. A plain include is read where it
+/// stands, as Git reads it (decision 060); one that isn't there is skipped, as in Git.
+fn read_git_settings(
+    path: &Path,
+    home: &Path,
+    depth: usize,
+    named: &mut Option<(Vec<u8>, PathBuf)>,
+) -> Result<(), ConfigError> {
+    let fail = |detail: String| ConfigError::GitSettings {
+        path: path.to_owned(),
+        detail,
+    };
+    let text = match safe_fs::read_capped_following_links(path, MAX_GIT_SETTINGS_BYTES) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(fail(e.to_string())),
+    };
+    if depth > MAX_INCLUDE_DEPTH {
+        return Err(fail(format!(
+            "it is included more than {MAX_INCLUDE_DEPTH} deep, where Git stops too; perhaps an \
+             include leads back to it"
+        )));
+    }
+    let settings = read_user_settings(&text)
+        .map_err(|line| fail(format!("line {line} can't be read as Git reads it")))?;
+    for setting in settings {
+        match setting {
+            UserSetting::ExcludesFile(value) => *named = Some((value, path.to_owned())),
+            UserSetting::Include(value) => {
+                let value = String::from_utf8(value)
+                    .map_err(|_| fail("an include.path in it isn't valid UTF-8".to_owned()))?;
+                // A relative include is from the including file's folder.
+                let folder = path.parent().unwrap_or(Path::new(""));
+                let included = git_path(&value, home, folder, path)?;
+                read_git_settings(&included, home, depth + 1, named)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `value`, a path set in `path`, a file of the user's own Git settings, as Git expands it: `~`
+/// is the home folder, an absolute path stays as it is, and a relative one is from `folder`.
+fn git_path(value: &str, home: &Path, folder: &Path, path: &Path) -> Result<PathBuf, ConfigError> {
+    let Some(rest) = value.strip_prefix('~') else {
+        return Ok(folder.join(value));
+    };
+    let separator = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
+    if rest.starts_with(|c: char| !separator(c)) {
+        return Err(ConfigError::GitSettings {
+            path: path.to_owned(),
+            detail: format!(
+                "Bolt can't expand {value}, which names a home folder by its user (~user/); \
+                 write the full path instead"
+            ),
+        });
+    }
+    // Git puts what follows `~` after the home folder, so `~//x` is the home folder's `x`.
+    Ok(home.join(rest.trim_start_matches(separator)))
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
@@ -569,6 +615,112 @@ mod tests {
             "{said}"
         );
         assert!(e.hint().unwrap().contains("core.excludesFile"));
+    }
+
+    /// Plain includes are read where they stand, as Git reads them (decision 060).
+    #[test]
+    fn includes_in_the_users_git_settings_are_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let xdg = home.join("xdg");
+        let find = || git_excludes_file_in(home, &xdg, &home.join("project")).unwrap();
+        let set = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let gitconfig = home.join(".gitconfig");
+        set(
+            &home.join(".gitconfig.local"),
+            "[core]\n\texcludesFile = ~/mine\n",
+        );
+        set(&gitconfig, "[include]\n\tpath = ~/.gitconfig.local\n");
+        assert_eq!(find(), Some(home.join("mine")));
+        // What an include sets counts at its place: a later line wins over it, and it wins over
+        // an earlier one.
+        let after = "[include]\n\tpath = ~/.gitconfig.local\n[core]\n\texcludesFile = ~/after\n";
+        set(&gitconfig, after);
+        assert_eq!(find(), Some(home.join("after")));
+        let before = "[core]\n\texcludesFile = ~/before\n[include]\n\tpath = ~/.gitconfig.local\n";
+        set(&gitconfig, before);
+        assert_eq!(find(), Some(home.join("mine")));
+        // A relative path is from the including file's folder.
+        set(&gitconfig, "");
+        set(
+            &xdg.join("git").join("config"),
+            "[include]\n\tpath = more\n",
+        );
+        set(
+            &xdg.join("git").join("more"),
+            "[core]\n\texcludesFile = ~/xdg\n",
+        );
+        set(&home.join("more"), "[core]\n\texcludesFile = ~/wrong\n");
+        assert_eq!(find(), Some(home.join("xdg")));
+        // A file that isn't there is skipped, as Git skips it.
+        set(
+            &xdg.join("git").join("config"),
+            "[include]\n\tpath = gone\n",
+        );
+        assert_eq!(find(), Some(xdg.join("git").join("ignore")));
+        // An `[includeIf]` needs the repository to decide, so it isn't followed.
+        let only_if = "[includeIf \"gitdir:~/\"]\n\tpath = more\n";
+        set(&xdg.join("git").join("config"), only_if);
+        assert_eq!(find(), Some(xdg.join("git").join("ignore")));
+    }
+
+    #[test]
+    fn includes_stop_ten_deep_as_in_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let find = || git_excludes_file_in(home, &home.join("xdg"), home);
+        // `.gitconfig` includes `1`, which includes `2`, and so on; the last one sets the list.
+        let chain = |deepest: u32| {
+            std::fs::write(home.join(".gitconfig"), "[include]\n\tpath = 1\n").unwrap();
+            for n in 1..deepest {
+                let next = format!("[include]\n\tpath = {}\n", n + 1);
+                std::fs::write(home.join(n.to_string()), next).unwrap();
+            }
+            let last = "[core]\n\texcludesFile = ~/list\n";
+            std::fs::write(home.join(deepest.to_string()), last).unwrap();
+        };
+        chain(10);
+        assert_eq!(find().unwrap(), Some(home.join("list")));
+        chain(11);
+        match find() {
+            Err(ConfigError::GitSettings { path, .. }) => assert_eq!(path, home.join("11")),
+            other => panic!("{other:?}"),
+        }
+        // A loop goes as deep as Git allows, then stops.
+        std::fs::write(home.join(".gitconfig"), "[include]\n\tpath = .gitconfig\n").unwrap();
+        let e = find().unwrap_err();
+        assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+        assert!(e.to_string().contains("10"), "{e}");
+    }
+
+    #[test]
+    fn a_home_folder_path_is_expanded_as_git_expands_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let find = |text: &str| {
+            std::fs::write(home.join(".gitconfig"), text).unwrap();
+            git_excludes_file_in(home, &home.join("xdg"), &home.join("project"))
+        };
+        let list = |value: &str| find(&format!("[core]\n\texcludesFile = {value}\n"));
+        // Git puts what follows `~` after the home folder, so more slashes change nothing.
+        assert_eq!(list("~//x").unwrap(), Some(home.join("x")));
+        assert_eq!(list("~").unwrap(), Some(home.to_owned()));
+        // Git looks other users up in the system's accounts; Bolt asks for the full path.
+        for text in [
+            "[core]\n\texcludesFile = ~alice/x\n",
+            "[include]\n\tpath = ~alice/x\n",
+        ] {
+            let e = find(text).unwrap_err();
+            assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+            let said = e.to_string();
+            assert!(
+                said.contains("~alice/x") && said.contains("full path"),
+                "{said}"
+            );
+        }
     }
 
     #[test]

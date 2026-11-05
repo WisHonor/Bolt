@@ -24,7 +24,7 @@ pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJEC
 pub use pack::apply_delta;
 pub use refs::{Head, Refs};
 
-pub(crate) use config::read_excludes_file;
+pub(crate) use config::{UserSetting, read_user_settings};
 
 use std::fs;
 use std::io;
