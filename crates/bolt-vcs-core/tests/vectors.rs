@@ -56,10 +56,14 @@ fn print_listing_vectors() {
         entry("é", EntryKind::File, 0x55, 0),
     ])
     .unwrap();
+    // A name of 600 bytes, past the 255 names had before decision 051: 200 characters of three
+    // bytes, which Windows holds as 200 UTF-16 units. Its length is a two-byte varint.
+    let long_name = Listing::new(vec![entry(&"語".repeat(200), EntryKind::File, 0x66, 3)]).unwrap();
     let rows: Vec<String> = [
         ("empty-listing", Listing::empty()),
         ("one-file", one),
         ("mixed", mixed),
+        ("long-name", long_name),
     ]
     .iter()
     .map(|(n, l)| {

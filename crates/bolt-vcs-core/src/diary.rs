@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::encoding::{DecodeError, Reader, Writer, varint_len};
 use crate::id::{Flavor, Id, hash_record};
 use crate::listing::EntryKind;
-use crate::save::{MAX_PATH_BYTES, Person, read_person, write_person};
+use crate::names::MAX_PATH_BYTES;
+use crate::save::{Person, read_person, write_person};
 
 pub const MAX_NAME_BYTES: usize = 255;
 pub const MAX_TAG_MESSAGE_BYTES: usize = 64 * 1024;

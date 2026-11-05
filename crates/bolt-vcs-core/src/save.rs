@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{ChangeId, Flavor, Id, hash_record};
+use crate::names::MAX_PATH_BYTES;
 
 pub const MAX_PARENTS: u64 = 1024;
 pub const MAX_MESSAGE_BYTES: usize = 1 << 20;
@@ -11,7 +12,6 @@ pub const MAX_MOVE_NOTES: u64 = 100_000;
 pub const MAX_EXTRA_FIELDS: u64 = 64;
 pub const MAX_EXTRA_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_PERSON_FIELD_BYTES: usize = 4096;
-pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 pub const MAX_EXTRA_KEY_BYTES: usize = 256;
 pub const EXTRA_LINE: &str = "line";

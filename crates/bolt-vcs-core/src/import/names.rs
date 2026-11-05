@@ -5,9 +5,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{ImportError, Renaming, lossy};
-use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS, ServerLines, is_line_name_char};
+use crate::diary::{
+    MAX_LINES, MAX_NAME_BYTES, MAX_SERVERS, MAX_TAGS, ServerLines, is_line_name_char,
+};
 use crate::git::{GitError, GitId, Refs, shown};
-use crate::names::MAX_NAME_BYTES;
 use crate::pack::MAX_RECORD_SIZE;
 
 /// A ref an import brings in: its Git name, the name it takes in Bolt, and what it points at.

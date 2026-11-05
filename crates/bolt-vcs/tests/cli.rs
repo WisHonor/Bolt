@@ -697,6 +697,30 @@ fn save_then_nothing_to_save() {
     assert!(stdout.ends_with("  \"Change a\"  (1 file)\n"), "{stdout:?}");
 }
 
+/// Microsoft's list of reserved names doesn't hold `COM0` and `LPT0`, and Windows makes them as
+/// ordinary files, so they save like any other name.
+#[cfg(windows)]
+#[test]
+fn com0_and_lpt0_save_on_windows() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    for name in ["COM0", "LPT0", "com0.txt", "LPT0.log"] {
+        std::fs::write(env.root().join(name), name).unwrap();
+        assert_eq!(
+            std::fs::read(env.root().join(name)).unwrap(),
+            name.as_bytes()
+        );
+    }
+    let out = env
+        .bolt()
+        .args(["save", "Device-like names"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.ends_with("(4 files)\n"), "{stdout:?}");
+}
+
 #[test]
 fn save_requires_a_message() {
     let env = Env::new();
@@ -1640,13 +1664,16 @@ fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
     assert!(text(&out.stderr).contains(&format!("warning: {said}\n")));
 }
 
-/// Nested folders with files at the bottom, all names 255 bytes: each file's path is about 100 KB
-/// and the 2,500 paths together over 250 MB, far more than `bolt` is given below. This is within
-/// the format's limits (4,096 levels, 10 million entries), so it must be readable.
+/// Fourteen nested folders, then 250 folders that are one listing of 250 files, all names 255
+/// bytes: each file's path is 4,095 bytes, just within a path's limit, and the 62,500 paths
+/// together over 250 MB, far more than `bolt` is given below. This is within the format's limits
+/// (paths of 4,096 bytes, 10 million entries), so it must be readable.
 #[cfg(unix)]
-const LONG_FOLDERS: usize = 400;
+const LONG_LEVELS: usize = 14;
 #[cfg(unix)]
-const LONG_FILES: usize = 2500;
+const LONG_FOLDERS: usize = 250;
+#[cfg(unix)]
+const LONG_FILES: usize = 250;
 
 /// The address space `bolt` gets: about 3 times what it needs to run (`save` needs about 35 MB,
 /// mostly for the stack of its scanning thread), and well under all the long paths together.
@@ -1657,9 +1684,10 @@ const CAP_KB: u32 = 100_000;
 fn plant_long_paths(root: &Path) {
     plant_save(root, |pack| {
         let empty = pack.add_content(b"").unwrap();
-        let files: Vec<String> = (0..LONG_FILES).map(|i| format!("{i:0>255}")).collect();
-        let mut id = add_listing(pack, &files, EntryKind::File, empty);
-        for _ in 0..LONG_FOLDERS {
+        let named = |n: usize| -> Vec<String> { (0..n).map(|i| format!("{i:0>255}")).collect() };
+        let files = add_listing(pack, &named(LONG_FILES), EntryKind::File, empty);
+        let mut id = add_listing(pack, &named(LONG_FOLDERS), EntryKind::Folder, files);
+        for _ in 0..LONG_LEVELS {
             id = add_listing(pack, &["d".repeat(255)], EntryKind::Folder, id);
         }
         id
@@ -1737,7 +1765,7 @@ fn save_does_not_hold_every_long_path_of_the_save_before_it() {
     let out = bolt_capped(&env, &["save", "my work"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // The long paths are all gone from the new save, and `mine.txt` is new.
-    let want = format!("  \"my work\"  ({} files)\n", LONG_FILES + 1);
+    let want = format!("  \"my work\"  ({} files)\n", LONG_FOLDERS * LONG_FILES + 1);
     let stdout = text(&out.stdout);
     assert!(stdout.ends_with(&want), "{stdout:?}");
 }

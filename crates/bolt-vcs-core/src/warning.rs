@@ -15,7 +15,7 @@ pub const CHANGED_FILES_NOT_COUNTED: &str = "changed_files_not_counted";
 pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
 /// Entries this computer doesn't hold as they are were kept as the last save has them.
 pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
-/// A save left out entries whose names Git treats as `.git`.
+/// A save left out entries whose names Git treats as `.git`, or Bolt as `.bolt`.
 pub const GIT_NAMES_LEFT_OUT: &str = "git_names_left_out";
 /// A save took changes to files an ignore rule matches, which stay saved because the last save
 /// holds them.

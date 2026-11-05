@@ -1,16 +1,26 @@
 //! Which file names Bolt stores, and which it flags as non-portable (decision 004):
 //! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
-//! that work here but would break on another operating system. [`is_git_alias`] spots the
-//! spellings of `.git`, [`holdable_here`] says whether this system can hold a name, and [`fold`]
-//! compares names as a drive does.
+//! that work here but would break on another operating system. [`is_git_alias`] and
+//! [`is_bolt_alias`] spot the spellings of `.git` and `.bolt`, [`own_folder`] the project's own
+//! ones, [`holdable_here`] says whether this system can hold a name, [`writable_here`] whether
+//! write-out may write one, and [`fold`] compares names as a drive does. The limits on names and
+//! paths are here too (decision 051).
 
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::drive::Drive;
 use crate::text::escape;
 
-/// Longest allowed name, in bytes.
-pub const MAX_NAME_BYTES: usize = 255;
+/// Longest name the format allows, in bytes: Windows' 255 UTF-16 units, each at most three bytes
+/// in UTF-8.
+pub const MAX_NAME_BYTES: usize = 765;
+
+/// Longest name a save may add, in bytes: what macOS and Linux hold.
+pub const MAX_NEW_NAME_BYTES: usize = 255;
+
+/// Longest path, in bytes, counted from the project's top with `/` between names.
+pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Why a name is refused on every system.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -57,6 +67,27 @@ pub enum PortabilityProblem {
         escape(name, false)
     )]
     ForbiddenCharacter { name: String, ch: char },
+    #[error(
+        "\"{}\" is longer than {} bytes, which macOS and Linux do not allow",
+        escape(.0, false),
+        MAX_NEW_NAME_BYTES
+    )]
+    TooLong(String),
+}
+
+/// Why write-out won't write a name on this system.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotWritable {
+    /// A spelling of `.git` ([`is_git_alias`]).
+    GitName,
+    /// A spelling of `.bolt` ([`is_bolt_alias`]).
+    BoltName,
+    /// A name this system can't hold, by decision 004's rules for it.
+    NotHoldable(PortabilityProblem),
+    /// Longer than this system holds ([`fits_here`]).
+    TooLong,
+    /// The real short name of a `.git` or `.bolt` in the same folder.
+    ShortNameOf(&'static str),
 }
 
 /// The always-on rules: what no name may ever be.
@@ -76,7 +107,7 @@ pub fn validate_name(name: &str) -> Result<(), NameError> {
     if name.len() > MAX_NAME_BYTES {
         return Err(NameError::TooLong);
     }
-    if is_bolt_spelling(name) {
+    if is_bolt_alias(name) {
         return Err(NameError::BoltSpelling);
     }
     Ok(())
@@ -95,7 +126,10 @@ fn ntfs_base(name: &str) -> &str {
     base.trim_end_matches(['.', ' '])
 }
 
-fn is_bolt_spelling(name: &str) -> bool {
+/// Whether Windows or macOS would take `name` for Bolt's own folder, `.bolt`: any letter case,
+/// trailing dots or spaces, a `:stream`, the short names `bolt~1` to `bolt~4`, or characters macOS
+/// ignores. It answers the same on every system.
+pub fn is_bolt_alias(name: &str) -> bool {
     let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
     let base = ntfs_base(&kept).to_ascii_lowercase();
     // `bolt~1`..`bolt~4` are NTFS 8.3 short names of `.bolt` (Git accepts ~1..~4).
@@ -107,6 +141,15 @@ fn is_bolt_spelling(name: &str) -> bool {
 /// backslash, and it answers the same on every system.
 pub fn is_git_alias(name: &str) -> bool {
     is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+}
+
+/// Whether `name`, in the project's top folder, is the project's own `.bolt` or Git's `.git` as
+/// this drive spells them: exactly, or in other letter case where the drive ignores it (decision
+/// 059). Other spellings of either are left out of saves with a warning instead.
+pub fn own_folder(name: &str, drive: Drive) -> bool {
+    [".bolt", ".git"]
+        .iter()
+        .any(|own| name == *own || (drive.ignores_case && name.eq_ignore_ascii_case(own)))
 }
 
 fn is_ntfs_dotgit(name: &str) -> bool {
@@ -153,8 +196,17 @@ fn is_reserved(name: &str) -> bool {
     })
 }
 
-/// Portability problems with a single name.
+/// Portability problems with a single name: Windows' rules, and the length every system holds.
 pub fn name_problems(name: &str) -> Vec<PortabilityProblem> {
+    let mut out = windows_problems(name);
+    if name.len() > MAX_NEW_NAME_BYTES {
+        out.push(PortabilityProblem::TooLong(name.into()));
+    }
+    out
+}
+
+/// What Windows refuses in a name: device names, a dot or space at its end, and characters.
+fn windows_problems(name: &str) -> Vec<PortabilityProblem> {
     let mut out = Vec::new();
     if is_reserved(name) {
         out.push(PortabilityProblem::ReservedName(name.into()));
@@ -175,10 +227,53 @@ pub fn name_problems(name: &str) -> Vec<PortabilityProblem> {
 }
 
 /// Whether this operating system can hold a file called `name` (a name `validate_name` accepts):
-/// decision 004's portability rules that apply here, which only Windows has. Names that clash on
-/// the drive are `drive::probe`'s business.
+/// it must [fit](fits_here), and pass decision 004's portability rules that apply here, which only
+/// Windows has. Names that clash on the drive are `drive::probe`'s business.
 pub fn holdable_here(name: &str) -> bool {
-    !cfg!(windows) || name_problems(name).is_empty()
+    fits_here(name) && (!cfg!(windows) || windows_problems(name).is_empty())
+}
+
+/// Whether this system holds a name this long: Windows holds 255 UTF-16 units, up to 765 bytes,
+/// and macOS and Linux 255 bytes (decision 051).
+pub fn fits_here(name: &str) -> bool {
+    if cfg!(windows) {
+        name.encode_utf16().count() <= 255
+    } else {
+        name.len() <= MAX_NEW_NAME_BYTES
+    }
+}
+
+/// Whether write-out may write `name` into a folder whose entries have the long and short names
+/// `short_names_here` (Windows' 8.3 names, as `Dir::entries` gives them). Never a spelling of
+/// `.git` or `.bolt`, on any system: Linux reaches NTFS and vfat drives too (CVE-2019-1353). Nor
+/// a name this system can't hold, nor the real short name of a `.git` or `.bolt` in that folder.
+pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<(), NotWritable> {
+    if is_git_alias(name) {
+        return Err(NotWritable::GitName);
+    }
+    if is_bolt_alias(name) {
+        return Err(NotWritable::BoltName);
+    }
+    if cfg!(windows)
+        && let Some(problem) = windows_problems(name).into_iter().next()
+    {
+        return Err(NotWritable::NotHoldable(problem));
+    }
+    if !fits_here(name) {
+        return Err(NotWritable::TooLong);
+    }
+    // After four clashes NTFS hashes a short name (`GI7EBA~1`), so the real one is compared.
+    for (long, short) in short_names_here {
+        if short.eq_ignore_ascii_case(name) {
+            if is_git_alias(long) {
+                return Err(NotWritable::ShortNameOf(".git"));
+            }
+            if is_bolt_alias(long) {
+                return Err(NotWritable::ShortNameOf(".bolt"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `name` as a drive compares names: composed (NFC) where it composes Unicode, then lowercase
@@ -253,8 +348,36 @@ mod tests {
         assert_eq!(validate_name(".."), Err(NameError::DotOrDotDot));
         assert_eq!(validate_name("a/b"), Err(NameError::Slash));
         assert_eq!(validate_name("a\0b"), Err(NameError::Nul));
-        assert_eq!(validate_name(&"x".repeat(256)), Err(NameError::TooLong));
-        assert_eq!(validate_name(&"x".repeat(255)), Ok(()));
+        assert_eq!(validate_name(&"x".repeat(766)), Err(NameError::TooLong));
+        assert_eq!(validate_name(&"x".repeat(765)), Ok(()));
+    }
+
+    #[test]
+    fn names_up_to_765_bytes_decode_and_fit_by_this_systems_rule() {
+        let cjk = "語".repeat(200); // 600 bytes, 200 UTF-16 units
+        assert!(validate_name(&cjk).is_ok());
+        assert_eq!(fits_here(&cjk), cfg!(windows));
+        assert!(validate_name(&"a".repeat(766)).is_err());
+        // 255 of either unit fit everywhere; one more fits nowhere.
+        assert!(fits_here(&"a".repeat(255)) && !fits_here(&"a".repeat(256)));
+        // Four bytes and two UTF-16 units each: 127 fit Windows (254 units), 63 fit 255 bytes.
+        let emoji = |n| "\u{1f600}".repeat(n);
+        assert!(fits_here(&emoji(63)));
+        assert_eq!(fits_here(&emoji(64)), cfg!(windows));
+        assert!(!fits_here(&emoji(128)));
+    }
+
+    #[test]
+    fn a_new_name_over_255_bytes_is_not_portable_and_holdable_where_it_fits() {
+        let cjk = "語".repeat(200);
+        assert_eq!(
+            name_problems(&cjk),
+            [PortabilityProblem::TooLong(cjk.clone())]
+        );
+        assert!(name_problems(&"a".repeat(255)).is_empty());
+        // Holding it is this system's own question: Windows holds 255 UTF-16 units.
+        assert_eq!(holdable_here(&cjk), cfg!(windows));
+        assert!(!holdable_here(&"a".repeat(256)));
     }
 
     #[test]
@@ -278,6 +401,7 @@ mod tests {
             "\u{FEFF}.bolt",
         ] {
             assert_eq!(validate_name(bad), Err(NameError::BoltSpelling), "{bad:?}");
+            assert!(is_bolt_alias(bad), "{bad:?}");
         }
         for ok in [
             ".boltignore",
@@ -288,6 +412,131 @@ mod tests {
             "bolt~12",
         ] {
             assert_eq!(validate_name(ok), Ok(()), "{ok}");
+            assert!(!is_bolt_alias(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn the_projects_own_folders_are_spelled_as_the_drive_spells_them() {
+        let drive = |ignores_case| Drive {
+            ignores_case,
+            composes_unicode: false,
+        };
+        for ignores_case in [false, true] {
+            for name in [".bolt", ".git"] {
+                assert!(own_folder(name, drive(ignores_case)), "{name}");
+            }
+            for name in [".BOLT", ".Git", ".gIT"] {
+                assert_eq!(
+                    own_folder(name, drive(ignores_case)),
+                    ignores_case,
+                    "{name}"
+                );
+            }
+            // Other spellings are left out of saves instead, and the rest are other names.
+            for name in [
+                ".bolt.",
+                "bolt~1",
+                "git~1",
+                ".git ",
+                ".g\u{200c}it",
+                ".gitignore",
+                "bolt",
+            ] {
+                assert!(!own_folder(name, drive(ignores_case)), "{name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn writable_here_refuses_every_spelling_of_git_and_bolt_on_every_system() {
+        for n in [
+            ".git",
+            ".GIT",
+            "git~1",
+            ".git.",
+            ".bolt",
+            ".BOLT",
+            "bolt~1",
+            ".bolt::$INDEX_ALLOCATION",
+            ".g\u{200c}it",
+        ] {
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        assert_eq!(writable_here(".Git", &[]), Err(NotWritable::GitName));
+        assert_eq!(writable_here("BOLT~2", &[]), Err(NotWritable::BoltName));
+        for n in ["Player.cs", ".gitignore", "bolt.toml", "名前"] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn a_real_short_name_of_git_is_refused() {
+        assert!(writable_here("GI7EBA~1", &[(".git", "GI7EBA~1")]).is_err());
+        // Ignoring case, and for `.bolt` and other spellings of either too.
+        let here = [
+            (".git", "GI7EBA~1"),
+            (".BOLT", "BOC2A3~1"),
+            ("Player.cs", "PLAYER~1.CS"),
+        ];
+        assert_eq!(
+            writable_here("gi7eba~1", &here),
+            Err(NotWritable::ShortNameOf(".git"))
+        );
+        assert_eq!(
+            writable_here("BOC2A3~1", &here),
+            Err(NotWritable::ShortNameOf(".bolt"))
+        );
+        // Another entry's short name is write-out's to sort out as a clash, not a name to refuse.
+        assert_eq!(writable_here("PLAYER~1.CS", &here), Ok(()));
+    }
+
+    #[test]
+    fn writable_here_refuses_names_this_system_cant_hold() {
+        let long = "語".repeat(200);
+        assert_eq!(
+            writable_here(&long, &[]).is_ok(),
+            cfg!(windows),
+            "a 600-byte name"
+        );
+        assert_eq!(
+            writable_here(&"a".repeat(256), &[]),
+            Err(NotWritable::TooLong)
+        );
+        for n in ["a\\b", "c:d", "aux.txt", "name."] {
+            assert_eq!(writable_here(n, &[]).is_ok(), !cfg!(windows), "{n:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_separators_devices_and_trailing_dots() {
+        for n in [
+            "a\\b",
+            "c:d",
+            "con",
+            "aux.txt",
+            "COM\u{b9}",
+            "LPT\u{b3}.log",
+            "name.",
+            "name ",
+        ] {
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        assert!(matches!(
+            writable_here("con", &[]),
+            Err(NotWritable::NotHoldable(PortabilityProblem::ReservedName(
+                _
+            )))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn com0_and_lpt0_are_ordinary_names_on_windows() {
+        // Microsoft's list of reserved names doesn't hold them, and Windows 11 creates them.
+        for n in ["COM0", "LPT0", "COM0.txt", "LPT0.txt"] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n}");
         }
     }
 
@@ -519,6 +768,7 @@ mod tests {
                 name: name(),
                 ch: '*',
             },
+            PortabilityProblem::TooLong(name()),
         ] {
             assert_hostile_text_escaped(&problem.to_string());
         }

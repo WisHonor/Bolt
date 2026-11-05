@@ -124,6 +124,7 @@ fn walk<E: From<StoreError>>(
     while let Some(Todo { name, at, step }) = todo.pop() {
         path.truncate(at);
         path.push_str(&name);
+        old_seen.check_path(path.len()).map_err(too_large)?; // the same path in both saves
         match step {
             Step::File(change) => each(FileChange {
                 path: &path,
@@ -422,13 +423,41 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// A path's limit comes before the 4,096 levels: `d/…/d/f` fits it 2,047 folders deep.
     #[test]
-    fn depth_at_the_limit_is_accepted() {
-        let (_dir, store, [root]) = store_with(|p| [chain(MAX_SAVE_DEPTH, p)]);
+    fn the_deepest_folders_a_path_holds_are_accepted() {
+        let (_dir, store, [root]) = store_with(|p| [chain(2047, p)]);
         let got = changes(&store, None, root);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].path, format!("{}f", "d/".repeat(MAX_SAVE_DEPTH)));
+        assert_eq!(got[0].path, format!("{}f", "d/".repeat(2047)));
         assert_eq!(count_changes(&store, None, root).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_path_of_4096_bytes_is_accepted_and_a_longer_one_refused() {
+        // Five folders of 700-byte names, and a file whose name brings the path to 4,096 bytes, or
+        // one more.
+        let (_dir, store, [fits, past]) = store_with(|p| {
+            [591, 592].map(|n| {
+                let mut inner = vec![file(&"f".repeat(n), EntryKind::File, b"x", p)];
+                for _ in 0..5 {
+                    inner = vec![folder(&"d".repeat(700), inner, p)];
+                }
+                folder("", inner, p).id
+            })
+        });
+        let got = changes(&store, None, fits);
+        assert_eq!(got[0].path.len(), 4096);
+        let walked = [
+            count_changes(&store, None, past).map(drop),
+            collect(&store, None, past, MAX_SAVE_ENTRIES).map(drop),
+        ];
+        for err in walked.map(Result::unwrap_err) {
+            let StoreError::SaveTooLarge { detail } = &err else {
+                panic!("{err:?}");
+            };
+            assert!(detail.contains("longer than 4096 bytes"), "{detail}");
+        }
     }
 
     #[test]

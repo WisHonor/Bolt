@@ -722,7 +722,7 @@ mod tests {
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
-    use crate::test_support::{commit_records, plant_damaged_copies, sample_records};
+    use crate::test_support::{commit_records, plant_damaged_copies, plant_save, sample_records};
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -1185,6 +1185,32 @@ mod tests {
         save_now(&mut repo).unwrap();
         write(dir.path(), "notes.txt", b"x");
         assert!(matches!(save_now(&mut repo), Ok(SaveOutcome::Saved { .. })));
+    }
+
+    #[test]
+    fn a_new_name_over_255_bytes_is_refused_and_one_saved_before_stays() {
+        let (dir, mut repo) = project();
+        // 300 bytes, which Windows holds as 100 UTF-16 units; macOS and Linux can't make it.
+        let long = "語".repeat(100);
+        if fs::write(dir.path().join(&long), b"x").is_ok() {
+            let head = repo.head().unwrap();
+            let Err(SaveError::NotPortable { problems }) = save_now(&mut repo) else {
+                panic!("a new name of 300 bytes was saved");
+            };
+            assert!(
+                matches!(problems.as_slice(), [(_, PortabilityProblem::TooLong(_))]),
+                "{problems:?}"
+            );
+            assert_eq!(repo.head().unwrap(), head);
+        }
+        // One the last save holds, as an import brings it, stays: read again where this system
+        // holds it, and kept as it was where it doesn't.
+        plant_save(&mut repo, &[(long.as_str(), EntryKind::File, b"x")]);
+        write(dir.path(), "new.txt", b"x");
+        let saved = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), saved);
+        let paths: Vec<&str> = tree.keys().map(String::as_str).collect();
+        assert_eq!(paths, ["new.txt", long.as_str()]);
     }
 
     #[cfg(unix)]

@@ -16,7 +16,7 @@ use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
-use crate::names::{holdable_here, is_git_alias, validate_name};
+use crate::names::{holdable_here, is_bolt_alias, is_git_alias, own_folder, validate_name};
 use crate::repo::RepoError;
 use crate::safe_fs;
 use crate::store::{Store, StoreError};
@@ -40,12 +40,6 @@ fn executable_bits(meta: &Metadata) -> Option<bool> {
 #[cfg(not(unix))]
 fn executable_bits(_meta: &Metadata) -> Option<bool> {
     None
-}
-
-/// Whether a folder of this name is Bolt's or Git's, which a save never enters. Where the drive
-/// ignores letter case, Git's folder may be spelled `.GIT`.
-fn is_internal_folder(name: &str, ignores_case: bool) -> bool {
-    name == ".bolt" || name == ".git" || (ignores_case && name.eq_ignore_ascii_case(".git"))
 }
 
 /// Whether the folder `dir` holds a Git repository or Bolt project of its own: an entry named
@@ -136,21 +130,24 @@ impl<'a> Base<'a> {
         without_git_names(listing)
     }
 
-    /// The listing `id` of a folder `depth` levels down that is gone from disk, or `None` from
-    /// the first time a read would pass the limits on. Past them the base save is invalid and
-    /// nothing can be kept, so the whole search ends there, reading nothing more, and the save
-    /// goes ahead, as one beside a save too large to compare does.
+    /// The listing `id` of a folder `depth` levels down that is gone from disk, whose path with a
+    /// `/` after it is `prefix` bytes long, or `None` from the first time a read would pass the
+    /// limits on. Past them the base save is invalid and nothing can be kept, so the whole search
+    /// ends there, reading nothing more, and the save goes ahead, as one beside a save too large
+    /// to compare does.
     fn gone_listing(
         &mut self,
         id: Id,
         depth: usize,
+        prefix: usize,
     ) -> Result<Option<(Listing, Vec<String>)>, SaveError> {
         if self.spent || self.limits.check_depth(depth).is_err() {
             self.spent = true;
             return Ok(None);
         }
         let listing = self.store.listing(&id)?;
-        if self.limits.add(listing.entries().len()).is_err() {
+        let long = |e: &Entry| self.limits.check_path(prefix + e.name.len()).is_err();
+        if listing.entries().iter().any(long) || self.limits.add(listing.entries().len()).is_err() {
             self.spent = true;
             return Ok(None);
         }
@@ -211,8 +208,8 @@ struct WalkState {
     problem: Option<SaveError>,
     /// One for each `.gitignore` skipped.
     warnings: Vec<Warning>,
-    /// What the save leaves out because Git treats its name as `.git`: from the folder, and from
-    /// the base save.
+    /// What the save leaves out because Git treats its name as `.git`, or Bolt as `.bolt`: from
+    /// the folder, and from the base save.
     git_names: Named,
     /// Folders that hold a repository or project of their own (decision 046), for the warning.
     nested: Named,
@@ -534,8 +531,9 @@ impl WalkState {
     }
 
     /// Whether the walk keeps `path`: never what it leaves untouched, and what the ignore rules
-    /// keep out stays out, unless the base save has it. A name Git treats as `.git` stays out too,
-    /// noted for the warning. What it keeps that Git's rules alone would leave out is noted too.
+    /// keep out stays out, unless the base save has it. A name Git treats as `.git` or Bolt as
+    /// `.bolt` stays out too, noted for the warning. What it keeps that Git's rules alone would
+    /// leave out is noted too.
     /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
     /// is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
@@ -562,9 +560,9 @@ impl WalkState {
         }
         let git_ignores = self.git_held.contains(&folder) || verdict.git == Decision::Ignored;
         // After the rules, so an ignored one stays out without a word, unless the base save held
-        // it: `Base` dropped and named those.
+        // it: `Base` dropped and named those. No save holds a `.bolt` spelling.
         let name = rel.file_name().and_then(|n| n.to_str());
-        if name.is_some_and(is_git_alias) {
+        if name.is_some_and(|n| is_git_alias(n) || is_bolt_alias(n)) {
             let rel = shown(rel);
             if !self.saved_git_names.contains(&rel) {
                 self.git_names.add(rel);
@@ -640,7 +638,8 @@ pub(super) struct Scan {
     /// The project paths of the files and links kept that Git's rules alone would leave out,
     /// because a `.boltignore` line takes them back, or a folder they are in.
     pub(super) gitignored: HashSet<String>,
-    /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` left out.
+    /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` or Bolt as
+    /// `.bolt` left out.
     pub(super) warnings: Vec<Warning>,
 }
 
@@ -673,6 +672,7 @@ fn scan_folder(
     own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
+    let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
     // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
@@ -694,8 +694,8 @@ fn scan_folder(
             let rules = Arc::clone(&rules);
             move |e| {
                 let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-                let internal = |name: &str| is_internal_folder(name, drive.ignores_case);
-                if is_dir && e.file_name().to_str().is_some_and(internal) {
+                let own = |name: &str| own_folder(name, drive);
+                if is_dir && e.depth() == 1 && e.file_name().to_str().is_some_and(own) {
                     return false;
                 }
                 let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
@@ -722,6 +722,9 @@ fn scan_folder(
             path: rel.clone(),
             reason: e.to_string(),
         })?;
+        limits
+            .check_path(rel.len())
+            .map_err(|why| too_long(why, &rel))?;
         let meta = fs::symlink_metadata(path).map_err(|source| SaveError::Unreadable {
             path: rel.clone(),
             source,
@@ -791,13 +794,17 @@ fn scan_folder(
         folders.entry(rel).or_default().push(child);
     }
     for (_, kept) in rules.untouched.drain() {
+        limits
+            .check_path(kept.rel.len())
+            .map_err(|why| too_long(why, &kept.rel))?;
         if let Kind::Kept {
             kind: EntryKind::Folder,
             id,
             ..
         } = kept.kind
         {
-            count_kept_folder(base.store, &mut limits, kept.rel.split('/').count(), id)?;
+            let depth = kept.rel.split('/').count();
+            count_kept_folder(base.store, &mut limits, depth, kept.rel.len() + 1, id)?;
         }
         limits.add(1).map_err(too_large)?;
         let (up, _) = kept.rel.rsplit_once('/').unwrap_or_default();
@@ -824,26 +831,30 @@ fn scan_folder(
     })
 }
 
-/// Says the save left out entries whose names Git treats as `.git`, naming the first few.
+/// Says the save left out entries whose names Git treats as `.git` or Bolt as `.bolt`, naming the
+/// first few.
 fn git_names_left_out(names: &Named) -> Warning {
     let count = names.count;
     let (what, next) = if count == 1 {
         (
-            "1 entry whose name Git treats as .git, with everything in it".to_owned(),
+            "1 entry whose name Git or Bolt keep for themselves, with everything in it".to_owned(),
             "If Git uses it (a submodule's or worktree's .git file), list it in .boltignore to \
              leave it out without this warning; otherwise rename it to save it.",
         )
     } else {
         (
-            format!("{count} entries whose names Git treats as .git, with everything in them"),
+            format!(
+                "{count} entries whose names Git or Bolt keep for themselves, with everything in \
+                 them"
+            ),
             "If Git uses them (a submodule's or worktree's .git file), list them in .boltignore to \
              leave them out without this warning; otherwise rename them to save them.",
         )
     };
-    // Every invisible character shown, so a spelling can be told from `.git` itself.
+    // Every invisible character shown, so a spelling can be told from `.git` or `.bolt` itself.
     let first = names.first.iter().map(|path| escape_all(path));
     let message = format!(
-        "Left out {what}:{}\nGit keeps such names for itself (some spellings only on Windows or \
+        "Left out {what}:{}\nSuch names stand for .git or .bolt (some spellings only on Windows or \
          macOS), so Bolt leaves them out of saves, as it does on import. {next}",
         listed(first, count)
     );
@@ -887,6 +898,8 @@ struct Gone {
 struct Open {
     /// Its name; the folder the search starts from has none.
     name: String,
+    /// How long its project path is, with a `/` after it.
+    prefix: usize,
     listing: Listing,
     /// Which of its entries are kept as they were.
     kept: Vec<bool>,
@@ -924,10 +937,10 @@ fn rebuild_gone(
     let mut open: Vec<Open> = Vec::new();
     let mut kept_in_all = 0;
     let mut listings = Vec::new();
-    let mut read = Some((String::new(), id));
+    let mut read = Some((String::new(), top.len() + 1, id));
     loop {
-        if let Some((name, id)) = read.take()
-            && let Some((listing, dropped)) = base.gone_listing(id, depth + open.len())?
+        if let Some((name, prefix, id)) = read.take()
+            && let Some((listing, dropped)) = base.gone_listing(id, depth + open.len(), prefix)?
         {
             // Only now is a path below `top` needed, to name it.
             for git_name in &dropped {
@@ -943,7 +956,8 @@ fn rebuild_gone(
                     });
                 }
                 if e.kind == EntryKind::Folder {
-                    count_kept_folder(base.store, limits, depth + open.len() + 1, e.id)?;
+                    let inside = prefix + e.name.len() + 1;
+                    count_kept_folder(base.store, limits, depth + open.len() + 1, inside, e.id)?;
                 }
                 limits.add(1).map_err(too_large)?;
                 holds.push(e.clone());
@@ -951,6 +965,7 @@ fn rebuild_gone(
             kept_in_all += holds.len();
             open.push(Open {
                 name,
+                prefix,
                 listing,
                 kept,
                 next: 0,
@@ -964,7 +979,7 @@ fn rebuild_gone(
             let kept = folder.kept.get(folder.next).copied().unwrap_or(false);
             folder.next += 1;
             if e.kind == EntryKind::Folder && !kept {
-                read = Some((e.name.clone(), e.id));
+                read = Some((e.name.clone(), folder.prefix + e.name.len() + 1, e.id));
             }
             continue;
         }
@@ -999,26 +1014,29 @@ fn rebuild_gone(
     }
 }
 
-/// Counts everything the kept folder `depth` levels down holds, from its listing `id` down,
-/// against `limits`, one listing at a time: kept or not, a save holds no more than its format
-/// allows.
+/// Counts everything a kept folder holds, from its listing `id` down, against `limits`, one
+/// listing at a time: kept or not, a save holds no more than its format allows. The folder is
+/// `depth` levels down, and its path with a `/` after it is `prefix` bytes long.
 fn count_kept_folder(
     store: &Store,
     limits: &mut SaveLimits,
     depth: usize,
+    prefix: usize,
     id: Id,
 ) -> Result<(), SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
-    let mut todo = vec![(id, depth)];
-    while let Some((id, depth)) = todo.pop() {
+    let mut todo = vec![(id, depth, prefix)];
+    while let Some((id, depth, prefix)) = todo.pop() {
         limits.check_depth(depth).map_err(too_large)?;
         let listing = store.listing(&id)?;
         limits.add(listing.entries().len()).map_err(too_large)?;
-        let inner = listing
-            .entries()
-            .iter()
-            .filter(|e| e.kind == EntryKind::Folder);
-        todo.extend(inner.map(|e| (e.id, depth + 1)));
+        for e in listing.entries() {
+            let path = prefix + e.name.len();
+            limits.check_path(path).map_err(too_large)?;
+            if e.kind == EntryKind::Folder {
+                todo.push((e.id, depth + 1, path + 1));
+            }
+        }
     }
     Ok(())
 }
@@ -1073,6 +1091,7 @@ mod tests {
     use super::*;
     use crate::id::hash_content;
     use crate::listing::MAX_SAVE_ENTRIES;
+    use crate::names::MAX_PATH_BYTES;
     use crate::repo::Repository;
     use crate::snapshot::SaveOutcome;
     use crate::snapshot::tests::{
@@ -1274,7 +1293,7 @@ mod tests {
             assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert_eq!(warnings[0].kind, "git_names_left_out");
-            let listed = ":\n  .GIT\n  sub/.Git\nGit keeps";
+            let listed = ":\n  .GIT\n  sub/.Git\nSuch names";
             assert!(warnings[0].message.contains(listed), "{warnings:?}");
         }
     }
@@ -1306,12 +1325,12 @@ mod tests {
         // Every invisible character is shown, the joiner too, so no spelling passes for `.git`.
         assert_eq!(
             warnings[0].message,
-            "Left out 4 entries whose names Git treats as .git, with everything in them:\n  \
-             .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nGit keeps such names for \
-             itself (some spellings only on Windows or macOS), so Bolt leaves them out of saves, \
-             as it does on import. If Git uses them (a submodule's or worktree's .git file), list \
-             them in .boltignore to leave them out without this warning; otherwise rename them to \
-             save them."
+            "Left out 4 entries whose names Git or Bolt keep for themselves, with everything in \
+             them:\n  .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nSuch names stand for \
+             .git or .bolt (some spellings only on Windows or macOS), so Bolt leaves them out of \
+             saves, as it does on import. If Git uses them (a submodule's or worktree's .git \
+             file), list them in .boltignore to leave them out without this warning; otherwise \
+             rename them to save them."
         );
         // Said again when nothing changed, since they are still there.
         let again = save_now(&mut repo).unwrap();
@@ -1334,9 +1353,9 @@ mod tests {
         }
         let saved = save_now(&mut repo).unwrap();
         let message = &warnings_of(&saved)[0].message;
-        let listed = "Left out 7 entries whose names Git treats as .git, with everything in them:\n  \
-                      sub1/git~1\n  sub2/git~1\n  sub3/git~1\n  sub4/git~1\n  sub5/git~1\n  and 2 \
-                      more\n";
+        let listed = "Left out 7 entries whose names Git or Bolt keep for themselves, with \
+                      everything in them:\n  sub1/git~1\n  sub2/git~1\n  sub3/git~1\n  sub4/git~1\n  \
+                      sub5/git~1\n  and 2 more\n";
         assert!(message.starts_with(listed), "{message}");
     }
 
@@ -1362,8 +1381,8 @@ mod tests {
         assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
         let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
-        let listed = "Left out 2 entries whose names Git treats as .git, with everything in them:\n  \
-                      .GIT\n  sub/.git\nGit keeps";
+        let listed = "Left out 2 entries whose names Git or Bolt keep for themselves, with \
+                      everything in them:\n  .GIT\n  sub/.git\nSuch names";
         assert!(warnings[0].message.starts_with(listed), "{warnings:?}");
     }
 
@@ -1395,7 +1414,7 @@ mod tests {
         );
         let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
-        let listed = ":\n  git~1\n  gone/.g\\u{200c}it\n  lib/.git\nGit keeps";
+        let listed = ":\n  git~1\n  gone/.g\\u{200c}it\n  lib/.git\nSuch names";
         assert!(warnings[0].message.contains(listed), "{warnings:?}");
         // Gone from the save, so the next one names none; `lib` still holds its `.git`.
         let again = save_now(&mut repo).unwrap();
@@ -1426,12 +1445,59 @@ mod tests {
         assert_eq!(warnings[0].kind, "git_names_left_out");
         assert_eq!(
             warnings[0].message,
-            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/git~1\n\
-             Git keeps such names for itself (some spellings only on Windows or macOS), so Bolt \
-             leaves them out of saves, as it does on import. If Git uses it (a submodule's or \
-             worktree's .git file), list it in .boltignore to leave it out without this warning; \
-             otherwise rename it to save it."
+            "Left out 1 entry whose name Git or Bolt keep for themselves, with everything in it:\n  \
+             sub/git~1\nSuch names stand for .git or .bolt (some spellings only on Windows or \
+             macOS), so Bolt leaves them out of saves, as it does on import. If Git uses it (a \
+             submodule's or worktree's .git file), list it in .boltignore to leave it out without \
+             this warning; otherwise rename it to save it."
         );
+    }
+
+    #[test]
+    fn a_bolt_spelling_is_left_out_of_a_save_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        // Below the top, where `bolt~1` isn't the short name of the project's own `.bolt` on
+        // Windows; Windows drops a trailing dot, so there it takes a character macOS ignores.
+        let dotted = if cfg!(windows) {
+            ".b\u{200c}olt"
+        } else {
+            ".bolt."
+        };
+        write(root, "sub/bolt~1/x", b"x");
+        write(root, &format!("sub/{dotted}/y"), b"y");
+        write(root, "sub/keep.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["sub", "sub/keep.txt"]);
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out"]);
+        let shown = escape_all(&format!("sub/{dotted}"));
+        let listed = format!(":\n  {shown}\n  sub/bolt~1\nSuch names");
+        assert!(warnings[0].message.contains(&listed), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_bolt_folder_spelled_by_the_drives_rule_is_skipped_silently_at_the_top() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        if this_drive().ignores_case {
+            // The project's own folder spelled `.BOLT`, which this drive takes for `.bolt`.
+            drop(repo);
+            fs::rename(root.join(".bolt"), root.join(".BOLT")).unwrap();
+            let mut repo = Repository::open(root).unwrap();
+            let saved = save_now(&mut repo).unwrap();
+            assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        } else {
+            // Where letter case counts it is another folder, which is left out and named.
+            write(root, ".BOLT/x", b"x");
+            let saved = save_now(&mut repo).unwrap();
+            let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+            assert_eq!(kinds, ["git_names_left_out"]);
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        }
     }
 
     /// A worktree, a clone and a Bolt project inside the project keep their own history, so a save
@@ -2678,23 +2744,23 @@ mod tests {
     #[test]
     fn a_deep_chain_of_gone_folders_comes_back_in_linear_time() {
         let (dir, mut repo) = project();
-        // 4,000 folders of 200-byte names with a link at the bottom: an 800 KB path that nothing
-        // may copy once per folder. Planted from the bottom up, so planting isn't quadratic.
-        let name = "n".repeat(200);
+        // 2,046 folders with a link at the bottom, as deep as a path allows: `n/n/…/n/sub` is
+        // 4,095 bytes. Planted from the bottom up, so planting isn't quadratic.
+        let name = "n";
         let mut first = None;
         plant_root(&mut repo, |packs| {
             let link = add_link(packs, COMMIT);
             let mut id = add_listing(packs, vec![entry("sub", EntryKind::ProjectLink, link)]).0;
-            for _ in 1..4000 {
-                id = add_listing(packs, vec![entry(&name, EntryKind::Folder, id)]).0;
+            for _ in 1..2046 {
+                id = add_listing(packs, vec![entry(name, EntryKind::Folder, id)]).0;
             }
             first = Some(id);
-            add_listing(packs, vec![entry(&name, EntryKind::Folder, id)]).0
+            add_listing(packs, vec![entry(name, EntryKind::Folder, id)]).0
         });
         write(dir.path(), "new.txt", b"x");
-        let saved = timed_save(&mut repo, "4,000 gone folders deep");
+        let saved = timed_save(&mut repo, "2,046 gone folders deep");
         // The chain comes back whole, so it holds the link at the bottom.
-        assert_eq!(saved.get(&name).map(|e| e.id), first);
+        assert_eq!(saved.get(name).map(|e| e.id), first);
     }
 
     #[test]
@@ -2899,22 +2965,30 @@ mod tests {
         });
         let (three, missing) = (three.unwrap(), Id([0xee; 32]));
         let base = |limits| Base::new(repo.store(), three, limits);
+        // Each is read as the listing of `x`, one level down, so its paths are `x/a` and so on.
+        let x = "x/".len();
         // Within its limits it reads, so the missing listing fails.
         assert!(
             base(SaveLimits::default())
-                .gone_listing(missing, 1)
+                .gone_listing(missing, 1, x)
                 .is_err()
         );
         // The third read of three entries passes a limit of 8; nothing is read after that.
         let mut spent = base(SaveLimits::new(MAX_SAVE_DEPTH, 8));
-        assert!(spent.gone_listing(three, 1).unwrap().is_some());
-        assert!(spent.gone_listing(three, 1).unwrap().is_some());
-        assert!(spent.gone_listing(three, 1).unwrap().is_none());
-        assert!(spent.gone_listing(missing, 1).unwrap().is_none());
-        // Likewise once a folder lies past the depth limit.
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_some());
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_some());
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1, x).unwrap().is_none());
+        // Likewise once a folder lies past the depth limit,
         let mut spent = base(SaveLimits::new(2, MAX_SAVE_ENTRIES));
-        assert!(spent.gone_listing(three, 3).unwrap().is_none());
-        assert!(spent.gone_listing(missing, 1).unwrap().is_none());
+        assert!(spent.gone_listing(three, 3, x).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1, x).unwrap().is_none());
+        // or holds a path past the path limit.
+        let within = |bytes| base(SaveLimits::default().with_max_path(bytes));
+        assert!(within(3).gone_listing(three, 1, x).unwrap().is_some());
+        let mut spent = within(2);
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1, x).unwrap().is_none());
     }
 
     #[test]
@@ -2994,8 +3068,9 @@ mod tests {
 
     impl DeepFolders {
         /// `levels` nested folders named `d` under `top`; `None` (with a printed reason) if the
-        /// system can't hold that path: 4,097 levels are 8 KB, over the limit on Linux (4,096) and
-        /// macOS (1,024). Windows takes it, so there a failure fails the test.
+        /// system can't hold that path: 2,048 levels are 4 KB, which with the temporary folder is
+        /// over the limit on Linux (4,096) and macOS (1,024). Windows takes it, so there a failure
+        /// fails the test.
         fn make(top: &Path, levels: usize) -> Option<DeepFolders> {
             let mut deep = DeepFolders {
                 top: top.to_path_buf(),
@@ -3056,6 +3131,64 @@ mod tests {
             panic!("5 entries were accepted under a limit of 4");
         };
         assert!(detail.contains("more than 4 "), "{detail}");
+    }
+
+    #[test]
+    fn a_path_over_4096_bytes_is_refused_by_save_and_by_readers() {
+        let (dir, mut repo) = project();
+        // A new path past the limit stops the save, named and escaped. Only Windows can make a
+        // path of 4,097 bytes in a temporary folder, so a limit of 13 bytes stands in here.
+        let within = |bytes| walk_project(&repo, SaveLimits::default().with_max_path(bytes));
+        write(dir.path(), "ab\u{202e}/cd/e.txt", b"x"); // 14 bytes
+        assert!(within(14).is_ok());
+        let Err(err) = within(13) else {
+            panic!("a path of 14 bytes was accepted under a limit of 13");
+        };
+        let SaveError::TooLarge { detail } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(detail.contains("longer than 13 bytes"), "{detail}");
+        assert!(detail.ends_with("ab\\u{202e}/cd/e.txt"), "{detail}");
+        assert!(err.hint().unwrap().contains(".boltignore"), "{err:?}");
+        // What a save leaves out is no part of it.
+        write(dir.path(), ".boltignore", "ab\u{202e}/\n".as_bytes());
+        assert!(within(13).is_ok());
+
+        // The last save's paths, through 255-byte names this system holds: `a`'s link is 3,845
+        // bytes down, and `b`'s 4,101. The search of the gone folders keeps the first, and ends
+        // at the second without a word, as past any other limit: the base save is invalid there.
+        let below = |levels: usize| format!("{}/", "n".repeat(255)).repeat(levels);
+        let (a, b) = (format!("a/{}sub", below(15)), format!("b/{}sub", below(16)));
+        plant_save(
+            &mut repo,
+            &[
+                (a.as_str(), EntryKind::ProjectLink, COMMIT),
+                (b.as_str(), EntryKind::ProjectLink, COMMIT),
+            ],
+        );
+        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let top: Vec<&str> = scan.folders[""].iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(top, [".boltignore", "a"]);
+
+        // A folder kept as it was counts its paths against the new save's limit, as its depth.
+        let deep = format!("Docs/{}x", below(16));
+        plant_save(
+            &mut repo,
+            &[
+                (deep.as_str(), EntryKind::File, b"x"),
+                ("docs/y", EntryKind::File, b"y"),
+            ],
+        );
+        let Err(SaveError::TooLarge { detail }) = walk(
+            dir.path(),
+            newest(&repo),
+            SaveLimits::default(),
+            CASE_BLIND,
+            None,
+        ) else {
+            panic!("a kept path of 4,102 bytes was accepted");
+        };
+        assert!(detail.contains("longer than 4096 bytes"), "{detail}");
     }
 
     #[test]
@@ -3121,30 +3254,35 @@ mod tests {
         assert!(refused);
     }
 
-    // The real limit of 4,096 levels takes about a minute per test on Windows, so these run on
-    // request (and in CI on Windows only), on a 1 MiB stack like `bolt`'s main thread. Run with:
+    // The deepest real folders a save takes, 2,048 levels of `d` whose last path is 4,095 bytes
+    // (a path's limit comes before the 4,096 levels), take several seconds per test on Windows,
+    // the one system that makes them, so these run on request (and in CI on Windows only), on a
+    // 1 MiB stack like `bolt`'s main thread. Run with:
     // `cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders`
+    const DEEPEST: usize = MAX_PATH_BYTES.div_ceil(2);
 
     #[test]
-    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    #[ignore = "slow, and Windows only: run with --ignored"]
     fn real_folders_one_level_past_the_limit_are_refused() {
         let (dir, mut repo) = project();
         let head = repo.head().unwrap();
-        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH + 1) else {
+        let Some(_deep) = DeepFolders::make(dir.path(), DEEPEST + 1) else {
             return;
         };
         match on_a_stack_of(1 << 20, || save_now(&mut repo)) {
-            Err(SaveError::TooLarge { detail }) => assert!(detail.contains("4096"), "{detail}"),
+            Err(SaveError::TooLarge { detail }) => {
+                assert!(detail.contains("longer than 4096 bytes"), "{detail}");
+            }
             other => panic!("{:?}", other.map(|_| ())),
         }
         assert_eq!(repo.head().unwrap(), head);
     }
 
     #[test]
-    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    #[ignore = "slow, and Windows only: run with --ignored"]
     fn real_folders_at_the_limit_are_saved() {
         let (dir, mut repo) = project();
-        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH) else {
+        let Some(_deep) = DeepFolders::make(dir.path(), DEEPEST) else {
             return;
         };
         let saved = on_a_stack_of(1 << 20, || save_now(&mut repo));

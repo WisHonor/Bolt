@@ -363,6 +363,8 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `project_link.json`: project links (§7), a SHA-1 submodule and a SHA-256 one;
   - `diary.json`: the `full` entry now points at the tag list and the server lines of the two files above, so it changed; the `minimal` entry is byte for byte what milestone 1 wrote;
   - `shattered-prefix.bin`: not a record. It is the first 320 bytes of one of the two PDFs of SHAttered, the first public SHA-1 collision. The Git reader's SHA-1 must refuse it as a collision attack, and must accept it with one bit changed.
+- **Milestone 3:**
+  - `listing.json`: a fourth vector, `long-name`, a file whose name is 600 bytes (200 characters of three bytes each), past the 255 bytes names had until [decision 051](decisions/051-names-this-computer-cant-write-and-length-limits.md); its length is a two-byte varint. The first three vectors are byte for byte what milestone 1 wrote.
 
 ## 14. Open points
 
