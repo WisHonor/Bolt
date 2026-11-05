@@ -204,7 +204,10 @@ pub fn bolt_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> 
         .env_remove("BOLT_FAULT_AT")
         .env("BOLT_USER_NAME", "Test")
         .env("BOLT_USER_EMAIL", "test@example.com")
-        .env("BOLT_CONFIG_DIR", config);
+        .env("BOLT_CONFIG_DIR", config)
+        // Git's own settings and ignore list are found from here (decision 047).
+        .env("HOME", config)
+        .env("XDG_CONFIG_HOME", config);
     cmd
 }
 
@@ -315,7 +318,10 @@ impl Env {
             .env("BOLT_USER_NAME", "Test")
             .env("BOLT_USER_EMAIL", "test@example.com")
             .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path());
+            .env("BOLT_CONFIG_DIR", self.config.path())
+            // Git's own settings and ignore list are found from here (decision 047).
+            .env("HOME", self.config.path())
+            .env("XDG_CONFIG_HOME", self.config.path());
         cmd
     }
 

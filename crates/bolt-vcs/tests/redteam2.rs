@@ -41,6 +41,8 @@ impl Env {
         cmd.current_dir(dir)
             .env_remove("BOLT_FAULT_AT")
             .env("BOLT_CONFIG_DIR", self.config.path())
+            .env("HOME", self.config.path())
+            .env("XDG_CONFIG_HOME", self.config.path())
             .env("BOLT_USER_NAME", "Test")
             .env("BOLT_USER_EMAIL", "test@example.com");
         cmd

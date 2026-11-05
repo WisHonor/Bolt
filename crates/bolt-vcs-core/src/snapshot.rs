@@ -35,6 +35,9 @@ pub struct SaveRequest<'a> {
     pub command: &'a str,
     /// Save files Git rewrote with CRLF as they are, without the stop after an import.
     pub accept_crlf: bool,
+    /// The user's own Git ignore list, from `config::git_excludes_file`, whose lines come first
+    /// (decision 047); `None` reads none.
+    pub git_excludes: Option<&'a Path>,
 }
 
 // Made once per command, so boxing the save would buy nothing.
@@ -267,7 +270,13 @@ pub fn save_folder(
         ignored,
         gitignored,
         mut warnings,
-    } = walk(repo.root(), base, SaveLimits::default(), drive)?;
+    } = walk(
+        repo.root(),
+        base,
+        SaveLimits::default(),
+        drive,
+        req.git_excludes,
+    )?;
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
@@ -735,12 +744,21 @@ mod tests {
     }
 
     pub(super) fn save_now(repo: &mut Repository) -> Result<SaveOutcome, SaveError> {
+        save_with(repo, None)
+    }
+
+    /// A save with `git_excludes` as the user's own Git ignore list.
+    pub(super) fn save_with(
+        repo: &mut Repository,
+        git_excludes: Option<&Path>,
+    ) -> Result<SaveOutcome, SaveError> {
         let who = who();
         let req = SaveRequest {
             message: "Change things",
             who: &who,
             command: "save",
             accept_crlf: false,
+            git_excludes,
         };
         save_folder(repo, &req, &mut |_| {})
     }
@@ -819,7 +837,7 @@ mod tests {
 
     /// `walk` of the project on top of the line's newest save, as `save` does.
     pub(super) fn walk_project(repo: &Repository, limits: SaveLimits) -> Result<Scan, SaveError> {
-        walk(repo.root(), newest(repo), limits, this_drive())
+        walk(repo.root(), newest(repo), limits, this_drive(), None)
     }
 
     #[test]

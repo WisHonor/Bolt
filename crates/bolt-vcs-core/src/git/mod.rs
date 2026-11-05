@@ -24,6 +24,8 @@ pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJEC
 pub use pack::apply_delta;
 pub use refs::{Head, Refs};
 
+pub(crate) use config::read_excludes_file;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,7 +33,6 @@ use std::path::{Path, PathBuf};
 use bolt_platform::Owner;
 
 use crate::config::ConfigError;
-use crate::ignore::Rules;
 use crate::names::MAX_NAME_BYTES;
 use crate::repo::{self, RepoError};
 use crate::safe_fs;
@@ -470,23 +471,6 @@ impl Repo {
     /// Whether `.git/lfs` is there, where Git LFS keeps its files. Only looked for, never read.
     pub fn has_lfs_folder(&self) -> Result<bool, GitError> {
         exists(&self.git.join("lfs"))
-    }
-
-    /// How many patterns `.git/info/exclude`, Git's personal list of files to ignore, holds, read
-    /// with Git's rules for such lines. Bolt doesn't use them (decision 038), so the import says
-    /// so. `None` if it can't be read to count them, as when it is over 1 MiB or a link.
-    #[must_use]
-    pub fn exclude_patterns(&self) -> Option<u64> {
-        let info = self.git.join("info");
-        match real_dir(&info) {
-            Ok(true) => {}
-            Ok(false) => return Some(0),
-            Err(_) => return None,
-        }
-        let path = info.join("exclude");
-        let text = read_optional(&path, safe_fs::MAX_IGNORE_FILE_BYTES).ok()?;
-        let rules = Rules::parse(&text.unwrap_or_default(), "", true);
-        Some(rules.pattern_count() as u64)
     }
 }
 

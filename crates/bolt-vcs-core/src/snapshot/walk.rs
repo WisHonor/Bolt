@@ -56,6 +56,13 @@ fn holds_own_repository(dir: &Path) -> bool {
         || fs::symlink_metadata(dir.join(".bolt")).is_ok_and(|m| m.is_dir())
 }
 
+/// Whether `root` holds a real `.git` folder with a real `info` folder in it, where Git keeps its
+/// personal list for the repository. Nothing in `.git` is read through a link.
+fn has_real_git_info(root: &Path) -> bool {
+    let git = root.join(".git");
+    safe_fs::check_real_dir(&git).is_ok() && safe_fs::check_real_dir(&git.join("info")).is_ok()
+}
+
 /// The project path of `name` in the folder `rel` (`""` for the top folder).
 fn path_in(rel: &str, name: &str) -> String {
     if rel.is_empty() {
@@ -231,13 +238,15 @@ struct WalkState {
 }
 
 impl WalkState {
-    /// The state for a walk of `root` on `drive`, beginning with its own ignore files. `top` is
-    /// the base save's top listing, and `dropped` the names Git treats as `.git` it held.
+    /// The state for a walk of `root` on `drive`, beginning with its own ignore files and Git's
+    /// personal lists, the user's own `own_list` among them. `top` is the base save's top listing,
+    /// and `dropped` the names Git treats as `.git` it held.
     fn new(
         root: &Path,
         drive: Drive,
         top: Listing,
         dropped: Vec<String>,
+        own_list: Option<&Path>,
     ) -> Result<WalkState, SaveError> {
         let mut rules = WalkState {
             root: root.to_owned(),
@@ -260,7 +269,7 @@ impl WalkState {
         rules.drop_saved("", dropped);
         rules.note_untouched("", &top);
         rules.old.insert(String::new(), Some(top));
-        rules.enter(root)?;
+        rules.enter(root, own_list)?;
         Ok(rules)
     }
 
@@ -333,11 +342,20 @@ impl WalkState {
     }
 
     /// Puts the rules of the ignore files in `dir` in force: its `.gitignore`, then its
-    /// `.boltignore`, whose lines come later so they can add to Git's rules or undo them.
-    fn enter(&mut self, dir: &Path) -> Result<(), SaveError> {
+    /// `.boltignore`, whose lines come later so they can add to Git's rules or undo them. At the
+    /// top, Git's personal lists come first, as in Git: the user's own `own_list`, then
+    /// `.git/info/exclude` (decision 047).
+    fn enter(&mut self, dir: &Path, own_list: Option<&Path>) -> Result<(), SaveError> {
         let folder = shown(dir.strip_prefix(&self.root).unwrap_or(dir));
         let mut in_force = self.matcher.in_force_bytes();
         let mut rules = Vec::new();
+        if let Some(list) = own_list {
+            rules.extend(self.own_list_rules(list, &mut in_force)?);
+        }
+        if folder.is_empty() && has_real_git_info(dir) {
+            let info = dir.join(".git").join("info");
+            rules.extend(self.file_rules(&info, &folder, "exclude", &mut in_force)?);
+        }
         for name in [".gitignore", ".boltignore"] {
             rules.extend(self.file_rules(dir, &folder, name, &mut in_force)?);
         }
@@ -347,11 +365,34 @@ impl WalkState {
         Ok(())
     }
 
-    /// The rules of the ignore file `name` in `dir`, the project's `folder`, or none if there
-    /// isn't one. Read through `safe_fs` and held to the limits (storage-format.md §12) before a
-    /// rule is read from it: `in_force` is the size of the files in force at `folder` so far. A
-    /// `.gitignore` that isn't a regular file is skipped with a warning, as Git skips a linked
-    /// one. A folder Bolt may not look into is `Unreadable`.
+    /// The rules of the user's own Git ignore list `file`, or none if it isn't there. It is the
+    /// user's own, so a link to it is followed; any other problem stops the save, as for a
+    /// `.gitignore`.
+    fn own_list_rules(
+        &mut self,
+        file: &Path,
+        in_force: &mut u64,
+    ) -> Result<Option<Rules>, SaveError> {
+        let shown = file.display().to_string();
+        match safe_fs::read_capped_following_links(file, safe_fs::MAX_IGNORE_FILE_BYTES) {
+            Ok(bytes) => self.counted(&bytes, &shown, "", true, in_force).map(Some),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => {
+                let why = e.to_string();
+                let detail = if why.starts_with(&shown) {
+                    why
+                } else {
+                    format!("{shown}: {why}")
+                };
+                Err(SaveError::Ignore { detail })
+            }
+        }
+    }
+
+    /// The rules of the ignore file `name` in `dir`, for the project's `folder`, or none if there
+    /// isn't one. Read through `safe_fs`. A `.gitignore`, or Git's `.git/info/exclude`, that isn't
+    /// a regular file is skipped with a warning, as Git skips a linked `.gitignore`. A folder
+    /// Bolt may not look into is `Unreadable`.
     fn file_rules(
         &mut self,
         dir: &Path,
@@ -361,7 +402,7 @@ impl WalkState {
     ) -> Result<Option<Rules>, SaveError> {
         let file = dir.join(name);
         let rel = shown(file.strip_prefix(&self.root).unwrap_or(&file));
-        let ignore = |detail| SaveError::Ignore { detail };
+        let gits = name != ".boltignore";
         let bytes = match safe_fs::read_capped(&file, safe_fs::MAX_IGNORE_FILE_BYTES) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -370,23 +411,27 @@ impl WalkState {
                     Ok(meta) => Some(meta),
                     Err(source) if source.kind() == io::ErrorKind::NotFound => None,
                     Err(source) => {
-                        let path = if folder.is_empty() {
-                            "the project folder".to_owned()
-                        } else {
-                            folder.to_owned()
+                        let path = match rel.rsplit_once('/') {
+                            Some((up, _)) => up.to_owned(),
+                            None => "the project folder".to_owned(),
                         };
                         return Err(SaveError::Unreadable { path, source });
                     }
                 };
                 // Judged by what the file is: an open can fail for other reasons with the same
                 // error kind, and a regular .gitignore that can't be read must stop the save.
-                if name == ".gitignore" && meta.is_some_and(|m| !safe_fs::is_regular(&m)) {
+                if gits && meta.is_some_and(|m| !safe_fs::is_regular(&m)) {
+                    let why = if name == ".gitignore" {
+                        "Git skips a linked .gitignore too"
+                    } else {
+                        "Bolt reads nothing in .git through a link"
+                    };
                     self.warnings.push(Warning::new(
                         warning::GITIGNORE_SKIPPED,
                         format!(
                             "Bolt skipped {}: it is a link, folder or special file, not a regular \
-                             file, so its rules weren't used. Git skips a linked .gitignore too. \
-                             Make it a regular file if its rules should apply.",
+                             file, so its rules weren't used. {why}. Make it a regular file if its \
+                             rules should apply.",
                             escape(&rel, false)
                         ),
                     ));
@@ -395,14 +440,29 @@ impl WalkState {
                 // `safe_fs` refusals start with the full path; the project path replaces it, so
                 // the file is named once.
                 let why = e.to_string();
-                return Err(ignore(
-                    match why.strip_prefix(&file.display().to_string()) {
+                return Err(SaveError::Ignore {
+                    detail: match why.strip_prefix(&file.display().to_string()) {
                         Some(rest) => format!("{rel}{rest}"),
                         None => format!("{rel}: {why}"),
                     },
-                ));
+                });
             }
         };
+        self.counted(&bytes, &rel, folder, gits, in_force).map(Some)
+    }
+
+    /// The rules in `bytes`, an ignore file shown as `rel`, for the project's `folder`, held to
+    /// the limits (storage-format.md §12) before a rule is read from it: `in_force` is the size
+    /// of the files in force at `folder` so far. `gits` says whether they are Git's rules.
+    fn counted(
+        &mut self,
+        bytes: &[u8],
+        rel: &str,
+        folder: &str,
+        gits: bool,
+        in_force: &mut u64,
+    ) -> Result<Rules, SaveError> {
+        let ignore = |detail| SaveError::Ignore { detail };
         let size = bytes.len() as u64;
         if *in_force + size > safe_fs::MAX_IGNORE_IN_FORCE_BYTES {
             return Err(ignore(format!(
@@ -419,7 +479,7 @@ impl WalkState {
         }
         *in_force += size;
         self.read += size;
-        Ok(Some(Rules::parse(&bytes, folder, name == ".gitignore")))
+        Ok(Rules::parse(bytes, folder, gits))
     }
 
     /// Whether the walk keeps `path`: never what it leaves untouched, and what the ignore rules
@@ -470,7 +530,7 @@ impl WalkState {
             }
             return kept;
         }
-        if is_dir && let Err(problem) = self.enter(path) {
+        if is_dir && let Err(problem) = self.enter(path, None) {
             self.problem.get_or_insert(problem);
             return false;
         }
@@ -534,17 +594,18 @@ pub(super) struct Scan {
 }
 
 /// Scans the project folder on a thread of its own, so callers don't need a deep stack. `drive`
-/// is what `drive::probe` found there.
+/// is what `drive::probe` found there, and `own_list` the user's own Git ignore list, if any.
 pub(super) fn walk(
     root: &Path,
     base: Base,
     limits: SaveLimits,
     drive: Drive,
+    own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
     thread::scope(|scope| {
         let scan = thread::Builder::new()
             .stack_size(WALK_STACK_BYTES)
-            .spawn_scoped(scope, || scan_folder(root, base, limits, drive))
+            .spawn_scoped(scope, || scan_folder(root, base, limits, drive, own_list))
             .map_err(|e| SaveError::Repo(e.into()))?;
         scan.join().unwrap_or_else(|_| {
             let stopped = io::Error::other("the scan of the project folder stopped unexpectedly");
@@ -558,6 +619,7 @@ fn scan_folder(
     mut base: Base,
     mut limits: SaveLimits,
     drive: Drive,
+    own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
@@ -566,7 +628,9 @@ fn scan_folder(
     let (top, dropped) = base.listing(base.root)?;
     // Bolt reads each ignore file itself: `ignore` would reopen it by path, following links and
     // reading without a limit.
-    let rules = Arc::new(Mutex::new(WalkState::new(root, drive, top, dropped)?));
+    let rules = Arc::new(Mutex::new(WalkState::new(
+        root, drive, top, dropped, own_list,
+    )?));
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -961,8 +1025,8 @@ mod tests {
     use crate::repo::Repository;
     use crate::snapshot::SaveOutcome;
     use crate::snapshot::tests::{
-        damage_the_only_copy_of, newest, project, save_now, saved_root, saved_tree, this_drive,
-        walk_project, write,
+        damage_the_only_copy_of, newest, project, save_now, save_with, saved_root, saved_tree,
+        this_drive, walk_project, write,
     };
     use crate::test_support::{add_link, add_listing, plant_root, plant_save};
 
@@ -1389,6 +1453,73 @@ mod tests {
         assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
     }
 
+    /// The user's own list, then `.git/info/exclude`, then the project's own rules, as in Git: the
+    /// last line that matches decides (decision 047).
+    #[test]
+    fn gits_personal_lists_keep_files_out_behind_the_projects_rules() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let own = tempfile::tempdir().unwrap();
+        let list = own.path().join("ignore");
+        fs::write(&list, "*.log\n!b.log\n.claude/settings.local.json\n").unwrap();
+        write(
+            root,
+            ".git/info/exclude",
+            b"b.log\n/.worktrees/\n!keep.txt\n",
+        );
+        write(root, ".gitignore", b"keep.txt\n!c.log\n");
+        let files = [
+            "a.log",
+            "b.log",
+            "c.log",
+            "keep.txt",
+            ".claude/settings.local.json",
+            ".worktrees/a/x.txt",
+            "plain.txt",
+        ];
+        for path in files {
+            write(root, path, b"x");
+        }
+        let saved = save_with(&mut repo, Some(&list)).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [".claude", ".gitignore", "c.log", "plain.txt"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_info_exclude_is_skipped_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("exclude"), "a.txt\n").unwrap();
+        fs::create_dir_all(root.join(".git/info")).unwrap();
+        let link = root.join(".git/info/exclude");
+        std::os::unix::fs::symlink(elsewhere.path().join("exclude"), link).unwrap();
+        write(root, "a.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["gitignore_skipped"]);
+        assert_eq!(saved_paths(&repo, saved), ["a.txt"]);
+    }
+
+    #[test]
+    fn an_own_list_bolt_cant_read_stops_the_save() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"x");
+        let own = tempfile::tempdir().unwrap();
+        let list = own.path().join("ignore");
+        fs::write(&list, comment_of(safe_fs::MAX_IGNORE_FILE_BYTES + 1)).unwrap();
+        let err = save_with(&mut repo, Some(&list)).unwrap_err();
+        assert!(matches!(err, SaveError::Ignore { .. }), "{err}");
+        assert!(err.to_string().contains("ignore"), "{err}");
+        // One that isn't there is none.
+        let gone = own.path().join("none");
+        assert!(save_with(&mut repo, Some(&gone)).is_ok());
+    }
+
     #[test]
     fn braces_in_boltignore_are_literal_as_in_git() {
         let (dir, mut repo) = project();
@@ -1472,7 +1603,8 @@ mod tests {
         );
         write(root, "a/.boltignore", b"#\n");
         write(root, "b/.boltignore", b"#\n");
-        let mut rules = WalkState::new(root, this_drive(), Listing::empty(), Vec::new()).unwrap();
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         assert!(!rules.keeps(&root.join("a"), true));
         // Past the first problem nothing is kept, and no other .boltignore is read.
         assert!(!rules.keeps(&root.join("b"), true));
@@ -1509,7 +1641,8 @@ mod tests {
         write(root, "a/.boltignore", b"!x.log\n");
         fs::create_dir(root.join("b")).unwrap();
         let mut base = newest(&repo);
-        let mut rules = WalkState::new(root, this_drive(), Listing::empty(), Vec::new()).unwrap();
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         // In walk order: `a` and its file, then `b`, which `a`'s rules no longer reach. The walk
         // notes each folder it keeps before it looks inside.
         assert!(rules.keeps(&root.join("a"), true));
@@ -1526,7 +1659,8 @@ mod tests {
         let (dir, repo) = project();
         let root = dir.path();
         write(root, ".gitignore", b"*.dll\n");
-        let mut rules = WalkState::new(root, this_drive(), Listing::empty(), Vec::new()).unwrap();
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         // Bolt can't tell whether the last save holds `a/x.dll` without `a`'s listing, so it
         // stops rather than leave out what may be saved.
         assert!(!rules.keeps(&root.join("a").join("x.dll"), false));
@@ -2335,7 +2469,7 @@ mod tests {
                 limits: SaveLimits::new(levels, entries),
                 ..newest(&repo)
             };
-            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive()).unwrap();
+            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive(), None).unwrap();
             scan.folders[""].iter().any(|c| c.name == "a")
         };
         assert!(comes_back_within(4, 5));
@@ -2469,7 +2603,7 @@ mod tests {
         // `gone`, the two kept folders, and the three files they hold.
         let walk_under = |most| {
             let limits = SaveLimits::new(MAX_SAVE_DEPTH, most);
-            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND, None)
         };
         assert!(walk_under(6).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_under(5) else {
@@ -2491,7 +2625,7 @@ mod tests {
         // `Docs/a/b` is three levels down.
         let walk_within = |levels| {
             let limits = SaveLimits::new(levels, MAX_SAVE_ENTRIES);
-            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND, None)
         };
         assert!(walk_within(3).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_within(2) else {
@@ -2513,7 +2647,7 @@ mod tests {
         // None of it is on disk, and `gone/Docs/a` is three levels down.
         let walk_within = |levels| {
             let limits = SaveLimits::new(levels, MAX_SAVE_ENTRIES);
-            walk(dir.path(), newest(&repo), limits, CASE_BLIND)
+            walk(dir.path(), newest(&repo), limits, CASE_BLIND, None)
         };
         assert!(walk_within(3).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_within(2) else {
@@ -2640,7 +2774,7 @@ mod tests {
             ..newest(&repo)
         };
         let started = std::time::Instant::now();
-        let scan = walk(dir.path(), base, SaveLimits::default(), this_drive()).unwrap();
+        let scan = walk(dir.path(), base, SaveLimits::default(), this_drive(), None).unwrap();
         let took = started.elapsed();
         eprintln!("a tree bomb past the base's limits: walked in {took:?}");
         // Reading on would take thousands of reads of 5,000 entries.
@@ -2669,7 +2803,7 @@ mod tests {
         };
         let walk_under = |most| {
             let limits = SaveLimits::new(MAX_SAVE_DEPTH, most);
-            walk(dir.path(), newest(&repo), limits, drive)
+            walk(dir.path(), newest(&repo), limits, drive, None)
         };
         assert!(walk_under(6).is_ok());
         let Err(SaveError::TooLarge { detail }) = walk_under(5) else {
@@ -2768,7 +2902,7 @@ mod tests {
                 limits: SaveLimits::new(MAX_SAVE_DEPTH, paths),
                 ..newest(&repo)
             };
-            walk(dir.path(), base, SaveLimits::default(), this_drive())
+            walk(dir.path(), base, SaveLimits::default(), this_drive(), None)
         };
         assert!(walk_reading(PATHS).is_ok());
         let Err(err) = walk_reading(PATHS - 1) else {
@@ -2807,7 +2941,7 @@ mod tests {
         let refused = on_a_stack_of(64 * 1024, || {
             let limits = SaveLimits::new(299, MAX_SAVE_ENTRIES);
             matches!(
-                walk(dir.path(), base, limits, drive),
+                walk(dir.path(), base, limits, drive, None),
                 Err(SaveError::TooLarge { .. })
             )
         });

@@ -34,6 +34,13 @@ pub enum ConfigError {
         escape(&path.display().to_string(), false)
     )]
     SafeFoldersNotAtTop { path: PathBuf },
+    /// The user's own Git settings, read for their ignore list (decision 047), can't be read.
+    #[error(
+        "Bolt can't read your Git settings in {}: {}",
+        escape(&path.display().to_string(), false),
+        escape(detail, false)
+    )]
+    GitSettings { path: PathBuf, detail: String },
 }
 
 const SNIPPET: &str = "[user]\nname = \"Your Name\"\nemail = \"you@example.com\"";
@@ -54,6 +61,11 @@ impl ConfigError {
             ConfigError::SafeFoldersNotAtTop { .. } => {
                 Some("Move that line above [user] and every other [section].".to_owned())
             }
+            ConfigError::GitSettings { .. } => Some(
+                "Bolt reads them only for core.excludesFile, your own list of files Git ignores. \
+                 Fix that file; `git config --global --list` shows what Git makes of it."
+                    .to_owned(),
+            ),
         }
     }
 }
@@ -198,6 +210,71 @@ pub fn user_config_path() -> Option<PathBuf> {
             .to_owned(),
     };
     Some(dir.join("config.toml"))
+}
+
+/// The most of the user's own Git settings Bolt reads, as for a repository's `.git/config`.
+const MAX_GIT_SETTINGS_BYTES: u64 = 1 << 20;
+
+/// The user's own Git ignore list (decision 047): the file `core.excludesFile` names in the
+/// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. Git's home folder is `HOME`, as
+/// Git for Windows takes it too. `None` when there is no home folder.
+pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigError> {
+    let env_path = |key| {
+        std::env::var_os(key)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = env_path("HOME")
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()));
+    let Some(home) = home else {
+        return Ok(None);
+    };
+    let xdg = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
+    git_excludes_file_in(&home, &xdg, project_root).map(Some)
+}
+
+/// `git_excludes_file` with the home folder and `XDG_CONFIG_HOME` given, so tests can choose
+/// them. Includes aren't followed, and the repository's own config is never read for this: it
+/// could name any file on the computer.
+fn git_excludes_file_in(
+    home: &Path,
+    xdg: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, ConfigError> {
+    let mut named = None;
+    // In Git's order, so that `~/.gitconfig` wins.
+    for path in [xdg.join("git").join("config"), home.join(".gitconfig")] {
+        let text = match safe_fs::read_capped_following_links(&path, MAX_GIT_SETTINGS_BYTES) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                let detail = e.to_string();
+                return Err(ConfigError::GitSettings { path, detail });
+            }
+        };
+        match crate::git::read_excludes_file(&text) {
+            Ok(Some(value)) => named = Some((value, path)),
+            Ok(None) => {}
+            Err(line) => {
+                let detail = format!("line {line} can't be read as Git reads it");
+                return Err(ConfigError::GitSettings { path, detail });
+            }
+        }
+    }
+    let Some((value, path)) = named else {
+        return Ok(xdg.join("git").join("ignore"));
+    };
+    let Ok(value) = String::from_utf8(value) else {
+        let detail = "its core.excludesFile isn't valid UTF-8".to_owned();
+        return Err(ConfigError::GitSettings { path, detail });
+    };
+    let in_home = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\").filter(|_| cfg!(windows)));
+    Ok(match in_home {
+        Some(rest) => home.join(rest),
+        None => project_root.join(value),
+    })
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
@@ -448,6 +525,43 @@ mod tests {
         assert_eq!(read(&path).unwrap(), None);
         std::fs::write(&path, "[user\n").unwrap();
         assert!(matches!(read(&path), Err(ConfigError::Invalid { .. })));
+    }
+
+    #[test]
+    fn the_users_own_git_ignore_list_is_found_as_git_finds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let xdg = home.join("xdg");
+        let root = home.join("project");
+        let find = || git_excludes_file_in(home, &xdg, &root).unwrap();
+        // Nothing set: git/ignore in XDG_CONFIG_HOME.
+        assert_eq!(find(), xdg.join("git").join("ignore"));
+        // A relative path is from the project's top, as in Git.
+        std::fs::create_dir_all(xdg.join("git")).unwrap();
+        std::fs::write(
+            xdg.join("git").join("config"),
+            "[core]\n\texcludesFile = list\n",
+        )
+        .unwrap();
+        assert_eq!(find(), root.join("list"));
+        // ~/.gitconfig is read after it, so it wins, and `~/` is the home folder.
+        std::fs::write(home.join(".gitconfig"), "[core]\n\texcludesFile = ~/mine\n").unwrap();
+        assert_eq!(find(), home.join("mine"));
+    }
+
+    #[test]
+    fn git_settings_bolt_cant_read_stop_it_and_are_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(home.join(".gitconfig"), "[user]\n[core\n").unwrap();
+        let e = git_excludes_file_in(home, &home.join("xdg"), home).unwrap_err();
+        assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+        let said = e.to_string();
+        assert!(
+            said.contains(".gitconfig") && said.contains("line 2"),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("core.excludesFile"));
     }
 
     #[test]

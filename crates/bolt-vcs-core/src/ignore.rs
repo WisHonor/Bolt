@@ -416,11 +416,6 @@ impl Rules {
         }
     }
 
-    /// How many of its lines are patterns: those left empty once trimmed match nothing.
-    pub(crate) fn pattern_count(&self) -> usize {
-        self.patterns.iter().filter(|p| !p.text.is_empty()).count()
-    }
-
     /// The last line that matches, as Git's `last_matching_pattern_from_list` finds it. `name` is
     /// the last part of `path`.
     fn last_match(

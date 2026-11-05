@@ -40,6 +40,20 @@ pub(super) fn read_sparse(text: &[u8], file: &str) -> Result<(Option<bool>, bool
     Ok((sparse, includes))
 }
 
+/// The last `core.excludesfile` in `text`, the user's own Git settings (decision 047), or the
+/// number of the first line Git couldn't read. A key with no value is refused, as Git refuses it
+/// for a path. Includes aren't followed.
+pub(crate) fn read_excludes_file(text: &[u8]) -> Result<Option<Vec<u8>>, usize> {
+    let mut found = None;
+    parse(text, &mut |name, value| {
+        if name == b"core.excludesfile" {
+            found = Some(value?.to_vec());
+        }
+        Some(())
+    })?;
+    Ok(found)
+}
+
 /// Whether the setting `name` is in an `[include]` or `[includeIf]` section, where Git takes
 /// other files to read.
 fn is_include(name: &[u8]) -> bool {
@@ -840,5 +854,26 @@ mod tests {
             let (_, worktree) = read_sparse(text.as_bytes(), ".git/config.worktree").unwrap();
             assert_eq!(worktree, includes, "{text}");
         }
+    }
+
+    #[test]
+    fn the_excludes_file_is_read_as_git_reads_it() {
+        let read = |text: &str| read_excludes_file(text.as_bytes());
+        assert_eq!(
+            read("[core]\n\texcludesFile = ~/.gitignore_global\n"),
+            Ok(Some(b"~/.gitignore_global".to_vec()))
+        );
+        // The last one wins, letter case doesn't matter in the name, and a quoted value is
+        // unquoted as Git does it.
+        assert_eq!(
+            read("[core]\nexcludesfile = a\n[CORE]\nEXCLUDESFILE = \"C:\\\\x y\"\n"),
+            Ok(Some(b"C:\\x y".to_vec()))
+        );
+        assert_eq!(read("[user]\n\tname = x\n"), Ok(None));
+        // Includes aren't followed.
+        assert_eq!(read("[include]\n\tpath = other\n"), Ok(None));
+        // A path needs a value, and a line Git can't read is refused.
+        assert_eq!(read("[core]\n\texcludesFile\n"), Err(2));
+        assert_eq!(read("[user]\nname = x\n[core\n"), Err(3));
     }
 }
