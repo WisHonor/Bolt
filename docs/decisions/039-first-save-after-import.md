@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
-- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (sparse checkouts set up through a config include: a warning, not a refusal)
+- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (sparse checkouts set up through a config include: a warning, not a refusal); [decision 051](051-names-this-computer-cant-write-and-length-limits.md) (names this computer can't write; names at most 765 bytes, paths 4,096)
 - **Reviewed:** 2026-11-04; the owner left the call to Claude. The line-ending stop offers its two ways on in its hint and never asks, in a terminal too: Bolt never runs Git, so a question could offer only the way that saves the CRLF files, which the hint names already. Kept.
 - **Agenda topic:** none (milestone 2 planning, question 9)
 - **Refines:** [decision 019](019-review-clarifications.md) #2 (entries this computer can't hold), built now rather than in milestone 3; [decision 004](004-project-contents.md) (bytes in = bytes out); [decision 031](031-own-git-reader.md) (the reader also takes `core.sparseCheckout`, only to refuse a sparse checkout)

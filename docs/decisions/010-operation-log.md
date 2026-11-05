@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 10
-- **Refined by:** [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in records of their own that diary entries point to)
+- **Refined by:** [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in records of their own that diary entries point to); [decision 049](049-writing-files-one-at-a-time.md) (files are written one at a time from a journal a crash leaves to finish)
 
 ## Context
 

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-02
 - **Agenda topic:** none (milestone 2 planning, question 5)
+- **Refined by:** [decision 051](051-names-this-computer-cant-write-and-length-limits.md) (names this computer can't write; names at most 765 bytes, paths 4,096)
 - **Refines:** [decision 004](004-project-contents.md) (imported histories keep their names) and [decision 019](019-review-clarifications.md) #7 (names in Git trees)
 
 ## Context

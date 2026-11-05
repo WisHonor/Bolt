@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 11
+- **Refined by:** [decision 048](048-handle-relative-file-access.md) (folders are held open and worked inside, never through a link); [decision 049](049-writing-files-one-at-a-time.md) (files are written one at a time from a journal a crash leaves to finish); [decision 053](053-file-state-cache.md) (the file-state cache)
 
 ## Context
 
