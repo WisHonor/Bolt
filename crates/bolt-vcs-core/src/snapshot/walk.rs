@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::thread;
@@ -460,10 +461,15 @@ impl WalkState {
         file: &Path,
         in_force: &mut u64,
     ) -> Result<Option<Rules>, SaveError> {
-        // shortcut: only a path spelled from the project's top counts as in it, not one with `..`,
-        // in other letter case or through a link of the user's own; compare resolved paths if
-        // settings like that turn up.
-        if let Ok(rel) = file.strip_prefix(&self.root)
+        // In the project however it is spelled (short names, letter case, `..`, a link of the
+        // user's own to the top). Only folders above it are resolved: the file, or a folder on
+        // the way, may be a link in the project, which must be seen as one.
+        let top = fs::canonicalize(&self.root).ok();
+        let rel = file.ancestors().skip(1).find_map(|up| {
+            let at_top = up == self.root || (top.is_some() && fs::canonicalize(up).ok() == top);
+            at_top.then(|| file.strip_prefix(up))
+        });
+        if let Some(Ok(rel)) = rel
             && !rel.as_os_str().is_empty()
             && rel.components().all(|c| matches!(c, Component::Normal(_)))
         {
@@ -1831,42 +1837,73 @@ mod tests {
     /// a file outside it, so there a link isn't followed (decision 060).
     #[test]
     fn a_linked_own_list_inside_the_project_is_skipped_with_a_warning() {
-        let (dir, mut repo) = project();
-        let root = dir.path();
-        let elsewhere = tempfile::tempdir().unwrap();
-        let outside = elsewhere.path().join("list");
-        fs::write(&outside, "a.txt\n").unwrap();
-        write(root, "a.txt", b"x");
-        if !crate::test_support::symlink(&outside, &root.join("mine")) {
-            return;
+        for spelled_otherwise in [false, true] {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            let (_links, top) = spelled(root, spelled_otherwise);
+            let elsewhere = tempfile::tempdir().unwrap();
+            let outside = elsewhere.path().join("list");
+            fs::write(&outside, "a.txt\n").unwrap();
+            write(root, "a.txt", b"x");
+            if !crate::test_support::symlink(&outside, &root.join("mine")) {
+                return;
+            }
+            let saved = save_with(&mut repo, Some(&top.join("mine"))).unwrap();
+            let warnings = warnings_of(&saved).to_vec();
+            assert_eq!(warnings.len(), 1, "{top:?}: {warnings:?}");
+            assert_eq!(warnings[0].kind, "gitignore_skipped");
+            assert!(
+                warnings[0].message.contains("skipped mine:"),
+                "{warnings:?}"
+            );
+            // Its rules don't apply, and the link itself is saved as a link.
+            assert_eq!(saved_paths(&repo, saved), ["a.txt", "mine"]);
         }
-        let saved = save_with(&mut repo, Some(&root.join("mine"))).unwrap();
-        let warnings = warnings_of(&saved).to_vec();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].kind, "gitignore_skipped");
-        assert!(
-            warnings[0].message.contains("skipped mine:"),
-            "{warnings:?}"
-        );
-        // Its rules don't apply, and the link itself is saved as a link.
-        assert_eq!(saved_paths(&repo, saved), ["a.txt", "mine"]);
     }
 
     #[test]
     fn an_own_list_inside_a_linked_folder_is_skipped_with_a_warning() {
+        for spelled_otherwise in [false, true] {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            let (_links, top) = spelled(root, spelled_otherwise);
+            let elsewhere = tempfile::tempdir().unwrap();
+            fs::write(elsewhere.path().join("mine"), "a.txt\n").unwrap();
+            write(root, "a.txt", b"x");
+            link_folder(&root.join("lists"), elsewhere.path());
+            let saved = save_with(&mut repo, Some(&top.join("lists").join("mine"))).unwrap();
+            let warnings = warnings_of(&saved).to_vec();
+            assert_eq!(warnings.len(), 1, "{top:?}: {warnings:?}");
+            assert_eq!(warnings[0].kind, "gitignore_skipped");
+            let named = "skipped lists/mine: lists is a link";
+            assert!(warnings[0].message.contains(named), "{warnings:?}");
+            assert_eq!(saved_paths(&repo, saved), ["a.txt", "lists"]);
+        }
+    }
+
+    /// The user's own link into the project is theirs to follow; inside, nothing is followed.
+    #[test]
+    fn an_own_list_named_through_a_link_into_the_project_is_read_there() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        let elsewhere = tempfile::tempdir().unwrap();
-        fs::write(elsewhere.path().join("mine"), "a.txt\n").unwrap();
+        let (_links, top) = spelled(root, true);
         write(root, "a.txt", b"x");
-        link_folder(&root.join("lists"), elsewhere.path());
-        let saved = save_with(&mut repo, Some(&root.join("lists").join("mine"))).unwrap();
-        let warnings = warnings_of(&saved).to_vec();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].kind, "gitignore_skipped");
-        let named = "skipped lists/mine: lists is a link";
-        assert!(warnings[0].message.contains(named), "{warnings:?}");
-        assert_eq!(saved_paths(&repo, saved), ["a.txt", "lists"]);
+        write(root, "lists/mine", b"a.txt\n");
+        let saved = save_with(&mut repo, Some(&top.join("lists").join("mine"))).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(saved_paths(&repo, saved), ["lists", "lists/mine"]);
+    }
+
+    /// `root`, or, `otherwise`, `root` spelled through a link of the user's own, as a short name
+    /// (`RUNNER~1`) or `/var` for `/private/var` spell it on CI. Keep the folder while it is used.
+    fn spelled(root: &Path, otherwise: bool) -> (tempfile::TempDir, PathBuf) {
+        let links = tempfile::tempdir().unwrap();
+        if !otherwise {
+            return (links, root.to_owned());
+        }
+        let alias = links.path().join("alias");
+        link_folder(&alias, root);
+        (links, alias)
     }
 
     #[test]
