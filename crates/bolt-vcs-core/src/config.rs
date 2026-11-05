@@ -44,7 +44,7 @@ impl ConfigError {
     pub fn hint(&self) -> Option<String> {
         match self {
             ConfigError::MissingIdentity { path: Some(path) } => Some(format!(
-                "Add this to {}:\n{SNIPPET}",
+                "Add this to {} (make the file, and its folder, if they aren't there):\n{SNIPPET}",
                 escape(&path.display().to_string(), false)
             )),
             ConfigError::MissingIdentity { path: None } => Some(format!(
@@ -457,7 +457,7 @@ mod tests {
         };
         let hint = e.hint().unwrap();
         assert!(
-            hint.contains("cfg.toml") && hint.contains(SNIPPET),
+            hint.contains("cfg.toml") && hint.contains("make the file") && hint.contains(SNIPPET),
             "{hint}"
         );
     }
