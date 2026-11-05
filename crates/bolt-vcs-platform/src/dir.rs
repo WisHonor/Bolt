@@ -132,12 +132,20 @@ impl Dir {
 
     /// Makes `name` a link to `target`, unless something already has that name. Windows needs to
     /// know whether it is a folder link (`to_dir`), and Developer Mode or an administrator to make
-    /// one at all: without them the system's error comes back. There the link is made under a
-    /// random name and moved to `name` once this folder shows it holds `target`, so an absolute
-    /// target must be written as Windows stores it (`C:\x`, no `.`, `..` or `/`).
-    pub fn symlink(&self, name: &OsStr, target: &OsStr, to_dir: bool) -> io::Result<()> {
+    /// one at all: without them the system's error comes back. Windows makes links only by path,
+    /// so there the link is made in `scratch` (`.bolt/tmp`, on the same drive) under a random
+    /// `tmp-` name, and moved to `name` once `scratch` shows it holds `target`; an absolute target
+    /// must therefore be written as Windows stores it (`C:\x`, no `.`, `..` or `/`). Unix makes
+    /// the link at `name` directly and leaves `scratch` alone.
+    pub fn symlink(
+        &self,
+        name: &OsStr,
+        target: &OsStr,
+        to_dir: bool,
+        scratch: &Dir,
+    ) -> io::Result<()> {
         one_name(name)?;
-        sys::symlink(&self.handle, name, target, to_dir)
+        sys::symlink(&self.handle, name, target, to_dir, &scratch.handle)
     }
 
     /// The target of the link `name`. On Windows an absolute target comes back as Rust's standard
@@ -257,13 +265,27 @@ mod tests {
             };
             match made {
                 Ok(()) => true,
-                Err(e) if e.raw_os_error() == Some(1314) => {
-                    println!("Not tried: this account can't make symlinks ({e}).");
+                Err(e) => {
+                    skip_without_link_right(e);
                     false
                 }
-                Err(e) => panic!("{e}"),
             }
         }
+    }
+
+    /// Says a test can't make links here, which on Windows takes Developer Mode or an
+    /// administrator, and lets it go on without them. Any other error fails the test, and so does
+    /// this one in CI (where `CI` is set): its runner has the right, and a skip there would pass
+    /// for a test that never ran.
+    #[cfg(windows)]
+    fn skip_without_link_right(e: io::Error) {
+        if e.raw_os_error() != Some(1314) {
+            panic!("couldn't make a link: {e}");
+        }
+        if std::env::var_os("CI").is_some() {
+            panic!("CI must be able to make links, so that the link tests run there: {e}");
+        }
+        println!("Skipped: this account can't make links ({e}).");
     }
 
     fn gone(path: &Path) -> bool {
@@ -412,7 +434,7 @@ mod tests {
             refused(d.create_dir(name));
             refused(d.remove_file(name));
             refused(d.remove_dir(name));
-            refused(d.symlink(name, n("ok"), false));
+            refused(d.symlink(name, n("ok"), false, &d));
             refused(d.read_link(name).map(drop));
             refused(d.set_executable(name, true));
             refused(d.rename_into(name, &d, n("ok2")));
@@ -433,7 +455,7 @@ mod tests {
         d.create_new(n("tool"), true).unwrap();
         d.create_dir(n("folder")).unwrap();
         #[cfg(unix)]
-        d.symlink(n("link"), n("folder"), true).unwrap();
+        d.symlink(n("link"), n("folder"), true, &d).unwrap();
         #[cfg(windows)]
         folder_link(&tmp.path().join("link"), &tmp.path().join("folder"));
 
@@ -603,18 +625,17 @@ mod tests {
     #[test]
     fn links_are_made_for_folders_and_files() {
         let (tmp, d) = held();
+        let (scratch_tmp, scratch) = held();
         d.create_dir(n("real")).unwrap();
         fs::write(tmp.path().join("real/x"), "x").unwrap();
-        match d.symlink(n("dl"), n("real"), true) {
-            Err(e) if e.raw_os_error() == Some(1314) => {
-                println!("Skipped: this account can't make links ({e}).");
-                return;
-            }
-            made => made.unwrap(),
+        if let Err(e) = d.symlink(n("dl"), n("real"), true, &scratch) {
+            skip_without_link_right(e);
+            return;
         }
-        d.symlink(n("fl"), n("real\\x"), false).unwrap();
+        d.symlink(n("fl"), n("real\\x"), false, &scratch).unwrap();
         let absolute = tmp.path().join("real");
-        d.symlink(n("abs"), absolute.as_os_str(), true).unwrap();
+        d.symlink(n("abs"), absolute.as_os_str(), true, &scratch)
+            .unwrap();
 
         for name in ["dl", "fl", "abs"] {
             assert_eq!(
@@ -644,66 +665,76 @@ mod tests {
         assert_eq!(fs::read_to_string(tmp.path().join("dl/x")).unwrap(), "x");
         assert_eq!(fs::read_to_string(tmp.path().join("fl")).unwrap(), "x");
         // A name already taken is never replaced.
-        let e = d.symlink(n("fl"), n("real"), false).unwrap_err();
+        let e = d.symlink(n("fl"), n("real"), false, &scratch).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
         assert_eq!(d.read_link(n("fl")).unwrap(), "real\\x");
-        // Nothing is left under the names the links were first made with.
+        // The links were moved out of the scratch folder, and nothing else came in.
         let mut names: Vec<_> = d.entries().unwrap().into_iter().map(|e| e.name).collect();
         names.sort();
         assert_eq!(names, ["abs", "dl", "fl", "real"]);
+        assert_eq!(fs::read_dir(scratch_tmp.path()).unwrap().count(), 0);
     }
 
-    /// Windows makes a link by its folder's path. A folder swapped for a junction at that moment
-    /// must not get the link at the name asked for, there or where the junction points.
+    /// Windows makes a link by the scratch folder's path. A scratch folder swapped for a junction
+    /// at that moment must not put a link at the name asked for, in the folder or anywhere else.
     #[cfg(windows)]
     #[test]
     fn a_link_raced_out_of_its_folder_lands_under_no_chosen_name() {
         let (tmp, d) = held();
         let elsewhere = tempfile::tempdir().unwrap();
-        d.create_dir(n("a")).unwrap();
-        let a = d.open_dir(n("a")).unwrap();
+        d.create_dir(n("tmp")).unwrap();
+        let scratch = d.open_dir(n("tmp")).unwrap();
         let (top, outside) = (tmp.path().to_owned(), elsewhere.path().to_owned());
         windows::BEFORE_LINK.set(Some(Box::new(move || {
-            fs::rename(top.join("a"), top.join("old")).unwrap();
-            folder_link(&top.join("a"), &outside);
+            fs::rename(top.join("tmp"), top.join("old")).unwrap();
+            folder_link(&top.join("tmp"), &outside);
         })));
-        match a.symlink(n("pre-commit"), n("target"), false) {
-            Err(e) if e.raw_os_error() == Some(1314) => {
-                println!("Skipped: this account can't make links ({e}).");
+        let made = d.symlink(n("pre-commit"), n("target"), false, &scratch);
+        if let Err(e) = made {
+            if e.raw_os_error() == Some(1314) {
+                skip_without_link_right(e);
                 return;
             }
-            made => assert!(made.is_err(), "the link was placed: {made:?}"),
+        } else {
+            panic!("the link was placed");
         }
+        assert!(gone(&tmp.path().join("pre-commit")));
         assert_eq!(fs::read_dir(tmp.path().join("old")).unwrap().count(), 0);
         let stray: Vec<_> = fs::read_dir(elsewhere.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(stray.len(), 1, "{stray:?}");
-        assert!(stray[0].starts_with("bolt-link-"), "{stray:?}");
+        let hex = stray[0].strip_prefix("tmp-").unwrap();
+        assert!(hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
     }
 
-    /// As on Unix, a file's own read-only flag doesn't stop Bolt removing or replacing it.
+    /// As on Unix, an entry's own read-only flag doesn't stop Bolt removing or replacing it.
     #[test]
     fn a_read_only_file_can_be_removed_or_replaced() {
         let (tmp, d) = held();
-        let read_only = |name: &str| {
-            let path = tmp.path().join(name);
-            fs::write(&path, name).unwrap();
-            let mut permissions = fs::metadata(&path).unwrap().permissions();
+        let read_only = |path: &Path| {
+            let mut permissions = fs::metadata(path).unwrap().permissions();
             permissions.set_readonly(true);
-            fs::set_permissions(&path, permissions).unwrap();
+            fs::set_permissions(path, permissions).unwrap();
         };
-        read_only("removed");
+        fs::write(tmp.path().join("removed"), "removed").unwrap();
+        read_only(&tmp.path().join("removed"));
         d.remove_file(n("removed")).unwrap();
         assert!(gone(&tmp.path().join("removed")));
-        read_only("replaced");
+        fs::write(tmp.path().join("replaced"), "replaced").unwrap();
+        read_only(&tmp.path().join("replaced"));
         fs::write(tmp.path().join("new"), "new").unwrap();
         d.rename_into(n("new"), &d, n("replaced")).unwrap();
         assert_eq!(
             fs::read_to_string(tmp.path().join("replaced")).unwrap(),
             "new"
         );
+        // An empty read-only folder goes too.
+        fs::create_dir(tmp.path().join("folder")).unwrap();
+        read_only(&tmp.path().join("folder"));
+        d.remove_dir(n("folder")).unwrap();
+        assert!(gone(&tmp.path().join("folder")));
     }
 
     /// Making a file, folder or link at a name that holds a link fails, even when the link points
@@ -711,6 +742,7 @@ mod tests {
     #[test]
     fn nothing_is_made_through_a_dangling_link() {
         let (tmp, d) = held();
+        let (scratch_tmp, scratch) = held();
         let missing = tmp.path().join("missing");
         fs::create_dir(&missing).unwrap();
         folder_link(&tmp.path().join("link"), &missing);
@@ -719,12 +751,14 @@ mod tests {
         for e in [
             d.create_new(n("link"), false).map(drop).unwrap_err(),
             d.create_dir(n("link")).unwrap_err(),
-            d.symlink(n("link"), n("elsewhere"), false).unwrap_err(),
+            d.symlink(n("link"), n("elsewhere"), false, &scratch)
+                .unwrap_err(),
         ] {
             assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{e}");
         }
         assert!(gone(&missing));
         assert_eq!(d.metadata(n("link")).unwrap().kind, EntryType::Symlink);
         assert_eq!(d.read_link(n("link")).unwrap(), target);
+        assert_eq!(fs::read_dir(scratch_tmp.path()).unwrap().count(), 0);
     }
 }

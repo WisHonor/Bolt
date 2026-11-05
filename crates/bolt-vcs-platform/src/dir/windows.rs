@@ -226,6 +226,7 @@ pub(super) fn symlink(
     name: &OsStr,
     target: &OsStr,
     to_dir: bool,
+    scratch: &OwnedHandle,
 ) -> io::Result<()> {
     // Nothing may have the name: checked now, and again when the link is moved there.
     match nt_open(dir.as_handle(), name, FILE_READ_ATTRIBUTES, FILE_OPEN, 0) {
@@ -234,10 +235,11 @@ pub(super) fn symlink(
         Err(e) => return Err(e),
     }
     // Windows makes links only by path, and a folder moved meanwhile would put the link wherever
-    // its old path now leads. So the link is made under a name nobody chose, and moved to `name`
-    // through the held folder only once the held folder shows it is this link.
+    // its old path now leads. So the link is made in `scratch`, under a name nobody chose, and
+    // moved to `name` by handle only once `scratch` shows it is this link. A crash meanwhile
+    // leaves it in `scratch`, among names its owner clears.
     let temp = temp_name();
-    let mut path = final_path(dir.as_handle())?;
+    let mut path = final_path(scratch.as_handle())?;
     if path.last() != Some(&BACKSLASH) {
         path.push(BACKSLASH);
     }
@@ -260,11 +262,11 @@ pub(super) fn symlink(
     }
     let elsewhere = || {
         io::Error::other(
-            "the link isn't in the folder Bolt holds: the folder moved, or something replaced the \
+            "the link isn't in the scratch folder: the folder moved, or something replaced the \
              link, while it was made",
         )
     };
-    let (link, what) = match open_entry(dir, &temp, DELETE) {
+    let (link, what) = match open_entry(scratch, &temp, DELETE) {
         Ok(found) => found,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(elsewhere()),
         Err(e) => return Err(e),
@@ -274,13 +276,15 @@ pub(super) fn symlink(
     {
         return Err(elsewhere());
     }
-    // Flags 0: the move fails if something took the name meanwhile.
     let placed = (|| {
-        if target_of(link.as_handle())? != wanted {
+        // SAFETY: `link` was opened by `nt_open`, which opens every handle for synchronous calls.
+        if unsafe { target_of(link.as_handle()) }? != wanted {
             return Err(io::Error::other(
                 "the link Windows made doesn't hold the target asked for",
             ));
         }
+        // Flags 0: the move fails if something took the name meanwhile. Into `dir`, by handle;
+        // `scratch` must be on the same drive.
         let rename = RenameInfo::new(dir.as_raw_handle(), name, 0)?;
         set_rename(link.as_handle(), &rename, FileRenameInformation)
     })();
@@ -293,19 +297,26 @@ pub(super) fn symlink(
 
 pub(super) fn read_link(dir: &OwnedHandle, name: &OsStr) -> io::Result<OsString> {
     let link = nt_open(dir.as_handle(), name, FILE_READ_ATTRIBUTES, FILE_OPEN, 0)?;
-    Ok(OsString::from_wide(&target_of(link.as_handle())?))
+    // SAFETY: `link` was opened by `nt_open`, which opens every handle for synchronous calls.
+    let target = unsafe { target_of(link.as_handle()) }?;
+    Ok(OsString::from_wide(&target))
 }
 
-/// The target of the link `link` has open, as `link_target` shows it. `link` must be open for
-/// synchronous calls, as `nt_open` opens every handle.
-fn target_of(link: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
+/// The target of the link `link` has open, as `link_target` shows it.
+///
+/// # Safety
+///
+/// `link` must be open for synchronous calls (FILE_SYNCHRONOUS_IO_NONALERT, which `nt_open` asks
+/// for every time). On a handle open for overlapped calls, Windows would finish the call later,
+/// writing into a buffer this function has already freed.
+unsafe fn target_of(link: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
     let mut buffer = Vec::new();
     let area = aligned(&mut buffer, MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize)?;
     let mut filled = 0u32;
     // SAFETY: there is no input (null, 0 bytes). `area` is writable and Windows is told its
     // length, so it writes nothing past it, and `filled` is a valid place for the count it writes;
-    // it keeps no pointer to either. `link` is open for the call, and both callers opened it with
-    // `nt_open`, for synchronous calls, so there is no OVERLAPPED (null).
+    // it keeps no pointer to either. `link` is open for the call, and for synchronous calls, as
+    // the caller promises, so the call is over when it returns and there is no OVERLAPPED (null).
     let ok = unsafe {
         DeviceIoControl(
             link.as_raw_handle(),
@@ -703,12 +714,13 @@ fn final_path(dir: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
     ))
 }
 
-/// A name for a link until it is checked: random, so nobody can choose or guess it, and with no
-/// extension, so nothing runs a file by it.
+/// A name for a link until it is checked: random, so nobody can choose or guess it; with no
+/// extension, so nothing runs a file by it; and in `.bolt/tmp`'s form (`tmp-` and 16 lowercase
+/// hexadecimal digits, `fsio::is_temp_name`), so what a crash leaves there is cleared.
 fn temp_name() -> OsString {
     // RandomState's keys come from Windows' random number generator.
     let random = RandomState::new().hash_one(());
-    OsString::from(format!("bolt-link-{random:016x}"))
+    OsString::from(format!("tmp-{random:016x}"))
 }
 
 /// `units` with a NUL after them, for Windows; a NUL among them is refused.
@@ -1078,15 +1090,17 @@ mod tests {
         assert!(!listing_done(true, &error(ERROR_INVALID_PARAMETER)));
     }
 
+    /// A link's first name is random, has no extension, and is one `.bolt/tmp` clears on start
+    /// (`fsio::is_temp_name`): `tmp-` and 16 lowercase hexadecimal digits.
     #[test]
     fn a_link_is_first_made_under_a_name_nobody_chose() {
         let (one, other) = (temp_name(), temp_name());
         assert_ne!(one, other);
         for name in [one, other] {
             let name = name.into_string().unwrap();
-            assert!(name.starts_with("bolt-link-"), "{name}");
-            // No extension, so nothing runs it by its name.
-            assert!(!name.contains('.'), "{name}");
+            let hex = name.strip_prefix("tmp-").unwrap();
+            let lowercase_hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+            assert!(hex.len() == 16 && hex.bytes().all(lowercase_hex), "{name}");
         }
     }
 }

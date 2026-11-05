@@ -127,6 +127,7 @@ pub(super) fn symlink(
     name: &OsStr,
     target: &OsStr,
     _to_dir: bool,
+    _scratch: &OwnedFd,
 ) -> io::Result<()> {
     Ok(rustix::fs::symlinkat(target, dir, name)?)
 }

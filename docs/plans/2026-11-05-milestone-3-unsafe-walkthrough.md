@@ -5,8 +5,8 @@ is in `crates/bolt-vcs-platform/src/`:
 
 - `dir.rs`: the shared `Dir` API and its tests. No `unsafe`.
 - `dir/unix.rs`: macOS and Linux, on the `rustix` crate. No `unsafe`.
-- `dir/windows.rs`: Windows. Every `unsafe` block below is in this file: 11 blocks, plus one
-  `unsafe trait` with two `unsafe impl`s.
+- `dir/windows.rs`: Windows. Every `unsafe` block below is in this file: 13 blocks, plus one
+  `unsafe fn` (`target_of`) and one `unsafe trait` with two `unsafe impl`s.
 
 ## In plain words
 
@@ -89,14 +89,19 @@ the promises hold.
    `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE`, and the replacing rename
    `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE` (0x40, the NT name of the
    `FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE` the review named), as Git for Windows and the
-   standard library's `remove_dir_all` do.
+   standard library's `remove_dir_all` do. Since `remove_dir` removes through the same `delete`,
+   it now removes an empty read-only folder too, as on Unix.
 7. **`sync` does nothing on Windows**, as `fsio::sync_dir` already doesn't. Windows flushes only
    handles opened for writing, and a held folder isn't one.
-8. **A link is made under a random name, checked, and only then moved to its name** (from the
-   review). Making a link is the one step Windows does only by path (block 10), so a folder moved
-   at that moment would send the link wherever its old path now leads, under the name the save
-   chose. Now a lost race leaves only a stray link with a meaningless name, never one at a name the
-   save chose. Block 10 has the steps.
+8. **A link is made in a scratch folder under a random name, checked, and only then moved to its
+   name** (from the reviews). This changes the interface the plan gave: `symlink(&self, name,
+   target, to_dir, scratch: &Dir)`, where callers pass `.bolt/tmp`. Making a link is the one step
+   Windows does only by path (block 10), so a folder moved at that moment would send the link
+   wherever its old path now leads. With the link made under a meaningless name in `.bolt/tmp`,
+   a lost race leaves only a stray link nobody would run, never one at a name the save chose; and
+   a crash before the move leaves it in `.bolt/tmp`, which Bolt clears on start, not in the
+   user's folder. macOS and Linux make the link at its name directly and ignore `scratch`. Block
+   10 has the steps.
 
 ## The blocks
 
@@ -114,7 +119,8 @@ Microsoft's pages for the function and its flags.
 | 8 | `set_rename`, used by `rename_into` and `symlink` | `NtSetInformationFile` |
 | 9 | `final_path` | `GetFinalPathNameByHandleW` |
 | 10 | `symlink` | `CreateSymbolicLinkW` |
-| 11 | `target_of`, used by `read_link` and `symlink` | `DeviceIoControl` |
+| 11 | `target_of`, an `unsafe fn` | `DeviceIoControl` |
+| 12, 13 | `symlink` and `read_link` | `target_of` |
 
 ### Block 1 and 2: opening a name inside a held folder (`create_file`)
 
@@ -365,7 +371,8 @@ a folder, `remove_file` refuses a folder that isn't a link.
 `delete` passes `FILE_DISPOSITION_INFO_EX` with `FILE_DISPOSITION_FLAG_DELETE` (delete it),
 `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` (the name goes as soon as this handle closes, even while
 others still have the file open; they keep using their handles) and
-`FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE` (a read-only file goes too, as on Unix). Windows
+`FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE` (a read-only file goes too, and so does an empty
+read-only folder, as on Unix). Windows
 10 before version 1809 refuses that last flag, so the call is then made without it. A drive that
 can't do POSIX deletes (FAT) refuses both and gets the older
 `FILE_DISPOSITION_INFO { DeleteFile: true }`; the name then goes once the last handle closes.
@@ -487,23 +494,30 @@ if !unsafe { CreateSymbolicLinkW(path.as_ptr(), target.as_ptr(), flags) } {
 
 **In plain words:** Windows has no "make a link inside this folder handle" call, so this is the
 one step Bolt has to do by path. To keep a moved folder from redirecting it, `symlink` goes in four
-steps:
+steps. Its caller passes two held folders: the one the link belongs in, and a scratch folder,
+`.bolt/tmp`.
 
 1. Through the held folder, check that nothing has the name yet.
-2. Ask where the held folder is now (block 9), and make the link there under a name nobody chose:
-   `bolt-link-` and 16 random hexadecimal digits, with no extension, so nothing runs it by its name.
-3. Open that random name through the held folder, and check that it is a symlink and that its
-   target (read by block 11) is exactly the one asked for.
-4. Only then move that very link, through its own handle, to the name asked for (block 8, with no
-   replacing: if something took the name meanwhile, the move fails).
+2. Ask where the scratch folder is now (block 9), and make the link there, by that path, under a
+   name nobody chose: `tmp-` and 16 random lowercase hexadecimal digits. That is the form of
+   `.bolt/tmp`'s own names (`fsio::is_temp_name`), which Bolt clears on start, and it has no
+   extension, so nothing runs it by its name.
+3. Open that random name through the scratch folder's handle, and check that it is a symlink and
+   that its target (read by block 11, called as block 12) is exactly the one asked for.
+4. Only then move that very link, through its own handle, into the held folder under the name asked
+   for (block 8, with no replacing: if something took the name meanwhile, the move fails). The two
+   folders must be on the same drive, as `.bolt/tmp` and the project are.
 
 If step 3 or 4 fails after finding a symlink under the random name, that symlink is removed again
-(removing a link never touches what it points to), and the error comes back.
+(removing a link never touches what it points to), and the error comes back. If Bolt stops between
+steps 2 and 4 (a crash, a power cut), the link stays in `.bolt/tmp` under its `tmp-` name, and the
+next start clears it; nothing appears in the user's folder.
 
-The arguments: `path` is the folder's path, `\` and the random name, then a NUL. `target` is what
-the link points to, then a NUL; a target that holds a NUL is refused before the call. `flags` is
-`SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` (lets a process that isn't an administrator make
-links when Developer Mode is on), plus `SYMBOLIC_LINK_FLAG_DIRECTORY` for a folder link.
+The arguments: `path` is the scratch folder's path, `\` and the random name, then a NUL. `target`
+is what the link points to, then a NUL; a target that holds a NUL is refused before the call.
+`flags` is `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` (lets a process that isn't an
+administrator make links when Developer Mode is on), plus `SYMBOLIC_LINK_FLAG_DIRECTORY` for a
+folder link.
 
 **Why it is sound.** Both strings are `Vec<u16>`s ending in NUL, alive through the call; the
 function only reads them. One more point: windows-sys declares this function as returning a Rust
@@ -511,15 +525,16 @@ function only reads them. One more point: windows-sys declares this function as 
 Windows returns `TRUE` (1) or `FALSE` (0), and the standard library declares and calls it the same
 way.
 
-**What a race can still do.** Someone who renames the held folder (or a folder above it) between
-steps 2 and 3, and puts a junction at its old path, makes Windows put the link wherever the
-junction points. Step 3 then doesn't find it in the held folder, so nothing is moved, and Bolt
-reports the error. What is left is one stray link with a meaningless name and the save's target,
-never a link at a name the save chose (`.git\hooks\pre-commit`, say). The random name is from
-Rust's `RandomState`, whose keys come from Windows' random number generator, so it can't be guessed
-in advance. Decision 048 records that links on Windows are made by path. Only someone who can rename
-folders inside the project can try this, and the owner checks (decisions 025 and 026) keep Bolt out
-of projects other accounts own. A test runs exactly this race.
+**What a race can still do.** The window is inside step 2: between reading the scratch folder's
+path (block 9) and this call making the link. Someone who renames the scratch folder (or a folder
+above it) in that moment, and puts a junction at its old path, makes Windows put the link wherever
+the junction points. Step 3 then doesn't find it in the scratch folder, so nothing is moved, and
+Bolt reports the error. What is left is one stray link with a meaningless name and the save's
+target, never a link at a name the save chose (`.git\hooks\pre-commit`, say). The random name is
+from Rust's `RandomState`, whose keys come from Windows' random number generator, so it can't be
+guessed in advance. Decision 048 records that links on Windows are made by path. Only someone who
+can rename folders inside the project can try this, and the owner checks (decisions 025 and 026)
+keep Bolt out of projects other accounts own. A test runs exactly this race.
 
 Step 3 compares the target Windows stored, so an absolute target must be written the way Windows
 stores it (`C:\x`, with no `.`, `..` or `/`); otherwise the check fails. A relative target, the
@@ -531,13 +546,24 @@ not held"); `symlink` returns it unchanged, so callers can write a placeholder i
 
 Microsoft: [CreateSymbolicLinkW][createsymboliclinkw] (both flags are on this page).
 
-### Block 11: reading a link's target (`target_of`, used by `read_link` and `symlink`)
+### Block 11: reading a link's target (`target_of`, an `unsafe fn`)
+
+```rust
+/// The target of the link `link` has open, as `link_target` shows it.
+///
+/// # Safety
+///
+/// `link` must be open for synchronous calls (FILE_SYNCHRONOUS_IO_NONALERT, which `nt_open` asks
+/// for every time). On a handle open for overlapped calls, Windows would finish the call later,
+/// writing into a buffer this function has already freed.
+unsafe fn target_of(link: BorrowedHandle<'_>) -> io::Result<Vec<u16>> {
+```
 
 ```rust
 // SAFETY: there is no input (null, 0 bytes). `area` is writable and Windows is told its
 // length, so it writes nothing past it, and `filled` is a valid place for the count it writes;
-// it keeps no pointer to either. `link` is open for the call, and both callers opened it with
-// `nt_open`, for synchronous calls, so there is no OVERLAPPED (null).
+// it keeps no pointer to either. `link` is open for the call, and for synchronous calls, as
+// the caller promises, so the call is over when it returns and there is no OVERLAPPED (null).
 let ok = unsafe {
     DeviceIoControl(
         link.as_raw_handle(),
@@ -552,18 +578,26 @@ let ok = unsafe {
 };
 ```
 
-**In plain words:** "Windows, give me the stored data of this link." `link` was opened through the
-held folder with `FILE_OPEN_REPARSE_POINT`, so it is the link itself: by `read_link`, or by
-`symlink`'s check (block 10, step 3).
+**In plain words:** "Windows, give me the stored data of this link." `link` was opened with
+`FILE_OPEN_REPARSE_POINT`, so it is the link itself: by `read_link` through the held folder, or by
+`symlink`'s check through the scratch folder (block 10, step 3).
+
+**An `unsafe fn`** is a function with a promise its caller must keep, which the compiler can't
+check. The promise is written in its `# Safety` section, and every call must sit in an `unsafe`
+block whose `// SAFETY:` comment says why the promise holds (blocks 12 and 13). Here the promise
+is that the handle was opened for synchronous calls. Microsoft: "If hDevice was opened without
+specifying FILE_FLAG_OVERLAPPED, lpOverlapped is ignored. If hDevice was opened with the
+FILE_FLAG_OVERLAPPED flag, the operation is performed as an overlapped (asynchronous) operation."
+On such a handle, a null `OVERLAPPED` could let Windows write into `area` after this function had
+returned and freed it. Making the function `unsafe` means a future caller can't pass a handle
+without writing `unsafe` and a reason, so no overlapped handle slips in unnoticed.
 
 **Why it is sound.** `FSCTL_GET_REPARSE_POINT` takes no input (null and 0, as Microsoft's page
 shows). `area` is 16 KiB (`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`, the most a link's data can be),
 zeroed and 8-byte aligned, and Windows is told its exact length. `filled` is a local `u32`;
-Microsoft: "If lpOverlapped is NULL, lpBytesReturned cannot be NULL", and it isn't. No `OVERLAPPED`,
-because both callers (`read_link` and `symlink`) open the link with `nt_open`, which always asks
-for synchronous calls. With a handle opened for overlapped calls, a null `OVERLAPPED` could let
-Windows write into `area` after the call returned; the function's comment says its handle must be
-synchronous, and no other handle reaches it.
+Microsoft: "If lpOverlapped is NULL, lpBytesReturned cannot be NULL", and it isn't. The handle is
+synchronous, as the caller promises, so the call is over when it returns and needs no
+`OVERLAPPED`.
 
 **Around it, in safe code.** `link_target` reads the `REPARSE_DATA_BUFFER` layout from the first
 `filled` bytes: the tag, then for a symlink or junction where the "substitute name" (the path
@@ -577,7 +611,23 @@ too, as Git does. Only absolute targets are affected, and Bolt writes those as p
 (decision 052).
 
 Microsoft: [DeviceIoControl][deviceiocontrol]; [FSCTL_GET_REPARSE_POINT][fsctl_get_reparse_point];
-[REPARSE_DATA_BUFFER][reparse_data_buffer].
+[REPARSE_DATA_BUFFER][reparse_data_buffer]. Rust: [unsafe functions][unsafe_functions].
+
+### Blocks 12 and 13: the two calls of `target_of` (`symlink`, `read_link`)
+
+```rust
+// SAFETY: `link` was opened by `nt_open`, which opens every handle for synchronous calls.
+if unsafe { target_of(link.as_handle()) }? != wanted {
+```
+
+```rust
+// SAFETY: `link` was opened by `nt_open`, which opens every handle for synchronous calls.
+let target = unsafe { target_of(link.as_handle()) }?;
+```
+
+**In plain words:** each keeps block 11's promise. In both, `link` comes straight from `nt_open`
+(through `open_entry` in `symlink`), and `nt_open` adds `FILE_SYNCHRONOUS_IO_NONALERT` to every
+open it makes (block 1). Nothing else in the file calls `target_of`.
 
 ## What an entry is, on Windows
 
@@ -596,22 +646,24 @@ Microsoft: [reparse point tags][reparse_point_tags]; [IsReparseTagNameSurrogate]
 
 Where the tests ran:
 
-- **CI run 41978531079, on commit a05fcf5:** Windows, macOS and Linux all green. The Windows runner
-  works as an administrator, so the link tests ran there too. That run covers everything below
-  except what is marked *(added in review)*: five new tests, and one new check in an older test.
-- **This machine (Windows 11, no Developer Mode):** everything below, except that the parts which
-  make symlinks print a reason and skip.
-- **Not run in CI yet:** what is marked *(added in review)*. It runs on the next push. Two of those
-  make symlinks on Windows, so on Windows they have only skipped so far:
-  `a_link_raced_out_of_its_folder_lands_under_no_chosen_name`, and the "nothing left under a random
-  name" check in `links_are_made_for_folders_and_files`.
+- **CI run 41982908337, on commit 2afb50c:** Windows, macOS and Linux all green, so everything
+  below passed on macOS and Linux, and on Windows everything that doesn't make symlinks. That run
+  can't show whether the Windows tests which make symlinks ran. Until the change after it, a test
+  that Windows refused to let make a link printed a reason and passed, and CI doesn't show what
+  tests print.
+- **From that change on**, those tests fail instead of skipping wherever the `CI` environment
+  variable is set, as GitHub sets it. So the next CI run proves whether they run on Windows; the
+  controller checks it. They are marked *(makes symlinks on Windows)* below.
+- **This machine (Windows 11, no Developer Mode):** everything below. The parts that make symlinks
+  print a reason and skip, and with `CI` set here they fail, as they should.
 
 The tests:
 
-- `a_link_at_a_name_is_refused_at_every_call`: links to a folder and a file (and a junction on
-  Windows) are refused by `open_dir`, `open_file`, `remove_dir`, `rename_into` at either name,
-  `open_top`, and on Unix `set_executable`; `metadata` calls each a link; nothing changes on disk.
-  Making `as_folder` accept a link makes this test and the next one fail.
+- `a_link_at_a_name_is_refused_at_every_call` *(makes symlinks on Windows)*: links to a folder and
+  a file (and a junction on Windows) are refused by `open_dir`, `open_file`, `remove_dir`,
+  `rename_into` at either name, `open_top`, and on Unix `set_executable`; `metadata` calls each a
+  link; nothing changes on disk. Making `as_folder` accept a link makes this test and the next one
+  fail. The junction part needs no right, so it runs on this machine too.
 - `a_folder_swapped_for_a_link_after_opening_stays_the_folder`: a held folder renamed away and
   replaced by a link (a junction on Windows) still receives the new file and folder; nothing lands
   where the link points.
@@ -626,24 +678,26 @@ The tests:
 - `new_files_get_exact_modes` (Unix): 0644 and 0755 exactly under umasks 0o077 and 0o000.
 - `short_names_come_with_entries` (Windows): `.git`'s short name equals what Windows' own `cmd`
   shows.
-- `links_are_made_for_folders_and_files` (Windows): folder, file and absolute links made through
-  `Dir` work for Windows and read back as the standard library reads them. It skips on this
-  machine; it passed in CI run 41978531079. It now also checks that nothing is left under a random
-  name *(added in review)*.
-- `a_link_raced_out_of_its_folder_lands_under_no_chosen_name` (Windows) *(added in review)*: a
-  test-only hook renames the held folder and puts a junction at its old path between steps 2 and 3
-  of block 10. `symlink` must fail, the held folder must stay empty, and where the junction points
-  there must be only one stray `bolt-link-…`, never `pre-commit`.
-- `a_read_only_file_can_be_removed_or_replaced` (every system) *(added in review)*: `remove_file`
-  removes a read-only file, and `rename_into` replaces one. Before the read-only flags, Windows
-  answered "access denied".
-- `nothing_is_made_through_a_dangling_link` (every system) *(added in review)*: `create_new`,
-  `create_dir` and `symlink` at a name holding a link that points nowhere fail with "already
-  exists", and nothing appears where the link points.
+- `links_are_made_for_folders_and_files` (Windows) *(makes symlinks on Windows)*: folder, file and
+  absolute links made through `Dir`, by way of a scratch folder, work for Windows and read back as
+  the standard library reads them; a name already taken is never replaced; nothing is left in the
+  scratch folder, nor under any other name.
+- `a_link_raced_out_of_its_folder_lands_under_no_chosen_name` (Windows) *(makes symlinks on
+  Windows)*: a test-only hook renames the scratch folder and puts a junction at its old path inside
+  step 2 of block 10, between reading the scratch folder's path and making the link. `symlink`
+  must fail; nothing may appear at the name in the held folder, nor in the moved scratch folder;
+  and where the junction points there must be only one stray link, named `tmp-` and 16 lowercase
+  hexadecimal digits, never `pre-commit`.
+- `a_read_only_file_can_be_removed_or_replaced` (every system): `remove_file` removes a read-only
+  file, `rename_into` replaces one, and `remove_dir` removes an empty read-only folder. Before the
+  read-only flags, Windows answered "access denied".
+- `nothing_is_made_through_a_dangling_link` (every system): `create_new`, `create_dir` and
+  `symlink` at a name holding a link that points nowhere fail with "already exists"; nothing
+  appears where the link points, and nothing in the scratch folder.
 - In `dir/windows.rs`: hand-built listings and link data, good and bad; the folder's path equals
   the standard library's `canonicalize`; a name over 255 characters is refused; "file not found"
-  ends only the first listing call; a link's temporary names are random and have no extension
-  (the last two *(added in review)*).
+  ends only the first listing call; a link's temporary names are random, have no extension, and
+  take `.bolt/tmp`'s form (`tmp-` and 16 lowercase hexadecimal digits).
 
 Not tested anywhere yet: the FAT and exFAT fallbacks, and the older-Windows fallbacks for the
 read-only flags (no such drive or Windows in CI); OneDrive files opened this way and paths over 260
@@ -666,6 +720,7 @@ removes the file it couldn't set (no such drive in CI).
 [file_attribute_tag_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_attribute_tag_info
 [file_id_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
 [unsafe_traits]: https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html#implementing-an-unsafe-trait
+[unsafe_functions]: https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html#calling-an-unsafe-function-or-method
 [file_id_both_dir_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_both_dir_info
 [getfileinformationbyhandle]: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle
 [by_handle_file_information]: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/ns-fileapi-by_handle_file_information
