@@ -2,22 +2,24 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::Path;
+
+use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
 use crate::drive;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
+use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
-use crate::safe_fs;
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError};
 use crate::text::escape;
@@ -26,7 +28,7 @@ use crate::warning::{self, Warning};
 mod endings;
 mod walk;
 
-use walk::{Base, Scan, walk};
+use walk::{Base, Handles, Scan, walk};
 
 pub struct SaveRequest<'a> {
     pub message: &'a str,
@@ -221,23 +223,6 @@ impl SaveError {
             .to_owned(),
         )
     }
-
-    /// The same error, naming the file by its project path instead of its full path.
-    fn at(self, rel: &str) -> SaveError {
-        match self {
-            SaveError::Unreadable { source, .. } => SaveError::Unreadable {
-                path: rel.to_owned(),
-                source,
-            },
-            SaveError::ChangedDuringSave { .. } => SaveError::ChangedDuringSave {
-                path: rel.to_owned(),
-            },
-            SaveError::SpecialFile { .. } => SaveError::SpecialFile {
-                path: rel.to_owned(),
-            },
-            other => other,
-        }
-    }
 }
 
 /// Saves the project folder on the current line. Nothing is written unless every file was read
@@ -261,9 +246,10 @@ pub fn save_folder(
         })?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
     // Probed under the lock: the probe's file sits in `tmp/`, which is cleared when it is free.
-    let drive = drive::probe(repo.tmp_dir()).map_err(RepoError::from)?;
+    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let base = Base::new(repo.store(), parent.root, SaveLimits::default());
     let Scan {
+        mut handles,
         folders,
         old,
         rebuilt,
@@ -280,7 +266,7 @@ pub fn save_folder(
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
-        endings::check(repo.store(), &folders, &old)?;
+        endings::check(repo.store(), &mut handles, &folders, &old)?;
     }
     let mut packs = repo.new_packs()?;
     for listing in &rebuilt {
@@ -289,6 +275,7 @@ pub fn save_folder(
     let (root, kept, changed, taken_back) = build(
         repo.store(),
         &mut packs,
+        &mut handles,
         &folders,
         &old,
         &ignored,
@@ -481,11 +468,10 @@ enum Kind {
 struct Child {
     name: String,
     kind: Kind,
-    path: PathBuf,
     /// Its project path, with `/` between names.
     rel: String,
-    /// The `x` bits, where the system has them.
-    executable: Option<bool>,
+    /// What the walk saw of a file or link: a file must still be that file when it is read.
+    meta: Option<EntryMeta>,
 }
 
 /// Every folder by project path (`""` is the top folder), with its children sorted by name.
@@ -519,12 +505,13 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
     }
 }
 
-/// Stores every file and listing, deepest folders first. Returns the top listing's ID, how many
-/// entries were kept as they were, which of the files and links in `ignored` changed, and which
-/// of those in `gitignored` are new or changed.
+/// Stores every file and listing, deepest folders first, reading the files and links through
+/// `handles`. Returns the top listing's ID, how many entries were kept as they were, which of the
+/// files and links in `ignored` changed, and which of those in `gitignored` are new or changed.
 fn build(
     store: &Store,
     packs: &mut PackSet,
+    handles: &mut Handles,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
     ignored: &HashSet<String>,
@@ -552,8 +539,10 @@ fn build(
                     (EntryKind::Folder, id, 0)
                 }
                 Kind::File => {
+                    let dir = handles.folder(rel)?;
+                    let meta = c.meta.as_ref();
                     let (id, size) =
-                        store_file(packs, store, &c.path, &mut || {}).map_err(|e| e.at(&c.rel))?;
+                        store_file(packs, store, dir, &c.name, &c.rel, meta, &mut || {})?;
                     let was = before.and_then(|l| l.get(&c.name));
                     // Git writes a link it can't make as a file holding its target: the link
                     // stays (decision 039).
@@ -564,7 +553,7 @@ fn build(
                         (EntryKind::Symlink, id, size)
                     } else {
                         // Without `x` bits, a file stays executable if it was (decision 004).
-                        let executable = c.executable.unwrap_or_else(|| {
+                        let executable = c.meta.and_then(|m| m.executable).unwrap_or_else(|| {
                             was.is_some_and(|e| e.kind == EntryKind::Executable)
                         });
                         let kind = if executable {
@@ -576,7 +565,8 @@ fn build(
                     }
                 }
                 Kind::Symlink => {
-                    let (id, size) = store_link(packs, store, &c.path).map_err(|e| e.at(&c.rel))?;
+                    let dir = handles.folder(rel)?;
+                    let (id, size) = store_link(packs, store, dir, &c.name, &c.rel)?;
                     (EntryKind::Symlink, id, size)
                 }
                 Kind::Kept { kind, id, size } => {
@@ -621,19 +611,27 @@ fn store_listing(store: &Store, packs: &mut PackSet, listing: &Listing) -> Resul
     Ok(id)
 }
 
-/// Stores a symlink's target as content; the link itself is never followed.
-fn store_link(packs: &mut PackSet, store: &Store, path: &Path) -> Result<(Id, u64), SaveError> {
+/// Stores the target of the link `name` in `dir`, at the project path `rel`, as content with `/`
+/// between its parts (decision 045); the link itself is never followed.
+fn store_link(
+    packs: &mut PackSet,
+    store: &Store,
+    dir: &Dir,
+    name: &str,
+    rel: &str,
+) -> Result<(Id, u64), SaveError> {
     let unreadable = |source| SaveError::Unreadable {
-        path: path.display().to_string(),
+        path: rel.to_owned(),
         source,
     };
-    let target = fs::read_link(path).map_err(unreadable)?;
-    let target = target.into_os_string().into_string().map_err(|_| {
+    let target = dir.read_link(OsStr::new(name)).map_err(unreadable)?;
+    let target = target.into_string().map_err(|_| {
         unreadable(io::Error::new(
             io::ErrorKind::InvalidData,
             "the link's target is not valid UTF-8",
         ))
     })?;
+    let target = link::stored_target(target);
     let id = hash_content(target.as_bytes());
     if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
         packs.add_content(target.as_bytes())?;
@@ -641,48 +639,67 @@ fn store_link(packs: &mut PackSet, store: &Store, path: &Path) -> Result<(Id, u6
     Ok((id, target.len() as u64))
 }
 
-/// Opens a project file to read, without following a link at its name and only if it is a regular
-/// file. A link or special file here was swapped in since the scan, unless it is a Windows reparse
-/// point that isn't a link (a cloud placeholder, say), which the scan takes for a file.
-fn open_project_file(path: &Path) -> Result<File, SaveError> {
-    safe_fs::open_regular(path, OpenOptions::new().read(true)).map_err(|e| {
-        let shown = path.display().to_string();
-        if e.kind() != io::ErrorKind::InvalidInput {
-            SaveError::Unreadable {
-                path: shown,
-                source: e,
+/// Opens the file `name` in `dir`, at the project path `rel`, to read, if it is still the regular
+/// file the walk saw (`seen`): the same file, size and time, so what is stored is what the walk
+/// described. Anything else changed since, unless it is a Windows reparse point that isn't a link
+/// (a cloud placeholder, say), which Bolt can't save yet. Returns the file and its details.
+fn open_scanned(
+    dir: &Dir,
+    name: &str,
+    rel: &str,
+    seen: Option<&EntryMeta>,
+) -> Result<(File, EntryMeta), SaveError> {
+    let name = OsStr::new(name);
+    let path = || rel.to_owned();
+    let file = dir
+        .open_file(name)
+        .map_err(|source| match dir.metadata(name) {
+            Ok(now) if cfg!(windows) && now.kind == EntryType::Other => {
+                SaveError::SpecialFile { path: path() }
             }
-        } else if fs::symlink_metadata(path).is_ok_and(|m| safe_fs::is_reparse_file(&m)) {
-            SaveError::SpecialFile { path: shown }
-        } else {
-            SaveError::ChangedDuringSave { path: shown }
-        }
-    })
+            Ok(now) if now.kind != EntryType::File => SaveError::ChangedDuringSave { path: path() },
+            _ => SaveError::Unreadable {
+                path: path(),
+                source,
+            },
+        })?;
+    let now = Dir::file_meta(&file).map_err(|source| SaveError::Unreadable {
+        path: path(),
+        source,
+    })?;
+    let what = |m: &EntryMeta| (m.file_id, m.size, m.modified_ns);
+    if seen.is_none_or(|seen| what(seen) != what(&now)) {
+        return Err(SaveError::ChangedDuringSave { path: path() });
+    }
+    Ok((file, now))
 }
 
 /// A file's size and modification time, to see whether it changed while it was read.
-fn stamp(file: &File) -> io::Result<(u64, Option<SystemTime>)> {
-    file.metadata().map(|m| (m.len(), m.modified().ok()))
+fn stamp(file: &File) -> io::Result<(u64, i128)> {
+    Dir::file_meta(file).map(|m| (m.size, m.modified_ns))
 }
 
-/// Stores one file in two passes: hash it, then copy it into `packs` unless already held. A file
-/// that changes in between, or turns into a link or special file, gives `ChangedDuringSave`; a
-/// Windows reparse point that isn't a link gives `SpecialFile`.
+/// Stores one file in two passes: hash it, then copy it into `packs` unless already held. The
+/// file is `name` in `dir`, at the project path `rel`, and must be the one the walk saw (`seen`;
+/// see `open_scanned`). A file that changes in between gives `ChangedDuringSave`.
 pub(crate) fn store_file(
     packs: &mut PackSet,
     store: &Store,
-    path: &Path,
+    dir: &Dir,
+    name: &str,
+    rel: &str,
+    seen: Option<&EntryMeta>,
     between_passes: &mut dyn FnMut(),
 ) -> Result<(Id, u64), SaveError> {
     let unreadable = |source| SaveError::Unreadable {
-        path: path.display().to_string(),
+        path: rel.to_owned(),
         source,
     };
     let changed = || SaveError::ChangedDuringSave {
-        path: path.display().to_string(),
+        path: rel.to_owned(),
     };
-    let mut file = open_project_file(path)?;
-    let before = stamp(&file).map_err(unreadable)?;
+    let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
+    let before = (opened.size, opened.modified_ns);
     let mut hasher = ContentHasher::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut size = 0u64;
@@ -824,7 +841,8 @@ mod tests {
 
     /// The drive the tests run on, as `save` probes it.
     pub(super) fn this_drive() -> Drive {
-        drive::probe(tempfile::tempdir().unwrap().path()).unwrap()
+        let tmp = tempfile::tempdir().unwrap();
+        drive::probe(&Dir::open_top(tmp.path()).unwrap()).unwrap()
     }
 
     /// The line's newest save, as the base of a walk, with the format's limits.
@@ -1411,18 +1429,37 @@ mod tests {
     #[test]
     fn save_stops_when_a_file_changes_during_the_save() {
         let (dir, repo) = project();
-        let path = dir.path().join("growing.log");
+        let name = "growing.log";
+        let path = dir.path().join(name);
         fs::write(&path, b"line 1\n").unwrap();
+        let top = Dir::open_top(dir.path()).unwrap();
+        let seen = top.metadata(OsStr::new(name)).unwrap();
         let mut packs = repo.new_packs().unwrap();
-        let got = store_file(&mut packs, repo.store(), &path, &mut || {}).unwrap();
-        assert_eq!(got, (hash_content(b"line 1\n"), 7));
+        let got = store_file(
+            &mut packs,
+            repo.store(),
+            &top,
+            name,
+            name,
+            Some(&seen),
+            &mut || {},
+        );
+        assert_eq!(got.unwrap(), (hash_content(b"line 1\n"), 7));
         let mut append = || {
             use std::io::Write;
             let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
             f.write_all(b"line 2\n").unwrap();
         };
         assert!(matches!(
-            store_file(&mut packs, repo.store(), &path, &mut append),
+            store_file(
+                &mut packs,
+                repo.store(),
+                &top,
+                name,
+                name,
+                Some(&seen),
+                &mut append
+            ),
             Err(SaveError::ChangedDuringSave { .. })
         ));
     }
@@ -1433,7 +1470,11 @@ mod tests {
         let (dir, repo) = project();
         let victim = dir.path().join("victim.txt");
         fs::write(&victim, b"x").unwrap();
-        let folders = walk_project(&repo, SaveLimits::default()).unwrap().folders;
+        let Scan {
+            mut handles,
+            folders,
+            ..
+        } = walk_project(&repo, SaveLimits::default()).unwrap();
         fs::remove_file(&victim).unwrap();
         if !make_link(&victim) {
             return;
@@ -1442,6 +1483,7 @@ mod tests {
         match build(
             repo.store(),
             &mut packs,
+            &mut handles,
             &folders,
             &HashMap::new(),
             &HashSet::new(),
@@ -1476,8 +1518,16 @@ mod tests {
     fn file_deleted_between_scan_and_read_is_still_unreadable() {
         let (dir, repo) = project();
         let mut packs = repo.new_packs().unwrap();
-        let gone = dir.path().join("gone.txt");
-        match store_file(&mut packs, repo.store(), &gone, &mut || {}) {
+        let top = Dir::open_top(dir.path()).unwrap();
+        match store_file(
+            &mut packs,
+            repo.store(),
+            &top,
+            "gone.txt",
+            "gone.txt",
+            None,
+            &mut || {},
+        ) {
             Err(SaveError::Unreadable { source, .. }) => {
                 assert_eq!(source.kind(), io::ErrorKind::NotFound);
             }
@@ -1499,9 +1549,13 @@ mod tests {
         // Opening a named pipe waits for a writer, so the read runs on another thread: a hang
         // fails this test instead of stopping the whole run.
         let (tx, rx) = std::sync::mpsc::channel();
+        let top = Dir::open_top(dir.path()).unwrap();
+        let seen = top.metadata(pipe.file_name().unwrap()).unwrap();
         std::thread::spawn(move || {
             let mut packs = repo.new_packs().unwrap();
-            let stored = store_file(&mut packs, repo.store(), &pipe, &mut || {});
+            let name = ".boltignore";
+            let seen = Some(&seen);
+            let stored = store_file(&mut packs, repo.store(), &top, name, name, seen, &mut || {});
             let _ = tx.send((stored, packs.is_empty()));
         });
         let (stored, pack_is_empty) = rx

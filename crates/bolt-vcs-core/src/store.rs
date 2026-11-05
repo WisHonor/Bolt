@@ -1,4 +1,6 @@
 //! One view over every pack in the store. The lookup index lives in memory and is rebuilt on open.
+use bolt_platform::dir::Dir;
+
 use crate::encoding::DecodeError;
 use crate::id::Id;
 use crate::listing::Listing;
@@ -60,8 +62,14 @@ struct Checked {
 }
 
 impl Store {
-    /// Opens every `*.pack` file in the folder and ignores everything else.
+    /// Opens every `*.pack` file in the folder at `packs_dir` and ignores everything else.
     pub fn open(packs_dir: &Path) -> Result<Store, StoreError> {
+        let packs = Dir::open_top(packs_dir).map_err(PackError::from)?;
+        Store::open_in(&packs, packs_dir)
+    }
+
+    /// `open` for the folder `packs`, at `packs_dir`, read through `packs`.
+    pub(crate) fn open_in(packs: &Dir, packs_dir: &Path) -> Result<Store, StoreError> {
         let mut store = Store {
             packs: Vec::new(),
             index: HashMap::new(),
@@ -69,32 +77,34 @@ impl Store {
             known: HashSet::new(),
             checked: Mutex::default(),
         };
-        store.refresh(packs_dir)?;
+        store.refresh(packs, packs_dir)?;
         Ok(store)
     }
 
-    /// Registers every `*.pack` file in the folder that is not registered yet, such as packs
-    /// another process committed since this store was opened.
-    pub fn refresh(&mut self, packs_dir: &Path) -> Result<(), StoreError> {
-        let mut paths = Vec::new();
-        for entry in std::fs::read_dir(packs_dir).map_err(PackError::from)? {
-            let path = entry.map_err(PackError::from)?.path();
-            let new = path.file_name().is_some_and(|n| !self.known.contains(n));
-            if new && path.extension().is_some_and(|e| e == "pack") {
-                paths.push(path);
+    /// Registers every `*.pack` file in the folder `packs`, at `packs_dir`, that is not registered
+    /// yet, such as packs another process committed since this store was opened.
+    pub fn refresh(&mut self, packs: &Dir, packs_dir: &Path) -> Result<(), StoreError> {
+        let mut names = Vec::new();
+        for entry in packs.entries().map_err(PackError::from)? {
+            let pack = Path::new(&entry.name)
+                .extension()
+                .is_some_and(|e| e == "pack");
+            if pack && !self.known.contains(&entry.name) {
+                names.push(entry.name);
             }
         }
-        paths.sort();
-        for path in paths {
-            self.register(&path)?;
+        names.sort();
+        for name in names {
+            self.register(packs, &packs_dir.join(name))?;
         }
         Ok(())
     }
 
-    /// Adds a finished pack. An object an earlier pack holds too gets a further copy here, read if
-    /// the earlier ones fail.
-    pub fn register(&mut self, pack_path: &Path) -> Result<(), StoreError> {
-        let reader = PackReader::open(pack_path)?;
+    /// Adds the finished pack at `pack_path`, read through `packs`, the folder it is in. An object
+    /// an earlier pack holds too gets a further copy here, read if the earlier ones fail.
+    pub fn register(&mut self, packs: &Dir, pack_path: &Path) -> Result<(), StoreError> {
+        let name = pack_path.file_name().unwrap_or_default();
+        let reader = PackReader::open_in(packs, name, pack_path)?;
         let n = self.packs.len();
         for (i, e) in reader.entries().iter().enumerate() {
             match self.index.entry(e.id) {
@@ -387,7 +397,7 @@ mod tests {
             let mut store = Store::open(&packs).unwrap();
             for chunk in contents.chunks(contents.len().div_ceil(n_packs)) {
                 let path = pack_of(&tmp, &packs, chunk);
-                store.register(&path).unwrap();
+                store.register(&Dir::open_top(&packs).unwrap(), &path).unwrap();
             }
             let fresh = Store::open(&packs).unwrap();
             for c in &contents {
@@ -419,8 +429,12 @@ mod tests {
         pack_of(&tmp, &packs, &[b"one".to_vec()]);
         let mut store = Store::open(&packs).unwrap();
         pack_of(&tmp, &packs, &[b"two".to_vec()]);
-        store.refresh(&packs).unwrap();
-        store.refresh(&packs).unwrap();
+        store
+            .refresh(&Dir::open_top(&packs).unwrap(), &packs)
+            .unwrap();
+        store
+            .refresh(&Dir::open_top(&packs).unwrap(), &packs)
+            .unwrap();
         assert_eq!(store.pack_count(), 2);
         assert!(
             store
@@ -479,7 +493,9 @@ mod tests {
         assert_eq!(store.damaged_packs().len(), 1);
         // A good copy arriving later is found past the damaged one.
         pack_of(&tmp, &packs, &[content]);
-        store.refresh(&packs).unwrap();
+        store
+            .refresh(&Dir::open_top(&packs).unwrap(), &packs)
+            .unwrap();
         assert!(store.has_good_copy(&id, ObjectKind::Content, size).unwrap());
         assert!(
             !store

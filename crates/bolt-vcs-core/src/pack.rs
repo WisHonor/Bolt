@@ -5,10 +5,13 @@ use crate::fsio;
 use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
 use crate::safe_fs;
 use crate::text::escape;
+use bolt_platform::dir::Dir;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(any(test, feature = "fault-injection"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -143,7 +146,9 @@ fn worth_compressing(compressed: usize, original: usize) -> bool {
 /// Builds a pack in the temp folder; `finish` moves it into the store.
 pub struct PackWriter {
     file: BufWriter<File>,
-    tmp_path: PathBuf,
+    /// The temp folder, and the pack's name there.
+    tmp: Arc<Dir>,
+    name: OsString,
     /// Where the next entry starts.
     end: u64,
     index: BTreeMap<Id, IndexEntry>,
@@ -152,11 +157,18 @@ pub struct PackWriter {
 }
 
 impl PackWriter {
+    /// A pack built in the folder at `tmp_dir`.
     pub fn create(tmp_dir: &Path) -> Result<PackWriter, PackError> {
-        let (file, tmp_path) = fsio::create_temp(tmp_dir)?;
+        PackWriter::create_in(&Arc::new(Dir::open_top(tmp_dir)?))
+    }
+
+    /// A pack built in the folder `tmp`.
+    pub(crate) fn create_in(tmp: &Arc<Dir>) -> Result<PackWriter, PackError> {
+        let (file, name) = fsio::create_temp(tmp)?;
         let mut w = PackWriter {
             file: BufWriter::new(file),
-            tmp_path,
+            tmp: Arc::clone(tmp),
+            name,
             end: PACK_HEADER_LEN,
             index: BTreeMap::new(),
             broken: false,
@@ -235,14 +247,21 @@ impl PackWriter {
         self.index.is_empty()
     }
 
-    /// Writes the index and trailer, flushes, and moves the pack into `packs_dir` under the
-    /// name `<hex of the index checksum>.pack`. An empty pack is deleted instead.
-    pub fn finish(mut self, packs_dir: &Path) -> Result<Option<PathBuf>, PackError> {
+    /// Writes the index and trailer, flushes, and moves the pack into the folder at `packs_dir`,
+    /// returning its path; see `finish_into`.
+    pub fn finish(self, packs_dir: &Path) -> Result<Option<PathBuf>, PackError> {
+        let packs = Dir::open_top(packs_dir)?;
+        Ok(self.finish_into(&packs)?.map(|name| packs_dir.join(name)))
+    }
+
+    /// Writes the index and trailer, flushes, and moves the pack into the folder `packs` under the
+    /// name `<hex of the index checksum>.pack`, which it returns. An empty pack is deleted instead.
+    pub(crate) fn finish_into(mut self, packs: &Dir) -> Result<Option<OsString>, PackError> {
         if self.broken {
             return Err(io::Error::other("an earlier write to this pack failed").into());
         }
         if self.index.is_empty() {
-            fs::remove_file(&self.tmp_path)?;
+            fsio::remove_file(&self.tmp, &self.name)?;
             return Ok(None);
         }
         let mut index = Writer::new();
@@ -263,8 +282,8 @@ impl PackWriter {
         self.file.flush()?;
         self.file.get_ref().sync_all()?;
         fsio::fault_point("pack:before-rename")?;
-        let dest = packs_dir.join(format!("{}.pack", checksum.to_hex()));
-        fsio::rename_durable(&self.tmp_path, &dest)?;
+        let dest = OsString::from(format!("{}.pack", checksum.to_hex()));
+        fsio::rename_durable(&self.tmp, &self.name, packs, &dest)?;
         fsio::fault_point("pack:after-rename")?;
         Ok(Some(dest))
     }
@@ -354,7 +373,7 @@ impl PackWriter {
 impl Drop for PackWriter {
     fn drop(&mut self) {
         // After a successful finish the temp file is gone, and this fails harmlessly.
-        let _ = fs::remove_file(&self.tmp_path);
+        let _ = fsio::remove_file(&self.tmp, &self.name);
     }
 }
 
@@ -394,7 +413,9 @@ fn failed_earlier() -> PackError {
 /// new one takes its place. Nothing points at these packs until the command moves the head, so
 /// any a crash leaves behind are only unused.
 pub struct PackSet {
-    tmp_dir: PathBuf,
+    tmp: Arc<Dir>,
+    /// The store's folder, and its path, which names the packs moved there.
+    packs: Arc<Dir>,
     packs_dir: PathBuf,
     limit: u64,
     /// The pack being built.
@@ -407,23 +428,36 @@ pub struct PackSet {
 }
 
 impl PackSet {
-    /// A set that rolls over at the writer's own limit.
-    pub(crate) fn new(tmp_dir: &Path, packs_dir: &Path) -> Result<PackSet, PackError> {
-        PackSet::start(tmp_dir, packs_dir, writer_limit())
+    /// A set built in the folder `tmp` that moves its packs into `packs`, the folder at
+    /// `packs_dir`, rolling over at the writer's own limit.
+    pub(crate) fn new(
+        tmp: &Arc<Dir>,
+        packs: &Arc<Dir>,
+        packs_dir: &Path,
+    ) -> Result<PackSet, PackError> {
+        PackSet::start(tmp, packs, packs_dir, writer_limit())
     }
 
     /// A set that rolls over at `limit` objects, so tests can split small commands.
     #[cfg(any(test, feature = "fault-injection"))]
     pub fn with_limit(tmp_dir: &Path, packs_dir: &Path, limit: u64) -> Result<PackSet, PackError> {
-        PackSet::start(tmp_dir, packs_dir, limit)
+        let tmp = Arc::new(Dir::open_top(tmp_dir)?);
+        let packs = Arc::new(Dir::open_top(packs_dir)?);
+        PackSet::start(&tmp, &packs, packs_dir, limit)
     }
 
-    fn start(tmp_dir: &Path, packs_dir: &Path, limit: u64) -> Result<PackSet, PackError> {
+    fn start(
+        tmp: &Arc<Dir>,
+        packs: &Arc<Dir>,
+        packs_dir: &Path,
+        limit: u64,
+    ) -> Result<PackSet, PackError> {
         Ok(PackSet {
-            tmp_dir: tmp_dir.to_owned(),
+            tmp: Arc::clone(tmp),
+            packs: Arc::clone(packs),
             packs_dir: packs_dir.to_owned(),
             limit,
-            current: PackWriter::create(tmp_dir)?,
+            current: PackWriter::create_in(tmp)?,
             done: Vec::new(),
             broken: false,
         })
@@ -469,9 +503,9 @@ impl PackSet {
         }
         // An empty pack is only dropped, which removes its temp file.
         if !self.current.is_empty()
-            && let Some(path) = self.current.finish(&self.packs_dir)?
+            && let Some(name) = self.current.finish_into(&self.packs)?
         {
-            self.done.push(path);
+            self.done.push(self.packs_dir.join(name));
         }
         Ok(self.done)
     }
@@ -497,10 +531,10 @@ impl PackSet {
     /// Moves the full pack into the store and starts the next one.
     fn roll_over(&mut self) -> Result<(), PackError> {
         // The next one first, so the set always has a pack to add to.
-        let next = PackWriter::create(&self.tmp_dir)?;
+        let next = PackWriter::create_in(&self.tmp)?;
         let full = std::mem::replace(&mut self.current, next);
-        if let Some(path) = full.finish(&self.packs_dir)? {
-            self.done.push(path);
+        if let Some(name) = full.finish_into(&self.packs)? {
+            self.done.push(self.packs_dir.join(name));
         }
         fsio::fault_point("packs:rolled-over")?;
         Ok(())
@@ -548,14 +582,30 @@ impl PackReader {
         PackReader::open_with(path, MAX_PACK_OBJECTS)
     }
 
+    /// `open` for the pack `name` in the folder `dir`, at `path`, opened through `dir`.
+    pub(crate) fn open_in(dir: &Dir, name: &OsStr, path: &Path) -> Result<PackReader, PackError> {
+        let opened = safe_fs::open_regular_in(dir, name, path);
+        PackReader::checked(opened, path, MAX_PACK_OBJECTS)
+    }
+
     /// `open`, with a smaller limit on objects than the format's; tests use one.
     fn open_with(path: &Path, max_objects: u64) -> Result<PackReader, PackError> {
+        let opened = safe_fs::open_regular(path, OpenOptions::new().read(true));
+        PackReader::checked(opened, path, max_objects)
+    }
+
+    /// The pack `opened` at `path`, once it passes `open`'s checks.
+    fn checked(
+        opened: io::Result<File>,
+        path: &Path,
+        max_objects: u64,
+    ) -> Result<PackReader, PackError> {
         let corrupt = |reason: String| PackError::Corrupt {
             path: path.to_path_buf(),
             reason,
         };
         // A link, pipe or device named like a pack is damage, never followed or waited on.
-        let file = match safe_fs::open_regular(path, OpenOptions::new().read(true)) {
+        let file = match opened {
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
                 return Err(corrupt("it is not a regular file".into()));
             }

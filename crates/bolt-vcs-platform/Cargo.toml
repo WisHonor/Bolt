@@ -7,6 +7,10 @@ publish.workspace = true
 [lib]
 name = "bolt_platform"
 
+[features]
+# Counts the folders each thread holds open, for tests that bound it.
+test-support = []
+
 [lints.rust]
 unsafe_code = "allow"
 unsafe_op_in_unsafe_fn = "deny"

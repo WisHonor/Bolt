@@ -1,10 +1,14 @@
 //! The single place every disk write goes through: temp files, atomic replacement, durable
-//! renames, and the fault points that crash tests use.
+//! renames, and the fault points that crash tests use. Writes in `.bolt` go through its folders
+//! held open, never by path.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
+
+use bolt_platform::dir::Dir;
 
 // One rule for temporary names, shared with the links the platform crate makes in `.bolt/tmp`.
 pub(crate) use bolt_platform::ACCENTED_SUFFIX;
@@ -12,40 +16,38 @@ pub use bolt_platform::is_temp_name;
 
 use crate::safe_fs;
 
-/// Creates a new, empty file in `tmp_dir`, named as `bolt_platform::temp_name` says: `tmp-` and 16
-/// random lowercase hex digits.
-pub fn create_temp(tmp_dir: &Path) -> io::Result<(File, PathBuf)> {
-    let path = tmp_dir.join(bolt_platform::temp_name());
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    Ok((file, path))
+/// Creates a new, empty file in the folder `tmp`, named as `bolt_platform::temp_name` says:
+/// `tmp-` and 16 random lowercase hex digits. Returns it and its name.
+pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
+    let name = bolt_platform::temp_name();
+    let file = tmp.create_new(&name, false)?;
+    Ok((file, name))
 }
 
-/// Replaces `dest` with `bytes` so that, even after a crash, it holds either the old or the
-/// new bytes, never a mix.
-pub fn write_atomic(tmp_dir: &Path, dest: &Path, bytes: &[u8]) -> io::Result<()> {
-    let (mut file, tmp) = create_temp(tmp_dir)?;
+/// Replaces `name` in the folder `to` with `bytes`, written in the folder `tmp` first, so that,
+/// even after a crash, it holds either the old or the new bytes, never a mix.
+pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let (mut file, temp) = create_temp(tmp)?;
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         fault_point("write:before-rename")?;
-        rename_durable(&tmp, dest)
+        rename_durable(tmp, &temp, to, OsStr::new(name))
     })();
     if result.is_err() {
         // The temp file is only litter now; failing to remove it changes nothing.
-        let _ = fs::remove_file(&tmp);
+        let _ = remove_file(tmp, &temp);
     }
     result
 }
 
-/// Renames `from` to `to`, then flushes the parent folder so the rename survives a crash.
-pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
+/// Moves `from` in the folder `from_dir` to `to` in the folder `to_dir`, replacing a file there,
+/// then flushes `to_dir` so the move survives a crash.
+pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
     let mut retries = 0;
     loop {
-        match fs::rename(from, to) {
+        match from_dir.rename_into(from, to_dir, to) {
             Ok(()) => break,
             // Virus scanners and indexers briefly hold files open on Windows.
             Err(e) if cfg!(windows) && retries < 10 && matches!(e.raw_os_error(), Some(5 | 32)) => {
@@ -55,7 +57,7 @@ pub fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    sync_parent(to)
+    to_dir.sync()
 }
 
 /// Flushes the folder that holds `path`.
@@ -76,9 +78,10 @@ pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Deletes a file. Not flushed: only used for leftovers, which may as well come back.
-pub fn remove_file(path: &Path) -> io::Result<()> {
-    fs::remove_file(path)
+/// Deletes the file `name` in the folder `dir`, or the link itself if it is one. Not flushed: only
+/// used for leftovers, which may as well come back.
+pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
+    dir.remove_file(name)
 }
 
 /// Opens the change-lock file for reading and writing, creating it if needed, never through a
@@ -188,18 +191,18 @@ mod tests {
     #[test]
     fn write_atomic_replaces_the_file_whole() {
         let root = tempfile::tempdir().unwrap();
-        let dest = root.path().join("head");
-        write_atomic(root.path(), &dest, b"old").unwrap();
-        write_atomic(root.path(), &dest, b"new").unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"new");
+        let dir = Dir::open_top(root.path()).unwrap();
+        write_atomic(&dir, &dir, "head", b"old").unwrap();
+        write_atomic(&dir, &dir, "head", b"new").unwrap();
+        assert_eq!(fs::read(root.path().join("head")).unwrap(), b"new");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[test]
     fn temp_names_are_the_ones_bolt_makes() {
         let root = tempfile::tempdir().unwrap();
-        let (_, made) = create_temp(root.path()).unwrap();
-        assert!(is_temp_name(made.file_name().unwrap()));
+        let (_, made) = create_temp(&Dir::open_top(root.path()).unwrap()).unwrap();
+        assert!(is_temp_name(&made));
         let hex = "0123456789abcdef";
         let probe_name = format!("tmp-{hex}{ACCENTED_SUFFIX}");
         assert_eq!(probe_name, format!("tmp-{hex}-e\u{301}"));
@@ -240,13 +243,13 @@ mod tests {
     #[test]
     fn fault_before_rename_keeps_the_old_file() {
         let root = tempfile::tempdir().unwrap();
-        let dest = root.path().join("head");
-        write_atomic(root.path(), &dest, b"old").unwrap();
+        let dir = Dir::open_top(root.path()).unwrap();
+        write_atomic(&dir, &dir, "head", b"old").unwrap();
         fault::arm(1);
-        let err = write_atomic(root.path(), &dest, b"new").unwrap_err();
+        let err = write_atomic(&dir, &dir, "head", b"new").unwrap_err();
         fault::disarm();
         assert_eq!(err.to_string(), "injected fault at write:before-rename");
-        assert_eq!(fs::read(&dest).unwrap(), b"old");
+        assert_eq!(fs::read(root.path().join("head")).unwrap(), b"old");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
 }

@@ -245,6 +245,21 @@ pub(crate) fn symlink(target: &Path, link: &Path) -> bool {
     }
 }
 
+/// Says a test can't make links here, which on Windows takes Developer Mode or an administrator,
+/// and lets it go on without them. Any other error fails the test, and so does this one in CI
+/// (where `CI` is set): its runner has the right, and a skip there would pass for a test that
+/// never ran.
+#[cfg(windows)]
+pub(crate) fn skip_without_link_right(e: std::io::Error) {
+    if e.raw_os_error() != Some(1314) {
+        panic!("couldn't make a link: {e}");
+    }
+    if std::env::var_os("CI").is_some() {
+        panic!("CI must be able to make links, so that the link tests run there: {e}");
+    }
+    println!("Skipped: this account can't make links ({e}).");
+}
+
 /// A Windows junction (no privilege needed) at `link`, pointing at the folder `target`.
 #[cfg(windows)]
 pub(crate) fn junction(link: &Path, target: &Path) {

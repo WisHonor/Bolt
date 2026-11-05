@@ -64,13 +64,19 @@ impl Dir {
     /// Opens the folder at `path`, which the caller has already resolved. A link at its last name
     /// is refused.
     pub fn open_top(path: &Path) -> io::Result<Dir> {
-        sys::open_top(path).map(|handle| Dir { handle })
+        sys::open_top(path).map(Dir::held)
     }
 
     /// Opens the folder `name` in this one.
     pub fn open_dir(&self, name: &OsStr) -> io::Result<Dir> {
         one_name(name)?;
-        sys::open_dir(&self.handle, name).map(|handle| Dir { handle })
+        sys::open_dir(&self.handle, name).map(Dir::held)
+    }
+
+    fn held(handle: sys::Handle) -> Dir {
+        #[cfg(feature = "test-support")]
+        open_count::opened();
+        Dir { handle }
     }
 
     /// What is in this folder, without `.` and `..`, in no particular order.
@@ -168,6 +174,45 @@ impl Dir {
     /// a crash. Windows can't flush a folder opened only to read it: there this does nothing yet.
     pub fn sync(&self) -> io::Result<()> {
         sys::sync(&self.handle)
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for Dir {
+    fn drop(&mut self) {
+        open_count::closed();
+    }
+}
+
+/// How many folders this thread holds open, for tests that bound it.
+#[cfg(feature = "test-support")]
+pub mod open_count {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NOW: Cell<usize> = const { Cell::new(0) };
+        static MOST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn opened() {
+        let now = NOW.get().saturating_add(1);
+        NOW.set(now);
+        MOST.set(MOST.get().max(now));
+    }
+
+    pub(super) fn closed() {
+        NOW.set(NOW.get().saturating_sub(1));
+    }
+
+    /// How many folders this thread holds open now.
+    pub fn now() -> usize {
+        NOW.get()
+    }
+
+    /// The most folders this thread has held open at once since the last call, which starts the
+    /// count again from those open now.
+    pub fn most_since_last() -> usize {
+        MOST.replace(NOW.get())
     }
 }
 

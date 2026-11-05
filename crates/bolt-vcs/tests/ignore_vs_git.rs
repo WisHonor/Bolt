@@ -327,7 +327,10 @@ fn write_for_git(root: &Path, tree: &Tree) {
 /// The drive the tests run on, as `save` finds it.
 fn this_drive() -> Drive {
     static DRIVE: OnceLock<Drive> = OnceLock::new();
-    *DRIVE.get_or_init(|| drive::probe(tempfile::tempdir().unwrap().path()).unwrap())
+    *DRIVE.get_or_init(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        drive::probe(&bolt_platform::dir::Dir::open_top(tmp.path()).unwrap()).unwrap()
+    })
 }
 
 /// A path as Git's walk reads it on this drive.

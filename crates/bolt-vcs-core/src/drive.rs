@@ -1,8 +1,10 @@
 //! What the drive does with names that look alike. Git asks the drive the same questions when it
 //! sets `core.ignorecase` and `core.precomposeunicode`.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::Path;
+
+use bolt_platform::dir::Dir;
 
 use crate::fsio;
 use crate::names;
@@ -24,28 +26,38 @@ impl Drive {
     }
 }
 
-/// Tests the drive that holds `tmp_dir` with a throwaway file there, which it removes again. Call
-/// it holding the change lock: opening the repository clears `tmp/` whenever the lock is free.
-pub fn probe(tmp_dir: &Path) -> io::Result<Drive> {
-    let (file, plain) = fsio::create_temp(tmp_dir)?;
+/// Tests the drive that holds the folder `tmp` with a throwaway file there, which it removes
+/// again. Call it holding the change lock: opening the repository clears `tmp/` whenever the lock
+/// is free.
+pub fn probe(tmp: &Dir) -> io::Result<Drive> {
+    let (file, plain) = fsio::create_temp(tmp)?;
     drop(file);
-    let name = plain.file_name().unwrap_or_default().to_string_lossy();
-    let accented = tmp_dir.join(format!("{name}{}", fsio::ACCENTED_SUFFIX));
+    let name = plain.to_string_lossy().into_owned();
+    let accented = OsString::from(format!("{name}{}", fsio::ACCENTED_SUFFIX));
     let result = (|| -> io::Result<Drive> {
-        let ignores_case = tmp_dir.join(name.to_ascii_uppercase()).try_exists()?;
+        let ignores_case = there(tmp, &name.to_ascii_uppercase())?;
         // Renamed rather than made anew, so every write still goes through `fsio`.
-        fsio::rename_durable(&plain, &accented)?;
-        let composes_unicode = tmp_dir.join(format!("{name}-\u{e9}")).try_exists()?;
+        fsio::rename_durable(tmp, &plain, tmp, &accented)?;
+        let composes_unicode = there(tmp, &format!("{name}-\u{e9}"))?;
         Ok(Drive {
             ignores_case,
             composes_unicode,
         })
     })();
     // Whatever is left is only litter, which opening the repository clears too.
-    for path in [&plain, &accented] {
-        let _ = fsio::remove_file(path);
+    for left in [&plain, &accented] {
+        let _ = fsio::remove_file(tmp, left);
     }
     result
+}
+
+/// Whether the folder `dir` holds something under the name `name`, as this drive compares names.
+fn there(dir: &Dir, name: &str) -> io::Result<bool> {
+    match dir.metadata(OsStr::new(name)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -54,10 +66,14 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn held(tmp: &tempfile::TempDir) -> Dir {
+        Dir::open_top(tmp.path()).unwrap()
+    }
+
     #[test]
     fn the_drive_probe_matches_the_ci_drives() {
         let tmp = tempfile::tempdir().unwrap();
-        let d = probe(tmp.path()).unwrap();
+        let d = probe(&held(&tmp)).unwrap();
         assert_eq!(d.ignores_case, cfg!(any(windows, target_os = "macos")));
         assert_eq!(d.composes_unicode, cfg!(target_os = "macos"));
     }
@@ -83,13 +99,16 @@ mod tests {
     #[test]
     fn the_probe_leaves_nothing_behind() {
         let tmp = tempfile::tempdir().unwrap();
-        probe(tmp.path()).unwrap();
+        probe(&held(&tmp)).unwrap();
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     #[test]
     fn a_missing_folder_is_an_error_not_an_answer() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(probe(&tmp.path().join("missing")).is_err());
+        fs::create_dir(tmp.path().join("gone")).unwrap();
+        let gone = Dir::open_top(&tmp.path().join("gone")).unwrap();
+        fs::remove_dir(tmp.path().join("gone")).unwrap();
+        assert!(probe(&gone).is_err());
     }
 }

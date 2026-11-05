@@ -413,13 +413,8 @@ fn windows_cant_hold_some_names_and_saving_keeps_them() {
 }
 
 /// Git writes the link out itself, as a real link wherever it can make one; the first save after
-/// the import keeps the target Git stored.
+/// the import keeps the target Git stored, though Git for Windows writes its `/` as `\`.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Git for Windows writes a link's `/` as `\\` and save stores the target as read, so \
-              the link reads as changed: a question for the owner"
-)]
 fn a_link_git_wrote_keeps_its_target_when_saved() {
     let env = Env::new();
     env.commit("dir/target.txt", "t\n", "First");
@@ -431,6 +426,12 @@ fn a_link_git_wrote_keeps_its_target_when_saved() {
     let out = git_with_input(env.root(), &args, b"");
     let link = std::fs::symlink_metadata(env.root().join("link"));
     if !link.is_ok_and(|meta| meta.file_type().is_symlink()) {
+        // CI's runners can make links, so a skip there would pass for a test that never ran.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "Git couldn't make the link in CI: {}",
+            text(&out.stderr)
+        );
         println!("Skipped: Git can't make links here. {}", text(&out.stderr));
         return;
     }
