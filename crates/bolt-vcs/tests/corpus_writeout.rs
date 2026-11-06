@@ -335,8 +335,6 @@ fn spellings_of_git_in_a_save_are_never_written() {
 }
 
 #[test]
-#[ignore = "write-out takes `gitmod~1` to `gitmod~4`, `.gitmodules`' plain short names, which \
-            Git refuses; it refuses only the hashed ones"]
 fn the_short_name_of_gitmodules_is_never_written() {
     let case = Case::new();
     case.plant(&[
@@ -349,6 +347,12 @@ fn the_short_name_of_gitmodules_is_never_written() {
     assert_eq!(
         strings(&doc["not_written"]),
         ["gitmod~1", "sub/GITMOD~4"],
+        "{doc}"
+    );
+    // Refused by name, not found in the way of `.gitmodules` on the drive.
+    assert_eq!(kinds(&doc), ["not_written_here"], "{doc}");
+    assert!(
+        message(&doc, "not_written_here").contains("a spelling of .git or .bolt"),
         "{doc}"
     );
     assert_eq!(

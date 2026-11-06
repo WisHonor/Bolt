@@ -270,7 +270,10 @@ pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<()
         Err(e) => return Err(NotWritable::Invalid(e)),
         Ok(()) => {}
     }
-    if is_git_alias(name) || is_hashed_short_name(name, b"gi7eba") {
+    if is_git_alias(name)
+        || is_hashed_short_name(name, b"gi7eba")
+        || is_plain_short_name(name, b"gitmod")
+    {
         return Err(NotWritable::GitName);
     }
     if is_bolt_alias(name) {
@@ -327,7 +330,26 @@ fn is_hashed_short_name(name: &str, prefix: &[u8]) -> bool {
         }
         pos += 1;
     }
-    let rest = bytes.get(pos..).unwrap_or_default();
+    only_dots_or_spaces(bytes.get(pos..).unwrap_or_default())
+}
+
+/// Whether `name` is the plain short name NTFS gives a name starting with `prefix`'s 6 letters
+/// before it runs out of them, as Git's `is_ntfs_dot_generic` reads it: those letters in any
+/// case, `~`, a digit 1-4, then only dots, spaces or a `:stream`. `gitmod` gives `.gitmodules`'
+/// `GITMOD~1`; write-out refuses it for every entry, as it does the hashed ones.
+fn is_plain_short_name(name: &str, prefix: &[u8; 6]) -> bool {
+    let Some((head, rest)) = name.as_bytes().split_at_checked(6) else {
+        return false;
+    };
+    let [b'~', b'1'..=b'4', rest @ ..] = rest else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(prefix) && only_dots_or_spaces(rest)
+}
+
+/// Whether what ends a short name holds only dots or spaces, up to a `:stream` if any: NTFS
+/// drops those, so the name is the short name still.
+fn only_dots_or_spaces(rest: &[u8]) -> bool {
     let end = rest.iter().position(|&b| b == b':').unwrap_or(rest.len());
     rest.get(..end)
         .unwrap_or_default()
@@ -781,6 +803,36 @@ mod tests {
             "gi7eba~",
             "gi7e~a12",
             "gi7eba1",
+        ] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn the_plain_short_names_of_gitmodules_are_refused() {
+        // Git's `is_ntfs_dot_generic`: `gitmod` in any case, `~1` to `~4`, then only dots,
+        // spaces or a stream.
+        for n in [
+            "gitmod~1",
+            "GITMOD~4",
+            "GitMod~2",
+            "gitmod~1.",
+            "gitmod~3 . ",
+            "gitmod~1:$DATA",
+            "gitmod~1 :x",
+        ] {
+            assert_eq!(writable_here(n, &[]), Err(NotWritable::GitName), "{n:?}");
+        }
+        for n in [
+            "gitmod~0",
+            "gitmod~5",
+            "gitmod~1x",
+            "gitmod~12",
+            "gitmod~",
+            "gitmo~1",
+            "gitmodu~1",
+            "xgitmod~1",
+            ".gitmodules",
         ] {
             assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
         }
