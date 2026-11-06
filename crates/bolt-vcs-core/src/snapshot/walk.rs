@@ -45,9 +45,10 @@ fn holds_own_repository(dir: &Dir) -> bool {
             .is_ok_and(|m| m.kind == EntryType::Dir)
 }
 
-/// The most folders a save holds open at once: past them, a folder is opened again from the
+/// The most folders a save holds open at once (half macOS's default limit of 256 open files, which
+/// counts packs and the rest too): past them, a folder is opened again from the
 /// deepest one held, a name at a time.
-const MOST_HELD: usize = 256;
+const MOST_HELD: usize = 128;
 
 /// The project's folders a save holds open: the top, those below it on the way to the folder last
 /// asked for, at most `MOST_HELD - 2`, and that folder itself when it is deeper than those. So at
@@ -3690,10 +3691,10 @@ mod tests {
         assert!(packs.is_empty());
     }
 
-    /// Past 255 levels the walk opens a folder again from the deepest one it holds, and so does
+    /// Past 127 levels the walk opens a folder again from the deepest one it holds, and so does
     /// the save when it reads the files there.
     #[test]
-    fn a_deep_tree_holds_at_most_256_folders_open() {
+    fn a_deep_tree_holds_at_most_128_folders_open() {
         use bolt_platform::dir::{Dir, open_count};
         use std::ffi::OsStr;
         use std::io::Write;
@@ -3739,7 +3740,7 @@ mod tests {
         )
         .unwrap();
         let most = open_count::most_since_last() - before;
-        assert!((1..=257).contains(&most), "{most} folders open at once");
+        assert!((1..=129).contains(&most), "{most} folders open at once");
         drop(packs);
         // The save, which reads the same.
         let saved = saved_root(save_now(&mut repo).unwrap());

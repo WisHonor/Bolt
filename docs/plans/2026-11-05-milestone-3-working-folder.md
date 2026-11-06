@@ -215,7 +215,7 @@ Decisions 045 (the save side) and 048; the follow-up on handle-relative walking;
 
 **Interfaces:**
 - `walk` keeps its signature. `Child` gains `meta: Option<EntryMeta>` (kind, size, modified time, file ID), taken from the listing where the system gives it, else from `Dir::metadata`.
-- The walk opens each folder from its parent's `Dir` (`open_dir`), never by path. It holds at most 256 folder handles; past that, a folder is opened again from the deepest held one, a name at a time.
+- The walk opens each folder from its parent's `Dir` (`open_dir`), never by path. It holds at most 128 folder handles; past that, a folder is opened again from the deepest held one, a name at a time.
 - Files are read from their folder's `Dir` (`open_file`); the opened file's `file_meta` must match the scan's file ID, size and time, else `ChangedDuringSave`.
 - A link's target read on Windows has each `\` turned into `/` before it is stored (decision 045); `a_link_git_wrote_keeps_its_target_when_saved` runs on Windows from now on, and the nightly job "Links Git for Windows writes keep their target when saved" is removed from `nightly.yml`.
 
