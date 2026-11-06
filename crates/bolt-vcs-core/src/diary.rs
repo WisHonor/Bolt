@@ -138,7 +138,8 @@ pub fn line_named_alike<'a>(lines: &'a BTreeMap<String, Id>, name: &str) -> Opti
         .map(String::as_str)
 }
 
-fn fold_line_name(name: &str) -> String {
+/// A line name as compared with others: two may not differ only by letter case.
+pub(crate) fn fold_line_name(name: &str) -> String {
     name.to_lowercase()
 }
 
