@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 3)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 003](003-working-copy-model.md) (safety copies; `goto` carries unsaved changes along unless they collide)
-- **Refined by:** [decision 065](065-matching-work-doesnt-collide.md) (unsaved work that already matches the target doesn't collide)
+- **Refined by:** [decision 065](065-matching-work-doesnt-collide.md) (unsaved work that already matches the target doesn't collide); [decision 071](071-a-step-records-its-change-to-the-folder.md) (what `discard` throws away is kept as a save, deletions included)
 
 ## Context
 

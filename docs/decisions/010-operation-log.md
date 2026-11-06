@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 10
-- **Refined by:** [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in records of their own that diary entries point to); [decision 049](049-writing-files-one-at-a-time.md) (files are written one at a time from a journal a crash leaves to finish)
+- **Refined by:** [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in records of their own that diary entries point to); [decision 049](049-writing-files-one-at-a-time.md) (files are written one at a time from a journal a crash leaves to finish); decisions [070](070-undo-and-redo-step-through-the-diary.md) to [077](077-tidy-and-the-undo-window.md) (milestone 4: undo and redo, what an entry records about the folder, the list and jumps, shelves, amend, crash recovery, Windows renames, `tidy` and the undo window)
 
 ## Context
 

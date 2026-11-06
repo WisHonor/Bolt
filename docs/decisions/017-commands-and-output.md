@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 17
-- **Refined by:** [decision 021](021-v0.1-command-scope.md) (the v0.1 command set); [decision 054](054-partial-saves.md) (partial saves name files, folders and patterns); [decision 058](058-changes-line-by-line.md) (`bolt changes` with the `similar` crate)
+- **Refined by:** [decision 021](021-v0.1-command-scope.md) (the v0.1 command set); [decision 054](054-partial-saves.md) (partial saves name files, folders and patterns); [decision 058](058-changes-line-by-line.md) (`bolt changes` with the `similar` crate); [decision 072](072-undo-list-and-undo-to.md) (`undo --list` and `undo --to`)
 
 ## Context
 
