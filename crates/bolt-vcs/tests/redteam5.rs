@@ -125,7 +125,6 @@ fn rt5_1_a_file_renamed_over_a_saved_one_is_seen_and_never_lost() {
 }
 
 #[test]
-#[ignore = "RT5-2: an ignored file in a folder goto replaces with a file half-switches and blames a change mid-switch"]
 fn rt5_2_an_ignored_file_in_a_folder_becoming_a_file_is_in_the_way() {
     let env = project();
     fs::write(env.root().join(".gitignore"), "*.o\n").unwrap();

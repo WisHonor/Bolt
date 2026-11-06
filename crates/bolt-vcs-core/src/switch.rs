@@ -51,7 +51,7 @@ pub struct DiscardOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum SwitchError {
     #[error(
-        "Your unsaved changes are in the way, so nothing was changed:{}",
+        "Your unsaved changes, or files Bolt ignores, are in the way, so nothing was changed:{}",
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
     Collisions { paths: Vec<String> },
@@ -96,8 +96,8 @@ impl SwitchError {
         match self {
             // Shelving comes in milestone 4.
             SwitchError::Collisions { .. } => Some(
-                "Save them first (bolt save \"describe your change\") or discard them, then run \
-                 bolt goto again."
+                "Save them first (bolt save \"describe your change\") or discard them, and move \
+                 ignored files somewhere else, then run bolt goto again."
                     .to_owned(),
             ),
             SwitchError::InTheWay { .. } => {

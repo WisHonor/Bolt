@@ -217,11 +217,59 @@ pub fn plan(
             kept.push(action);
         }
     }
+    // What the plan never read below a folder that goes (an ignored file, a nested project) is
+    // in the way of a file or link put in its place. Where the target just removes the folder,
+    // it stays for what is left, as Git leaves it.
+    let mut blocked = Vec::new();
+    let mut stays = HashSet::new();
+    {
+        let removed: HashSet<&str> = kept
+            .iter()
+            .filter(|a| removes(a.change))
+            .map(|a| a.path.as_str())
+            .collect();
+        let goes: HashSet<&str> = kept
+            .iter()
+            .filter(|a| {
+                a.expected.is_some_and(|e| e.kind == EntryKind::Folder)
+                    && !matches!(a.change, Change::MakeFolder)
+            })
+            .map(|a| a.path.as_str())
+            .collect();
+        for &path in &goes {
+            // The walk of the folder above already covers this one.
+            if ancestors(path).any(|up| goes.contains(up)) {
+                continue;
+            }
+            let left = left_below(&mut disk, path, &removed)?;
+            if left.is_empty() {
+                continue;
+            }
+            if removed.contains(path) {
+                for l in &left {
+                    let up = ancestors(l).chain([l.as_str()]);
+                    stays.extend(up.filter(|f| goes.contains(f)).map(str::to_owned));
+                }
+            } else {
+                plan.collisions.extend(left);
+                blocked.push(path.to_owned());
+            }
+        }
+    }
+    kept.retain(|a| !(a.change == Change::RemoveFolder && stays.contains(&a.path)));
     // Nothing is planned below a folder left out, or it would be made inside what is in the way.
-    let left_out: HashSet<&str> = plan.collisions.iter().map(String::as_str).collect();
-    kept.retain(|a| !ancestors(&a.path).any(|up| left_out.contains(up)));
+    let left_out: HashSet<&str> = plan
+        .collisions
+        .iter()
+        .chain(&blocked)
+        .map(String::as_str)
+        .collect();
+    kept.retain(|a| {
+        !left_out.contains(a.path.as_str()) && !ancestors(&a.path).any(|up| left_out.contains(up))
+    });
     plan.actions = kept;
     plan.collisions.sort_unstable();
+    plan.collisions.dedup();
     plan.not_written = refused.into_iter().collect();
     Ok(plan)
 }
@@ -1243,6 +1291,38 @@ fn in_the_way(disk: &mut Folders, folder: &mut Tree, path: &str) -> Result<bool,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(unreadable(path, e)),
     }
+}
+
+/// What is on disk below the folder `path` that no action in `removed` takes away. A folder that
+/// can't be opened counts as left, since the switch couldn't empty it either.
+fn left_below(
+    disk: &mut Folders,
+    path: &str,
+    removed: &HashSet<&str>,
+) -> Result<Vec<String>, SaveError> {
+    let mut left = Vec::new();
+    let mut todo = vec![path.to_owned()];
+    while let Some(dir) = todo.pop() {
+        let listed = disk.enter(&dir).and_then(|()| disk.here().entries());
+        let entries = match listed {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                left.push(dir);
+                continue;
+            }
+        };
+        for e in entries {
+            let below = format!("{dir}/{}", e.name.to_string_lossy());
+            let gone = e.name.to_str().is_some() && removed.contains(below.as_str());
+            if !gone {
+                left.push(below);
+            } else if e.kind == EntryType::Dir {
+                todo.push(below);
+            }
+        }
+    }
+    Ok(left)
 }
 
 fn unreadable(path: &str, source: io::Error) -> SaveError {

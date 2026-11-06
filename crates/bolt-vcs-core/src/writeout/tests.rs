@@ -592,6 +592,31 @@ fn nothing_below_a_folder_in_the_way_is_planned() {
 }
 
 #[test]
+fn what_the_plan_never_read_in_a_folder_that_goes_is_in_the_way_or_kept() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let ignore: (&str, &[u8]) = (".boltignore", b"*.o\nout/\n");
+    let a = planted(
+        &mut repo,
+        &files(&[ignore, ("d/f", b"f"), ("d/sub/g", b"g"), ("e/s/h", b"h")]),
+    );
+    switch(&mut repo, empty, a);
+    // The target has a file where `d` is a folder, and no `e` at all.
+    let b = planted(&mut repo, &files(&[ignore, ("d", b"file d")]));
+    let clean = planned(&mut repo, a.0, b.0, false);
+    assert!(clean.collisions.is_empty(), "{:?}", clean.collisions);
+    fs::write(dir.path().join("d/sub/x.o"), b"build").unwrap();
+    fs::create_dir(dir.path().join("e/s/out")).unwrap();
+    for remove_new in [false, true] {
+        let plan = planned(&mut repo, a.0, b.0, remove_new);
+        assert_eq!(plan.collisions, ["d/sub/x.o"]);
+        let paths: Vec<&str> = plan.actions.iter().map(|a| a.path.as_str()).collect();
+        // `e` and `e/s` stay for what is left in them; the saved file goes.
+        assert_eq!(paths, ["e/s/h"]);
+    }
+}
+
+#[test]
 fn every_name_of_a_path_is_checked_against_its_folders_real_short_names() {
     let own = |folder: &str| -> io::Result<Vec<(String, String)>> {
         Ok(match folder {
