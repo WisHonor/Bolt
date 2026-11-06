@@ -105,6 +105,8 @@ pub fn plan(
         Ok::<(), SaveError>(())
     })?;
 
+    // Compared as the drive compares names, so a path given in another case still matches.
+    let only: Option<Vec<String>> = only.map(|o| o.iter().map(|p| drive.compared(p)).collect());
     let mut target = Tree::new(store, &stored, to_root, drive);
     let mut folder = Tree::new(store, &now.listings, now.root, drive);
     let mut refused = BTreeSet::new();
@@ -119,7 +121,7 @@ pub fn plan(
         Some(now.root),
         to_root,
         |path, n, t| {
-            if !in_scope(path, only, t) {
+            if !in_scope(&drive.compared(path), only.as_deref(), t) {
                 return Ok(());
             }
             if let Some(at) = refused_at(path, &mut target, &mut folder)? {
@@ -201,19 +203,39 @@ pub fn plan(
     Ok(plan)
 }
 
-/// Whether the save `save` holds an entry at `path`, spelled exactly so.
-pub fn holds(repo: &Repository, save: Id, path: &str) -> Result<bool, SaveError> {
+/// The paths of the entries of the save `save` that `drive` takes to be `path`: none, the one,
+/// or, where the save holds names the drive takes for one, several.
+pub fn spellings(
+    repo: &Repository,
+    save: Id,
+    path: &str,
+    drive: Drive,
+) -> Result<Vec<String>, SaveError> {
     let store = repo.store();
     let root = store.save(&save, repo.signatures_allowed())?.root;
     let stored = HashMap::new();
-    // Exact names only, so the drive's way of comparing them doesn't matter.
-    let drive = Drive {
-        ignores_case: false,
-        composes_unicode: false,
-    };
-    Ok(Tree::new(store, &stored, root, drive)
-        .entry(path)?
-        .is_some())
+    let mut tree = Tree::new(store, &stored, root, drive);
+    let mut found = vec![String::new()];
+    for name in path.split('/') {
+        let wanted = drive.compared(name);
+        let mut next = Vec::new();
+        for up in &found {
+            let Some(folder) = tree.folder(up)? else {
+                continue;
+            };
+            for e in folder.listing.entries() {
+                if drive.compared(&e.name) == wanted {
+                    next.push(if up.is_empty() {
+                        e.name.clone()
+                    } else {
+                        format!("{up}/{}", e.name)
+                    });
+                }
+            }
+        }
+        found = next;
+    }
+    Ok(found)
 }
 
 /// Stores in `packs` what carrying out `actions` would overwrite or remove that the save `from`
@@ -1078,7 +1100,7 @@ pub(crate) fn within(path: &str, top: &str) -> bool {
 }
 
 /// Whether the entry at `path` belongs to a switch limited to `only`: it is at or below one of
-/// them, or is a folder that must be made on the way to one.
+/// them, or is a folder that must be made on the way to one. Both as the drive compares names.
 fn in_scope(path: &str, only: Option<&[String]>, t: Option<&Entry>) -> bool {
     let folder = t.is_some_and(|e| e.kind == EntryKind::Folder);
     only.is_none_or(|only| {

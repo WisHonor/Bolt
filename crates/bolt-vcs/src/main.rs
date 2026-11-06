@@ -682,9 +682,10 @@ fn discard_command(
 ) -> Result<(), Failure> {
     let here = resolved(&std::env::current_dir()?);
     let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let drive = repo.drive()?;
     let paths = given
         .iter()
-        .map(|p| project_path(repo.root(), &here, p))
+        .map(|p| project_path(repo.root(), &here, p, drive))
         .collect::<Result<Vec<_>, _>>()?;
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
@@ -705,6 +706,7 @@ fn discard_command(
                 "bolt_json": BOLT_JSON,
                 "restored": done.restored,
                 "removed": done.removed,
+                "folders": done.folders,
                 "not_written": done.applied.not_written,
                 "placeholders": done.applied.placeholders,
                 "files_in_use": done.applied.in_use,
@@ -714,10 +716,15 @@ fn discard_command(
         );
     } else {
         let n = done.restored.len() + done.removed.len();
-        let files = if n == 1 {
-            "1 file"
+        let count = |n: usize, one: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {one}s"),
+        };
+        // Folders count only where no file does.
+        let what = if n == 0 {
+            count(done.folders, "folder")
         } else {
-            &format!("{n} files")
+            count(n, "file")
         };
         // A deleted file put back loses nothing, so it needs no copy.
         let copies = match done.safety_copies {
@@ -727,10 +734,11 @@ fn discard_command(
             1 => " (a safety copy of the 1 that held unsaved work was kept)".into(),
             k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
         };
-        match (n, paths.is_empty()) {
-            (0, true) => println!("Nothing to discard: your files match your last save."),
-            (0, false) => println!("Nothing to discard there: it matches your last save."),
-            _ => println!("Threw away your unsaved changes in {files}{copies}."),
+        let nothing = n == 0 && done.folders == 0;
+        match (nothing, paths.is_empty()) {
+            (true, true) => println!("Nothing to discard: your files match your last save."),
+            (true, false) => println!("Nothing to discard there: it matches your last save."),
+            _ => println!("Threw away your unsaved changes in {what}{copies}."),
         }
     }
     output::print_warnings(&warnings);

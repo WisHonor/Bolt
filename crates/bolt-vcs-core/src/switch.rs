@@ -9,6 +9,7 @@ use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
 use crate::journal::{Change, Journal};
 use crate::lines::Target;
+use crate::listing::EntryKind;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::snapshot::{NAMED, SaveError, listed};
@@ -36,8 +37,10 @@ pub struct GotoOutcome {
 pub struct DiscardOutcome {
     /// Files and links put back as the save has them: changed or deleted ones.
     pub restored: Vec<String>,
-    /// New files and links removed.
+    /// New files and links removed, and those a saved folder went back in place of.
     pub removed: Vec<String>,
+    /// Folders made or removed that no file above counts for.
+    pub folders: usize,
     /// What was written and removed, as `goto` gives it.
     pub applied: Applied,
     pub safety_copies: usize,
@@ -52,11 +55,20 @@ pub enum SwitchError {
     )]
     Collisions { paths: Vec<String> },
     #[error(
-        "Files your ignore rules keep out are where discarded files would go back, so nothing \
-         was changed:{}",
+        "Something is in the way where discarded files would go back (ignored, or new since \
+         Bolt looked), so nothing was changed:{}",
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
-    IgnoredInTheWay { paths: Vec<String> },
+    InTheWay { paths: Vec<String> },
+    #[error(
+        "{} could be any of these, so nothing was changed:{}",
+        escape(path, false),
+        listed(spellings.iter().take(NAMED), spellings.len() as u64)
+    )]
+    Ambiguous {
+        path: String,
+        spellings: Vec<String>,
+    },
     #[error(
         "Nothing in your last save or your unsaved changes is at {}, so nothing was changed.",
         escape(path, false)
@@ -87,8 +99,11 @@ impl SwitchError {
                  bolt goto again."
                     .to_owned(),
             ),
-            SwitchError::IgnoredInTheWay { .. } => {
+            SwitchError::InTheWay { .. } => {
                 Some("Move them somewhere else, then run bolt discard again.".to_owned())
+            }
+            SwitchError::Ambiguous { .. } => {
+                Some("Name the one you mean, spelled exactly as it is saved.".to_owned())
             }
             SwitchError::NoMatch { .. } => {
                 Some("Check the path: bolt status lists your unsaved changes.".to_owned())
@@ -180,41 +195,54 @@ fn throw_away(
 ) -> Result<DiscardOutcome, SwitchError> {
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let drive = repo.drive()?;
     // A switch to the save the folder is on that removes new files too.
     let plan = writeout::plan(repo, from, from, paths, true, drive, git_excludes)?;
     if !plan.collisions.is_empty() {
-        return Err(SwitchError::IgnoredInTheWay {
+        return Err(SwitchError::InTheWay {
             paths: plan.collisions,
         });
     }
-    for path in paths.unwrap_or_default() {
-        let reached = plan.actions.iter().any(|a| writeout::within(&a.path, path));
-        if !reached && !path.is_empty() && !writeout::holds(repo, from, path)? {
+    for path in paths.unwrap_or_default().iter().filter(|p| !p.is_empty()) {
+        let spellings = writeout::spellings(repo, from, path, drive)?;
+        if spellings.len() > 1 {
+            return Err(SwitchError::Ambiguous {
+                path: path.clone(),
+                spellings,
+            });
+        }
+        let top = drive.compared(path);
+        let reached = plan
+            .actions
+            .iter()
+            .any(|a| writeout::within(&drive.compared(&a.path), &top));
+        if !reached && spellings.is_empty() {
             return Err(SwitchError::NoMatch { path: path.clone() });
         }
     }
-    let files = |removing: bool| -> Vec<String> {
-        let wanted = |c: Change| match c {
-            Change::RemoveFile => removing,
-            Change::File(_) | Change::Executable(_) | Change::Link(_) => !removing,
-            Change::MakeFolder | Change::RemoveFolder => false,
-        };
-        plan.actions
-            .iter()
-            .filter(|a| wanted(a.change))
-            .map(|a| a.path.clone())
-            .collect()
-    };
-    let (restored, removed) = (files(false), files(true));
+    let (mut restored, mut removed, mut folders) = (Vec::new(), Vec::new(), 0);
+    for a in &plan.actions {
+        // A file or link the folder held at this path is thrown away, whatever replaces it.
+        let held_file = a.expected.is_some_and(|e| e.kind != EntryKind::Folder);
+        match a.change {
+            Change::File(_) | Change::Executable(_) | Change::Link(_) => {
+                restored.push(a.path.clone());
+            }
+            Change::RemoveFile => removed.push(a.path.clone()),
+            Change::MakeFolder if held_file => removed.push(a.path.clone()),
+            Change::MakeFolder | Change::RemoveFolder => folders += 1,
+        }
+    }
     if plan.actions.is_empty() {
         return Ok(DiscardOutcome {
             restored,
             removed,
+            folders,
             applied: switch_warnings(plan, Applied::default(), earlier),
             safety_copies: 0,
         });
     }
+    crate::fsio::act_point("discard:planned");
     let to_make = Switch {
         head,
         from,
@@ -237,6 +265,7 @@ fn throw_away(
     Ok(DiscardOutcome {
         restored: done(restored),
         removed: done(removed),
+        folders,
         applied,
         safety_copies,
     })

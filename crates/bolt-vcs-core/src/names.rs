@@ -396,10 +396,17 @@ pub enum GivenPathError {
     NotUnicode(String),
 }
 
-/// The project path of `given`, a path typed in the folder `here`, for a project at `root`:
-/// `/` between names, `""` for the whole project. Both folders are as `repo::resolved` gives
-/// them. `..` is taken away by name, as a shell does, without following links.
-pub fn project_path(root: &Path, here: &Path, given: &Path) -> Result<String, GivenPathError> {
+/// The project path of `given`, a path typed in the folder `here`, for a project at `root` on
+/// `drive`: `/` between names, `""` for the whole project. `given` is taken from `here`, the real
+/// current folder as the operating system gives it (`repo::resolved`), and each `..` in it
+/// removes the name before it, without following links. The root's names are compared as the
+/// drive compares them, so an absolute path may spell it in another case.
+pub fn project_path(
+    root: &Path,
+    here: &Path,
+    given: &Path,
+    drive: Drive,
+) -> Result<String, GivenPathError> {
     let shown = || given.to_string_lossy().into_owned();
     let mut full = PathBuf::new();
     for part in here.join(given).components() {
@@ -411,13 +418,19 @@ pub fn project_path(root: &Path, here: &Path, given: &Path) -> Result<String, Gi
             other => full.push(other),
         }
     }
-    // shortcut: compared as typed, so another spelling of the root (other letter case on
-    // Windows, say) reads as outside; fine while paths are typed relative to the folder.
-    let Ok(inside) = full.strip_prefix(root) else {
-        return Err(GivenPathError::Outside(shown()));
+    let same = |a: Component, b: Component| {
+        a == b
+            || matches!((a.as_os_str().to_str(), b.as_os_str().to_str()),
+                (Some(a), Some(b)) if drive.compared(a) == drive.compared(b))
     };
+    let mut parts = full.components();
+    for top in root.components() {
+        if !parts.next().is_some_and(|part| same(part, top)) {
+            return Err(GivenPathError::Outside(shown()));
+        }
+    }
     let mut names = Vec::new();
-    for part in inside.components() {
+    for part in parts {
         let name = part
             .as_os_str()
             .to_str()
@@ -442,7 +455,11 @@ mod tests {
     fn given_paths_become_project_paths() {
         let root = Path::new(if cfg!(windows) { r"C:\p" } else { "/p" });
         let sub = root.join("dir");
-        let at = |here: &Path, given: &str| project_path(root, here, Path::new(given));
+        let exact = Drive {
+            ignores_case: false,
+            composes_unicode: false,
+        };
+        let at = |here: &Path, given: &str| project_path(root, here, Path::new(given), exact);
         assert_eq!(at(root, "a.txt"), Ok("a.txt".into()));
         assert_eq!(at(&sub, "c.txt"), Ok("dir/c.txt".into()));
         assert_eq!(at(&sub, "../a.txt"), Ok("a.txt".into()));
@@ -469,6 +486,18 @@ mod tests {
             at(root, "a/.bolt"),
             Err(GivenPathError::Invalid(..))
         ));
+        let typed = if cfg!(windows) {
+            r"C:\P\dir\c.txt"
+        } else {
+            "/P/dir/c.txt"
+        };
+        assert!(matches!(at(root, typed), Err(GivenPathError::Outside(_))));
+        let folding = Drive {
+            ignores_case: true,
+            composes_unicode: false,
+        };
+        let any_case = project_path(root, root, Path::new(typed), folding);
+        assert_eq!(any_case, Ok("dir/c.txt".into()));
     }
 
     #[test]

@@ -279,3 +279,18 @@ fn a_command_gives_one_warning_for_its_placeholders_and_one_for_what_it_left_unw
     assert_eq!(done.not_written, names(&["n0", "n1", "n2"]));
     assert_eq!(earlier, Earlier::default());
 }
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_file_edited_after_the_discard_planned_is_left_as_edited() {
+    use crate::fsio::fault;
+    let (dir, mut repo) = saved(&[("a.txt", b"a"), ("b.txt", b"b")]);
+    write_all(dir.path(), &[("a.txt", b"mine"), ("b.txt", b"mine too")]);
+    let at = dir.path().join("a.txt");
+    fault::act_at("discard:planned", move || fs::write(at, b"edited").unwrap());
+    let done = discard(&mut repo, None, &who(), "discard", None, &mut |_| {}).unwrap();
+    assert_eq!(done.applied.changed_since_plan, ["a.txt"]);
+    assert_eq!(done.restored, ["b.txt"]);
+    assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"edited");
+    assert_eq!(fs::read(dir.path().join("b.txt")).unwrap(), b"b");
+}

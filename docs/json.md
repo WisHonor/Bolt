@@ -116,13 +116,14 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `bolt discard --json`
 
-`bolt discard [paths]` throws away unsaved changes: in those files and folders (a folder means everything in it; paths are taken from the folder the command runs in), or everywhere without any. Changed and deleted files are put back as the current save has them and new ones are removed, each changed or new one with a safety copy listed in the diary entry; the project stays on its save. Ignored files the save doesn't hold, entries this computer can't hold, project links and nested projects are never touched ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)). With nothing to throw away it records nothing and both lists are `[]`. A path outside the project, in `.bolt`, or matching nothing in the save or among the unsaved changes fails the command (exit code 1) before anything changes.
+`bolt discard [paths]` throws away unsaved changes: in those files and folders (a folder means everything in it; paths are taken from the folder the command runs in), or everywhere without any. Changed and deleted files are put back as the current save has them and new ones are removed, each changed or new one with a safety copy listed in the diary entry; the project stays on its save. Ignored files the save doesn't hold, entries this computer can't hold, project links and nested projects are never touched ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)). With nothing to throw away it records nothing and both lists are `[]`. On a drive that ignores letter case, paths match whatever their case, as the drive matches them. A path outside the project, in `.bolt`, matching nothing in the save or among the unsaved changes, or matching more than one saved name (a save made elsewhere can hold `a.txt` and `A.txt`) fails the command (exit code 1) before anything changes, and so does something in the way of a file going back (ignored, or new since Bolt looked).
 
 | Field | Type | Meaning |
 |---|---|---|
 | `bolt_json` | number | `1` |
 | `restored` | list of string | The paths of the files and links put back: changed or deleted ones. `[]` if none. |
-| `removed` | list of string | The paths of the new files and links removed. `[]` if none. |
+| `removed` | list of string | The paths of the new files and links removed, and of files and links a saved folder went back in place of. `[]` if none. |
+| `folders` | number | Folders made or removed (a deleted saved folder put back, a new empty folder removed) that no listed file counts for. |
 | `not_written` | list of string | As in `goto`. |
 | `placeholders` | list of string | As in `goto`. |
 | `files_in_use` | list of string | Always `[]` here: files another program holds fail the command as they fail `goto`, and the next command that changes the project finishes it. |

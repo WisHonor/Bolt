@@ -1082,6 +1082,11 @@ impl Repository {
         &self.tmp
     }
 
+    /// How the project's drive compares names.
+    pub fn drive(&self) -> Result<crate::drive::Drive, RepoError> {
+        Ok(crate::drive::probe(self.tmp_folder())?)
+    }
+
     /// `tmp/`, held open.
     pub(crate) fn tmp_folder(&self) -> &Dir {
         &self.held.tmp

@@ -387,3 +387,150 @@ fn a_discard_with_a_file_in_use_fails_and_the_next_one_finishes() {
     assert_eq!(files(env.root()), holding(SAVED));
     assert!(!env.root().join(".bolt/state/journal").exists());
 }
+
+#[test]
+fn a_file_where_a_saved_empty_folder_was_is_reported_removed() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    plant_save(env.root(), |pack| {
+        let a = pack.add_content(b"a").unwrap();
+        let empty = Listing::new(vec![]).unwrap();
+        let empty_id = pack
+            .add_record(ObjectKind::FolderListing, &empty.encode())
+            .unwrap();
+        let top = Listing::new(vec![
+            entry("a.txt", EntryKind::File, a, 1),
+            entry("e", EntryKind::Folder, empty_id, 0),
+        ])
+        .unwrap();
+        pack.add_record(ObjectKind::FolderListing, &top.encode())
+            .unwrap()
+    });
+    write(&env, "a.txt", b"a");
+    write(&env, "e", b"mine");
+    let said = discard(&env, &[]);
+    assert!(
+        said.contains("Threw away your unsaved changes in 1 file (a safety copy of it was kept)."),
+        "{said}"
+    );
+    assert!(env.root().join("e").is_dir());
+    let repo = Repository::open(env.root()).unwrap();
+    let copies = repo.current().unwrap().1.safety_copies;
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].path, "e");
+    let mut out = Vec::new();
+    repo.store().copy_content(&copies[0].id, &mut out).unwrap();
+    assert_eq!(out, b"mine");
+}
+
+#[test]
+fn a_file_where_a_saved_folder_was_is_counted_with_what_comes_back() {
+    let env = project(SAVED);
+    fs::remove_dir_all(env.root().join("dir")).unwrap();
+    write(&env, "dir", b"mine");
+    let doc = discard_json(&env, &[]);
+    assert_eq!(strings(&doc["removed"]), ["dir"], "{doc}");
+    assert_eq!(strings(&doc["restored"]), ["dir/c.txt"], "{doc}");
+    assert_eq!(doc["safety_copies"], 1, "{doc}");
+    assert_eq!(files(env.root()), holding(SAVED));
+}
+
+#[test]
+fn discard_refuses_when_an_ignored_file_is_in_the_way() {
+    let env = project(SAVED);
+    write(&env, ".boltignore", b"dir\n");
+    env.bolt().args(["save", "Ignore"]).assert().success();
+    fs::remove_dir_all(env.root().join("dir")).unwrap();
+    write(&env, "dir", b"ignored");
+    write(&env, "a.txt", b"mine\n");
+    let before = (env.standing(), files(env.root()));
+    let said = refused(&env, &[]);
+    assert!(
+        said.contains("in the way") && said.contains("dir"),
+        "{said}"
+    );
+    assert_eq!((env.standing(), files(env.root())), before);
+}
+
+#[test]
+fn discard_of_a_name_leaves_longer_names_alone() {
+    let env = project(&[("a", "a\n"), ("ab", "ab\n")]);
+    write(&env, "a", b"mine\n");
+    write(&env, "ab", b"mine too\n");
+    discard(&env, &["a"]);
+    assert_eq!(changed(&env), ["ab"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn discard_removes_a_new_link() {
+    let env = project(SAVED);
+    std::os::unix::fs::symlink("a.txt", env.root().join("l")).unwrap();
+    let doc = discard_json(&env, &[]);
+    assert_eq!(strings(&doc["removed"]), ["l"], "{doc}");
+    assert_eq!(doc["safety_copies"], 1, "{doc}");
+    assert!(env.root().join("l").symlink_metadata().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn discard_puts_back_an_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = project(SAVED);
+    let a = env.root().join("a.txt");
+    fs::set_permissions(&a, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(changed(&env), ["a.txt"]);
+    let doc = discard_json(&env, &[]);
+    assert_eq!(strings(&doc["restored"]), ["a.txt"], "{doc}");
+    assert_eq!(
+        fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert!(changed(&env).is_empty());
+}
+
+/// The names in `dir`, as the drive spells them.
+#[cfg(any(windows, target_os = "macos"))]
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".bolt")
+        .collect();
+    names.sort();
+    names
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn on_a_drive_that_ignores_case_paths_match_in_any_case() {
+    let env = project(&[("Readme.md", "r\n"), ("b.txt", "b\n")]);
+    write(&env, "Readme.md", b"mine\n");
+    discard(&env, &["README.MD"]);
+    assert!(changed(&env).is_empty());
+    // Renamed only in case, and discarded by the name on disk: the saved name comes back.
+    fs::rename(env.root().join("Readme.md"), env.root().join("README.md")).unwrap();
+    discard(&env, &["README.md"]);
+    assert_eq!(names_in(env.root()), ["Readme.md", "b.txt"]);
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_path_two_saved_names_fold_to_is_refused_with_both() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    plant_save(env.root(), |pack| {
+        let a = pack.add_content(b"a").unwrap();
+        let top = Listing::new(vec![
+            entry("A.txt", EntryKind::File, a, 1),
+            entry("a.txt", EntryKind::File, a, 1),
+        ])
+        .unwrap();
+        pack.add_record(ObjectKind::FolderListing, &top.encode())
+            .unwrap()
+    });
+    let before = env.standing();
+    let said = refused(&env, &["A.TXT"]);
+    assert!(said.contains("A.txt") && said.contains("a.txt"), "{said}");
+    assert_eq!(env.standing(), before);
+}
