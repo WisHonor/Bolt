@@ -67,11 +67,14 @@
 
 Saving gives one of two documents, told apart by `result`.
 
+`bolt save "message" [paths]` saves every change, or only those at the files, folders and patterns named after the message ([decision 054](decisions/054-partial-saves.md)). They are taken from the folder the command runs in; a folder means everything in it, and an argument holding `*`, `?` or `[` is a pattern, matched as Git's wildmatch matches (`**` included), a folder it matches meaning everything in it. The save takes the folder's version of what they match, deletions included, and the last save's version of everything else, which stays unsaved work. On a drive that ignores letter case they match whatever the case. An argument matching nothing in the folder or the last save, a path outside the project or in `.bolt`, and a new file an ignore rule keeps out, named outright, fail the save (§5), saving nothing; a pattern just leaves such a file out.
+
 `"result": "saved"`: a save was made.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `bolt_json`, `result` | number, string | `1`, `"saved"` |
+| `paths` | list of string | What the save was limited to, as project paths (`/` between names, `""` for the whole project), patterns joined to the folder they are matched below. `[]` when every change was saved. |
 | `save` | save | The new save. |
 | `changed_files` | number or `null` | How many files were added, removed or changed since the save before. It can be `0` when only folders changed. **`null` means Bolt couldn't count them.** The save was made all the same, and a `changed_files_not_counted` warning says why. |
 | `warnings` | list | See §4. |
@@ -79,7 +82,7 @@ Saving gives one of two documents, told apart by `result`.
 
 **At a save, not on a line,** a save needs `--line <name>`: the new line it starts, which points at the new save; the project is then on it, and the save's `line` is that name. With `--json` Bolt never asks for the name, so without the flag a save with changes fails (§5), saving nothing. A name that breaks the line-name rules, or that is a line's already in any letter case, fails the save too, and so does `--line` on a line ([decision 055](decisions/055-lines-in-v0.1.md)).
 
-`"result": "nothing-changed"`: the folder is as the save it would build on has it (the line's newest, or the save the project is at), so nothing was saved. At a save no name is needed for that, and with `--line` no line is made: a new line starts with a save, so change a file first. The fields are `bolt_json`, `result`, `warnings` and, if it applies, `ignored_project_identity`.
+`"result": "nothing-changed"`: the folder is as the save it would build on has it (the line's newest, or the save the project is at), so nothing was saved. At a save no name is needed for that, and with `--line` no line is made: a new line starts with a save, so change a file first. The fields are `bolt_json`, `result`, `paths` (as above: with paths, nothing they match changed), `warnings` and, if it applies, `ignored_project_identity`.
 
 **`ignored_project_identity`** is there only when the project's own settings (`.bolt/config.toml`) name a person other than the user. Bolt never takes who the user is from a project, since a project that was shared could name anyone, so the save was made as the user. The field says who was named, `{"name": …, "email": …}`, and is left out otherwise. For people, `bolt save` prints a note instead of the field. The note shows at most 256 characters of a name or email, and gives the lines to add to their own settings, if they do want that identity in this folder, only when nothing was cut: lines with a cut name would save as someone else. The field always has both in full.
 

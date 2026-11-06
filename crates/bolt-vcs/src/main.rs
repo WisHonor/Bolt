@@ -18,7 +18,7 @@ use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, 
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
-use bolt_core::names::{GivenPathError, project_path};
+use bolt_core::names::{GivenPathError, project_given, project_path};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
@@ -52,9 +52,12 @@ enum Command {
     Start,
     /// Bring the Git repository in this folder into Bolt, with all its history.
     Import,
-    /// Save the current state of your files.
+    /// Save the current state of your files: all of them, or only these files, folders and
+    /// patterns (such as "*.png" or "art/**/*.png").
     Save {
         message: Option<String>,
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
         /// After an import, save files Git wrote with CRLF line endings as they are.
         #[arg(long)]
         accept_crlf: bool,
@@ -327,6 +330,7 @@ fn ask_line_name() -> Result<Option<String>, Failure> {
 fn save(
     json: bool,
     message: Option<String>,
+    given: &[PathBuf],
     accept_crlf: bool,
     line: Option<String>,
     opened: &mut Option<Repository>,
@@ -339,9 +343,19 @@ fn save(
             printed: false,
         });
     }
-    let repo = opened.insert(with_users_key(Repository::discover(
-        &std::env::current_dir()?,
-    )?));
+    let here = resolved(&std::env::current_dir()?);
+    let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let only = if given.is_empty() {
+        None
+    } else {
+        let drive = repo.drive()?;
+        let only = given
+            .iter()
+            .map(|p| project_given(repo.root(), &here, p, drive))
+            .collect::<Result<Vec<_>, _>>()?;
+        Some(only)
+    };
+    let paths: Vec<String> = only.iter().flatten().map(|g| g.shown()).collect();
     let who = now_person(&load_identity(Some(repo.root()))?);
     // A project's own settings never say who the user is; if they try, the user is told.
     let ignored = ignored_project_identity(repo);
@@ -353,6 +367,7 @@ fn save(
         accept_crlf,
         git_excludes: git_excludes.as_deref(),
         new_line: line.as_deref(),
+        only: only.as_deref(),
     };
     let mut on_wait = |_: &str| eprintln!("Waiting for another Bolt command to finish...");
     let asked;
@@ -379,6 +394,7 @@ fn save(
                 let document = json!({
                     "bolt_json": BOLT_JSON,
                     "result": "saved",
+                    "paths": paths,
                     "save": output::save_json(&save_id, &save, &short),
                     "changed_files": changed_files,
                     "warnings": output::warnings_json(&warnings),
@@ -407,6 +423,7 @@ fn save(
                 let document = json!({
                     "bolt_json": BOLT_JSON,
                     "result": "nothing-changed",
+                    "paths": paths,
                     "warnings": output::warnings_json(&warnings),
                 });
                 println!("{}", with_ignored(document, ignored.as_ref()));
@@ -414,7 +431,11 @@ fn save(
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
-                println!("Nothing to save: no changes since your last save ({short}).");
+                if paths.is_empty() {
+                    println!("Nothing to save: no changes since your last save ({short}).");
+                } else {
+                    println!("Nothing to save there: it matches your last save ({short}).");
+                }
                 if req.new_line.is_some() {
                     println!(
                         "No line was made: a new line starts with a save, so change a file first."
@@ -843,9 +864,10 @@ fn main() -> ExitCode {
         Command::Import => import(cli.json, &mut opened),
         Command::Save {
             message,
+            paths,
             accept_crlf,
             line,
-        } => save(cli.json, message, accept_crlf, line, &mut opened),
+        } => save(cli.json, message, &paths, accept_crlf, line, &mut opened),
         Command::Line => line_command(cli.json, &mut opened),
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::History => history(cli.json, &mut opened),

@@ -4,7 +4,8 @@
 //! [`is_git_alias`] and [`is_bolt_alias`] spot the spellings of `.git` and `.bolt`, [`own_folder`]
 //! the project's own ones, [`holdable_here`] says whether this system can hold a name,
 //! [`writable_here`] whether write-out may write one, and [`fold`] compares names as a drive does.
-//! [`project_path`] turns a path typed on the command line into a project path.
+//! [`project_path`] turns a path typed on the command line into a project path, and
+//! [`project_given`] a path or pattern into a [`Given`].
 //! The limits on names and paths are here too (decision 051).
 
 use std::collections::BTreeMap;
@@ -394,6 +395,76 @@ pub enum GivenPathError {
     Invalid(String, NameError),
     #[error("{} isn't a path Bolt can use: it isn't valid Unicode.", escape(.0, false))]
     NotUnicode(String),
+    #[error(
+        "{} isn't a pattern Bolt can use: `.` and `..` must come before the first name holding \
+         `*`, `?` or `[`.",
+        escape(.0, false)
+    )]
+    UpInPattern(String),
+}
+
+/// A path or pattern typed on the command line, taken into the project (decision 054).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Given {
+    /// A project path: everything at it or below it. `""` is the whole project.
+    Path(String),
+    /// Git's wildmatch pattern `glob`, matched against the project paths below the project path
+    /// `below`, taken from it; a folder it matches means everything in it.
+    Pattern { below: String, glob: String },
+}
+
+impl Given {
+    /// As a project path, for output: `below/glob` for a pattern.
+    #[must_use]
+    pub fn shown(&self) -> String {
+        match self {
+            Given::Path(path) => path.clone(),
+            Given::Pattern { below, glob } if below.is_empty() => glob.clone(),
+            Given::Pattern { below, glob } => format!("{below}/{glob}"),
+        }
+    }
+}
+
+/// Whether a typed name is a pattern: it holds `*`, `?` or `[`.
+fn is_pattern(given: &str) -> bool {
+    given.contains(['*', '?', '['])
+}
+
+/// `given`, typed in the folder `here`, as `project_path` takes it, or as a pattern if it holds
+/// `*`, `?` or `[`: the names before the first such name are the folder it is matched below.
+pub fn project_given(
+    root: &Path,
+    here: &Path,
+    given: &Path,
+    drive: Drive,
+) -> Result<Given, GivenPathError> {
+    let shown = || given.to_string_lossy().into_owned();
+    let parts: Vec<Component> = given.components().collect();
+    let first = parts.iter().position(|part| match part {
+        Component::Normal(name) => name.to_str().is_some_and(is_pattern),
+        _ => false,
+    });
+    let Some(first) = first else {
+        return project_path(root, here, given, drive).map(Given::Path);
+    };
+    let (lead, rest) = parts.split_at(first);
+    let below = project_path(root, here, &lead.iter().collect::<PathBuf>(), drive)?;
+    let mut glob = Vec::new();
+    for part in rest {
+        match part {
+            Component::Normal(name) => {
+                glob.push(
+                    name.to_str()
+                        .ok_or_else(|| GivenPathError::NotUnicode(shown()))?,
+                );
+            }
+            _ => return Err(GivenPathError::UpInPattern(shown())),
+        }
+    }
+    Ok(Given::Pattern {
+        below,
+        glob: glob.join("/"),
+    })
 }
 
 /// The project path of `given`, a path typed in the folder `here`, for a project at `root` on
@@ -498,6 +569,41 @@ mod tests {
         };
         let any_case = project_path(root, root, Path::new(typed), folding);
         assert_eq!(any_case, Ok("dir/c.txt".into()));
+    }
+
+    #[test]
+    fn given_patterns_are_matched_below_the_folder_they_start_in() {
+        let root = Path::new(if cfg!(windows) { r"C:\p" } else { "/p" });
+        let sub = root.join("dir");
+        let exact = Drive {
+            ignores_case: false,
+            composes_unicode: false,
+        };
+        let at = |here: &Path, given: &str| project_given(root, here, Path::new(given), exact);
+        let pattern = |below: &str, glob: &str| {
+            Ok(Given::Pattern {
+                below: below.into(),
+                glob: glob.into(),
+            })
+        };
+        assert_eq!(at(&sub, "a.txt"), Ok(Given::Path("dir/a.txt".into())));
+        assert_eq!(at(&sub, "*.cs"), pattern("dir", "*.cs"));
+        assert_eq!(at(&sub, "../src/**/*.png"), pattern("src", "**/*.png"));
+        assert_eq!(at(root, "a/b?/c"), pattern("a", "b?/c"));
+        assert_eq!(at(root, "*").map(|g| g.shown()), Ok("*".into()));
+        assert_eq!(
+            at(&sub, "x/[ab]").map(|g| g.shown()),
+            Ok("dir/x/[ab]".into())
+        );
+        assert!(matches!(
+            at(root, "*/../a"),
+            Err(GivenPathError::UpInPattern(_))
+        ));
+        assert!(matches!(at(root, "../*"), Err(GivenPathError::Outside(_))));
+        assert!(matches!(
+            at(root, ".bolt/*"),
+            Err(GivenPathError::InBolt(_))
+        ));
     }
 
     #[test]

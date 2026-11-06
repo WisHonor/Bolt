@@ -861,6 +861,7 @@ fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveE
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
+        only: None,
     };
     crate::snapshot::save_folder(repo, &req, &mut |_| {})
 }

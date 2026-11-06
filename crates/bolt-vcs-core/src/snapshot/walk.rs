@@ -153,7 +153,7 @@ fn folder_of(rel: &str) -> String {
 }
 
 /// The project path of `name` in the folder `rel` (`""` for the top folder).
-fn path_in(rel: &str, name: &str) -> String {
+pub(super) fn path_in(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         name.to_owned()
     } else {
@@ -164,7 +164,7 @@ fn path_in(rel: &str, name: &str) -> String {
 /// Which entries of `listing`, a folder of the last save, every save keeps as they were because
 /// this computer can't hold them as they are: project links, names this system can't hold, and
 /// names that are one file with another on this drive (decisions 036 and 039).
-fn kept_as_they_were(listing: &Listing, drive: Drive) -> Vec<bool> {
+pub(super) fn kept_as_they_were(listing: &Listing, drive: Drive) -> Vec<bool> {
     let entries = listing.entries();
     let mut kept: Vec<bool> = entries
         .iter()
@@ -250,7 +250,7 @@ impl<'a> Base<'a> {
 }
 
 /// `listing` without its names Git treats as `.git`, and those names.
-fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String>), SaveError> {
+pub(super) fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String>), SaveError> {
     if !listing.entries().iter().any(|e| is_git_alias(&e.name)) {
         return Ok((listing, Vec::new()));
     }

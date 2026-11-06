@@ -21,7 +21,7 @@ use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
-use crate::names::{PortabilityProblem, folder_problems};
+use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, Person, Save};
@@ -31,6 +31,7 @@ use crate::warning::{self, Warning};
 use crate::writeout;
 
 mod endings;
+mod only;
 mod walk;
 
 use walk::{Base, Handles, Scan, walk};
@@ -47,6 +48,8 @@ pub struct SaveRequest<'a> {
     pub git_excludes: Option<&'a Path>,
     /// The new line a save made at a save goes on; refused on a line.
     pub new_line: Option<&'a str>,
+    /// Save only the changes at these paths and patterns (decision 054); `None` saves all.
+    pub only: Option<&'a [Given]>,
 }
 
 // Made once per command, so boxing the save would buy nothing.
@@ -133,6 +136,16 @@ pub enum SaveError {
         escape(line, false)
     )]
     LineFromLine { line: String },
+    #[error(
+        "{} matches nothing in your files or in the last save.",
+        escape(given, false)
+    )]
+    NoMatch { given: String },
+    #[error(
+        "{} is new, and an ignore rule keeps it out of saves.",
+        escape(path, false)
+    )]
+    LeftOut { path: String },
 }
 
 // Through `RepoError`, so a damaged pack is reported as damage.
@@ -236,6 +249,10 @@ impl SaveError {
             SaveError::LineFromLine { line } => {
                 format!("Leave out --line to save on {}.", escape(line, false))
             }
+            SaveError::NoMatch { .. } => {
+                "Name files, folders or patterns from the folder you are in.".into()
+            }
+            SaveError::LeftOut { .. } => "To save it, change the rule that ignores it.".into(),
             SaveError::Unreadable { .. } => "Let Bolt read it, or list it in .boltignore.".into(),
             SaveError::ChangedDuringSave { .. } => {
                 "Try again when the file stops changing, or list it in .boltignore.".into()
@@ -282,9 +299,9 @@ pub fn save_folder(
     let base = Base::new(repo.store(), parent.root, SaveLimits::default());
     let Scan {
         mut handles,
-        folders,
-        old,
-        rebuilt,
+        mut folders,
+        mut old,
+        mut rebuilt,
         ignored,
         gitignored,
         mut warnings,
@@ -297,6 +314,12 @@ pub fn save_folder(
         req.git_excludes,
     )?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
+    if let Some(given) = req.only {
+        let scope = only::Scope::new(given, drive);
+        let store = repo.store();
+        let matched = only::narrow(&scope, given, store, &mut folders, &mut old, &mut rebuilt)?;
+        only::check_matched(given, &matched, &mut handles)?;
+    }
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
@@ -570,6 +593,12 @@ enum Kind {
         id: Id,
         kept: usize,
     },
+    /// An entry of the base save that a partial save leaves as it was.
+    Left {
+        kind: EntryKind,
+        id: Id,
+        size: u64,
+    },
 }
 
 struct Child {
@@ -797,6 +826,7 @@ fn build_with(
                     kept.push(c.rel.clone());
                     (kind, id, size)
                 }
+                Kind::Left { kind, id, size } => (kind, id, size),
                 Kind::Back { id, kept: below } => {
                     kept_below_gone += below;
                     (EntryKind::Folder, id, 0)
@@ -1152,6 +1182,25 @@ mod tests {
             accept_crlf: false,
             git_excludes,
             new_line: None,
+            only: None,
+        };
+        save_folder(repo, &req, &mut |_| {})
+    }
+
+    /// A save of only `only`.
+    pub(super) fn save_only(
+        repo: &mut Repository,
+        only: &[Given],
+    ) -> Result<SaveOutcome, SaveError> {
+        let who = who();
+        let req = SaveRequest {
+            message: "Some things",
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: Some(only),
         };
         save_folder(repo, &req, &mut |_| {})
     }
@@ -2206,5 +2255,243 @@ mod tests {
             panic!("saved again");
         };
         assert_eq!(warnings[0].kind, "file_cache_not_stored");
+    }
+
+    fn path(p: &str) -> Given {
+        Given::Path(p.into())
+    }
+
+    fn pattern(below: &str, glob: &str) -> Given {
+        Given::Pattern {
+            below: below.into(),
+            glob: glob.into(),
+        }
+    }
+
+    /// The bytes of each file in the line's newest save, by path; folders are left out.
+    fn newest_files(repo: &Repository) -> BTreeMap<String, Vec<u8>> {
+        newest_tree(repo)
+            .into_iter()
+            .filter(|(_, (kind, _))| *kind != EntryKind::Folder)
+            .map(|(p, (_, bytes))| (p, bytes))
+            .collect()
+    }
+
+    fn newest_tree(repo: &Repository) -> Tree {
+        let tip = repo.current().unwrap().1.state.lines["main"];
+        let root = repo.store().save(&tip, false).unwrap().root;
+        saved_tree(repo.store(), root)
+    }
+
+    fn files(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+        pairs
+            .iter()
+            .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn a_partial_save_takes_only_the_named_file() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a1");
+        write(dir.path(), "b.txt", b"b1");
+        save_now(&mut repo).unwrap();
+        write(dir.path(), "a.txt", b"a2");
+        write(dir.path(), "b.txt", b"b2");
+        write(dir.path(), "new.txt", b"n");
+        save_only(&mut repo, &[path("a.txt")]).unwrap();
+        assert_eq!(
+            newest_files(&repo),
+            files(&[("a.txt", "a2"), ("b.txt", "b1")])
+        );
+    }
+
+    #[test]
+    fn a_partial_save_leaves_the_rest_unsaved() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a1");
+        write(dir.path(), "b.txt", b"b1");
+        save_now(&mut repo).unwrap();
+        write(dir.path(), "a.txt", b"a2");
+        write(dir.path(), "b.txt", b"b2");
+        write(dir.path(), "new.txt", b"n");
+        save_only(&mut repo, &[path("a.txt")]).unwrap();
+        let now = crate::status::status(&repo, false, None).unwrap();
+        let changed: Vec<&str> = now.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(changed, ["b.txt", "new.txt"]);
+    }
+
+    #[test]
+    fn a_named_folder_takes_everything_in_it() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "src/a.rs", b"a1");
+        write(dir.path(), "src/gone.rs", b"g");
+        write(dir.path(), "src/sub/b.rs", b"b1");
+        write(dir.path(), "srcx.txt", b"x1");
+        write(dir.path(), "top.txt", b"t1");
+        save_now(&mut repo).unwrap();
+        write(dir.path(), "src/a.rs", b"a2");
+        fs::remove_file(dir.path().join("src/gone.rs")).unwrap();
+        write(dir.path(), "src/sub/b.rs", b"b2");
+        write(dir.path(), "src/sub/new.rs", b"n");
+        write(dir.path(), "srcx.txt", b"x2");
+        write(dir.path(), "top.txt", b"t2");
+        save_only(&mut repo, &[path("src")]).unwrap();
+        assert_eq!(
+            newest_files(&repo),
+            files(&[
+                ("src/a.rs", "a2"),
+                ("src/sub/b.rs", "b2"),
+                ("src/sub/new.rs", "n"),
+                ("srcx.txt", "x1"),
+                ("top.txt", "t1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_pattern_takes_the_files_it_matches() {
+        let (dir, mut repo) = project();
+        for p in ["a.cs", "b.txt", "sub/c.cs", "sub/d.txt"] {
+            write(dir.path(), p, b"1");
+        }
+        save_now(&mut repo).unwrap();
+        for p in [
+            "a.cs",
+            "b.txt",
+            "sub/c.cs",
+            "sub/d.txt",
+            "new/e.cs",
+            "new/f.txt",
+        ] {
+            write(dir.path(), p, b"2");
+        }
+        save_only(&mut repo, &[pattern("", "*.cs")]).unwrap();
+        let top_only = files(&[
+            ("a.cs", "2"),
+            ("b.txt", "1"),
+            ("sub/c.cs", "1"),
+            ("sub/d.txt", "1"),
+        ]);
+        assert_eq!(newest_files(&repo), top_only);
+        save_only(&mut repo, &[pattern("", "**/*.cs")]).unwrap();
+        let every = files(&[
+            ("a.cs", "2"),
+            ("b.txt", "1"),
+            ("new/e.cs", "2"),
+            ("sub/c.cs", "2"),
+            ("sub/d.txt", "1"),
+        ]);
+        assert_eq!(newest_files(&repo), every);
+        // A folder a pattern matches means everything in it.
+        save_only(&mut repo, &[pattern("", "s*")]).unwrap();
+        let tree = newest_tree(&repo);
+        assert_eq!(tree["sub/d.txt"].1, b"2");
+        assert!(!tree.contains_key("new/f.txt"), "{tree:?}");
+    }
+
+    #[test]
+    fn a_named_deleted_file_is_saved_as_deleted() {
+        let (dir, mut repo) = project();
+        for p in ["a.txt", "b.txt", "dir/x.txt", "dir/y.txt", "old/z.txt"] {
+            write(dir.path(), p, b"1");
+        }
+        save_now(&mut repo).unwrap();
+        fs::remove_file(dir.path().join("a.txt")).unwrap();
+        fs::remove_file(dir.path().join("b.txt")).unwrap();
+        fs::remove_dir_all(dir.path().join("dir")).unwrap();
+        fs::remove_dir_all(dir.path().join("old")).unwrap();
+        save_only(&mut repo, &[path("a.txt"), path("dir/x.txt")]).unwrap();
+        assert_eq!(
+            newest_files(&repo),
+            files(&[("b.txt", "1"), ("dir/y.txt", "1"), ("old/z.txt", "1")])
+        );
+        // The last file of a folder gone from disk takes the folder with it.
+        save_only(&mut repo, &[path("dir/y.txt")]).unwrap();
+        let tree = newest_tree(&repo);
+        assert!(!tree.contains_key("dir"), "{tree:?}");
+        // A pattern takes deleted files too, in folders gone from disk.
+        save_only(&mut repo, &[pattern("", "**/*.txt")]).unwrap();
+        assert_eq!(newest_files(&repo), files(&[]));
+    }
+
+    #[test]
+    fn an_argument_matching_nothing_is_refused() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        write(dir.path(), "a.txt", b"2");
+        let before = repo.current().unwrap().1.state.lines["main"];
+        for given in [
+            path("nope.txt"),
+            pattern("", "*.zip"),
+            pattern("a.txt", "*"),
+        ] {
+            let only = [path("a.txt"), given.clone()];
+            match save_only(&mut repo, &only) {
+                Err(SaveError::NoMatch { given: shown }) => assert_eq!(shown, given.shown()),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(repo.current().unwrap().1.state.lines["main"], before);
+        // A file only the last save holds is a match: its deletion is saved.
+        fs::remove_file(dir.path().join("a.txt")).unwrap();
+        save_only(&mut repo, &[path("a.txt")]).unwrap();
+        assert_eq!(newest_files(&repo), files(&[]));
+    }
+
+    #[test]
+    fn an_ignored_new_file_named_outright_is_refused() {
+        let (dir, mut repo) = project();
+        write(dir.path(), ".boltignore", b"*.log\nbuild/\n");
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        write(dir.path(), "a.txt", b"2");
+        write(dir.path(), "x.log", b"log");
+        write(dir.path(), "build/out.o", b"o");
+        for named in ["x.log", "build", "build/out.o"] {
+            match save_only(&mut repo, &[path(named)]) {
+                Err(e @ SaveError::LeftOut { .. }) => {
+                    assert!(e.to_string().contains(named), "{e}");
+                    let hint = e.hint().unwrap();
+                    assert!(hint.contains("change the rule"), "{hint}");
+                }
+                other => panic!("{named}: {other:?}"),
+            }
+        }
+        // A pattern just leaves it out.
+        save_only(&mut repo, &[pattern("", "*")]).unwrap();
+        assert_eq!(
+            newest_files(&repo),
+            files(&[(".boltignore", "*.log\nbuild/\n"), ("a.txt", "2")])
+        );
+    }
+
+    #[test]
+    fn the_file_cache_after_a_partial_save_vouches_for_no_unsaved_change() {
+        let (dir, mut repo) = project();
+        write_old(dir.path(), "a.txt", b"one");
+        write_old(dir.path(), "b.txt", b"one");
+        save_now(&mut repo).unwrap();
+        // Changed at old times, so status trusts what it reads and the cache learns both.
+        let b = dir.path().join("b.txt");
+        let then = fs::metadata(&b).unwrap().modified().unwrap();
+        let earlier = then - std::time::Duration::from_secs(60);
+        write_old(dir.path(), "a.txt", b"two!");
+        write_old(dir.path(), "b.txt", b"two!");
+        set_time(&dir.path().join("a.txt"), earlier);
+        set_time(&b, earlier);
+        crate::status::status(&repo, false, None).unwrap();
+        save_only(&mut repo, &[path("a.txt")]).unwrap();
+        let top = Dir::open_top(dir.path()).unwrap();
+        let b_now = top.metadata(OsStr::new("b.txt")).unwrap();
+        assert!(FileCache::load(&repo).matches("b.txt", &b_now).is_none());
+        // A full save then stores b's change, which a fresh look at the store reads back.
+        save_now(&mut repo).unwrap();
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(
+            newest_files(&fresh),
+            files(&[("a.txt", "two!"), ("b.txt", "two!")])
+        );
     }
 }

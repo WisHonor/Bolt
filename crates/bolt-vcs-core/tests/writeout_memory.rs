@@ -40,6 +40,7 @@ fn save(repo: &mut Repository) {
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
+        only: None,
     };
     save_folder(repo, &req, &mut |_| {}).unwrap();
 }

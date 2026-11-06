@@ -376,7 +376,7 @@ fn save_json_names_the_ignored_project_identity() {
         let again = json_of(&env, &["--json", "save", "again"]);
         assert_eq!(
             again,
-            serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "warnings": []})
+            serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "paths": [], "warnings": []})
         );
         let out = env
             .bolt_anonymous(env.root())
@@ -1011,7 +1011,7 @@ fn save_json_output() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "warnings": []})
+        serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "paths": [], "warnings": []})
     );
 }
 
@@ -1943,4 +1943,68 @@ fn json_as_user(env: &Env, args: &[&str]) -> serde_json::Value {
     let out = env.bolt().args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn paths_are_relative_to_the_current_folder() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let sub = env.root().join("sub");
+    std::fs::create_dir_all(sub.join("deep")).unwrap();
+    for (path, bytes) in [
+        ("a.txt", "a"),
+        ("sub/a.txt", "a"),
+        ("sub/b.png", "b"),
+        ("sub/deep/c.png", "c"),
+    ] {
+        std::fs::write(env.root().join(path), bytes).unwrap();
+    }
+    let saved = |args: &[&str]| {
+        let out = env.bolt_in(&sub).arg("--json").args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        doc["paths"].clone()
+    };
+    assert_eq!(
+        saved(&["save", "A", "a.txt"]),
+        serde_json::json!(["sub/a.txt"])
+    );
+    let shown = stdout_of_in(&env, &sub, &["show"]);
+    assert!(shown.contains("added     sub/a.txt"), "{shown}");
+    assert!(
+        !shown.contains("b.png") && !shown.contains("added     a.txt"),
+        "{shown}"
+    );
+    // A pattern is matched from here too, and `..` reaches above.
+    assert_eq!(
+        saved(&["save", "B", "*.png"]),
+        serde_json::json!(["sub/*.png"])
+    );
+    let shown = stdout_of_in(&env, &sub, &["show"]);
+    assert!(
+        shown.contains("sub/b.png") && !shown.contains("c.png"),
+        "{shown}"
+    );
+    assert_eq!(
+        saved(&["save", "C", "../a.txt"]),
+        serde_json::json!(["a.txt"])
+    );
+    // Nothing named left to save.
+    let out = stdout_of_in(&env, &sub, &["save", "D", "a.txt"]);
+    assert!(out.contains("Nothing to save there"), "{out}");
+    // Outside the project, or matching nothing, saves nothing.
+    for (args, said) in [
+        (&["save", "E", "../../x"][..], "is outside the project"),
+        (
+            &["save", "E", "nope.txt"][..],
+            "sub/nope.txt matches nothing",
+        ),
+    ] {
+        let out = env.bolt_in(&sub).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let err = text(&out.stderr);
+        assert!(err.contains(said), "{err}");
+    }
+    std::fs::write(env.root().join("a.txt"), "f").unwrap();
+    assert_eq!(saved(&["save", "F"]), serde_json::json!([]));
 }

@@ -5,6 +5,7 @@ expression: json
 {
   "bolt_json": 1,
   "changed_files": 1,
+  "paths": [],
   "result": "saved",
   "save": {
     "author": {

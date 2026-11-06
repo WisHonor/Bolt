@@ -246,3 +246,26 @@ fn a_crash_never_keeps_the_save_without_its_line() {
         }
     }
 }
+
+#[test]
+fn a_partial_save_at_a_save_needs_a_line_name_too() {
+    let (env, first) = at_first_save();
+    env.overwrite("a.txt", "c");
+    env.overwrite("b.txt", "new");
+    let err = refused_save(&env, &["C", "a.txt"]);
+    assert!(err.contains("bolt save --line <name>"), "{err}");
+    let out = env.save(&["--line", "part", "C", "a.txt"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (repo, state) = env.state();
+    let save = repo.store().save(&state.lines["part"], false).unwrap();
+    assert_eq!(save.parents, vec![first]);
+    let names: Vec<String> = repo
+        .store()
+        .listing(&save.root)
+        .unwrap()
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    assert_eq!(names, ["a.txt"]);
+}

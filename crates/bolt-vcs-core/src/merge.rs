@@ -334,6 +334,7 @@ mod tests {
                 accept_crlf: false,
                 git_excludes: None,
                 new_line: None,
+                only: None,
             };
             match save_folder(&mut repo, &req, &mut |_| {}).unwrap() {
                 SaveOutcome::Saved {
