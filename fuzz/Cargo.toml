@@ -120,3 +120,10 @@ path = "fuzz_targets/git_config.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "change_ids"
+path = "fuzz_targets/change_ids.rs"
+test = false
+doc = false
+bench = false

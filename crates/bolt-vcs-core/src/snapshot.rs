@@ -10,12 +10,14 @@ use std::path::Path;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
+use crate::changeids::ChangeIds;
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
 use crate::drive;
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
+use crate::keyed;
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems};
@@ -319,18 +321,26 @@ pub fn save_folder(
     // Refuse a save that would not read back (an over-long message, say) before storing it.
     Save::decode(&encoded, false).map_err(StoreError::from)?;
     let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
-    // Worked out before the commit, so that nothing after it can fail the save.
-    let short_change_id =
-        history::short_change_id(repo, &save_id, &save.change_id).unwrap_or_else(|why| {
-            warnings.push(Warning::new(
-                warning::CHANGE_ID_NOT_SHORTENED,
-                format!(
-                    "The save was made, but Bolt couldn't read this line's older saves to \
+    // Worked out before the commit, so that nothing after it can fail the save. The line's
+    // change IDs come from the cache, which then learns this one.
+    let mut cache = None;
+    let shortened = (|| {
+        let key = keyed::cache_key()?;
+        let mut ids = ChangeIds::load(repo, &key);
+        let short = history::short_among(ids.line(repo, line, parent_id)?, &save.change_id, false);
+        cache = Some((ids, key));
+        Ok::<_, RepoError>(short)
+    })();
+    let short_change_id = shortened.unwrap_or_else(|why| {
+        warnings.push(Warning::new(
+            warning::CHANGE_ID_NOT_SHORTENED,
+            format!(
+                "The save was made, but Bolt couldn't read this line's older saves to \
                      shorten its ID. {why}"
-                ),
-            ));
-            save.change_id.to_letters()
-        });
+            ),
+        ));
+        save.change_id.to_letters()
+    });
     let mut state = entry.state.clone();
     state.lines.insert(line.clone(), save_id);
     let diary = DiaryEntry {
@@ -343,6 +353,10 @@ pub fn save_folder(
         safety_copies: vec![],
     };
     repo.commit(&lock, packs, &diary)?;
+    if let Some((mut ids, key)) = cache {
+        ids.add(line, parent_id, save_id, save.change_id);
+        ids.store(repo, &key, &diary.state);
+    }
     // The save is committed now; failing to count its files must not make it look failed.
     let changed_files = match count_changes(repo.store(), Some(parent.root), root) {
         Ok(count) => Some(count),
@@ -957,6 +971,41 @@ mod tests {
     }
 
     #[test]
+    fn a_save_does_not_read_its_line_once_the_cache_is_built() {
+        let (dir, mut repo) = project();
+        let mut shorts = Vec::new();
+        for n in 0..6 {
+            write(dir.path(), "a.txt", format!("{n}").as_bytes());
+            let before = repo.store().saves_read();
+            let SaveOutcome::Saved {
+                save_id,
+                save,
+                short_change_id,
+                ..
+            } = save_now(&mut repo).unwrap()
+            else {
+                panic!("nothing was saved");
+            };
+            // The save it builds on, and nothing else of the line, once a save built the cache.
+            if n > 0 {
+                assert_eq!(repo.store().saves_read() - before, 1, "save {n}");
+            }
+            shorts.push((save_id, save.change_id, short_change_id));
+        }
+        // The newest save's short ID is the one the line gives it.
+        let fresh = Repository::open(dir.path()).unwrap();
+        let (id, change_id, short) = shorts.last().unwrap();
+        assert_eq!(
+            *short,
+            history::short_change_id(&fresh, id, change_id).unwrap()
+        );
+        // History reads the line once.
+        let fresh = Repository::open(dir.path()).unwrap();
+        history::for_each_on_line::<RepoError>(&fresh, |_, _, _| Ok(())).unwrap();
+        assert_eq!(fresh.store().saves_read(), 7);
+    }
+
+    #[test]
     fn save_stores_a_file_even_when_a_damaged_copy_claims_its_id() {
         let (dir, _repo) = project();
         // Content anyone can predict, like a licence, in a pack that came with the project.
@@ -1091,6 +1140,8 @@ mod tests {
         write(dir.path(), "a.txt", b"a");
         saved_root(save_now(&mut repo).unwrap());
         damage_the_only_copy_of(&repo, &first);
+        // Without the cache, the line must be read.
+        fs::remove_file(dir.path().join(".bolt/cache/change-ids")).unwrap();
 
         let mut repo = Repository::open(dir.path()).unwrap();
         write(dir.path(), "b.txt", b"b");

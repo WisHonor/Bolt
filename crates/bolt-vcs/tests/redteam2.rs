@@ -555,6 +555,8 @@ fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
             std::fs::write(&path, bytes).unwrap();
         }
     }
+    // Without the change-ID cache, the save reads the line to shorten its ID.
+    std::fs::remove_file(env.root().join(".bolt/cache/change-ids")).unwrap();
     let before = Repository::open(env.root()).unwrap().head().unwrap();
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     let out = env.bolt().args(["save", "my work"]).output().unwrap();

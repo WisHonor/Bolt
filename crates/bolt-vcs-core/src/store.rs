@@ -63,6 +63,8 @@ pub struct Store {
     path: PathBuf,
     packs: Mutex<Packs>,
     checked: Mutex<Checked>,
+    #[cfg(test)]
+    saves_read: std::sync::atomic::AtomicUsize,
 }
 
 /// The packs listed, and those open.
@@ -169,6 +171,8 @@ impl Store {
             path: packs_dir.to_owned(),
             packs: Mutex::default(),
             checked: Mutex::default(),
+            #[cfg(test)]
+            saves_read: std::sync::atomic::AtomicUsize::new(0),
         };
         store.list()?;
         Ok(store)
@@ -356,6 +360,9 @@ impl Store {
     }
 
     pub fn save(&self, id: &Id, signatures_allowed: bool) -> Result<Save, StoreError> {
+        #[cfg(test)]
+        self.saves_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Save::decode(
             &self.read_record(id, ObjectKind::Save)?,
             signatures_allowed,
@@ -617,6 +624,12 @@ impl Store {
     fn pack_path(&self, n: usize) -> PathBuf {
         let name = self.packs().names.get(n).cloned().flatten();
         name.map_or_else(|| self.path.clone(), |name| self.path.join(name))
+    }
+
+    /// How many saves this store has been asked for.
+    #[cfg(test)]
+    pub(crate) fn saves_read(&self) -> usize {
+        self.saves_read.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]

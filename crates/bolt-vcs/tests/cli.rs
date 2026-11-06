@@ -813,9 +813,11 @@ fn save_warns_about_a_pack_holding_a_damaged_copy() {
     );
 }
 
-/// Bit rot in the only copy of a save: its first stored byte is flipped.
+/// Bit rot in the only copy of a save: its first stored byte is flipped. The change-ID cache goes
+/// too, so that the line is read again.
 fn damage_the_only_copy_of(root: &Path, id: &Id) {
     use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
+    let _ = std::fs::remove_file(root.join(".bolt/cache/change-ids"));
     for e in std::fs::read_dir(root.join(".bolt/store/packs")).unwrap() {
         let path = e.unwrap().path();
         let found = PackReader::open(&path).unwrap().find(id).unwrap();

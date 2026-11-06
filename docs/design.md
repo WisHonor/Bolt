@@ -208,7 +208,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** A save points at the photo of your project (its top folder listing) and records who, when and why. Each save also has a short, stable change ID made of letters (`kxqmz`) that survives edits, and it can note files Bolt is sure you moved.
 
 - **Fields:** top folder listing ID; ordered parents; author and saver (name, email, time, time zone); message; change ID; optional move notes; reserved signature slot; extra fields that older versions keep but ignore.
-- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters; kept across edits; marked "divergent" when two visible saves share one. A save imported from Git takes its change ID from its commit instead ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
+- **Change IDs:** 128 random bits, shown in the letters k–z (never confused with hex fingerprints), as the shortest unique prefix of at least 4 letters (each line's change IDs are kept in a sealed cache, `.bolt/cache/change-ids`, so a save and `history` needn't read the line to shorten them); kept across edits; marked "divergent" when two visible saves share one. A save imported from Git takes its change ID from its commit instead ([decision 032](decisions/032-exact-repeatable-commit-import.md)).
 - **Move notes:** recorded only when Bolt is certain (same contents moved, or a Unity `.meta` file moved with its asset); used by diffs, merges and locks; they never change the snapshot.
 
 ### 5.5 Conflicts ([decision 007](decisions/007-conflicts.md))

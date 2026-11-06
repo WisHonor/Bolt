@@ -562,3 +562,70 @@ fn pack_v2_matches_its_vector() {
         pack_reads_back(&v);
     }
 }
+
+#[derive(Deserialize)]
+struct SealedVector {
+    name: String,
+    key: String,
+    body: String,
+    sealed: String,
+}
+
+/// `main` at save 11…11 with change IDs 22…22 and 33…33, and `side` at 44…44 with 22…22, as
+/// storage-format.md §10 lays them out.
+fn change_ids_body() -> String {
+    let id = |byte: &str, n: usize| byte.repeat(n);
+    format!(
+        "424f4c5443484944010204{}{}02{}{}04{}{}01{}",
+        hex(b"main"),
+        id("11", 32),
+        id("22", 16),
+        id("33", 16),
+        hex(b"side"),
+        id("44", 32),
+        id("22", 16)
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/change_ids.json"]
+fn print_change_ids_vector() {
+    let key = [0x42; 32];
+    let body = change_ids_body();
+    println!(
+        "[\n  {{\"name\": \"two-lines\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        hex(&key),
+        hex(&bolt_core::keyed::seal(&key, &unhex(&body)))
+    );
+}
+
+#[test]
+fn change_ids_match_their_vector() {
+    use bolt_core::changeids::ChangeIds;
+    use bolt_core::keyed::{open_sealed, seal};
+    let path = format!(
+        "{}/tests/vectors/change_ids.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<SealedVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    // The body is the one the layout above gives.
+    assert_eq!(vectors[0].body, change_ids_body());
+    for v in vectors {
+        let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
+        let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
+        assert_eq!(seal(&key, &body), sealed, "{}", v.name);
+        assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
+        assert_eq!(open_sealed(&[0; 32], &sealed), None);
+        let ids = ChangeIds::decode(&body).unwrap();
+        assert_eq!(ids.encode(), body);
+        let main = ids.get("main").unwrap();
+        assert_eq!(main.0, Id([0x11; 32]));
+        assert_eq!(main.1, [ChangeId([0x22; 16]), ChangeId([0x33; 16])]);
+        let side = ids.get("side").unwrap();
+        assert_eq!(
+            (side.0, side.1),
+            (Id([0x44; 32]), &[ChangeId([0x22; 16])][..])
+        );
+    }
+}

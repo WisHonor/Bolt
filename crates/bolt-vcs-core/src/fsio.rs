@@ -27,12 +27,24 @@ pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
 /// Replaces `name` in the folder `to` with `bytes`, written in the folder `tmp` first, so that,
 /// even after a crash, it holds either the old or the new bytes, never a mix.
 pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
+    replace(tmp, to, name, bytes, true)
+}
+
+/// `write_atomic` for a cache, which is no part of what a command did, so crash tests don't
+/// stop there.
+pub(crate) fn write_cache(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
+    replace(tmp, to, name, bytes, false)
+}
+
+fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::Result<()> {
     let (mut file, temp) = create_temp(tmp)?;
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        fault_point("write:before-rename")?;
+        if faults {
+            fault_point("write:before-rename")?;
+        }
         rename_durable(tmp, &temp, to, OsStr::new(name))
     })();
     if result.is_err() {

@@ -112,6 +112,14 @@ pub enum RepoError {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// The user's own cache key can't be used. It is never replaced silently: a key Bolt didn't
+    /// make there may mean someone changed the user's files.
+    #[error(
+        "Bolt can't use its cache key {}: {}.",
+        escape(&path.display().to_string(), false),
+        escape(detail, false)
+    )]
+    CacheKey { path: PathBuf, detail: String },
 }
 
 impl RepoError {
@@ -165,6 +173,10 @@ impl RepoError {
                     "Nothing was changed. Ask for help before trying to repair it."
                 }
                 RepoError::Config(e) => return e.hint(),
+                RepoError::CacheKey { .. } => {
+                    "Delete that file: Bolt makes a new key, and rebuilds the caches the old one \
+                     sealed."
+                }
                 _ => return None,
             }
             .to_owned(),
@@ -264,6 +276,7 @@ struct Held {
     state: Dir,
     packs: Arc<Dir>,
     tmp: Arc<Dir>,
+    cache: Dir,
 }
 
 impl Held {
@@ -275,6 +288,7 @@ impl Held {
             state: fixed(&top, bolt, "state")?,
             packs: Arc::new(fixed(&store, &bolt.join("store"), "packs")?),
             tmp: Arc::new(fixed(&top, bolt, "tmp")?),
+            cache: fixed(&top, bolt, "cache")?,
             bolt: top,
         })
     }
@@ -961,6 +975,7 @@ impl Repository {
         }
         let held = Held {
             tmp: Arc::new(fixed(&top, &bolt, "tmp")?),
+            cache: fixed(&top, &bolt, "cache")?,
             bolt: top,
             state,
             packs: packs_dir,
@@ -1025,6 +1040,16 @@ impl Repository {
     /// `.bolt`, held open.
     pub(crate) fn bolt_folder(&self) -> &Dir {
         &self.held.bolt
+    }
+
+    /// `cache/`, held open.
+    pub(crate) fn cache_folder(&self) -> &Dir {
+        &self.held.cache
+    }
+
+    /// Where `cache/` is, to name files in it.
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        self.bolt.join("cache")
     }
 
     #[must_use]

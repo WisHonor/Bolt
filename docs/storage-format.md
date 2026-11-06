@@ -242,7 +242,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock` | Lock file for changing commands | Yes |
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
-| `cache/` | Rebuildable speed-ups, the file-state cache among them ([decision 053](decisions/053-file-state-cache.md)): a file's kind, size, modified time and content ID, with a checksum keyed by a random key kept in the user's own settings, so a cache Bolt didn't write for this account is ignored | No |
+| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): the file-state cache (a file's kind, size, modified time and content ID) and `change-ids`, each line's change IDs (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
@@ -262,6 +262,24 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 **`state/lock`** is held with an operating-system lock (`LockFileEx` on Windows, `flock` elsewhere) by every command that changes the repository. Its contents mean nothing. Once a command holds the lock, it replaces `state/lock-info` (through `tmp/` and a rename) with `pid <n>\ncommand <command>\nstarted <unix ms>\n`; a command that finds the lock busy shows that text in its "waiting for another command" message. The text lives in a separate file because Windows doesn't let other processes read a locked file; it is only informational and may be stale.
 
 **`state/journal`** ([decision 049](decisions/049-writing-files-one-at-a-time.md); its exact bytes and test vectors come with milestone 3, before the code) is written (whole, through `tmp/` and a rename) before a command starts rewriting files in the folder, and removed after the command commits. It records the target diary entry, each planned file action (path, expected current ID, new ID) and the safety copies taken, followed by a BLAKE3 checksum of the bytes before it. If it exists when Bolt starts, Bolt finishes or rolls back the interrupted command (decision 010).
+
+**The cache key and the seal** ([decision 053](decisions/053-file-state-cache.md)). Every file in `cache/` is sealed: its body followed by 32 bytes, the keyed BLAKE3 hash of the body under the user's cache key. A file whose seal doesn't match (another account's, a copied project's from someone else, or edited) is ignored and rebuilt, never trusted and never an error. The key is the file `cache-key` in the folder of the user's own `config.toml` (`BOLT_CONFIG_DIR` if set): exactly 32 random bytes, nothing else. Bolt makes it on first use, writing a file of its own name there, readable only by the user on Unix (0600), and linking it in as `cache-key`, which never replaces a key already there, so two Bolts making it at once end with one key; on a drive without hard links it is made in place. A key file that can't be read or isn't 32 bytes long is an error naming it, with the hint to delete it: it is the user's own file, so Bolt doesn't replace it silently. It is the user's own, so a link there is followed. With no settings folder at all, a key for that run alone is used, so no cache is trusted again.
+
+**`cache/change-ids`** (not normative) lists the change IDs of each line's saves, so that a save and `history` can shorten change IDs (§5) without reading the line. Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
+
+```text
+bytes[8] "BOLTCHID"
+u8       version = 1
+varint   line count (at most 100,000)
+lines, strictly sorted by name:
+  string   name (at most 255 bytes)
+  id       the line's newest save when its IDs were read
+  varint   change-ID count (refused if more than the bytes left hold)
+  change-id × count   the change IDs of the saves from that save back along first parents, sorted, repeats kept
+bytes[32] seal
+```
+
+A line's IDs are used only for a line whose newest save is the one recorded, or one whose first parents lead back to it: Bolt reads the saves from the newest back to the recorded one and adds their IDs. If the walk reaches the line's first save without meeting it (an undo moved the line back, say), the IDs read replace the line's. Lines the current diary entry doesn't have are dropped when the file is next written. Commands write it through `tmp/` and a rename, without the lock; a write that fails is just skipped.
 
 ## 11. Pack files
 
@@ -381,6 +399,7 @@ Vectors are added milestone by milestone, for the records each milestone builds;
 - **Milestone 3:**
   - `listing.json`: a fourth vector, `long-name`, a file whose name is 600 bytes (200 characters of three bytes each), past the 255 bytes names had until [decision 051](decisions/051-names-this-computer-cant-write-and-length-limits.md); its length is a two-byte varint. The first three vectors are byte for byte what milestone 1 wrote.
   - `pack_v2.json`: a version 2 pack (§11) of the same two objects as `pack.json`'s `two-objects`, which the writer must write byte for byte. `pack.json` stays as milestone 1 wrote it, in version 1, which readers must still read.
+  - `change_ids.json`: a sealed `cache/change-ids` (§10) with two lines, its key, its body and the sealed bytes.
 
 ## 14. Open points
 

@@ -3,8 +3,10 @@
 
 use std::collections::HashSet;
 
+use crate::changeids::ChangeIds;
 use crate::diary::{DiaryEntry, Position};
 use crate::id::{ChangeId, Id};
+use crate::keyed;
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
 use crate::text::escape;
@@ -103,15 +105,64 @@ fn short_lengths(ids: &[ChangeId]) -> Vec<usize> {
     common.into_iter().map(short_len).collect()
 }
 
+/// The shortest form of `change_id` among the sorted `ids`, leaving one copy of it out when
+/// `itself` (it is the change ID of one of their saves).
+pub(crate) fn short_among(ids: &[ChangeId], change_id: &ChangeId, itself: bool) -> String {
+    let at = ids.partition_point(|c| c < change_id);
+    let (below, mut above) = ids.split_at(at);
+    if itself && above.first() == Some(change_id) {
+        above = &above[1..];
+    }
+    // The IDs sharing the longest start with it are its neighbours in the sorted order.
+    let common = [below.last(), above.first()]
+        .into_iter()
+        .flatten()
+        .map(|other| common_letters(change_id, other))
+        .max()
+        .unwrap_or(0);
+    change_id.to_letters()[..short_len(common)].to_owned()
+}
+
 /// The shortest form of `change_id` (at least 4 letters) that no other save on the current line
-/// starts with. `id` is the save it belongs to, on the line or not.
+/// starts with. `id` is the save it belongs to, on the line or not. The line's change IDs come
+/// from the cache when it is current.
 pub fn short_change_id(
     repo: &Repository,
     id: &Id,
     change_id: &ChangeId,
 ) -> Result<String, RepoError> {
+    let (_, entry) = repo.current()?;
+    let tip = tip_of(&entry)?;
+    let Position::OnLine(line) = &entry.state.position else {
+        return walk_short(repo, tip, id, change_id);
+    };
+    let key = keyed::cache_key()?;
+    let mut cache = ChangeIds::load(repo, &key);
+    let ids = cache.line(repo, line, tip)?;
+    let listed = ids.binary_search(change_id).is_ok();
+    let short = match (listed, *id == tip) {
+        (false, _) => Some(short_among(ids, change_id, false)),
+        (true, true) => Some(short_among(ids, change_id, true)),
+        // Whether `id` is on the line, or another save there has its change ID, only the line
+        // says.
+        (true, false) => None,
+    };
+    cache.store(repo, &key, &entry.state);
+    match short {
+        Some(short) => Ok(short),
+        None => walk_short(repo, tip, id, change_id),
+    }
+}
+
+/// `short_change_id`, by reading the line from `tip`.
+fn walk_short(
+    repo: &Repository,
+    tip: Id,
+    id: &Id,
+    change_id: &ChangeId,
+) -> Result<String, RepoError> {
     let mut common = 0;
-    for step in chain(repo, current_save(repo)?) {
+    for step in chain(repo, tip) {
         let (other, save) = step?;
         if other != *id {
             common = common.max(common_letters(change_id, &save.change_id));
@@ -121,21 +172,39 @@ pub fn short_change_id(
 }
 
 /// Calls `each` with every save on the current line, newest first, and the shortest form of its
-/// change ID. The line is read twice, the first time for its change IDs alone, so that only the
-/// save being handed out is held.
+/// change ID. The line's change IDs come first, from the cache when it is current and otherwise
+/// by reading the line once for them alone, so that only the save being handed out is held.
 pub fn for_each_on_line<E: From<RepoError>>(
     repo: &Repository,
     mut each: impl FnMut(&Id, &Save, &str) -> Result<(), E>,
 ) -> Result<(), E> {
-    let tip = current_save(repo)?;
-    let lengths = {
-        let ids = chain(repo, tip)
-            .map(|step| step.map(|(_, save)| save.change_id))
-            .collect::<Result<Vec<ChangeId>, RepoError>>()?;
-        short_lengths(&ids)
+    let (_, entry) = repo.current()?;
+    let tip = tip_of(&entry)?;
+    let ids = match &entry.state.position {
+        Position::OnLine(line) => {
+            let key = keyed::cache_key()?;
+            let mut cache = ChangeIds::load(repo, &key);
+            let ids = cache.line(repo, line, tip)?.to_vec();
+            cache.store(repo, &key, &entry.state);
+            ids
+        }
+        Position::AtSave(_) => {
+            let mut ids = chain(repo, tip)
+                .map(|step| step.map(|(_, save)| save.change_id))
+                .collect::<Result<Vec<ChangeId>, RepoError>>()?;
+            ids.sort_unstable();
+            ids
+        }
     };
-    for (step, len) in chain(repo, tip).zip(lengths) {
+    let lengths = short_lengths(&ids);
+    for step in chain(repo, tip) {
         let (id, save) = step?;
+        let at = ids.partition_point(|c| *c < save.change_id);
+        // Every save of the line is among `ids`; all its letters if somehow not.
+        let len = match ids.get(at) {
+            Some(c) if *c == save.change_id => lengths[at],
+            _ => LETTERS,
+        };
         each(&id, &save, &save.change_id.to_letters()[..len])?;
     }
     Ok(())
@@ -544,6 +613,152 @@ mod tests {
         let off = plant(&mut repo, &[], "klmnopl", None);
         let short = short_change_id(&repo, &off, &change("klmnopl")).unwrap();
         assert_eq!(short, "klmnopl");
+    }
+
+    /// Points `line` at `id`, as an undo would, without a new save.
+    fn move_line(repo: &mut Repository, line: &str, id: Id) {
+        let lock = repo.lock_for_change("undo", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        state.lines.insert(line.to_owned(), id);
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "undo".into(),
+            who: who(),
+            bolt_version: "0.1.0".into(),
+            state,
+            safety_copies: vec![],
+        };
+        let packs = repo.new_packs().unwrap();
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    /// The short IDs of the current line by reading it whole, newest first.
+    fn uncached_line(repo: &Repository) -> Vec<String> {
+        let saves: Vec<ChangeId> = chain(repo, current_save(repo).unwrap())
+            .map(|s| s.unwrap().1.change_id)
+            .collect();
+        saves
+            .iter()
+            .zip(plainly(&saves))
+            .map(|(c, len)| c.to_letters()[..len].to_owned())
+            .collect()
+    }
+
+    fn cached_line(repo: &Repository) -> Vec<String> {
+        let mut shown = Vec::new();
+        for_each_on_line::<RepoError>(repo, |_, _, short| {
+            shown.push(short.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        shown
+    }
+
+    /// A cache that says `main`, at its newest save, holds one save more than it does, whose ID
+    /// shares 7 letters with `klmnopk`.
+    fn lying_cache(repo: &Repository) -> crate::changeids::ChangeIds {
+        let tip = current_save(repo).unwrap();
+        let mut ids: Vec<ChangeId> = chain(repo, tip).map(|s| s.unwrap().1.change_id).collect();
+        ids.push(change("klmnopkl"));
+        let mut lie = crate::changeids::ChangeIds::default();
+        lie.set("main", tip, ids);
+        lie
+    }
+
+    fn plant_cache(dir: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(dir.join(".bolt/cache/change-ids"), bytes).unwrap();
+    }
+
+    #[test]
+    fn a_cache_from_another_account_is_ignored() {
+        let (dir, repo, ids) = project_with(&["klmnopl", "klmnopk"]);
+        let lie = lying_cache(&repo);
+        // The lie, sealed with this account's key, is believed: the test can tell.
+        let key = crate::keyed::cache_key().unwrap();
+        plant_cache(dir.path(), &crate::keyed::seal(&key, &lie.encode()));
+        assert_eq!(cached_line(&repo)[0], "klmnopkk");
+        let other = [0x5a; crate::keyed::KEY_LEN];
+        assert_ne!(other, key);
+        plant_cache(dir.path(), &crate::keyed::seal(&other, &lie.encode()));
+        assert_eq!(cached_line(&repo), uncached_line(&repo));
+        assert_eq!(cached_line(&repo)[0], "klmnopk");
+        plant_cache(dir.path(), &crate::keyed::seal(&other, &lie.encode()));
+        let tip = change("klmnopk");
+        assert_eq!(short_change_id(&repo, &ids[2], &tip).unwrap(), "klmnopk");
+    }
+
+    #[test]
+    fn an_edited_cache_is_ignored() {
+        let (dir, repo, ids) = project_with(&["klmnopl", "klmnopk"]);
+        // A cache Bolt wrote, its body swapped for the lie and its seal kept.
+        assert_eq!(cached_line(&repo), uncached_line(&repo));
+        let path = dir.path().join(".bolt/cache/change-ids");
+        let written = std::fs::read(&path).unwrap();
+        let seal = &written[written.len() - crate::keyed::KEY_LEN..];
+        let mut edited = lying_cache(&repo).encode();
+        edited.extend_from_slice(seal);
+        plant_cache(dir.path(), &edited);
+        assert_eq!(cached_line(&repo)[0], "klmnopk");
+        // Every single bit flipped in what Bolt wrote, too.
+        for at in [0, written.len() / 2, written.len() - 1] {
+            let mut flipped = written.clone();
+            flipped[at] ^= 1;
+            plant_cache(dir.path(), &flipped);
+            let tip = change("klmnopk");
+            assert_eq!(short_change_id(&repo, &ids[2], &tip).unwrap(), "klmnopk");
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Step {
+        Save(&'static str),
+        Back(usize),
+        Side(&'static str),
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        let start = prop::sample::select(vec!["klmn", "klmo", "klmnop", "zzzz", "lmno"]);
+        prop_oneof![
+            3 => start.clone().prop_map(Step::Save),
+            1 => (0..4usize).prop_map(Step::Back),
+            1 => start.prop_map(Step::Side),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        // Saves the cache never saw, undos that move a line back, and saves off the line, with
+        // the cache read and rewritten in between: the short IDs are always the uncached ones.
+        #[test]
+        fn short_ids_match_the_uncached_ones(steps in prop::collection::vec(step(), 1..10)) {
+            let (_dir, mut repo, mut saves) = project_with(&[]);
+            for step in steps {
+                match step {
+                    Step::Save(start) => {
+                        let tip = current_save(&repo).unwrap();
+                        saves.push(plant(&mut repo, &[tip], start, Some("main")));
+                    }
+                    Step::Back(n) => {
+                        let back = chain(&repo, current_save(&repo).unwrap()).nth(n);
+                        if let Some(Ok((id, _))) = back {
+                            move_line(&mut repo, "main", id);
+                        }
+                    }
+                    Step::Side(start) => saves.push(plant(&mut repo, &[saves[0]], start, None)),
+                }
+                prop_assert_eq!(cached_line(&repo), uncached_line(&repo));
+                let tip = current_save(&repo).unwrap();
+                for id in &saves {
+                    let change_id = repo.store().save(id, false).unwrap().change_id;
+                    prop_assert_eq!(
+                        short_change_id(&repo, id, &change_id).unwrap(),
+                        walk_short(&repo, tip, id, &change_id).unwrap()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

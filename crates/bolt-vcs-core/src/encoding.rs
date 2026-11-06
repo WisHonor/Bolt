@@ -120,6 +120,12 @@ impl<'a> Reader<'a> {
         Reader { rest: input }
     }
 
+    /// How many bytes are left, to check a count against before allocating for it.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.rest.len()
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
         if n > self.rest.len() {
             return Err(DecodeError::UnexpectedEnd);

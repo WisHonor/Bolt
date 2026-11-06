@@ -1,6 +1,7 @@
 //! Bolt's engine library: objects, storage and history. No `unsafe` code is allowed here.
 #![forbid(unsafe_code)]
 
+pub mod changeids;
 pub mod config;
 pub mod diary;
 pub mod diff;
@@ -12,6 +13,7 @@ pub mod history;
 pub mod id;
 pub mod ignore;
 pub mod import;
+pub mod keyed;
 pub mod link;
 pub mod listing;
 pub mod merge;
