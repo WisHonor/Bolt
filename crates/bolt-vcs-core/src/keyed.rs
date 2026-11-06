@@ -113,7 +113,8 @@ fn no_hard_links(e: &io::Error) -> bool {
     let codes: &[i32] = if cfg!(windows) {
         &[1, 50]
     } else if cfg!(target_os = "macos") {
-        &[1, 102]
+        // FAT and exFAT give ENOTSUP (45), which is not EOPNOTSUPP (102) there.
+        &[1, 45, 102]
     } else {
         &[1, 95]
     };
@@ -189,7 +190,7 @@ mod tests {
             let e = key_in(dir.path()).unwrap_err();
             assert!(matches!(e, RepoError::CacheKey { .. }), "{e:?}");
             assert!(e.to_string().contains(KEY_FILE), "{e}");
-            assert!(e.hint().unwrap().contains("Delete"), "{e:?}");
+            assert!(e.hint().unwrap().contains("delete it"), "{e:?}");
             // Never replaced.
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
@@ -236,6 +237,8 @@ mod tests {
         assert!(no_hard_links(&io::Error::from_raw_os_error(1)));
         #[cfg(windows)]
         assert!(!no_hard_links(&io::Error::from_raw_os_error(5)));
+        #[cfg(target_os = "macos")]
+        assert!(no_hard_links(&io::Error::from_raw_os_error(45)));
     }
 
     #[test]

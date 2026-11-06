@@ -175,8 +175,9 @@ impl RepoError {
                 }
                 RepoError::Config(e) => return e.hint(),
                 RepoError::CacheKey { .. } => {
-                    "Delete that file: Bolt makes a new key, and rebuilds the caches the old one \
-                     sealed."
+                    "If that file is there, delete it: Bolt makes a new key, and rebuilds the \
+                     caches the old one sealed. If it isn't, check that Bolt can write to its \
+                     folder."
                 }
                 _ => return None,
             }

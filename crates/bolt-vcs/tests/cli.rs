@@ -1899,7 +1899,7 @@ fn a_cache_key_bolt_cant_use_is_a_warning_not_a_failure() {
         );
         let said = doc["warnings"][0]["message"].as_str().unwrap();
         assert!(
-            said.contains("cache-key") && said.contains("Delete"),
+            said.contains("cache-key") && said.contains("delete it"),
             "{said}"
         );
     }
