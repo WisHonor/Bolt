@@ -73,6 +73,8 @@ See [testing.md](testing.md) §3: fuzz targets for the decoders and parsers list
 
 **Hostile Git repositories** (the review of Git's published vulnerabilities, 2026-11-02): `crates/bolt-vcs/tests/corpus_git.rs` holds 25 tests, one of them only on Windows, for 22 of the review's 24 kinds of case. The unusual commits a save keeps exactly are in `import_vs_git.rs`: `Craft` could write them too, but there the test also compares each with Git. A `.git` another account owns is tested in `git/mod.rs`, the only place its owner can be stubbed. A SHA-1 collision can't be built as a Git object, so `git/id.rs` feeds SHAttered's blocks to the hasher. Six fuzz targets cover the Git reader: loose objects, packs and their indexes, deltas, commits, trees and tags, refs, and config.
 
+**Hostile saves written out** (T1 to T5, and the review's write-out cases): `crates/bolt-vcs/tests/corpus_writeout.rs` plants each save, or a switch's journal, as a hostile `.bolt` could hold it, runs `bolt goto` onto it, and checks the exit code, what was written, the warnings and messages, and that nothing reached a folder beside the project or went into `.git` or `.bolt`. Its cases: `.git` spellings, `.gitmodules`' hashed short names and, on Windows, the real hashed short name of `.git`; `.bolt` spellings in a save (its listing is refused) and in a journal (the journal is refused); `\`, drive letters and device names, `COM¹` included; links named like folders with files below them (CVE-2021-21300, CVE-2024-32002); links leading out (absolute, a drive letter, `\\host` and `//host`, `..` past the top), written as placeholders; modes 0644 and 0755 under a umask of 0 (Unix); a folder a stopped switch made, swapped for a link before the switch finishes; names too long for the system, paths over 4,096 bytes and a save 4,096 folders deep. The case for `.gitmodules`' plain short names (`gitmod~1` to `gitmod~4`) is ignored: write-out doesn't refuse them yet. Each case was seen to fail on a write-out with its defence taken out before it passed.
+
 **Red-team sessions** ([decision 024](decisions/024-red-team-gate.md)). Every milestone ends with a time-boxed session in which a fresh agent attacks Bolt from an isolated sandbox and must prove each finding with a failing test. Every proven finding is fixed, or ruled on in writing, before the milestone is merged; its proof test stays as a permanent test ([testing.md](testing.md) §3), and new threats are added to §4.
 
 **Session reports:**
@@ -83,7 +85,7 @@ See [testing.md](testing.md) §3: fuzz targets for the decoders and parsers list
 
 **Windows name rules.** Checked on 2026-11-01 against Microsoft's "Naming Files, Paths, and Namespaces" page (dated 2024-08-28): Bolt refuses everything on that list, plus the console devices `CONIN$` and `CONOUT$`, while `COM0` and `LPT0`, which are not on it, stay ordinary names. Bolt also refuses `.bolt`'s short names (`bolt~1` to `bolt~4`) and its stream syntax (`.bolt::$INDEX_ALLOCATION`), because Windows treats both as `.bolt`.
 
-**GitHub settings** (turned on by the owner on 2026-11-01):
+**GitHub settings** (turned on by the owner on 2026-11-01, while the repository was public). The repository has been private since 2026-11-05, and its plan doesn't offer CodeQL code scanning (with Copilot Autofix), secret scanning with push protection, or private vulnerability reporting for private repositories, so those three no longer run; nothing below that relies on them protects the code today.
 - **On:**
   - dependency graph;
   - Dependabot alerts, malware alerts and grouped security updates;
@@ -99,7 +101,7 @@ See [testing.md](testing.md) §3: fuzz targets for the decoders and parsers list
 - **Branch protection** (on since 2026-11-02, the ruleset "Protect main"):
   - force pushes to `main` and its deletion are blocked;
   - every change needs a pull request;
-  - the CI checks (`test` on all three systems, and `deny`) and CodeQL must pass.
+  - the CI checks (`test` on all three systems, and `deny`) must pass, and CodeQL did while the repository was public.
 
   Nobody can bypass it, the owner included, so every change, an agent's too, reaches `main` only through a pull request whose checks are green.
 
