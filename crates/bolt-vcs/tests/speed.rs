@@ -30,7 +30,10 @@ fn status_on_an_unchanged_100_000_file_project() {
         file.set_modified(then).unwrap();
     }
     let started = Instant::now();
-    env.bolt().args(["save", "Files", "--yes"]).assert().success();
+    env.bolt()
+        .args(["save", "Files", "--yes"])
+        .assert()
+        .success();
     println!("first save: {:.2} s", started.elapsed().as_secs_f64());
     let mut times = Vec::new();
     for _ in 0..2 {
