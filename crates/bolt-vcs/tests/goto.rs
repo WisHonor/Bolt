@@ -1,4 +1,4 @@
-//! `bolt goto`, end to end. For now its helpers, and a check that they do what tests need.
+//! `bolt goto`, end to end, and the helpers its tests share.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use bolt_core::journal::Journal;
@@ -139,4 +139,276 @@ fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
         }
         assert!(!env.root().join(".bolt/state/journal").exists());
     }
+}
+
+// `bolt goto` itself.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use bolt_core::diary::{Action, DiaryEntry, Position};
+use bolt_core::id::ChangeId;
+use bolt_core::pack::ObjectKind;
+use bolt_core::save::Save;
+
+/// Every file below `dir` but `.git` and `.bolt`, by path, with what it holds.
+fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = folders.pop() {
+        for e in std::fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if rel.is_empty() && (name == ".git" || name == ".bolt") {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                folders.push((e.path(), path));
+            } else {
+                found.insert(path, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    found
+}
+
+fn holding(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
+    entries
+        .iter()
+        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
+        .collect()
+}
+
+const MAIN: &[(&str, &str)] = &[
+    ("a.txt", "a\n"),
+    ("b.txt", "b\n"),
+    ("dir/c.bin", "\0\u{1}\r\n\u{ff}binary"),
+];
+const FEATURE: &[(&str, &str)] = &[
+    ("a.txt", "a\n"),
+    ("b.txt", "b on feature\r\n"),
+    ("new/deep/d.txt", "d\n"),
+];
+
+fn write_all(env: &Env, entries: &[(&str, &str)]) {
+    for (path, bytes) in entries {
+        let at = env.root().join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, bytes).unwrap();
+    }
+}
+
+/// An imported Git repository with two lines: `main`, holding `MAIN`, which the project is on,
+/// and `feature`, holding `FEATURE`. The server line `x@origin` is at `feature`'s save.
+fn two_lines() -> Env {
+    let env = Env::new();
+    write_all(&env, MAIN);
+    env.git(&["add", "-A"]);
+    env.git(&["commit", "-q", "-m", "Main"]);
+    env.git(&["checkout", "-q", "-b", "feature"]);
+    std::fs::remove_dir_all(env.root().join("dir")).unwrap();
+    write_all(&env, FEATURE);
+    env.git(&["add", "-A"]);
+    env.git(&["commit", "-q", "-m", "Feature"]);
+    env.git(&["update-ref", "refs/remotes/origin/x", "HEAD"]);
+    env.git(&["checkout", "-q", "main"]);
+    env.import();
+    assert_eq!(files(env.root()), holding(MAIN));
+    env
+}
+
+fn goto(env: &Env, target: &str) -> String {
+    let out = env.bolt().args(["goto", target]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    text(&out.stdout)
+}
+
+fn goto_json(env: &Env, target: &str) -> serde_json::Value {
+    let out = env
+        .bolt()
+        .args(["goto", target, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// What `bolt status` finds changed.
+fn changed(env: &Env) -> Vec<String> {
+    let (_, doc) = warning_kinds(env, &["status"]);
+    doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn goto_a_line_and_back_restores_every_file_byte_for_byte() {
+    let env = two_lines();
+    let said = goto(&env, "feature");
+    assert!(said.contains("You're on line feature."), "{said}");
+    assert_eq!(files(env.root()), holding(FEATURE));
+    assert!(!env.root().join("dir").exists());
+    assert_eq!(env.state().1.position, Position::OnLine("feature".into()));
+    assert!(changed(&env).is_empty());
+
+    let said = goto(&env, "main");
+    assert!(said.contains("You're on line main."), "{said}");
+    assert_eq!(files(env.root()), holding(MAIN));
+    assert!(!env.root().join("new").exists());
+    assert!(changed(&env).is_empty());
+    assert!(!env.root().join(".bolt/state/journal").exists());
+}
+
+#[test]
+fn goto_carries_unsaved_changes_that_dont_collide() {
+    let env = two_lines();
+    env.overwrite("a.txt", "mine\n");
+    env.overwrite("n.txt", "new\n");
+    let said = goto(&env, "feature");
+    assert!(said.contains("You're on line feature."), "{said}");
+    assert!(said.contains("2 files"), "{said}");
+    let mut wanted = holding(FEATURE);
+    wanted.insert("a.txt".into(), b"mine\n".to_vec());
+    wanted.insert("n.txt".into(), b"new\n".to_vec());
+    assert_eq!(files(env.root()), wanted);
+    assert_eq!(changed(&env), ["a.txt", "n.txt"]);
+}
+
+#[test]
+fn goto_stops_at_colliding_changes_and_changes_nothing() {
+    let env = two_lines();
+    env.overwrite("b.txt", "mine\n");
+    env.overwrite("dir/c.bin", "mine too");
+    let before = (env.standing(), files(env.root()));
+    let out = env.bolt().args(["goto", "feature"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    assert!(
+        said.contains("b.txt") && said.contains("dir/c.bin"),
+        "{said}"
+    );
+    assert!(
+        said.contains("hint:") && said.contains("bolt save"),
+        "{said}"
+    );
+    assert_eq!((env.standing(), files(env.root())), before);
+    assert!(!env.root().join(".bolt/state/journal").exists());
+    assert_eq!(env.state().1.position, Position::OnLine("main".into()));
+}
+
+#[test]
+fn goto_a_save_at_a_lines_tip_is_at_the_save() {
+    let env = two_lines();
+    let feature = env.state().1.lines["feature"];
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(said.contains("not on a line"), "{said}");
+    assert!(
+        said.contains("Saving here asks for a new line's name."),
+        "{said}"
+    );
+    assert!(
+        said.contains("To keep saving on feature: bolt goto feature"),
+        "{said}"
+    );
+    assert_eq!(env.state().1.position, Position::AtSave(feature));
+    assert_eq!(files(env.root()), holding(FEATURE));
+}
+
+#[test]
+fn goto_a_server_line_is_at_its_save() {
+    let env = two_lines();
+    let (repo, state) = env.state();
+    let at = repo.server_lines(&state).unwrap().servers["origin"]["x"];
+    drop(repo);
+    let said = goto(&env, "x@origin");
+    assert!(said.contains("not on a line"), "{said}");
+    assert_eq!(env.state().1.position, Position::AtSave(at));
+    assert_eq!(files(env.root()), holding(FEATURE));
+}
+
+/// Commits a save on `main` with the change ID `change_id` and the same files as the last.
+fn plant_with_change_id(root: &Path, change_id: ChangeId) {
+    let mut repo = Repository::open(root).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let parent_id = entry.state.lines["main"];
+    let parent = repo.store().save(&parent_id, false).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    let save = Save {
+        parents: vec![parent_id],
+        message: "Planted".into(),
+        change_id,
+        ..parent
+    };
+    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), save_id);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        command: "save".into(),
+        state,
+        ..entry
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+}
+
+#[test]
+fn an_ambiguous_target_lists_the_saves() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let mut second = [0; 16];
+    second[15] = 1;
+    plant_with_change_id(env.root(), ChangeId([0; 16]));
+    plant_with_change_id(env.root(), ChangeId(second));
+    let before = env.standing();
+    let out = env.bolt().args(["goto", "kkkk"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    assert!(said.contains("matches more than one save"), "{said}");
+    assert!(said.contains(&ChangeId([0; 16]).to_letters()), "{said}");
+    assert!(said.contains(&ChangeId(second).to_letters()), "{said}");
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn goto_records_safety_copies_in_its_diary_entry() {
+    let env = two_lines();
+    let before = Repository::open(env.root()).unwrap().head().unwrap();
+    env.overwrite("a.txt", "mine\n");
+    let doc = goto_json(&env, "feature");
+    let repo = Repository::open(env.root()).unwrap();
+    let (_, entry) = repo.current().unwrap();
+    assert_eq!(entry.parent, Some(before));
+    assert_eq!(entry.action, Action::Command);
+    assert_eq!(entry.command, "goto");
+    assert_eq!(entry.state.position, Position::OnLine("feature".into()));
+    // Goto never overwrites unsaved work, so what it carries along needs no copy.
+    assert_eq!(entry.safety_copies, []);
+    assert_eq!(doc["safety_copies"], 0, "{doc}");
+    assert_eq!(std::fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
+}
+
+#[test]
+fn goto_json_matches_its_snapshot() {
+    let env = two_lines();
+    let mut doc = goto_json(&env, "feature");
+    let redact = |v: &mut serde_json::Value| *v = "[redacted]".into();
+    let save = &mut doc["save"];
+    for key in ["id", "change_id", "change_id_short"] {
+        redact(&mut save[key]);
+    }
+    for person in ["author", "saver"] {
+        for key in ["time_ms", "tz_offset_min"] {
+            redact(&mut save[person][key]);
+        }
+    }
+    insta::assert_json_snapshot!(doc);
 }

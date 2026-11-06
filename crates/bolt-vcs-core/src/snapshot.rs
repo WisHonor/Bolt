@@ -816,7 +816,7 @@ fn store_link(
 }
 
 /// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it.
-fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, SaveError> {
+pub(crate) fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
         source,

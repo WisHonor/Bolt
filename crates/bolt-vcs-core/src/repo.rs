@@ -1252,6 +1252,20 @@ impl Repository {
     fn move_head(
         &mut self,
         lock: &ChangeLock,
+        packs: PackSet,
+        entry: &DiaryEntry,
+    ) -> Result<Id, RepoError> {
+        let id = self.store_entry(lock, packs, entry)?;
+        fault_point("commit:before-head")?;
+        self.move_head_to(lock, id)?;
+        Ok(id)
+    }
+
+    /// Stores `entry` in the last of `packs` and moves them all into the store, leaving
+    /// `state/head` as it is: a switch stores its entry before it changes the folder.
+    pub fn store_entry(
+        &mut self,
+        _lock: &ChangeLock,
         mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
@@ -1262,8 +1276,6 @@ impl Repository {
         for path in packs.finish()? {
             self.store.register(&path);
         }
-        fault_point("commit:before-head")?;
-        self.move_head_to(lock, id)?;
         Ok(id)
     }
 

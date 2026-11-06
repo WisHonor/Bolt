@@ -33,6 +33,18 @@ pub enum ResolveError {
     Repo(#[from] RepoError),
 }
 
+impl ResolveError {
+    /// What the user can do next, if there is something to say.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            ResolveError::NotFound(_) => Some("See your saves with: bolt history".to_owned()),
+            ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
+            ResolveError::Repo(r) => r.hint(),
+        }
+    }
+}
+
 impl From<crate::store::StoreError> for ResolveError {
     fn from(e: crate::store::StoreError) -> Self {
         RepoError::from(e).into()

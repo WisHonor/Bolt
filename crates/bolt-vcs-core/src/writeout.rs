@@ -11,20 +11,20 @@ use std::time::Duration;
 
 use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
-use crate::diary::DiaryEntry;
+use crate::diary::{DiaryEntry, SafetyCopy};
 use crate::diff::{for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
 use crate::fsio;
 use crate::history::tip_of;
-use crate::id::{ContentHasher, Id};
+use crate::id::{ContentHasher, Id, hash_content};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{
     MAX_PATH_BYTES, holdable_here, is_bolt_alias, is_git_alias, validate_path, writable_here,
 };
-use crate::pack::ObjectKind;
+use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::snapshot::{NAMED, SaveError, listed, read_folder};
 use crate::store::{Store, StoreError};
@@ -42,6 +42,8 @@ pub struct Plan {
     pub placeholders: Vec<String>,
     /// Unsaved work the switch would overwrite or remove, which it leaves out.
     pub collisions: Vec<String>,
+    /// Unsaved changes the folder holds, which stay as they are unless they collide.
+    pub carried: usize,
     /// What reading the folder found wrong.
     pub warnings: Vec<Warning>,
 }
@@ -58,6 +60,8 @@ pub struct Applied {
     /// Entries that weren't what the plan found, left as they are. A folder stands for
     /// everything below it.
     pub changed_since_plan: Vec<String>,
+    /// Links written as files holding their targets because this computer couldn't make them.
+    pub placeholders: Vec<String>,
     pub warnings: Vec<Warning>,
 }
 
@@ -103,6 +107,7 @@ pub fn plan(
     let mut folder = Tree::new(store, &now.listings, now.root, drive);
     let mut refused = BTreeSet::new();
     let mut plan = Plan {
+        carried: unsaved.len(),
         warnings: now.warnings,
         ..Plan::default()
     };
@@ -192,6 +197,88 @@ pub fn plan(
     plan.collisions.sort_unstable();
     plan.not_written = refused.into_iter().collect();
     Ok(plan)
+}
+
+/// Stores in `packs` what carrying out `actions` would overwrite or remove that the save `from`
+/// doesn't hold at the same path, and lists it by path: the safety copies (decision 050). An
+/// entry that is no longer what the plan found is left by the switch, so it needs none.
+pub fn keep_safety_copies(
+    repo: &Repository,
+    actions: &[Action],
+    from: Id,
+    drive: Drive,
+    packs: &mut PackSet,
+) -> Result<Vec<SafetyCopy>, SaveError> {
+    let store = repo.store();
+    let from_root = store.save(&from, repo.signatures_allowed())?.root;
+    let stored = HashMap::new();
+    let mut saved = Tree::new(store, &stored, from_root, drive);
+    let mut disk = Folders::open(repo.root()).map_err(|e| unreadable("the project folder", e))?;
+    let mut copies = Vec::new();
+    for a in actions {
+        let Some(e) = a.expected else { continue };
+        if !matches!(
+            e.kind,
+            EntryKind::File | EntryKind::Executable | EntryKind::Symlink
+        ) || saved
+            .entry(&a.path)?
+            .is_some_and(|s| s.kind == e.kind && s.id == e.id)
+        {
+            continue;
+        }
+        let held =
+            packs.contains(&e.id) || store.has_good_copy(&e.id, ObjectKind::Content, e.size)?;
+        if !held && !copy_in(&mut disk, &a.path, e, packs)? {
+            continue;
+        }
+        copies.push(SafetyCopy {
+            path: a.path.clone(),
+            kind: e.kind,
+            id: e.id,
+            size: e.size,
+        });
+    }
+    copies.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(copies)
+}
+
+/// Stores the entry at `path` if it still holds `e`; `false` if it doesn't.
+fn copy_in(
+    disk: &mut Folders,
+    path: &str,
+    e: Expected,
+    packs: &mut PackSet,
+) -> Result<bool, SaveError> {
+    let (up, name) = split(path);
+    if disk.enter(up).is_err() {
+        return Ok(false);
+    }
+    let dir = disk.here();
+    let os = OsStr::new(name);
+    // Gone, or no longer what it was: the switch leaves what is there.
+    let still = |kind: EntryType| dir.metadata(os).is_ok_and(|now| now.kind == kind);
+    if e.kind == EntryKind::Symlink {
+        let target = match crate::snapshot::link_target(dir, name, path) {
+            Ok(target) => target,
+            Err(_) if !still(EntryType::Symlink) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if hash_content(target.as_bytes()) != e.id {
+            return Ok(false);
+        }
+        packs.add_content(target.as_bytes())?;
+        return Ok(true);
+    }
+    let mut file = match dir.open_file(os) {
+        Ok(file) => file,
+        Err(_) if !still(EntryType::File) => return Ok(false),
+        Err(err) => return Err(unreadable(path, err)),
+    };
+    match packs.add_content_from(&mut file, e.id) {
+        Ok(_) => Ok(true),
+        Err(PackError::ContentChanged) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Carries out `journal`, made by [`plan`] or read back after a crash. Each change is checked
@@ -845,10 +932,11 @@ impl Run<'_> {
         }
         let mut applied = self.applied;
         applied.changed_since_plan = self.changed.into_iter().collect();
+        applied.placeholders = self.placeholders;
         let refused: Vec<String> = self.refused.into_iter().collect();
         let warnings = [
             (!refused.is_empty()).then(|| not_written_warning(&refused)),
-            (!self.placeholders.is_empty()).then(|| placeholders_warning(&self.placeholders)),
+            (!applied.placeholders.is_empty()).then(|| placeholders_warning(&applied.placeholders)),
             (!applied.in_use.is_empty()).then(|| in_use_warning(&applied.in_use)),
             (!applied.changed_since_plan.is_empty())
                 .then(|| changed_warning(&applied.changed_since_plan)),

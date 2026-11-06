@@ -15,11 +15,13 @@ use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
+use bolt_core::lines::resolve_target;
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
+use bolt_core::switch::{SwitchError, goto};
 use bolt_core::text::escape;
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
@@ -64,6 +66,8 @@ enum Command {
     History,
     /// Show one save.
     Show { save: Option<String> },
+    /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
+    Goto { target: String },
 }
 
 impl From<RepoError> for Failure {
@@ -104,13 +108,18 @@ impl From<SaveError> for Failure {
 
 impl From<ResolveError> for Failure {
     fn from(e: ResolveError) -> Failure {
-        let hint = match &e {
-            ResolveError::NotFound(_) => Some("See your saves with: bolt history".to_owned()),
-            ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
-            ResolveError::Repo(r) => r.hint(),
-        };
         Failure {
-            hint,
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<SwitchError> for Failure {
+    fn from(e: SwitchError) -> Failure {
+        Failure {
+            hint: e.hint(),
             message: e.to_string(),
             printed: false,
         }
@@ -583,6 +592,69 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     Ok(())
 }
 
+fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let target = resolve_target(repo, text)?;
+    let done = goto(
+        repo,
+        &target,
+        &who,
+        "goto",
+        git_excludes.as_deref(),
+        &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
+    )?;
+    let mut warnings = done.applied.warnings.clone();
+    let save = repo.store().save(&done.save, repo.signatures_allowed())?;
+    let short = short_or_whole(repo, &done.save, &save.change_id, &mut warnings);
+    // The switch has happened, so this only leaves out a line of advice if it fails.
+    let lines = repo
+        .current()
+        .map(|(_, e)| e.state.lines)
+        .unwrap_or_default();
+    warnings.extend(repo.store().warnings());
+    if json {
+        println!(
+            "{}",
+            json!({
+                "bolt_json": BOLT_JSON,
+                "position": output::position_json(&done.position),
+                "save": output::save_json(&done.save, &save, &short),
+                "written": done.applied.written,
+                "removed": done.applied.removed,
+                "not_written": done.not_written,
+                "placeholders": done.applied.placeholders,
+                "files_in_use": done.applied.in_use,
+                "safety_copies": done.safety_copies,
+                "warnings": output::warnings_json(&warnings),
+            })
+        );
+    } else {
+        match done.carried {
+            0 => {}
+            1 => println!("Your unsaved changes in 1 file came along."),
+            n => println!("Your unsaved changes in {n} files came along."),
+        }
+        match &done.position {
+            Position::OnLine(line) => println!("You're on line {}.", escape(line, false)),
+            Position::AtSave(id) => {
+                println!(
+                    "You're at save {short}, not on a line. Saving here asks for a new line's name."
+                );
+                if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
+                    let line = escape(line, false);
+                    println!("To keep saving on {line}: bolt goto {line}");
+                }
+            }
+        }
+    }
+    output::print_warnings(&warnings);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // The project a command opens is kept here, so that if the command fails, the error can list
@@ -598,6 +670,7 @@ fn main() -> ExitCode {
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
+        Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
