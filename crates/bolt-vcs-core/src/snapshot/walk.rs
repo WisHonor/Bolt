@@ -8,9 +8,12 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use bolt_platform::dir::{Dir, DirEntry, EntryType, is_link_refusal};
+use bolt_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::drive::Drive;
@@ -50,19 +53,32 @@ const MOST_HELD: usize = 256;
 /// asked for, at most `MOST_HELD - 2`, and that folder itself when it is deeper than those. So at
 /// most `MOST_HELD` are open, and one more for a moment while the next is opened.
 pub(super) struct Handles {
-    top: Dir,
+    top: Arc<Dir>,
     down: Vec<(OsString, Dir)>,
     past: Option<(PathBuf, Dir)>,
+    /// The most it holds; less than `MOST_HELD` when several share the limit.
+    most: usize,
 }
 
 impl Handles {
     /// The project folder at `root`, a path the caller has resolved.
     fn open(root: &Path) -> io::Result<Handles> {
         Ok(Handles {
-            top: Dir::open_top(root)?,
+            top: Arc::new(Dir::open_top(root)?),
             down: Vec::new(),
             past: None,
+            most: MOST_HELD,
         })
+    }
+
+    /// Another set from the same top folder, holding at most `most`.
+    fn sharing_top(&self, most: usize) -> Handles {
+        Handles {
+            top: Arc::clone(&self.top),
+            down: Vec::new(),
+            past: None,
+            most,
+        }
     }
 
     /// The folder at the project path `rel`, opened from the deepest folder held on the way to
@@ -76,7 +92,7 @@ impl Handles {
             .take_while(|((held, _), name)| held.as_os_str() == **name)
             .count();
         self.down.truncate(same);
-        while self.down.len() < MOST_HELD - 2
+        while self.down.len() < self.most.saturating_sub(2)
             && let Some(&name) = names.get(self.down.len())
         {
             let next = self.deepest().open_dir(name)?;
@@ -829,93 +845,9 @@ fn scan_folder(
 ) -> Result<Scan, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
-    // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
-    // read.
-    let mut folders = Folders::from([(String::new(), Vec::new())]);
     let (top, dropped) = base.listing(base.root)?;
     let mut rules = WalkState::new(root, drive, top, dropped, own_list)?;
-    let mut path = vec![InFolder::listed(&mut rules.handles, String::new(), 0)?];
-    while let Some(here) = path.last_mut() {
-        let Some(entry) = here.left.pop() else {
-            path.pop();
-            continue;
-        };
-        let (up, depth) = (here.rel.clone(), here.depth + 1);
-        // A Windows reparse point that isn't a link but is marked as a folder: a folder to the
-        // ignore rules, though Bolt never goes into it.
-        let closed = entry.kind == EntryType::Other && entry.folder;
-        let is_dir = entry.kind == EntryType::Dir || closed;
-        let own = |name: &str| own_folder(name, drive);
-        if is_dir && depth == 1 && entry.name.to_str().is_some_and(own) {
-            continue;
-        }
-        let rel_path = Path::new(&up).join(&entry.name);
-        let kept = if closed {
-            rules.keeps_closed_folder(&root.join(&rel_path))
-        } else {
-            rules.keeps(&root.join(&rel_path), is_dir)
-        };
-        // Going on without the rules of an ignore file that failed would save what it keeps out.
-        if let Some(problem) = rules.problem.take() {
-            return Err(problem);
-        }
-        if !kept {
-            continue;
-        }
-        let rel = shown(&rel_path);
-        let name = entry.name.to_str().ok_or_else(|| SaveError::InvalidName {
-            path: rel.clone(),
-            reason: "its name is not valid UTF-8".into(),
-        })?;
-        validate_name(name).map_err(|e| SaveError::InvalidName {
-            path: rel.clone(),
-            reason: e.to_string(),
-        })?;
-        limits
-            .check_path(rel.len())
-            .map_err(|why| too_long(why, &rel))?;
-        let kind = match entry.kind {
-            EntryType::Dir => {
-                limits.check_depth(depth).map_err(too_large)?;
-                folders.entry(rel.clone()).or_default();
-                // The walk hands a folder over before it asks about anything inside.
-                rules.note_folder(&rel, &mut base)?;
-                Kind::Folder
-            }
-            EntryType::Symlink => Kind::Symlink,
-            EntryType::File => Kind::File,
-            // A Windows reparse point that isn't a link (a cloud placeholder, say): reading it
-            // says that Bolt can't save it yet.
-            EntryType::Other if cfg!(windows) => Kind::File,
-            // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
-            EntryType::Other => continue,
-        };
-        let meta = if kind == Kind::Folder {
-            None
-        } else {
-            let unreadable = |source| SaveError::Unreadable {
-                path: rel.clone(),
-                source,
-            };
-            let dir = rules.handles.folder(&up)?;
-            let meta = dir.metadata(&entry.name).map_err(unreadable)?;
-            // The listing and this look disagree: it changed in between.
-            if meta.kind != entry.kind {
-                return Err(SaveError::ChangedDuringSave { path: rel });
-            }
-            Some(meta)
-        };
-        limits.add(1).map_err(too_large)?;
-        folders.entry(up).or_default().push(Child {
-            name: name.to_owned(),
-            kind,
-            rel: rel.clone(),
-            meta,
-        });
-        if kind == Kind::Folder {
-            path.push(InFolder::listed(&mut rules.handles, rel, depth)?);
-        }
-    }
+    let mut folders = walk_and_look(root, &mut base, &mut limits, drive, &mut rules)?;
     // Sorted, so a name the walk found can be looked up.
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -976,15 +908,8 @@ fn scan_folder(
         let left_out = nested_projects_left_out(&rules.nested);
         rules.warnings.push(left_out);
     }
-    // Only the top: what is read next opens its folders again by name, so one swapped since the
-    // walk is found, never read where it went.
-    let handles = Handles {
-        down: Vec::new(),
-        past: None,
-        ..rules.handles
-    };
     Ok(Scan {
-        handles,
+        handles: rules.handles,
         folders,
         old: rules.old,
         rebuilt,
@@ -993,6 +918,248 @@ fn scan_folder(
         gitignored: rules.gitignored,
         warnings: rules.warnings,
     })
+}
+
+/// A file or link the walk found, still to be looked at: child `at` of `folder`, named `name`, at
+/// the project path `rel`, which the folder's listing said was `listed`.
+struct Look {
+    folder: String,
+    at: usize,
+    listed: EntryType,
+    name: String,
+    rel: String,
+}
+
+/// The most files one thread looks at in one go.
+const LOOKS_PER_JOB: usize = 256;
+/// The most threads that look at files at once; more only wait on each other in the drive.
+const MOST_LOOKERS: usize = 6;
+
+/// Walks the folder (`walk_folders`) and fills in the details of every file and link it keeps,
+/// each from a look at the entry itself. Never from the folder listing: on Windows it keeps the
+/// old size and time of a file that is open and being written, so a change would hide behind them.
+/// Each look opens the file there, so they run on other threads while the walk goes on, as Git's
+/// preloaded index does.
+fn walk_and_look(
+    root: &Path,
+    base: &mut Base,
+    limits: &mut SaveLimits,
+    drive: Drive,
+    rules: &mut WalkState,
+) -> Result<Folders, SaveError> {
+    let threads = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MOST_LOOKERS);
+    // Half the folders held are the walk's; the lookers share the rest.
+    rules.handles.most = MOST_HELD / 2;
+    let most = MOST_HELD / 2 / threads;
+    let (send, jobs) = mpsc::channel();
+    let jobs = Mutex::new(jobs);
+    let failed = AtomicBool::new(false);
+    let (walked, looked) = thread::scope(|scope| {
+        let mut lookers = Vec::new();
+        for _ in 0..threads {
+            let mine = rules.handles.sharing_top(most);
+            let (jobs, failed) = (&jobs, &failed);
+            match thread::Builder::new().spawn_scoped(scope, move || look(mine, jobs, failed)) {
+                Ok(looker) => lookers.push(looker),
+                // Dropping `send` lets those started finish.
+                Err(e) => return (Err(SaveError::Repo(e.into())), Vec::new()),
+            }
+        }
+        let walked = walk_folders(root, base, limits, drive, rules, send);
+        let mut looked = Vec::new();
+        for looker in lookers {
+            match looker.join() {
+                Ok(found) => looked.extend(found),
+                Err(_) => {
+                    let stopped =
+                        io::Error::other("a look at the project's files stopped unexpectedly");
+                    looked.push((0, Err(SaveError::Repo(stopped.into()))));
+                }
+            }
+        }
+        (walked, looked)
+    });
+    rules.handles.most = MOST_HELD;
+    // Only the top: what is read next opens its folders again by name, so one swapped since the
+    // walk is found, never read where it went.
+    rules.handles.down.clear();
+    rules.handles.past = None;
+    let mut folders = walked?;
+    // Every job before a failed one was taken, so the first problem is always the same one.
+    let mut looked = looked;
+    looked.sort_by_key(|(i, _)| *i);
+    for (_, found) in looked {
+        for (look, meta) in found? {
+            if let Some(c) = folders
+                .get_mut(&look.folder)
+                .and_then(|c| c.get_mut(look.at))
+            {
+                c.meta = Some(meta);
+            }
+        }
+    }
+    Ok(folders)
+}
+
+/// A job's files, each with its details, or the first problem a look at them found.
+type Looked = Result<Vec<(Look, EntryMeta)>, SaveError>;
+
+/// A looker: takes jobs from `jobs` until there are none, or until one fails.
+fn look(
+    mut handles: Handles,
+    jobs: &Mutex<Receiver<(usize, Vec<Look>)>>,
+    failed: &AtomicBool,
+) -> Vec<(usize, Looked)> {
+    let mut done = Vec::new();
+    while !failed.load(Ordering::Relaxed) {
+        let next = match jobs.lock() {
+            Ok(jobs) => jobs.recv(),
+            Err(_) => break,
+        };
+        let Ok((i, job)) = next else { break };
+        let found = look_at(&mut handles, job);
+        failed.fetch_or(found.is_err(), Ordering::Relaxed);
+        done.push((i, found));
+    }
+    done
+}
+
+/// The details of each file and link in `job`, all in one folder.
+fn look_at(handles: &mut Handles, job: Vec<Look>) -> Looked {
+    let Some(first) = job.first() else {
+        return Ok(Vec::new());
+    };
+    let dir = handles.folder(&first.folder)?;
+    let mut found = Vec::with_capacity(job.len());
+    for look in job {
+        let meta =
+            dir.metadata(OsStr::new(&look.name))
+                .map_err(|source| SaveError::Unreadable {
+                    path: look.rel.clone(),
+                    source,
+                })?;
+        // The listing and this look disagree: it changed in between.
+        if meta.kind != look.listed {
+            return Err(SaveError::ChangedDuringSave { path: look.rel });
+        }
+        found.push((look, meta));
+    }
+    Ok(found)
+}
+
+/// The walk itself, handing the files and links it keeps to `send` a folder at a time, numbered
+/// in the order met, to be looked at while it goes on.
+fn walk_folders(
+    root: &Path,
+    base: &mut Base,
+    limits: &mut SaveLimits,
+    drive: Drive,
+    rules: &mut WalkState,
+    send: Sender<(usize, Vec<Look>)>,
+) -> Result<Folders, SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
+    // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
+    // read.
+    let mut folders = Folders::from([(String::new(), Vec::new())]);
+    let mut path = vec![InFolder::listed(&mut rules.handles, String::new(), 0)?];
+    let (mut job, mut jobs) = (Vec::new(), 0);
+    while let Some(here) = path.last_mut() {
+        let Some(entry) = here.left.pop() else {
+            path.pop();
+            continue;
+        };
+        let (up, depth) = (here.rel.clone(), here.depth + 1);
+        // A Windows reparse point that isn't a link but is marked as a folder: a folder to the
+        // ignore rules, though Bolt never goes into it.
+        let closed = entry.kind == EntryType::Other && entry.folder;
+        let is_dir = entry.kind == EntryType::Dir || closed;
+        let own = |name: &str| own_folder(name, drive);
+        if is_dir && depth == 1 && entry.name.to_str().is_some_and(own) {
+            continue;
+        }
+        let rel_path = Path::new(&up).join(&entry.name);
+        let kept = if closed {
+            rules.keeps_closed_folder(&root.join(&rel_path))
+        } else {
+            rules.keeps(&root.join(&rel_path), is_dir)
+        };
+        // Going on without the rules of an ignore file that failed would save what it keeps out.
+        if let Some(problem) = rules.problem.take() {
+            return Err(problem);
+        }
+        if !kept {
+            continue;
+        }
+        let rel = shown(&rel_path);
+        let name = entry.name.to_str().ok_or_else(|| SaveError::InvalidName {
+            path: rel.clone(),
+            reason: "its name is not valid UTF-8".into(),
+        })?;
+        validate_name(name).map_err(|e| SaveError::InvalidName {
+            path: rel.clone(),
+            reason: e.to_string(),
+        })?;
+        limits
+            .check_path(rel.len())
+            .map_err(|why| too_long(why, &rel))?;
+        let kind = match entry.kind {
+            EntryType::Dir => {
+                limits.check_depth(depth).map_err(too_large)?;
+                folders.entry(rel.clone()).or_default();
+                // The walk hands a folder over before it asks about anything inside.
+                rules.note_folder(&rel, base)?;
+                Kind::Folder
+            }
+            EntryType::Symlink => Kind::Symlink,
+            EntryType::File => Kind::File,
+            // A Windows reparse point that isn't a link (a cloud placeholder, say): reading it
+            // says that Bolt can't save it yet.
+            EntryType::Other if cfg!(windows) => Kind::File,
+            // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
+            EntryType::Other => continue,
+        };
+        limits.add(1).map_err(too_large)?;
+        let children = folders.entry(up.clone()).or_default();
+        if kind == Kind::Folder {
+            // Every file here is met before any folder, so they can be looked at now.
+            send_job(&mut job, &mut jobs, &send);
+        } else {
+            if job.len() == LOOKS_PER_JOB || job.first().is_some_and(|l: &Look| l.folder != up) {
+                send_job(&mut job, &mut jobs, &send);
+            }
+            job.push(Look {
+                folder: up,
+                at: children.len(),
+                listed: entry.kind,
+                name: name.to_owned(),
+                rel: rel.clone(),
+            });
+        }
+        children.push(Child {
+            name: name.to_owned(),
+            kind,
+            rel: rel.clone(),
+            meta: None,
+        });
+        if kind == Kind::Folder {
+            path.push(InFolder::listed(&mut rules.handles, rel, depth)?);
+        }
+    }
+    send_job(&mut job, &mut jobs, &send);
+    Ok(folders)
+}
+
+/// Sends `job`, if it holds anything, as number `jobs`, and starts the next.
+fn send_job(job: &mut Vec<Look>, jobs: &mut usize, send: &Sender<(usize, Vec<Look>)>) {
+    if job.is_empty() {
+        return;
+    }
+    // Only fails once every looker has stopped, and then their own error says why.
+    let _ = send.send((*jobs, std::mem::take(job)));
+    *jobs += 1;
 }
 
 /// Says the save left out entries whose names Git treats as `.git` or Bolt as `.bolt`, naming the

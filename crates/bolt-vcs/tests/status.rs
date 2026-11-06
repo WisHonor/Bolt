@@ -258,6 +258,8 @@ fn status_never_writes_to_the_store() {
 #[test]
 fn a_cache_that_cant_be_written_is_a_warning() {
     let env = project(&[("a.txt", "a")]);
+    // The save wrote the cache; a folder takes its place.
+    fs::remove_file(env.root().join(".bolt/cache/files")).unwrap();
     fs::create_dir_all(env.root().join(".bolt/cache/files/in-the-way")).unwrap();
     let doc = status_json(&env, &[]);
     let kinds: Vec<&str> = doc["warnings"]
@@ -270,8 +272,8 @@ fn a_cache_that_cant_be_written_is_a_warning() {
     let said = doc["warnings"][0]["message"].as_str().unwrap();
     assert!(
         said.starts_with(
-            "Bolt couldn't keep what it learned about your files, so the next status reads them \
-             all again: "
+            "Bolt couldn't keep what it learned about your files, so the next status or save \
+             reads them all again: "
         ),
         "{said}"
     );

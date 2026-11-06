@@ -259,6 +259,9 @@ pub fn save_folder(
             detail: format!("the current line {line} has no save"),
         })?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
+    // Before the walk, as for `read_folder`; without it every file is read.
+    let now = filecache::drive_now(repo).ok();
+    let trusted = now.map(|_| FileCache::load(repo)).unwrap_or_default();
     // Probed under the lock: the probe's file sits in `tmp/`, which is cleared when it is free.
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let base = Base::new(repo.store(), parent.root, SaveLimits::default());
@@ -288,29 +291,38 @@ pub fn save_folder(
     for listing in &rebuilt {
         store_listing(repo.store(), &mut packs, listing)?;
     }
-    let (root, kept, changed, taken_back) = build(
-        repo.store(),
-        &mut packs,
+    let mut storing = Storing {
+        store: repo.store(),
+        packs: &mut packs,
+        trusted,
+        seen: FileCache::default(),
+    };
+    let built = build_with(
+        &mut storing,
         &mut handles,
         &folders,
         &old,
         &ignored,
         &gitignored,
     )?;
+    let seen = storing.seen;
+    let root = built.root;
+    let kept = built.kept.len() + built.kept_below_gone;
     if kept > 0 {
         warnings.push(kept_warning(kept));
     }
-    if !changed.is_empty() {
-        warnings.push(ignored_changes_saved(changed));
+    if !built.changed.is_empty() {
+        warnings.push(ignored_changes_saved(built.changed));
     }
-    if !taken_back.is_empty() {
-        warnings.push(gitignored_files_saved(taken_back));
+    if !built.taken_back.is_empty() {
+        warnings.push(gitignored_files_saved(built.taken_back));
     }
     if root == parent.root {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
         if !packs.is_empty() {
             packs.finish()?;
         }
+        keep_file_cache(repo, seen, now, &mut warnings);
         return Ok(SaveOutcome::NothingChanged {
             current: parent_id,
             warnings,
@@ -364,6 +376,7 @@ pub fn save_folder(
     repo.commit(&lock, packs, &diary)?;
     cache.add(line, parent_id, save_id, save.change_id);
     cache.store(repo, &key, &diary.state);
+    keep_file_cache(repo, seen, now, &mut warnings);
     // The save is committed now; failing to count its files must not make it look failed.
     let changed_files = match count_changes(repo.store(), Some(parent.root), root) {
         Ok(count) => Some(count),
@@ -385,6 +398,27 @@ pub fn save_folder(
         short_change_id,
         warnings,
     })
+}
+
+/// Writes `seen`, what this walk learned of the files, as the file-state cache, if the drive's
+/// "now" was found before the walk; failing to is only a warning.
+fn keep_file_cache(
+    repo: &Repository,
+    seen: FileCache,
+    now: Option<i128>,
+    warnings: &mut Vec<Warning>,
+) {
+    if let Some(now) = now
+        && let Err(why) = seen.store(repo, now)
+    {
+        warnings.push(Warning::new(
+            warning::FILE_CACHE_NOT_STORED,
+            format!(
+                "Bolt couldn't keep what it learned about your files, so the next status or save \
+                 reads them all again: {why}"
+            ),
+        ));
+    }
 }
 
 /// Says how many entries a save kept as they were, and why.
@@ -529,24 +563,56 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
 }
 
 /// Where `build` puts what it reads: the store, for a save, or nowhere, for a look at what changed.
+/// Folders are opened through `handles`, by project path, only for what is read.
 trait Contents {
-    /// The ID and size of the file `c` in `dir`.
-    fn file(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError>;
-    /// The ID and size of the link `c`'s target.
-    fn link(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError>;
+    /// The ID and size of the file `c` in the folder `folder`, which the base save holds as `was`.
+    fn file(
+        &mut self,
+        handles: &mut Handles,
+        folder: &str,
+        c: &Child,
+        was: Option<&Entry>,
+    ) -> Result<(Id, u64), SaveError>;
+    /// The ID and size of the link `c`'s target, in the folder `folder`.
+    fn link(
+        &mut self,
+        handles: &mut Handles,
+        folder: &str,
+        c: &Child,
+    ) -> Result<(Id, u64), SaveError>;
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
 }
 
-/// A save's: everything goes into `packs` unless the store holds a good copy.
+/// A save's: everything goes into `packs` unless the store holds a good copy. A file `trusted`
+/// vouches for is taken from the base save unread, if the base save holds what the cache says it
+/// held. `seen` learns every file met.
 struct Storing<'a> {
     store: &'a Store,
     packs: &'a mut PackSet,
+    trusted: FileCache,
+    seen: FileCache,
 }
 
 impl Contents for Storing<'_> {
-    fn file(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
+    fn file(
+        &mut self,
+        handles: &mut Handles,
+        folder: &str,
+        c: &Child,
+        was: Option<&Entry>,
+    ) -> Result<(Id, u64), SaveError> {
         let meta = c.meta.as_ref();
-        store_file(
+        // The cache never names content to a save: it only says the base save's entry still holds.
+        if let Some(meta) = meta
+            && let Some(known) = self.trusted.matches(&c.rel, meta)
+            && was.is_some_and(|e| (e.id, e.size) == (known.id, known.size))
+        {
+            let (id, size) = (known.id, known.size);
+            self.seen.record(&c.rel, meta, id);
+            return Ok((id, size));
+        }
+        let dir = handles.folder(folder)?;
+        let (id, size) = store_file(
             self.packs,
             self.store,
             dir,
@@ -554,11 +620,27 @@ impl Contents for Storing<'_> {
             &c.rel,
             meta,
             &mut || {},
-        )
+        )?;
+        // The walk's details: the read found the file still had them.
+        if let Some(meta) = meta {
+            self.seen.record(&c.rel, meta, id);
+        }
+        Ok((id, size))
     }
 
-    fn link(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
-        store_link(self.packs, self.store, dir, &c.name, &c.rel)
+    fn link(
+        &mut self,
+        handles: &mut Handles,
+        folder: &str,
+        c: &Child,
+    ) -> Result<(Id, u64), SaveError> {
+        store_link(
+            self.packs,
+            self.store,
+            handles.folder(folder)?,
+            &c.name,
+            &c.rel,
+        )
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
@@ -579,9 +661,10 @@ struct Built {
     taken_back: Vec<String>,
 }
 
-/// Stores every file and listing, deepest folders first, reading the files and links through
+/// Stores every file and listing, deepest folders first, reading every file and link through
 /// `handles`. Returns the top listing's ID, how many entries were kept as they were, which of the
 /// files and links in `ignored` changed, and which of those in `gitignored` are new or changed.
+#[cfg(test)]
 fn build(
     store: &Store,
     packs: &mut PackSet,
@@ -591,7 +674,12 @@ fn build(
     ignored: &HashSet<String>,
     gitignored: &HashSet<String>,
 ) -> Result<(Id, usize, Vec<String>, Vec<String>), SaveError> {
-    let mut storing = Storing { store, packs };
+    let mut storing = Storing {
+        store,
+        packs,
+        trusted: FileCache::default(),
+        seen: FileCache::default(),
+    };
     let b = build_with(&mut storing, handles, folders, old, ignored, gitignored)?;
     let kept = b.kept.len() + b.kept_below_gone;
     Ok((b.root, kept, b.changed, b.taken_back))
@@ -623,14 +711,14 @@ fn build_with(
         let before = old.get(rel).and_then(Option::as_ref);
         let mut entries = Vec::new();
         for c in folders.get(rel).into_iter().flatten() {
+            let was = before.and_then(|l| l.get(&c.name));
             let (kind, id, size) = match c.kind {
                 Kind::Folder => {
                     let id = built.remove(c.rel.as_str()).ok_or_else(missing)?;
                     (EntryKind::Folder, id, 0)
                 }
                 Kind::File => {
-                    let (id, size) = contents.file(handles.folder(rel)?, c)?;
-                    let was = before.and_then(|l| l.get(&c.name));
+                    let (id, size) = contents.file(handles, rel, c, was)?;
                     // Git writes a link it can't make as a file holding its target: the link
                     // stays (decision 039).
                     let links_target =
@@ -652,7 +740,7 @@ fn build_with(
                     }
                 }
                 Kind::Symlink => {
-                    let (id, size) = contents.link(handles.folder(rel)?, c)?;
+                    let (id, size) = contents.link(handles, rel, c)?;
                     (EntryKind::Symlink, id, size)
                 }
                 Kind::Kept { kind, id, size } => {
@@ -664,7 +752,6 @@ fn build_with(
                     (EntryKind::Folder, id, 0)
                 }
             };
-            let was = before.and_then(|l| l.get(&c.name));
             if was.is_none_or(|e| (e.kind, e.id) != (kind, id)) {
                 if ignored.contains(&c.rel) {
                     changed.push(c.rel.clone());
@@ -906,17 +993,7 @@ pub(crate) fn read_folder(
         &ignored,
         &gitignored,
     )?;
-    if let Some(now) = now
-        && let Err(why) = reading.seen.store(repo, now)
-    {
-        warnings.push(Warning::new(
-            warning::FILE_CACHE_NOT_STORED,
-            format!(
-                "Bolt couldn't keep what it learned about your files, so the next status reads \
-                 them all again: {why}"
-            ),
-        ));
-    }
+    keep_file_cache(repo, reading.seen, now, &mut warnings);
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
     not_written_here.sort_unstable();
@@ -937,7 +1014,13 @@ struct Reading {
 }
 
 impl Contents for Reading {
-    fn file(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
+    fn file(
+        &mut self,
+        handles: &mut Handles,
+        folder: &str,
+        c: &Child,
+        _was: Option<&Entry>,
+    ) -> Result<(Id, u64), SaveError> {
         if let Some(meta) = &c.meta
             && let Some(known) = self.trusted.matches(&c.rel, meta)
         {
@@ -945,6 +1028,7 @@ impl Contents for Reading {
             self.seen.record(&c.rel, meta, id);
             return Ok((id, meta.size));
         }
+        let dir = handles.folder(folder)?;
         let (_, id, size) = hash_scanned(dir, &c.name, &c.rel, c.meta.as_ref(), &mut || {})?;
         // The walk's details: the read found the file still had them.
         if let Some(meta) = &c.meta {
@@ -953,8 +1037,13 @@ impl Contents for Reading {
         Ok((id, size))
     }
 
-    fn link(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
-        let target = link_target(dir, &c.name, &c.rel)?;
+    fn link(
+        &mut self,
+        handles: &mut Handles,
+        folder: &str,
+        c: &Child,
+    ) -> Result<(Id, u64), SaveError> {
+        let target = link_target(handles.folder(folder)?, &c.name, &c.rel)?;
         Ok((hash_content(target.as_bytes()), target.len() as u64))
     }
 
@@ -1797,7 +1886,6 @@ mod tests {
     }
 
     /// Sets when `path` last changed.
-    #[cfg(feature = "fault-injection")]
     fn set_time(path: &Path, time: std::time::SystemTime) {
         let file = fs::File::options().write(true).open(path).unwrap();
         file.set_modified(time).unwrap();
@@ -1935,5 +2023,117 @@ mod tests {
             "{stored:?}"
         );
         assert!(pack_is_empty);
+    }
+
+    /// Writes `rel`, then sets its time an hour back, so the file-state cache can vouch for it.
+    fn write_old(root: &Path, rel: &str, bytes: &[u8]) {
+        write(root, rel, bytes);
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        set_time(&root.join(rel), hour_ago);
+    }
+
+    #[test]
+    fn an_unchanged_file_is_not_read_by_save() {
+        let (dir, mut repo) = project();
+        write_old(dir.path(), "kept.txt", b"kept");
+        save_now(&mut repo).unwrap();
+        let kept = dir.path().join("kept.txt");
+        // Nothing can read it now, so a save that opened it would fail.
+        #[cfg(unix)]
+        let _shut = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&kept, fs::Permissions::from_mode(0o000)).unwrap();
+            // Root reads it anyway.
+            if fs::read(&kept).is_ok() {
+                return;
+            }
+        };
+        #[cfg(windows)]
+        let _shut = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = fs::File::options().read(true).share_mode(0).open(&kept);
+            assert!(fs::read(&kept).is_err());
+            held.unwrap()
+        };
+        write(dir.path(), "new.txt", b"new");
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), root);
+        assert_eq!(tree["kept.txt"].1, b"kept");
+        assert_eq!(tree["new.txt"].1, b"new");
+    }
+
+    #[test]
+    fn a_file_the_cache_misses_is_read_and_saved() {
+        let (dir, mut repo) = project();
+        write_old(dir.path(), "a.txt", b"one");
+        write_old(dir.path(), "b.txt", b"one");
+        save_now(&mut repo).unwrap();
+        // As many bytes, at another time; and more bytes, at the same time.
+        let b = dir.path().join("b.txt");
+        let then = fs::metadata(&b).unwrap().modified().unwrap();
+        write_old(dir.path(), "a.txt", b"two");
+        set_time(
+            &dir.path().join("a.txt"),
+            then - std::time::Duration::from_secs(60),
+        );
+        write(dir.path(), "b.txt", b"three");
+        set_time(&b, then);
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), root);
+        assert_eq!(tree["a.txt"].1, b"two");
+        assert_eq!(tree["b.txt"].1, b"three");
+    }
+
+    #[test]
+    fn a_deleted_file_drops_out_of_the_file_cache() {
+        let (dir, mut repo) = project();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write_old(dir.path(), name, name.as_bytes());
+        }
+        save_now(&mut repo).unwrap();
+        let top = Dir::open_top(dir.path()).unwrap();
+        let meta = |name: &str| top.metadata(OsStr::new(name)).unwrap();
+        let (a, b, c) = (meta("a.txt"), meta("b.txt"), meta("c.txt"));
+        let cache = FileCache::load(&repo);
+        assert!(cache.matches("b.txt", &b).is_some());
+        assert!(cache.matches("c.txt", &c).is_some());
+        fs::remove_file(dir.path().join("b.txt")).unwrap();
+        save_now(&mut repo).unwrap();
+        let cache = FileCache::load(&repo);
+        assert!(cache.matches("a.txt", &a).is_some());
+        assert!(cache.matches("b.txt", &b).is_none());
+        // Status keeps only what it met too.
+        fs::remove_file(dir.path().join("c.txt")).unwrap();
+        crate::status::status(&repo, false, None).unwrap();
+        let cache = FileCache::load(&repo);
+        assert!(cache.matches("a.txt", &a).is_some());
+        assert!(cache.matches("c.txt", &c).is_none());
+    }
+
+    #[test]
+    fn a_save_whose_file_cache_cant_be_written_is_made_with_a_warning() {
+        let (dir, mut repo) = project();
+        fs::create_dir(dir.path().join(".bolt/cache/files")).unwrap();
+        write(dir.path(), "a.txt", b"a");
+        let SaveOutcome::Saved {
+            save_id, warnings, ..
+        } = save_now(&mut repo).unwrap()
+        else {
+            panic!("nothing was saved");
+        };
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["file_cache_not_stored"]);
+        assert!(
+            warnings[0]
+                .message
+                .starts_with("Bolt couldn't keep what it learned about your files"),
+            "{warnings:?}"
+        );
+        assert_eq!(repo.current().unwrap().1.state.lines["main"], save_id);
+        // And when nothing changed.
+        let SaveOutcome::NothingChanged { warnings, .. } = save_now(&mut repo).unwrap() else {
+            panic!("saved again");
+        };
+        assert_eq!(warnings[0].kind, "file_cache_not_stored");
     }
 }
