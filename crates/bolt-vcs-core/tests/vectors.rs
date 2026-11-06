@@ -693,3 +693,106 @@ fn file_cache_matches_its_vector() {
         assert_eq!((b.kind, b.id), (EntryKind::Executable, Id([0x22; 32])));
     }
 }
+
+#[derive(Deserialize)]
+struct JournalVector {
+    name: String,
+    hex: String,
+}
+
+/// A switch from entry 22…22 to 11…11: make the folder `a`; write `a/b.txt` (300 bytes, 44…44)
+/// over the 5-byte file 33…33; write the link `link` (a 6-byte target, 55…55); remove the empty
+/// executable `old` (66…66); remove the folder `z`. Laid out as storage-format.md §10 says,
+/// without the checksum.
+fn journal_body() -> String {
+    let id = |byte: &str| byte.repeat(32);
+    format!(
+        "{}01{}{}05\
+         0161{}\
+         07{}0101{}05{}ac02\
+         04{}0300{}06\
+         03{}050102{}00\
+         017a060104{}00",
+        hex(b"BOLTJRNL"),
+        id("11"),
+        id("22"),
+        "0400",
+        hex(b"a/b.txt"),
+        "01".to_owned() + &id("33"),
+        id("44"),
+        hex(b"link"),
+        id("55"),
+        hex(b"old"),
+        id("66"),
+        id("00"),
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/journal.json"]
+fn print_journal_vector() {
+    let body = unhex(&journal_body());
+    let mut bytes = body.clone();
+    bytes.extend_from_slice(blake3::hash(&body).as_bytes());
+    println!(
+        "[\n  {{\"name\": \"five-actions\", \"hex\": \"{}\"}}\n]",
+        hex(&bytes)
+    );
+}
+
+#[test]
+fn the_journal_matches_its_vectors() {
+    use bolt_core::journal::{Action, Change, Content, Expected, Journal};
+    let path = format!("{}/tests/vectors/journal.json", env!("CARGO_MANIFEST_DIR"));
+    let vectors: Vec<JournalVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let v = &vectors[0];
+    let bytes = unhex(&v.hex);
+    // The body is the one the layout above gives, and the last 32 bytes are its BLAKE3.
+    let (body, sum) = bytes.split_at(bytes.len() - 32);
+    assert_eq!(hex(body), journal_body(), "{}", v.name);
+    assert_eq!(sum, blake3::hash(body).as_bytes());
+    let found = |kind, id, size| {
+        Some(Expected {
+            kind,
+            id: Id([id; 32]),
+            size,
+        })
+    };
+    let at = |path: &str, change, expected| Action {
+        path: path.into(),
+        change,
+        expected,
+    };
+    let journal = Journal {
+        target: Id([0x11; 32]),
+        from: Id([0x22; 32]),
+        actions: vec![
+            at("a", Change::MakeFolder, None),
+            at(
+                "a/b.txt",
+                Change::File(Content {
+                    id: Id([0x44; 32]),
+                    size: 300,
+                }),
+                found(EntryKind::File, 0x33, 5),
+            ),
+            at(
+                "link",
+                Change::Link(Content {
+                    id: Id([0x55; 32]),
+                    size: 6,
+                }),
+                None,
+            ),
+            at(
+                "old",
+                Change::RemoveFile,
+                found(EntryKind::Executable, 0x66, 0),
+            ),
+            at("z", Change::RemoveFolder, found(EntryKind::Folder, 0, 0)),
+        ],
+    };
+    assert_eq!(Journal::decode(&bytes).unwrap(), journal);
+    assert_eq!(journal.encode(), bytes);
+}

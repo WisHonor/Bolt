@@ -1,10 +1,10 @@
 //! Which file names Bolt stores, and which it flags as non-portable (decision 004):
-//! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
-//! that work here but would break on another operating system. [`is_git_alias`] and
-//! [`is_bolt_alias`] spot the spellings of `.git` and `.bolt`, [`own_folder`] the project's own
-//! ones, [`holdable_here`] says whether this system can hold a name, [`writable_here`] whether
-//! write-out may write one, and [`fold`] compares names as a drive does. The limits on names and
-//! paths are here too (decision 051).
+//! [`validate_name`] refuses a name outright, and [`validate_path`] a path; [`name_problems`] and
+//! [`folder_problems`] flag names that work here but would break on another operating system.
+//! [`is_git_alias`] and [`is_bolt_alias`] spot the spellings of `.git` and `.bolt`, [`own_folder`]
+//! the project's own ones, [`holdable_here`] says whether this system can hold a name,
+//! [`writable_here`] whether write-out may write one, and [`fold`] compares names as a drive does.
+//! The limits on names and paths are here too (decision 051).
 
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
@@ -37,6 +37,8 @@ pub enum NameError {
     TooLong,
     #[error("a name cannot be spelled like Bolt's own folder (.bolt)")]
     BoltSpelling,
+    #[error("a path cannot be longer than {} bytes", MAX_PATH_BYTES)]
+    PathTooLong,
 }
 
 /// A name that is stored fine here but would break on another system. The names in the messages
@@ -111,6 +113,15 @@ pub fn validate_name(name: &str) -> Result<(), NameError> {
         return Err(NameError::BoltSpelling);
     }
     Ok(())
+}
+
+/// The always-on rules for a project path: `/` between names, each one [`validate_name`] allows,
+/// and at most [`MAX_PATH_BYTES`] in all. So no empty name, no `..`, and no `/` at either end.
+pub fn validate_path(path: &str) -> Result<(), NameError> {
+    if path.len() > MAX_PATH_BYTES {
+        return Err(NameError::PathTooLong);
+    }
+    path.split('/').try_for_each(validate_name)
 }
 
 /// Characters macOS (HFS+) ignores when comparing names; Git's `next_hfs_char` list.

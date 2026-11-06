@@ -134,3 +134,10 @@ path = "fuzz_targets/file_cache.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_journal"
+path = "fuzz_targets/decode_journal.rs"
+test = false
+doc = false
+bench = false

@@ -245,7 +245,7 @@ The current design, by area. Each part links to the decision that set it.
 **In plain words.** Bolt keeps a diary of every command that changed something. Each entry records the whole state of the repository afterwards, so `undo` simply goes back to an earlier entry, like Ctrl+Z in an editor. Changing commands take turns, and a crash can never leave a command half-done.
 
 - **Entries:** objects in the store; each holds the full state (every line, where you are, shelves), the safety copies made, its parent, and metadata. Tags and server lines, which change rarely, sit in records of their own that entries point to and share while unchanged ([decision 034](decisions/034-tags-kept-and-shared.md)).
-- **Committing:** one or more packs (the new data, with the entry in the last one), then `.bolt/state/head` is replaced atomically. Folder rewrites are journaled first, so an interrupted command is finished or rolled back on the next run.
+- **Committing:** one or more packs (the new data, with the entry in the last one), then `.bolt/state/head` is replaced atomically. Folder rewrites are journaled first (`.bolt/state/journal`), so an interrupted command is finished on the next run, never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)).
 - **Undo/redo:** new entries that copy an earlier state and restore files from safety copies; nothing is erased, and undo can jump to any entry.
 - **Other people:** undo changes only your repository; for sent saves and locks, Bolt offers the opposite action (v0.3).
 - **Concurrency:** one changing command at a time behind an OS-held lock; read-only commands never wait.

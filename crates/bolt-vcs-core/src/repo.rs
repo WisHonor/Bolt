@@ -225,7 +225,7 @@ impl From<PackError> for RepoError {
     }
 }
 
-fn damaged(detail: impl Into<String>) -> RepoError {
+pub(crate) fn damaged(detail: impl Into<String>) -> RepoError {
     RepoError::Damaged {
         detail: detail.into(),
     }
@@ -233,7 +233,7 @@ fn damaged(detail: impl Into<String>) -> RepoError {
 
 /// A `safe_fs` refusal (a link, special file or oversized file where `.bolt` must hold a real
 /// one) is damage; any other error stays an I/O error.
-fn refused(e: io::Error) -> RepoError {
+pub(crate) fn refused(e: io::Error) -> RepoError {
     match e.kind() {
         io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => damaged(e.to_string()),
         _ => e.into(),
@@ -1059,6 +1059,16 @@ impl Repository {
     /// that they last from one command to the next.
     pub fn set_cache_key(&mut self, key: [u8; KEY_LEN]) {
         self.cache_key = key;
+    }
+
+    /// `state/`, held open.
+    pub(crate) fn state_folder(&self) -> &Dir {
+        &self.held.state
+    }
+
+    /// Where `state/` is, to name files in it.
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        self.bolt.join("state")
     }
 
     /// `cache/`, held open.

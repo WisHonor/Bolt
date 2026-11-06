@@ -14,6 +14,7 @@ pub mod history;
 pub mod id;
 pub mod ignore;
 pub mod import;
+pub mod journal;
 pub mod keyed;
 pub mod link;
 pub mod listing;

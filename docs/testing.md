@@ -66,13 +66,13 @@ Measured on 2026-11-03 in release builds, on git/git as of 2026-11-01: 85,977 co
 
 Git before 2.52 reads a `**` right after the literal start of a pattern with a `/` differently, and Bolt follows 2.52 and later; with an older Git such lines are left out of the random rules. The CI runners' Git is new enough that nothing is left out.
 
-**Fuzz targets.** Seventeen cover the decoders and parsers of data from outside Bolt:
+**Fuzz targets.** Eighteen cover the decoders and parsers of data from outside Bolt:
 - Bolt's records: `decode_listing` (folder listings), `decode_save`, `decode_diary` (diary entries), `decode_tag_list` and `decode_server_lines`.
-- Bolt's files: `open_pack` (a pack of either version, with its index, trailer and every entry, each also looked up by its ID), `format_file` (`.bolt/format`), `change_ids` (`cache/change-ids` and its seal), `file_cache` (`cache/files`) and `name_rules` (a list of names given to `validate_name`, `is_git_alias` and `folder_problems`: the always-on name rules, the `.git` spellings and the clashes among one folder's names).
+- Bolt's files: `open_pack` (a pack of either version, with its index, trailer and every entry, each also looked up by its ID), `format_file` (`.bolt/format`), `change_ids` (`cache/change-ids` and its seal), `file_cache` (`cache/files`), `decode_journal` (`state/journal`) and `name_rules` (a list of names given to `validate_name`, `is_git_alias` and `folder_problems`: the always-on name rules, the `.git` spellings and the clashes among one folder's names).
 - `ignore_rules`: ignore files, the matcher and wildmatch, on drives that do and don't ignore letter case or compose Unicode.
 - The Git reader: `git_loose` (loose objects, as they are and compressed, to get past zlib), `git_pack` (a pack and its index, given the checksums no fuzzer finds by chance), `git_delta`, `git_objects` (commits, trees, tags, people, and the tests for Git LFS pointers), `git_refs` (`packed-refs` and `HEAD`, then the renaming of branch and tag names) and `git_config`.
 
-The decoder for project links ([storage-format.md](storage-format.md) §7) has test vectors but no target yet. The decoders for chunk lists, conflict records, `state/journal` and `bolt.toml` get theirs in the milestones that build them.
+The decoder for project links ([storage-format.md](storage-format.md) §7) has test vectors but no target yet. The decoders for chunk lists, conflict records and `bolt.toml` get theirs in the milestones that build them.
 
 **Malicious-repository corpus.** At least one case per threat in [security.md](security.md) §4: path tricks, `.bolt` spellings, symlink escapes, case and Unicode collisions, device names, bombs, non-canonical encodings, wrong fingerprints, truncated packs and corrupted indexes. The cases from the review of Git's published vulnerabilities (2026-11-02, security.md §6) are in `crates/bolt-vcs/tests/corpus_git.rs`: each is a Git repository written byte by byte with `Craft`, which only Bolt reads, run through `bolt import` (in the test's own process where a sweep imports a thousand times), and each test checks the exact refusal, or what was left out and how it was listed, and that nothing was committed when the import stopped.
 
