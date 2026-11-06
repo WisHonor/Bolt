@@ -13,7 +13,7 @@ use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change_in, for_each_entry_change_in};
-use crate::drive::{self, Drive};
+use crate::drive::Drive;
 use crate::filecache::FileCache;
 use crate::fsio;
 use crate::history::tip_of;
@@ -120,10 +120,8 @@ pub fn plan(
                 return Ok(());
             }
             // Project links and what their folders hold are never touched (decision 050).
-            if [n, t]
-                .into_iter()
-                .flatten()
-                .any(|e| matches!(e.kind, EntryKind::ProjectLink | EntryKind::Conflict))
+            if [n, t].into_iter().flatten().any(not_ours)
+                || below_project_link(path, &mut target, &mut folder)?
             {
                 return Ok(());
             }
@@ -187,6 +185,9 @@ pub fn plan(
             kept.push(action);
         }
     }
+    // Nothing is planned below a folder left out, or it would be made inside what is in the way.
+    let left_out: HashSet<&str> = plan.collisions.iter().map(String::as_str).collect();
+    kept.retain(|a| !ancestors(&a.path).any(|up| left_out.contains(up)));
     plan.actions = kept;
     plan.collisions.sort_unstable();
     plan.not_written = refused.into_iter().collect();
@@ -197,13 +198,15 @@ pub fn plan(
 /// against the folder right before it is made: what is there must be what the plan found, or
 /// already what the switch puts there, which is then left (so a journal carried out twice
 /// changes nothing more). Anything else is left as it is and listed. Folders are made first,
-/// top down; then files; then removals, deepest first; links last.
+/// top down; then files; then removals, deepest first; links last. `drive` is the drive's own
+/// answer (`drive::probe`), the one the plan was made with: which names it takes for one is
+/// that drive's business, and a journal finished on another drive is judged by that one.
 pub fn apply(
     repo: &Repository,
     _lock: &ChangeLock,
     journal: &Journal,
+    drive: Drive,
 ) -> Result<Applied, RepoError> {
-    let drive = drive::probe(repo.tmp_folder())?;
     let mut run = Run {
         repo,
         folders: Folders::open(repo.root())?,
@@ -244,8 +247,10 @@ pub fn apply(
             map.insert(folded(&a.path), &a.path);
         }
     }
-    let other = |map: &HashMap<String, &str>, path: &str| {
-        folds && map.get(&folded(path)).is_some_and(|p| *p != path)
+    // The other spelling of `path` in `map`, if the drive takes it for the same name.
+    let other = |map: &HashMap<String, &str>, path: &str| -> Option<String> {
+        let p = map.get(&folded(path))?;
+        (folds && *p != path).then(|| (*p).to_owned())
     };
     let holds_folder = |a: &Action| a.expected.is_some_and(|e| e.kind == EntryKind::Folder);
 
@@ -255,16 +260,16 @@ pub fn apply(
     for a in actions.iter().filter(|a| !holds_folder(a)) {
         if let Change::File(c) | Change::Executable(c) = a.change {
             let renaming = other(&removed_at, &a.path);
-            run.step(a, |run| run.put(a, c, renaming))?;
+            run.step(a, |run| run.put(a, c, renaming.as_deref()))?;
         }
     }
     for a in actions.iter().rev() {
         match a.change {
-            Change::RemoveFile | Change::RemoveFolder if !other(&written_at, &a.path) => {
+            Change::RemoveFile | Change::RemoveFolder if other(&written_at, &a.path).is_none() => {
                 run.step(a, |run| run.remove(a))?;
             }
             Change::File(c) | Change::Executable(c) if holds_folder(a) => {
-                run.step(a, |run| run.put(a, c, false))?;
+                run.step(a, |run| run.put(a, c, None))?;
             }
             _ => {}
         }
@@ -290,6 +295,8 @@ enum Outcome {
     Nothing,
     /// Not what the plan found, so left.
     Changed,
+    /// Its folder isn't there, or isn't a folder any more.
+    Gone,
     /// Another program holds it open.
     InUse,
     /// A name this system mustn't write here.
@@ -336,7 +343,7 @@ impl Run<'_> {
             }
             Outcome::Removed => self.applied.removed += 1,
             Outcome::Nothing => return Ok(()),
-            Outcome::Changed => {
+            Outcome::Changed | Outcome::Gone => {
                 self.changed.insert(path);
                 return Ok(());
             }
@@ -344,43 +351,42 @@ impl Run<'_> {
                 self.applied.in_use.push(path);
                 return Ok(());
             }
-            Outcome::Refused => {
-                self.refused.insert(path);
-                return Ok(());
-            }
+            // `enter` noted the name refused.
+            Outcome::Refused => return Ok(()),
         }
         self.dirty.insert(parent(&a.path).to_owned());
         fsio::fault_point("switch:changed")?;
         Ok(())
     }
 
-    /// Opens the folder holding `path` and checks that its name may be written there, giving the
-    /// name, or what to report instead.
+    /// Opens the folder holding `path`, checking every name on the way against what may be
+    /// written in its folder, giving the last name, or what to report instead. On Windows each
+    /// name is also checked against the real short names of a `.git` or `.bolt` in its folder,
+    /// since the drive resolves those names to them.
     fn enter<'p>(&mut self, path: &'p str) -> Result<Result<&'p str, Outcome>, RepoError> {
         let (up, name) = split(path);
+        if cfg!(windows) {
+            let (folders, known) = (&mut self.folders, &mut self.short_names);
+            let refused = first_refused(path, |folder| {
+                if let Some(own) = known.get(folder) {
+                    return Ok(own.clone());
+                }
+                folders.enter(folder)?;
+                let own = own_short_names(folders.here())?;
+                known.insert(folder.to_owned(), own.clone());
+                Ok(own)
+            });
+            match refused {
+                Ok(Some(at)) => {
+                    self.refused.insert(at.to_owned());
+                    return Ok(Err(Outcome::Refused));
+                }
+                Ok(None) => {}
+                Err(e) => return entering_failed(e).map(Err),
+            }
+        }
         if let Err(e) = self.folders.enter(up) {
-            return gone_or(e, Outcome::Changed).map(Err);
-        }
-        if cfg!(windows) && !self.short_names.contains_key(up) {
-            let entries = retried(|| self.folders.here().entries());
-            let entries = match entries {
-                Ok(entries) => entries,
-                Err(e) => return classify(e).map(Err),
-            };
-            let own: Vec<(String, String)> = entries
-                .into_iter()
-                .filter_map(|e| {
-                    let long = e.name.to_str()?.to_owned();
-                    let short = e.short_name?.to_str()?.to_owned();
-                    (is_git_alias(&long) || is_bolt_alias(&long)).then_some((long, short))
-                })
-                .collect();
-            self.short_names.insert(up.to_owned(), own);
-        }
-        let own = self.short_names.get(up).map_or(&[][..], Vec::as_slice);
-        let pairs: Vec<(&str, &str)> = own.iter().map(|(l, s)| (l.as_str(), s.as_str())).collect();
-        if writable_here(name, &pairs).is_err() {
-            return Ok(Err(Outcome::Refused));
+            return entering_failed(e).map(Err);
         }
         Ok(Ok(name))
     }
@@ -472,10 +478,15 @@ impl Run<'_> {
         }
     }
 
-    /// Writes a file. `renaming`: it takes over a file whose name differs only as the drive
-    /// ignores, so it is written even when its contents are already there, to take the new
-    /// spelling.
-    fn put(&mut self, a: &Action, c: Content, renaming: bool) -> Result<Outcome, RepoError> {
+    /// Writes a file. `renaming`: the path of a file the switch removes whose name differs only
+    /// as the drive ignores, which this one takes over; it is written even when its contents are
+    /// already there, to take the new spelling.
+    fn put(
+        &mut self,
+        a: &Action,
+        c: Content,
+        renaming: Option<&str>,
+    ) -> Result<Outcome, RepoError> {
         let executable = matches!(a.change, Change::Executable(_));
         let kind = if executable {
             EntryKind::Executable
@@ -494,7 +505,7 @@ impl Run<'_> {
         };
         let os = OsStr::new(name);
         if let Some(f) = &found
-            && !renaming
+            && renaming.is_none()
             && f.size == c.size
             && f.id == Some(c.id)
             && matches!(f.kind, Some(EntryKind::File | EntryKind::Executable))
@@ -508,7 +519,7 @@ impl Run<'_> {
                 Err(e) => classify(e),
             };
         }
-        let ours = |f: &Found| f.is(a.expected) || (renaming && f.is_content(kind, c));
+        let ours = |f: &Found| f.is(a.expected) || (renaming.is_some() && f.is_content(kind, c));
         match &found {
             None => {}
             Some(f) if !ours(f) => return Ok(Outcome::Changed),
@@ -516,6 +527,19 @@ impl Run<'_> {
                 if let Some(outcome) = self.clear(os, f.kind)? {
                     return Ok(outcome);
                 }
+            }
+        }
+        // Some drives keep the old spelling when a file replaces one whose name differs only as
+        // they ignore (macOS), so the old file takes the new spelling first.
+        if let Some(old) = renaming.map(|p| split(p).1)
+            && old != name
+            && found
+                .as_ref()
+                .is_some_and(|f| f.kind != Some(EntryKind::Folder))
+        {
+            let dir = self.folders.here();
+            if let Err(e) = retried(|| dir.rename_into(OsStr::new(old), dir, os)) {
+                return classify(e);
             }
         }
         self.write_file(os, c, executable)
@@ -570,7 +594,7 @@ impl Run<'_> {
         let name = match self.enter(&a.path)? {
             Ok(name) => name,
             // Gone with the folder it was in.
-            Err(Outcome::Changed) => return Ok(Outcome::Nothing),
+            Err(Outcome::Gone) => return Ok(Outcome::Nothing),
             Err(outcome) => return Ok(outcome),
         };
         let sizes: Vec<u64> = a.expected.iter().map(|e| e.size).collect();
@@ -702,6 +726,35 @@ impl Run<'_> {
         applied.warnings.extend(warnings.into_iter().flatten());
         Ok(applied)
     }
+}
+
+/// The first part of `path` (itself or a folder above it) whose name may not be written in its
+/// folder, given each folder's `.git` and `.bolt` spellings with their short names (`own`).
+fn first_refused(
+    path: &str,
+    mut own: impl FnMut(&str) -> io::Result<Vec<(String, String)>>,
+) -> io::Result<Option<&str>> {
+    for (at, name) in names_with_paths(path) {
+        let here = own(parent(at))?;
+        let pairs: Vec<(&str, &str)> = here.iter().map(|(l, s)| (l.as_str(), s.as_str())).collect();
+        if writable_here(name, &pairs).is_err() {
+            return Ok(Some(at));
+        }
+    }
+    Ok(None)
+}
+
+/// The `.git` and `.bolt` spellings in `dir` that have a short name, with it.
+fn own_short_names(dir: &Dir) -> io::Result<Vec<(String, String)>> {
+    let entries = retried(|| dir.entries())?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|e| {
+            let long = e.name.to_str()?.to_owned();
+            let short = e.short_name?.to_str()?.to_owned();
+            (is_git_alias(&long) || is_bolt_alias(&long)).then_some((long, short))
+        })
+        .collect())
 }
 
 /// An entry as `Run::look` found it.
@@ -851,6 +904,28 @@ fn refused_at<'a>(
     Ok(None)
 }
 
+/// A project link, or a conflict, which write-out leaves to others.
+fn not_ours(e: &Entry) -> bool {
+    matches!(e.kind, EntryKind::ProjectLink | EntryKind::Conflict)
+}
+
+/// Whether a folder above `path` is a project link or conflict in the save written or in the
+/// folder now: what is there belongs to the other project.
+fn below_project_link<'a>(
+    path: &str,
+    target: &mut Tree<'a>,
+    folder: &mut Tree<'a>,
+) -> Result<bool, StoreError> {
+    for up in ancestors(path) {
+        for tree in [&mut *target, &mut *folder] {
+            if tree.entry(up)?.is_some_and(|e| not_ours(&e)) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// On a drive that folds names, a new entry whose name the drive takes for one the switch
 /// removes (`README.md` where `Readme.md` goes) is that entry, renamed: it is checked against
 /// what the removed one held.
@@ -906,24 +981,32 @@ fn link_target(store: &Store, c: Content) -> Result<Option<Vec<u8>>, StoreError>
     if c.size > MAX_LINK_TARGET {
         return Ok(None);
     }
-    let mut out = Capped(Vec::new());
+    let mut out = Capped::default();
     match store.copy_content(&c.id, &mut out) {
-        Ok(()) => Ok(Some(out.0)),
-        // The listing gave the wrong size: what it holds is too long for a link.
-        Err(_) if out.0.len() as u64 >= MAX_LINK_TARGET => Ok(None),
+        Ok(()) => Ok(Some(out.bytes)),
+        // The listing understated its size: what it holds is too long for a link.
+        Err(_) if out.over => Ok(None),
         Err(e) => Err(e),
     }
 }
 
-/// Takes at most `MAX_LINK_TARGET` bytes.
-struct Capped(Vec<u8>);
+/// Takes at most `MAX_LINK_TARGET` bytes, and says when more came.
+#[derive(Default)]
+struct Capped {
+    bytes: Vec<u8>,
+    over: bool,
+}
 
 impl Write for Capped {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if (self.0.len() + buf.len()) as u64 > MAX_LINK_TARGET {
-            return Err(io::Error::new(io::ErrorKind::FileTooLarge, "too long"));
+        if (self.bytes.len() + buf.len()) as u64 > MAX_LINK_TARGET {
+            self.over = true;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "too long for a link",
+            ));
         }
-        self.0.extend_from_slice(buf);
+        self.bytes.extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -937,7 +1020,7 @@ impl Write for Capped {
 /// of that save, `Some(false)` otherwise; `None` for a link to write as a placeholder. A target
 /// leaves when it is absolute, starts with a drive letter or `\\`, or climbs past the top with
 /// `..`; on Windows also when it holds a `\` (decision 045) or a name Windows reads otherwise.
-/// A link on the way could lead anywhere, so a target going through one is a placeholder too.
+/// So is a target whose names before the last aren't all folders of that save.
 fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>, StoreError> {
     let Ok(target) = std::str::from_utf8(target) else {
         return Ok(None);
@@ -969,12 +1052,10 @@ fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>
             return Ok(None);
         }
         at.push(part);
+        // `..` is taken on the drive after the name before it, so every name but the last must
+        // be a folder of the save: through a file, a link or nothing, it could lead anywhere.
         let last = i + 1 == parts.len();
-        if !last
-            && tree
-                .entry(&at.join("/"))?
-                .is_some_and(|e| e.kind == EntryKind::Symlink)
-        {
+        if !last && tree.folder(&at.join("/"))?.is_none() {
             return Ok(None);
         }
     }
@@ -1031,10 +1112,15 @@ fn classify(e: io::Error) -> Result<Outcome, RepoError> {
     Err(e.into())
 }
 
-/// `classify`, but a folder that isn't there any more gives `gone`.
-fn gone_or(e: io::Error, gone: Outcome) -> Result<Outcome, RepoError> {
-    if e.kind() == io::ErrorKind::NotFound {
-        return Ok(gone);
+/// What a folder that can't be entered comes to: one that isn't there, or is a file now, is
+/// `Gone`; one swapped for a link is changed since the plan.
+fn entering_failed(e: io::Error) -> Result<Outcome, RepoError> {
+    if matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) && !is_link_refusal(&e)
+    {
+        return Ok(Outcome::Gone);
     }
     classify(e)
 }

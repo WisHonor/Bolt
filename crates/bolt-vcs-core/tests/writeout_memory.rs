@@ -91,7 +91,7 @@ fn writing_a_big_file_uses_little_memory() {
         from: repo.head().unwrap(),
         actions: plan.actions,
     };
-    let done = apply(&repo, &lock, &journal).unwrap();
+    let done = apply(&repo, &lock, &journal, drive).unwrap();
     let grew = peak().saturating_sub(before);
     assert_eq!(done.written, 1);
     assert_eq!(std::fs::metadata(&big).unwrap().len(), SIZE);

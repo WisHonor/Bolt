@@ -62,7 +62,8 @@ fn planned(repo: &mut Repository, from: Id, to: Id, remove_new: bool) -> Plan {
 
 fn applied(repo: &mut Repository, journal: &Journal) -> Applied {
     let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
-    apply(repo, &lock, journal).unwrap()
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    apply(repo, &lock, journal, drive).unwrap()
 }
 
 /// Plans and carries out a switch from the save `from` to `to`.
@@ -559,4 +560,170 @@ fn unsaved_work_in_the_way_collides_and_the_rest_comes_along() {
             size: 4
         })
     );
+}
+
+#[test]
+fn nothing_below_a_folder_in_the_way_is_planned() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let a = planted(&mut repo, &files(&[(".boltignore", b"build/\n")]));
+    switch(&mut repo, empty, a);
+    fs::create_dir(dir.path().join("build")).unwrap();
+    fs::write(dir.path().join("build/junk"), b"ignored").unwrap();
+    let b = planted(
+        &mut repo,
+        &files(&[
+            (".boltignore", b"build/\n"),
+            ("build/x", b"x"),
+            ("build/deeper/y", b"y"),
+            ("GI7EBA~1/hooks/post-checkout", b"evil"),
+        ]),
+    );
+    let plan = planned(&mut repo, a.0, b.0, false);
+    assert_eq!(plan.collisions, ["build"]);
+    assert!(plan.actions.is_empty(), "{:?}", plan.actions);
+    assert_eq!(plan.not_written, ["GI7EBA~1"]);
+}
+
+#[test]
+fn every_name_of_a_path_is_checked_against_its_folders_real_short_names() {
+    let own = |folder: &str| -> io::Result<Vec<(String, String)>> {
+        Ok(match folder {
+            "" => vec![(".git".into(), "ZZ7EBA~1".into())],
+            "a" => vec![(".bolt".into(), "BO1234~1".into())],
+            _ => vec![],
+        })
+    };
+    assert_eq!(
+        first_refused("ZZ7EBA~1/hooks/x", own).unwrap(),
+        Some("ZZ7EBA~1")
+    );
+    assert_eq!(
+        first_refused("a/bo1234~1/x", own).unwrap(),
+        Some("a/bo1234~1")
+    );
+    assert_eq!(first_refused("a/ZZ7EBA~1/x", own).unwrap(), None);
+    assert_eq!(first_refused("b/c", own).unwrap(), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn the_real_short_name_of_git_leads_nowhere() {
+    let (dir, mut repo) = project();
+    // These take `GIT~1` to `GIT~4`, so `.git` gets a hashed short name (`GI2837~1` here).
+    for taken in ["g it", "gi t", "g i t", "g  it"] {
+        fs::create_dir(dir.path().join(taken)).unwrap();
+    }
+    fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+    let top = bolt_platform::dir::Dir::open_top(dir.path()).unwrap();
+    let short = top
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.name == ".git")
+        .and_then(|e| e.short_name)
+        .map(|s| s.to_string_lossy().into_owned());
+    let Some(short) = short else {
+        println!("Skipped: this drive gives no 8.3 names; the short-name check is tested above.");
+        return;
+    };
+    // No rule refuses the name by itself: only the folder's own short names catch it.
+    assert_eq!(crate::names::writable_here(&short, &[]), Ok(()), "{short}");
+    let to = planted(&mut repo, &files(&[("x", b"x")]));
+    let by_hand = Journal {
+        target: to.1,
+        from: to.1,
+        actions: vec![Action {
+            path: format!("{short}/hooks/post-checkout"),
+            change: Change::File(content(b"x")),
+            expected: None,
+        }],
+    };
+    let done = applied(&mut repo, &by_hand);
+    assert_eq!(done.written, 0);
+    assert!(names_in(&dir.path().join(".git/hooks")).is_empty());
+}
+
+#[test]
+fn a_folder_where_a_project_link_is_gets_nothing_written() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let a = planted(&mut repo, &[("vendor", EntryKind::ProjectLink, &[7; 20])]);
+    switch(&mut repo, empty, a);
+    // The other project's own checkout.
+    fs::create_dir(dir.path().join("vendor")).unwrap();
+    let b = planted(
+        &mut repo,
+        &files(&[("vendor/x", b"x"), ("vendor/y/z", b"z")]),
+    );
+    let plan = planned(&mut repo, a.0, b.0, false);
+    assert!(plan.actions.is_empty(), "{:?}", plan.actions);
+    let discard = planned(&mut repo, a.0, b.0, true);
+    assert!(discard.actions.is_empty(), "{:?}", discard.actions);
+}
+
+#[test]
+fn a_link_whose_size_is_understated_is_a_placeholder() {
+    use crate::listing::Entry;
+    use crate::test_support::{add_listing, plant_root};
+    let (_dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let long = "x/".repeat(3000);
+    plant_root(&mut repo, |packs| {
+        let id = packs.add_content(long.as_bytes()).unwrap();
+        let link = Entry {
+            name: "l".into(),
+            kind: EntryKind::Symlink,
+            id,
+            size: 1,
+        };
+        add_listing(packs, vec![link]).0
+    });
+    let to = current_save(&repo).unwrap();
+    let plan = planned(&mut repo, empty, to, false);
+    assert_eq!(plan.placeholders, ["l"]);
+}
+
+#[test]
+fn a_removal_below_a_folder_swapped_for_a_link_is_reported() {
+    let (dir, mut repo) = project();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("x"), b"keep").unwrap();
+    let to = planted(&mut repo, &files(&[("y", b"y")]));
+    folder_link(outside.path(), &dir.path().join("c"));
+    let by_hand = Journal {
+        target: to.1,
+        from: to.1,
+        actions: vec![Action {
+            path: "c/x".into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::File,
+                id: crate::id::hash_content(b"keep"),
+                size: 4,
+            }),
+        }],
+    };
+    let done = applied(&mut repo, &by_hand);
+    assert_eq!(done.changed_since_plan, ["c/x"]);
+    assert_eq!(fs::read(outside.path().join("x")).unwrap(), b"keep");
+}
+
+#[test]
+fn a_link_through_a_name_that_isnt_a_folder_is_a_placeholder() {
+    let (_dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let link = |path, target: &'static [u8]| (path, EntryKind::Symlink, target);
+    let to = planted(
+        &mut repo,
+        &[
+            ("f", EntryKind::File, b"f"),
+            ("d/inside", EntryKind::File, b"i"),
+            link("through_a_file", b"f/../d/inside"),
+            link("through_nothing", b"nowhere/../d/inside"),
+            link("fine", b"d/inside"),
+        ],
+    );
+    let plan = planned(&mut repo, empty, to.0, false);
+    assert_eq!(plan.placeholders, ["through_a_file", "through_nothing"]);
 }

@@ -267,7 +267,7 @@ pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<()
         Err(e) => return Err(NotWritable::Invalid(e)),
         Ok(()) => {}
     }
-    if is_git_alias(name) {
+    if is_git_alias(name) || is_hashed_short_name(name, b"gi7eba") {
         return Err(NotWritable::GitName);
     }
     if is_bolt_alias(name) {
@@ -281,7 +281,7 @@ pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<()
     if !fits_here(name) {
         return Err(NotWritable::TooLong);
     }
-    // After four clashes NTFS hashes a short name (`GI7EBA~1`), so the real one is compared.
+    // After four clashes NTFS hashes a short name (`GI1D2E~1`, say), so the real one is compared.
     for (long, short) in short_names_here {
         if short.eq_ignore_ascii_case(name) {
             if is_git_alias(long) {
@@ -293,6 +293,42 @@ pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Whether `name` is an NTFS fallback short name made from `prefix` the way Git's
+/// `is_ntfs_dot_generic` spells one: up to 6 of its letters, `~`, a digit 1-9, more digits to 8
+/// characters, then only dots, spaces or a `:stream`. Git refuses `gi7eba`, `.gitmodules`'
+/// prefix, so write-out does too. `.git` and `.bolt` have no such prefix known ahead (NTFS hashes
+/// the name), so their real short names are compared folder by folder instead.
+fn is_hashed_short_name(name: &str, prefix: &[u8]) -> bool {
+    let bytes = name.as_bytes();
+    let mut pos = 0;
+    let mut saw_tilde = false;
+    while pos < 8 {
+        let Some(&b) = bytes.get(pos) else {
+            return false;
+        };
+        if saw_tilde {
+            if !b.is_ascii_digit() {
+                return false;
+            }
+        } else if b == b'~' {
+            saw_tilde = true;
+            pos += 1;
+            if !bytes.get(pos).is_some_and(|d| (b'1'..=b'9').contains(d)) {
+                return false;
+            }
+        } else if pos >= 6 || !prefix.get(pos).is_some_and(|p| b.eq_ignore_ascii_case(p)) {
+            return false;
+        }
+        pos += 1;
+    }
+    let rest = bytes.get(pos..).unwrap_or_default();
+    let end = rest.iter().position(|&b| b == b':').unwrap_or(rest.len());
+    rest.get(..end)
+        .unwrap_or_default()
+        .iter()
+        .all(|&b| b == b'.' || b == b' ')
 }
 
 /// `name` as a drive compares names: composed (NFC) where it composes Unicode, then lowercase
@@ -502,16 +538,43 @@ mod tests {
     }
 
     #[test]
+    fn a_hashed_short_name_of_git_as_a_folder_is_refused() {
+        // Git's fallback short names for `.gitmodules` (`gi7eba`), as its `is_ntfs_dot_generic`
+        // spells them: the prefix cut anywhere up to 6 letters, `~`, a digit 1-9, more digits to
+        // 8 characters, then only dots, spaces or a stream.
+        for n in [
+            "GI7EBA~1",
+            "gi7eba~9",
+            "gi7eb~12",
+            "g~123456",
+            "gi7eba~1 .",
+            "gi7eba~1:$DATA",
+        ] {
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        for n in [
+            "gi7eba~0",
+            "gi7ebb~1",
+            "gi7eba~1x",
+            "gi7eba~",
+            "gi7e~a12",
+            "gi7eba1",
+        ] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
+        }
+    }
+
+    #[test]
     fn a_real_short_name_of_git_is_refused() {
-        assert!(writable_here("GI7EBA~1", &[(".git", "GI7EBA~1")]).is_err());
+        assert!(writable_here("GI1D2E~1", &[(".git", "GI1D2E~1")]).is_err());
         // Ignoring case, and for `.bolt` and other spellings of either too.
         let here = [
-            (".git", "GI7EBA~1"),
+            (".git", "GI1D2E~1"),
             (".BOLT", "BOC2A3~1"),
             ("Player.cs", "PLAYER~1.CS"),
         ];
         assert_eq!(
-            writable_here("gi7eba~1", &here),
+            writable_here("gi1d2e~1", &here),
             Err(NotWritable::ShortNameOf(".git"))
         );
         assert_eq!(
