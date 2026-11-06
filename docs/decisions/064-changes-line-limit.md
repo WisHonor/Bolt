@@ -20,7 +20,7 @@ Decision 058 diffs any file up to 64 MiB line by line. The size isn't what costs
 
 **A, at 1,000,000 lines per side.** Past it, on either side, a file shows without lines, as one over 64 MiB does, and says it has over 1,000,000 lines.
 
-Why that figure: at 1,000,000 lines, what the diff holds is tens of MB per side, in the same range as the 64 MiB a file may already take, and Myers' tables grow with the number of lines too. Hand-written source files stay far below it (the biggest are around 100,000 lines). Past it, a line-by-line listing is too long to read anyway: lock files, generated code and data dumps.
+Why that figure: at 1,000,000 lines, what the diff holds is about 100 MB per side on top of the file itself, so at most about 0.35 GB for one file (one file is held at a time). Hand-written source files stay far below it (the biggest are around 100,000 lines). Past it, a line-by-line listing is too long to read anyway: lock files, generated code and data dumps.
 
 ## Consequences
 

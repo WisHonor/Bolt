@@ -244,7 +244,7 @@ impl Write for Stdout {
     }
 }
 
-// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
+/// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
 pub fn warnings_json(warnings: &[Warning]) -> Value {
     warnings
         .iter()
