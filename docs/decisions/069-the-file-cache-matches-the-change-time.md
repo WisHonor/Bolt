@@ -29,6 +29,8 @@ Every system keeps a second time that no ordinary call sets: the change time, mo
 ## Consequences
 
 - An in-place overwrite that keeps the size and modified time is seen by `status` and protected by `goto` and `discard`.
+- A change to a file's permissions, owner or link count, or on Windows its attributes, moves its change time too, so Bolt reads that file again, once.
 - **Known limit:** a program that sets the change time back. On Unix only the kernel or a privileged tool that changes the clock can; on Windows any program allowed to write the file can, through `SetFileInformationByHandle`. A drive that keeps no change time of its own (FAT and exFAT, where systems report one that follows the modified time) gives no protection beyond decision 067's. [security.md](../security.md) T25 lists both.
 - **Known limit:** a file written over in place within one tick of the change-time clock after Bolt read it (milliseconds on Linux, 100 ns on Windows), keeping its size and an old modified time, still matches.
+- **Expected, not yet checked on a real OneDrive folder:** on Windows, OneDrive's "Free up space" and "Always keep on this device" change a file's attributes, which moves its change time, so the next `status` or `save` reads each such file once, and so downloads it, against [decision 053](053-file-state-cache.md)'s aim. The owner checks this before the merge: in a project inside OneDrive, run `bolt status` once, choose "Free up space" on a folder, run `bolt status` again, and see whether the files download.
 - [storage-format.md](../storage-format.md) §10 describes version 3 of `cache/files`, with its test vector.

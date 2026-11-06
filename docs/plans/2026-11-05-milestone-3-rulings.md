@@ -30,6 +30,10 @@ Rulings made while milestone 3 was built (2026-11-05 to 2026-11-06), copied from
 - No colour in `bolt changes` on Windows until a console call (new `unsafe`) is reviewed.
 - The repository has been private since 2026-11-05: CodeQL, secret scanning and private vulnerability reporting aren't offered on its plan.
 
+**To check or choose before the merge:**
+- OneDrive and the change time (decision 069): "Free up space" and pinning change a file's attributes, which on Windows moves its change time, so the next `status` or `save` is expected to read, and so download, each such file once. In a project inside OneDrive, run `bolt status` once, choose "Free up space" on a folder, run `bolt status` again, and see whether the files download.
+- The racy rule: judging a file racy by the later of its modified and change times would close decision 069's one-tick limit, at the cost of one extra read for each file just unpacked with an old time. It needs a record refining 069.
+
 ## Every ruling, as logged
 
 Each line names the task, the ruling, its reason and its cost if wrong. "P1" to "P5" were made while planning the build.

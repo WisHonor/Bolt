@@ -242,7 +242,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock` | Lock file for changing commands | Yes |
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
-| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time and content ID, below), and `change-ids`, each line's change IDs (below) | No |
+| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), and `change-ids`, each line's change IDs (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
