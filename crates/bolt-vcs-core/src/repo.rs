@@ -876,9 +876,11 @@ impl Repository {
         packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
-        let id = self.commit(lock, packs, entry)?;
+        let id = self.move_head(lock, packs, entry)?;
         let held = &self.held;
         write_atomic(&held.tmp, &held.bolt, "format", FORMAT_TEXT.as_bytes())?;
+        // Only once it is a project, so a stopped merge never leaves it unfinished.
+        crate::merge::merge_after_commit(self, lock);
         Ok(id)
     }
 
@@ -1137,9 +1139,22 @@ impl Repository {
     /// them, then replaces `state/head`. The command has happened exactly when the head is
     /// replaced (decision 010), so an `Io` error from the final folder sync does not mean
     /// "nothing changed".
+    /// Then merges the small packs; problems doing so are only warnings, kept with the store's.
     pub fn commit(
         &mut self,
         lock: &ChangeLock,
+        packs: PackSet,
+        entry: &DiaryEntry,
+    ) -> Result<Id, RepoError> {
+        let id = self.move_head(lock, packs, entry)?;
+        crate::merge::merge_after_commit(self, lock);
+        Ok(id)
+    }
+
+    /// `commit`, without the merge.
+    fn move_head(
+        &mut self,
+        _lock: &ChangeLock,
         mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
@@ -1155,7 +1170,6 @@ impl Repository {
         let held = &self.held;
         write_atomic(&held.tmp, &held.state, "head", head.as_bytes())?;
         self.head = Some(id);
-        crate::merge::merge_after_commit(self, lock);
         Ok(id)
     }
 }
