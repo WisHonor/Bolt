@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") is next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 65
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, its docs brought up to date the same day, with its red-team session, its whole-branch review and the owner's review of its `unsafe` code still to come before it is merged (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 65
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -308,7 +308,7 @@ head ─► redo     main → ptvz
 **In plain words.** A line is a name, like `main` or `feature/double-jump`, that points at the latest save made on it and moves forward when you save. Each save also notes which line it was made on, so history keeps that information even after lines are combined or deleted.
 
 - **Stored in the diary**, not as files: renaming or deleting a line can be undone, and filesystem case rules never interfere.
-- **Names:** letters, digits, `-`, `_`, `.`, `/`; no spaces; no two names differing only by letter case; `bolt start` creates `main`.
+- **Names:** letters, digits, `-`, `_`, `.`, `/`; no spaces; no two names differing only by letter case; `bolt start` creates `main`. Letter case is compared through Unicode's lowercase mapping (Rust's `to_lowercase`), not full case folding, so `ß` and `SS`, or `ΑΣ` and `ασ` (whose final sigma lowercases differently), count as different names. Changing that would change which diaries readers accept, so it waits for a decision before format 1 freezes.
 - **Not on a line:** after `goto` to a save, Bolt says you're looking at an older save; saving there asks for a new line name in a terminal, or takes it from `--line <name>` (without either it stops, saving nothing); the name follows the rules above, may not be a line's already in any letter case, and the new line and the save are one diary entry. On a line, `--line` is refused until v0.2. `goto` to a save is at that save even when it is a line's newest, and then says how to keep saving on that line (the first by name, when several lines are there); `goto <line>` puts you on the line; `bolt line` lists the lines, marking the current one, then the server lines as `line@server` ([decision 055](decisions/055-lines-in-v0.1.md)).
 - **Tags:** fixed names for important saves; they never move, and changing one asks first.
 - **In v0.1:** lines can be created (by saving away from a line), listed and switched; combining, renaming and deleting come in v0.2.
@@ -448,7 +448,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
 - ~~**Objects per pack vs. one pack per command.**~~ *Decided while planning milestone 2* ([decision 041](decisions/041-several-packs-per-command.md)): a command's writer starts a new pack every 2^20 objects, well under the 2^24 a pack may hold, so a big command writes several.
-- ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository is public, so Actions minutes aren't a constraint.
+- ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository has been private since 2026-11-05, so Actions minutes count: the whole suite runs locally before a push, and pushes come at task boundaries ([testing.md](testing.md) §4).
 - ~~**Known limitation: links Git wrote on Windows.**~~ *Decided while planning milestone 3* ([decision 045](decisions/045-link-targets-stored-with-slashes.md)): link targets are stored with `/`, as Git stores them, and written with `\` on Windows; milestone 3 builds it.
 
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
@@ -478,6 +478,12 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 - **Importing reftable repositories.** [The reader refuses them, saying how to make a copy it can read; teach it the format before Git 3.0 makes reftable common (decision 031).]
 - **Partial saves stop at problems outside what is named.** The walk still refuses an invalid name, a path too long, or a folder it can't read anywhere in the project, so a partial save fails there, though decision 054 says a save's rules apply to what is named. It fails closed, saving nothing. [Let the walk skip what no named path or pattern reaches, in a later milestone.]
 - **Change-ID letters like Jujutsu's.** Bolt writes 0 as `k` and 15 as `z`; Jujutsu, whose change IDs imported saves share, writes them the other way round. [Display only, no stored data changes; decide before v0.1 (decision 032).]
+- **Naming the program that holds a file** on Windows (the Restart Manager). Today a file in use is tried again for about a second, then left, and Bolt says another program has it open. [More `unsafe` in the platform crate, which the owner reviews; a later milestone (decision 049).]
+- **Marking a file executable on Windows.** A new file made on Windows isn't executable, and saves keep the flag history gives each file. [A later milestone (decision 052).]
+- **Compressing again when merging packs**, at a stronger level. [With `tidy`, milestone 4 (decisions 009, 057).]
+- **Colour in `changes` on Windows.** The diff is coloured only on macOS and Linux terminals: Windows' console needs virtual-terminal mode turned on first. [A console call in the platform crate, new `unsafe` the owner reviews line by line (decision 058).]
+- **Line names compared by full case folding.** Today two line names clash when Unicode's lowercase mapping makes them equal (§5.10), so `ß` and `SS` are two names. [Changes what readers accept, so it needs a decision and a storage-format change before format 1 freezes.]
+- **Cloud placeholders in `status`.** A placeholder Windows shows to Bolt (not OneDrive's in its default mode) stops `status` as it stops `save`, as a special file Bolt can't read yet; listing such files as "not read" instead would change decided behaviour. [The owner's call; follow-ups list.]
 
 ## 8. Prior art
 
