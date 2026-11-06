@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") is next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 62
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") is next (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 63
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -154,10 +154,11 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] Lines in v0.1 → [decision 055](decisions/055-lines-in-v0.1.md)
 - [x] A question before unusually large saves, ahead of presets → [decision 056](decisions/056-question-before-large-saves.md)
 - [x] Packs searched on disk, opened when needed and merged (risk 17) → [decision 057](decisions/057-pack-index-on-disk-and-merging.md)
-- [x] `bolt changes`, line by line → [decision 058](decisions/058-changes-line-by-line.md)
+- [x] `bolt changes`, line by line → [decision 058](decisions/058-changes-line-by-line.md), [063](decisions/063-changes-takes-the-save-with-a-flag.md)
 - [x] `.bolt` spellings in saves → [decision 059](decisions/059-bolt-spellings-left-out-like-git-spellings.md)
 - [x] Which copy is read first once packs are opened only when searched (the review of decision 057's code) → [decision 061](decisions/061-pack-copy-order-and-lazy-opening.md)
 - [x] When packs are merged, and which count as small (the review of the merge's code) → [decision 062](decisions/062-when-packs-are-merged.md)
+- [x] `bolt changes` takes the save with `--save` (building `bolt changes`) → [decision 063](decisions/063-changes-takes-the-save-with-a-flag.md)
 
 Questions 2 to 12 were decided by Claude on 2026-11-05 at the owner's request to go on without them; each record says so and can be reversed.
 
@@ -370,7 +371,7 @@ head ─► redo     main → ptvz
 | Upkeep | `verify` (fsck) · `tidy` (gc) |
 
 - **Output:** `--json` on every command; colors and progress only in a terminal; no questions without a terminal; examples first in help.
-- **`changes`** shows unsaved changes (`bolt changes [paths]`), or what a save changed against its first parent (`bolt changes --save <save>`, so a path is never taken for a save), line by line in the unified form with 3 lines of context, with the `similar` crate; binary files (a zero byte in the first 8,000) and files over 64 MiB show as changed without lines, a file whose only change is its line endings says so, and each file gets at most 2 seconds, past which its changes show coarser and a `diff_timed_out` warning says so ([decision 058](decisions/058-changes-line-by-line.md)).
+- **`changes`** shows unsaved changes (`bolt changes [paths]`), or what a save changed against its first parent (`bolt changes --save <save>`, so a path is never taken for a save), line by line in the unified form with 3 lines of context, with the `similar` crate; binary files (a zero byte in the first 8,000) and files over 64 MiB show as changed without lines, a file whose only change is its line endings says so, and each file gets at most 2 seconds, past which its changes show coarser and a `diff_timed_out` warning says so ([decisions 058](decisions/058-changes-line-by-line.md) and [063](decisions/063-changes-takes-the-save-with-a-flag.md)).
 - **`--json` formats:** every document, field and kind of warning is in [json.md](json.md).
 
 ### 5.16 Importing from Git (milestone 2)
