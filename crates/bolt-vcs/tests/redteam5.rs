@@ -77,7 +77,6 @@ fn kept(env: &Env, name: &str, bytes: &[u8]) -> bool {
 }
 
 #[test]
-#[ignore = "RT5-1: a file renamed over a saved one of the same size and time is unseen, then overwritten"]
 fn rt5_1_a_file_renamed_over_a_saved_one_is_seen_and_never_lost() {
     let env = project();
     write_at(

@@ -1,6 +1,7 @@
 //! The file-state cache, `.bolt/cache/files` (storage-format.md section 10): each file's kind,
-//! size, modified time and content ID, so that a file whose details still match needn't be read.
-//! Only ever a hint: one that is missing, sealed by another key, edited or unreadable is empty.
+//! size, modified time, file ID and content ID, so that a file whose details still match needn't
+//! be read. Only ever a hint: one that is missing, sealed by another key, edited or unreadable is
+//! empty.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::collections::BTreeMap;
@@ -16,14 +17,14 @@ use crate::repo::{RepoError, Repository};
 use crate::{fsio, keyed, safe_fs};
 
 const MAGIC: &[u8; 8] = b"BOLTFILE";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const FILE: &str = "files";
 /// The most the file may hold, seal included.
 pub const MAX_BYTES: u64 = 256 << 20;
 /// A path's limit (decision 051).
 const MAX_PATH: usize = 4096;
-/// The fewest bytes an entry takes: an empty path, then kind, size, time, racy and ID.
-const MIN_ENTRY: usize = 1 + 1 + 1 + 8 + 4 + 1 + 32;
+/// The fewest bytes an entry takes: an empty path, then kind, size, time, file ID, racy and ID.
+const MIN_ENTRY: usize = 1 + 1 + 1 + 8 + 4 + 24 + 1 + 32;
 const SECOND: i128 = 1_000_000_000;
 /// FAT's resolution, the coarsest a drive Bolt runs on keeps (decision 053).
 const RACY_NS: i128 = 2 * SECOND;
@@ -34,6 +35,8 @@ pub struct FileState {
     pub kind: EntryKind,
     pub size: u64,
     pub modified_ns: i128,
+    /// The drive's number and the file's on it, so a file moved onto the path isn't taken for it.
+    pub file_id: (u64, u128),
     pub id: Id,
 }
 
@@ -69,6 +72,10 @@ impl FileCache {
             w.varint(s.size);
             w.i64(secs);
             w.u32(nanos);
+            let (drive, number) = s.file_id;
+            w.u64(drive);
+            w.u64(number as u64);
+            w.u64((number >> 64) as u64);
             w.bool(entry.racy);
             w.id(&s.id);
         }
@@ -102,12 +109,15 @@ impl FileCache {
             let secs = r.i64()?;
             let nanos = r.u32()?;
             let modified_ns = join_ns(secs, nanos).ok_or(DecodeError::Invalid("nanoseconds"))?;
+            let drive = r.u64()?;
+            let (low, high) = (r.u64()?, r.u64()?);
             let racy = r.bool()?;
             let id = r.id()?;
             let state = FileState {
                 kind,
                 size,
                 modified_ns,
+                file_id: (drive, u128::from(high) << 64 | u128::from(low)),
                 id,
             };
             files.insert(path.to_owned(), Entry { state, racy });
@@ -128,13 +138,18 @@ impl FileCache {
             .unwrap_or_default()
     }
 
-    /// What the cache knows of `path`, if the file there still has that kind, size and time, and
-    /// didn't change too close to when the cache was written.
+    /// What the cache knows of `path`, if the file there is still the same file, with that kind,
+    /// size and time, and didn't change too close to when the cache was written. A file numbered
+    /// 0 is never trusted: some network and FUSE drives give every file that number.
     #[must_use]
     pub fn matches(&self, path: &str, meta: &EntryMeta) -> Option<&FileState> {
         let entry = self.files.get(path).filter(|e| !e.racy)?;
         let s = &entry.state;
-        (Some(s.kind) == kind_of(meta) && s.size == meta.size && s.modified_ns == meta.modified_ns)
+        (Some(s.kind) == kind_of(meta)
+            && s.size == meta.size
+            && s.modified_ns == meta.modified_ns
+            && s.file_id == meta.file_id
+            && meta.file_id.1 != 0)
             .then_some(s)
     }
 
@@ -150,6 +165,7 @@ impl FileCache {
             kind,
             size: meta.size,
             modified_ns: meta.modified_ns,
+            file_id: meta.file_id,
             id,
         };
         self.files
@@ -290,6 +306,7 @@ mod tests {
                 kind: EntryKind::File,
                 size: 3,
                 modified_ns: THEN,
+                file_id: (1, 2),
                 id: Id([1; 32])
             }
         );
@@ -375,7 +392,7 @@ mod tests {
             {
                 let mut edited = sealed.clone();
                 // The size byte: 3 becomes 4.
-                let at = sealed.len() - 32 - 32 - 1 - 4 - 8 - 1;
+                let at = sealed.len() - 32 - 32 - 1 - 24 - 4 - 8 - 1;
                 assert_eq!(edited[at], 3);
                 edited[at] = 4;
                 edited
@@ -393,13 +410,34 @@ mod tests {
     }
 
     #[test]
-    fn size_or_time_or_kind_changes_miss() {
+    fn size_or_time_or_kind_or_identity_changes_miss() {
         let (_dir, repo) = project();
         let mut cache = FileCache::load(&repo);
         cache.record("a", &file(3, THEN), Id([1; 32]));
         assert!(cache.matches("a", &file(3, THEN)).is_some());
         assert!(cache.matches("a", &file(4, THEN)).is_none());
         assert!(cache.matches("a", &file(3, THEN + 1)).is_none());
+        // Another file moved onto the path, on this drive or another, is not the one recorded.
+        for file_id in [(1, 3), (2, 2), (1, 2 | 1 << 64)] {
+            assert!(
+                cache
+                    .matches(
+                        "a",
+                        &EntryMeta {
+                            file_id,
+                            ..file(3, THEN)
+                        }
+                    )
+                    .is_none()
+            );
+        }
+        // A drive that numbers every file 0 says nothing about which file it is.
+        let unnumbered = EntryMeta {
+            file_id: (1, 0),
+            ..file(3, THEN)
+        };
+        cache.record("n", &unnumbered, Id([5; 32]));
+        assert!(cache.matches("n", &unnumbered).is_none());
         let executable = EntryMeta {
             executable: Some(true),
             ..file(3, THEN)
@@ -445,13 +483,14 @@ mod tests {
         assert!(FileCache::decode(&longer).is_err());
         // Magic, version, count, then "a": its length and name.
         let a_kind = 8 + 1 + 1 + 2;
-        let entry = 1 + 1 + 8 + 4 + 1 + 32;
+        let entry = 1 + 1 + 8 + 4 + 24 + 1 + 32;
         let edit = |at: usize, v: u8| {
             let mut b = body.clone();
             b[at] = v;
             FileCache::decode(&b)
         };
-        assert!(edit(8, 2).is_err(), "version");
+        assert!(edit(8, 1).is_err(), "a version 1 cache");
+        assert!(edit(8, 3).is_err(), "a later version");
         assert!(edit(9, 0x7f).is_err(), "count past the bytes");
         assert!(edit(a_kind, 4).is_err(), "a folder");
         assert!(edit(a_kind, 0).is_err(), "no kind");
@@ -459,7 +498,7 @@ mod tests {
             edit(a_kind + 2 + 8 + 3, 0xff).is_err(),
             "nanoseconds past a second"
         );
-        assert!(edit(a_kind + 2 + 8 + 4, 2).is_err(), "racy not a bool");
+        assert!(edit(a_kind + 2 + 8 + 4 + 24, 2).is_err(), "racy not a bool");
         assert!(edit(a_kind + entry + 1, b'a').is_err(), "a name twice");
         // A size that isn't written in the fewest bytes.
         let mut long_size = body[..a_kind + 1].to_vec();

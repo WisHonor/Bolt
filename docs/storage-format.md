@@ -287,24 +287,27 @@ A journal drives writes into the user's folder, so a reader checks the checksum 
 
 **The cache key and the seal** ([decision 053](decisions/053-file-state-cache.md)). Every file in `cache/` is sealed: its body followed by 32 bytes, the keyed BLAKE3 hash of the body under the user's cache key. A file whose seal doesn't match (another account's, a copied project's from someone else, or edited) is ignored and rebuilt, never trusted and never an error. The key is the file `cache-key` in the folder of the user's own `config.toml` (`BOLT_CONFIG_DIR` if set): exactly 32 random bytes, nothing else. Bolt makes it on first use, writing a file of its own name there, readable only by the user on Unix (0600), and linking it in as `cache-key`, which never replaces a key already there, so two Bolts making it at once end with one key; only on a drive that has no hard links (the link fails with "not supported", or EPERM as Linux's FAT gives it) is it made in place, and any other failure counts as a key Bolt can't use. A key file that can't be read or isn't 32 bytes long is never replaced, since it is the user's own and replacing it silently could hide that someone changed it: the command goes on with a key for that run alone, so no cache is trusted or kept, and a `cache_key_unusable` warning names the file and says to delete it. It is the user's own, so a link there is followed. With no settings folder at all, a key for that run alone is used too, without a warning. Only the command line reads the key; the engine is handed it, and seals with a key for that handle alone when it isn't, so a program using the engine never touches the user's settings.
 
-**`cache/files`** (not normative) is the file-state cache: what each file in the folder was when Bolt last read it, so that a file whose kind, size and modified time still match needn't be read again. Sealed as above; read with a 256 MiB cap, seal included, and a bigger one is not written (the command warns instead).
+**`cache/files`** (not normative) is the file-state cache: what each file in the folder was when Bolt last read it, so that a file whose kind, size, modified time and file ID still match needn't be read again. Sealed as above; read with a 256 MiB cap, seal included, and a bigger one is not written (the command warns instead).
 
 ```text
 bytes[8] "BOLTFILE"
-u8       version = 1
-varint   file count (refused if more than the bytes left hold at 48 bytes each)
+u8       version = 2 (a cache of another version is ignored and rebuilt)
+varint   file count (refused if more than the bytes left hold at 72 bytes each)
 files, sorted by project path in byte order, no path twice:
   string   project path, `/` between names (at most 4,096 bytes)
   u8       kind: 1 file, 2 executable, 3 symbolic link (§3's numbers; nothing else)
   varint   size in bytes
   i64      modified time: whole seconds since 1970-01-01 UTC, rounded down
   u32      and nanoseconds past them (below 1,000,000,000)
+  u64      the drive's number (the device on Unix, the volume serial on Windows)
+  u64      the file's number on it (the inode, or Windows' file ID): its low 64 bits
+  u64      and its high 64 bits (0 but on drives with 128-bit file IDs, such as ReFS)
   bool     racy
   id       content ID
 bytes[32] seal
 ```
 
-An entry is trusted only if it isn't racy and the file's kind, size and modified time are the ones recorded; a file's ID on the drive (inode or file index) isn't kept. At the start of a scan Bolt writes a file in `tmp/`, takes its modified time as "now" and removes it, so the drive's own clock and resolution count. When the cache is written, an entry whose time isn't at least 2 seconds older than that "now" (FAT's resolution) is marked racy, and stays racy until the file is read again ([decision 053](decisions/053-file-state-cache.md)). The file is replaced whole, through `tmp/` and a rename.
+An entry is trusted only if it isn't racy, the file's kind, size, modified time and both numbers are the ones recorded, and the file's number isn't 0, which some network and FUSE drives give every file ([decision 067](decisions/067-the-file-cache-matches-file-identity.md)): a file moved or copied onto the path is another file, so it is read. At the start of a scan Bolt writes a file in `tmp/`, takes its modified time as "now" and removes it, so the drive's own clock and resolution count. When the cache is written, an entry whose time isn't at least 2 seconds older than that "now" (FAT's resolution) is marked racy, and stays racy until the file is read again ([decision 053](decisions/053-file-state-cache.md)). The file is replaced whole, through `tmp/` and a rename.
 
 **`cache/change-ids`** (not normative) lists the change IDs of each line's saves, so that a save and `history` can shorten change IDs (§5) without reading the line. Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
 
