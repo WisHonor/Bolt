@@ -7,8 +7,8 @@ use std::io::{self, Read, Write};
 
 use bolt_platform::dir::Dir;
 
-use super::{Child, Folders, Handles, Kind, NAMED, SaveError, open_scanned, stamp};
-use crate::listing::{Entry, EntryKind, Listing};
+use super::{Child, Folders, Handles, Kind, NAMED, SaveError, open_scanned, saved_file, stamp};
+use crate::listing::{Entry, Listing};
 use crate::store::Store;
 
 /// How many saved bytes are held up against the file at a time.
@@ -30,10 +30,7 @@ pub(super) fn check(
             continue;
         };
         for c in children.iter().filter(|c| c.kind == Kind::File) {
-            let saved = before
-                .get(&c.name)
-                .filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable));
-            let Some(was) = saved else {
+            let Some(was) = saved_file(Some(before), &c.name) else {
                 continue;
             };
             if converted(store, was, handles.folder(rel)?, c)? {
@@ -160,6 +157,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::id::hash_content;
+    use crate::listing::EntryKind;
     use crate::listing::SaveLimits;
     use crate::snapshot::tests::{project, save_now, saved_root, walk_project, write};
     use crate::test_support::{add_listing, plant_root, plant_save};

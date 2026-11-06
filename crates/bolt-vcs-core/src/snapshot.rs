@@ -13,7 +13,7 @@ use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 use crate::changeids::ChangeIds;
 use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
 use crate::diff::count_changes;
-use crate::drive;
+use crate::drive::{self, Drive};
 use crate::encoding::DecodeError;
 use crate::filecache::{self, FileCache};
 use crate::fsio;
@@ -405,7 +405,7 @@ pub fn save_folder(
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
         endings::check(repo.store(), &mut handles, &folders, &old)?;
     }
-    if let Some(large) = large_save(&folders, &old) {
+    if let Some(large) = large_save(repo.store(), drive, &folders, &old)? {
         // New files mean something to save, so a missing line name is asked for now: the
         // question comes after it, and what is stored is stored once.
         if line.is_none() {
@@ -533,30 +533,72 @@ pub fn save_folder(
     })
 }
 
+/// The base save's file named `name` in a folder it lists as `before`, if it holds a file there.
+fn saved_file<'l>(before: Option<&'l Listing>, name: &str) -> Option<&'l Entry> {
+    before
+        .and_then(|l| l.get(name))
+        .filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable))
+}
+
 /// What the save would add, from the walk's sizes, if it is more than a save adds without asking.
-/// A file is new where the base save holds no file; a changed one doesn't count.
-fn large_save(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Option<LargeSave> {
+/// A file is new where the base save holds no file under a name `drive` takes as its own, so a
+/// changed file, or one renamed only in letter case on a drive that ignores case, doesn't count.
+/// Only listings are read.
+fn large_save(
+    store: &Store,
+    drive: Drive,
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+) -> Result<Option<LargeSave>, SaveError> {
+    let folds = drive.ignores_case || drive.composes_unicode;
     let (mut new_files, mut new_bytes) = (0u64, 0u64);
     let mut by_top: HashMap<&str, u64> = HashMap::new();
+    // Base folders the walk didn't match because their name is spelled otherwise on disk.
+    let mut found: HashMap<&str, Listing> = HashMap::new();
     for (rel, children) in folders {
-        let before = old.get(rel).and_then(Option::as_ref);
+        let respelled = found.remove(rel.as_str());
+        let before = old.get(rel).and_then(Option::as_ref).or(respelled.as_ref());
         let top = rel.split('/').next().unwrap_or_default();
-        for c in children.iter().filter(|c| c.kind == Kind::File) {
-            let saved = before
-                .and_then(|l| l.get(&c.name))
-                .is_some_and(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable));
-            if saved {
-                continue;
+        // Built at the first name missing from `before`: its entries by name as the drive sees it.
+        let mut alike: Option<HashMap<String, &Entry>> = None;
+        let mut lookup = |name: &str| -> Option<&Entry> {
+            let listing = before?;
+            if let Some(e) = listing.get(name) {
+                return Some(e);
             }
-            let size = c.meta.as_ref().map_or(0, |m| m.size);
-            new_files = new_files.saturating_add(1);
-            new_bytes = new_bytes.saturating_add(size);
-            let held = by_top.entry(top).or_default();
-            *held = held.saturating_add(size);
+            if !folds {
+                return None;
+            }
+            let index = alike.get_or_insert_with(|| {
+                let entries = listing.entries().iter();
+                entries.map(|e| (drive.compared(&e.name), e)).collect()
+            });
+            index.get(&drive.compared(name)).copied()
+        };
+        for c in children {
+            match c.kind {
+                Kind::Folder if old.get(&c.rel).and_then(Option::as_ref).is_none() => {
+                    if let Some(e) = lookup(&c.name).filter(|e| e.kind == EntryKind::Folder) {
+                        found.insert(&c.rel, store.listing(&e.id)?);
+                    }
+                }
+                Kind::File => {
+                    let saved = lookup(&c.name).and_then(|e| saved_file(before, &e.name));
+                    if saved.is_some() {
+                        continue;
+                    }
+                    let size = c.meta.as_ref().map_or(0, |m| m.size);
+                    new_files = new_files.saturating_add(1);
+                    new_bytes = new_bytes.saturating_add(size);
+                    let held = by_top.entry(top).or_default();
+                    *held = held.saturating_add(size);
+                }
+                _ => {}
+            }
         }
     }
     if new_bytes <= ASK_OVER_BYTES && new_files <= ASK_OVER_FILES {
-        return None;
+        return Ok(None);
     }
     let mut biggest: Vec<(String, u64)> = by_top
         .into_iter()
@@ -564,11 +606,11 @@ fn large_save(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Opti
         .collect();
     biggest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     biggest.truncate(3);
-    Some(LargeSave {
+    Ok(Some(LargeSave {
         new_files,
         new_bytes,
         biggest_folders: biggest,
-    })
+    }))
 }
 
 /// The line a save goes on, and the save it builds on: the current line or, at a save, the new
@@ -2796,16 +2838,34 @@ mod tests {
         let (dir, mut repo) = project();
         write(dir.path(), "a.txt", b"1");
         save_now(&mut repo).unwrap();
-        let (head, packs) = (
-            repo.head().unwrap(),
-            fs::read_dir(repo.packs_dir()).unwrap().count(),
-        );
+        // Head, diary, packs, `tmp/` and the file cache: all of `.bolt`, byte for byte, but for
+        // the lock's note of who last held it.
+        let bolt = || {
+            let mut tree = disk_tree(&dir.path().join(".bolt"));
+            tree.remove("state/lock-info");
+            tree
+        };
+        let before = bolt();
         sized(dir.path(), "art/huge.bin", 100_000_001);
         let (result, asked) = save_answering(&mut repo, None, false);
         assert!(asked.is_some());
         assert!(matches!(result, Err(SaveError::LargeSave(_))), "{result:?}");
-        assert_eq!(repo.head().unwrap(), head);
-        assert_eq!(fs::read_dir(repo.packs_dir()).unwrap().count(), packs);
+        assert!(bolt() == before, "something was stored");
+    }
+
+    #[test]
+    fn a_folder_renamed_in_letter_case_only_is_not_new_where_the_drive_ignores_case() {
+        let (dir, mut repo) = project();
+        sized(dir.path(), "Art/Huge.bin", 100_000_001);
+        save_now(&mut repo).unwrap();
+        fs::rename(dir.path().join("Art"), dir.path().join("art")).unwrap();
+        fs::rename(
+            dir.path().join("art/Huge.bin"),
+            dir.path().join("art/huge.bin"),
+        )
+        .unwrap();
+        let (_, asked) = save_answering(&mut repo, None, false);
+        assert_eq!(asked.is_some(), !this_drive().ignores_case, "{asked:?}");
     }
 
     #[test]
