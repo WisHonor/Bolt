@@ -103,6 +103,26 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
+    /// `state/journal`, the record of a stopped switch between saves, can't be used. It is
+    /// neither carried out nor passed over, since the folder may be half switched.
+    #[error(
+        "A switch between saves was stopped here, and Bolt can't finish it: \
+         .bolt/state/journal {}.",
+        escape(detail, false)
+    )]
+    JournalUnusable { detail: String },
+    /// A switch between saves stopped at `path` with an error it can't go past.
+    #[error("A switch between saves stopped at {}: {source}", escape(path, false))]
+    SwitchStopped {
+        path: String,
+        source: Box<RepoError>,
+    },
+    /// A stopped switch was carried on, but another program still holds files it must write.
+    #[error(
+        "A switch between saves was stopped, and Bolt couldn't finish it: {}",
+        escape(detail, true)
+    )]
+    SwitchInUse { detail: String },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -172,6 +192,28 @@ impl RepoError {
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
+                }
+                // Removing the journal is no roll back: the files stay as the switch left them.
+                RepoError::JournalUnusable { .. } => {
+                    "Nothing was changed. Your files are as the stopped switch left them, and \
+                     `bolt status` shows how they differ from the save the project is on. To go \
+                     on without finishing the switch, delete .bolt/state/journal."
+                }
+                RepoError::SwitchStopped { source, .. } => {
+                    let damage = if matches!(**source, RepoError::Damaged { .. }) {
+                        " Bolt's copy of it looks damaged: ask for help before trying to repair \
+                         the project."
+                    } else {
+                        ""
+                    };
+                    return Some(format!(
+                        "The switch isn't finished: what it already wrote stays, and the next \
+                         command that changes the project finishes it once that is fixed.{damage}"
+                    ));
+                }
+                RepoError::SwitchInUse { .. } => {
+                    "Close that program, then run the command again: Bolt finishes the switch \
+                     before anything else."
                 }
                 RepoError::Config(e) => return e.hint(),
                 RepoError::CacheKey { .. } => {
@@ -1208,7 +1250,7 @@ impl Repository {
     /// `commit`, without the merge.
     fn move_head(
         &mut self,
-        _lock: &ChangeLock,
+        lock: &ChangeLock,
         mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
@@ -1220,11 +1262,18 @@ impl Repository {
             self.store.register(&path);
         }
         fault_point("commit:before-head")?;
+        self.move_head_to(lock, id)?;
+        Ok(id)
+    }
+
+    /// Points `state/head` at `id`, a diary entry already stored: how a switch between saves
+    /// takes effect.
+    pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
         let head = format!("{id}\n");
         let held = &self.held;
         write_atomic(&held.tmp, &held.state, "head", head.as_bytes())?;
         self.head = Some(id);
-        Ok(id)
+        Ok(())
     }
 }
 

@@ -801,3 +801,241 @@ fn a_link_replaced_by_a_file_named_in_other_case_is_written() {
     assert_eq!(fs::read(dir.path().join("README")).unwrap(), b"new");
     assert!(outside.path().exists());
 }
+
+const OLD: &[(&str, &[u8])] = &[
+    ("a.txt", b"old a"),
+    ("b.txt", b"same"),
+    ("dir/c.txt", b"old c"),
+    ("gone/x.txt", b"bye"),
+    ("gone.txt", b"bye"),
+];
+const NEW: &[(&str, &[u8])] = &[
+    ("a.txt", b"new a"),
+    ("b.txt", b"same"),
+    ("dir/c.txt", b"new c"),
+    ("new/d.txt", b"d"),
+    ("new/e.txt", b"e"),
+];
+
+/// A project on the save `OLD`, its folder holding it, with the save `NEW` stored and the
+/// journal of a switch to it written, but nothing switched yet.
+fn stopped_switch() -> (tempfile::TempDir, Repository, Journal) {
+    let (dir, mut repo) = project();
+    let old = planted(&mut repo, &files(OLD));
+    let new = planted(&mut repo, &files(NEW));
+    for (path, bytes) in OLD {
+        let at = dir.path().join(path);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(at, bytes).unwrap();
+    }
+    let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
+    repo.move_head_to(&lock, old.1).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let plan = plan(&repo, old.0, new.0, None, false, drive, None).unwrap();
+    let journal = Journal {
+        target: new.1,
+        from: old.1,
+        actions: plan.actions,
+    };
+    journal.write(&repo, &lock).unwrap();
+    (dir, repo, journal)
+}
+
+/// What a file of the switch holds now, if it is there.
+fn held(dir: &Path, path: &str) -> Option<Vec<u8>> {
+    fs::read(dir.join(path)).ok()
+}
+
+fn assert_holds(dir: &Path, wanted: &[(&str, &[u8])]) {
+    for (path, bytes) in wanted {
+        assert_eq!(held(dir, path).as_deref(), Some(*bytes), "{path}");
+    }
+}
+
+fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveError> {
+    let who = who();
+    let req = crate::snapshot::SaveRequest {
+        message: "next",
+        who: &who,
+        command: "save",
+        accept_crlf: false,
+        git_excludes: None,
+    };
+    crate::snapshot::save_folder(repo, &req, &mut |_| {})
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
+    use crate::fsio::fault;
+    use crate::snapshot::SaveOutcome;
+    let mut stops_before_head = 0;
+    for n in 1.. {
+        assert!(n < 100, "the switch never finished");
+        let (dir, mut repo, journal) = stopped_switch();
+        let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        fault::arm(n);
+        let result = carry_out(&mut repo, &lock, &journal, drive);
+        fault::disarm();
+        drop(lock);
+        drop(repo);
+        // Every file wholly old or wholly new, and nothing else in the folder.
+        for (path, _) in OLD.iter().chain(NEW) {
+            let now = held(dir.path(), path);
+            let old = OLD.iter().find(|(p, _)| p == path).map(|(_, b)| b.to_vec());
+            let new = NEW.iter().find(|(p, _)| p == path).map(|(_, b)| b.to_vec());
+            assert!(now == old || now == new, "fault {n}: {path} holds {now:?}");
+        }
+        for name in names_in(dir.path()) {
+            assert!(
+                ["a.txt", "b.txt", "dir", "gone", "gone.txt", "new"].contains(&name.as_str()),
+                "fault {n}: {name}"
+            );
+        }
+
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let took_effect = repo.head().unwrap() == journal.target;
+        let outcome = save_now(&mut repo).unwrap();
+        let SaveOutcome::NothingChanged { current, warnings } = outcome else {
+            panic!("fault {n}: the save saved the folder before the switch finished");
+        };
+        assert_eq!(current, tip_of(&repo.current().unwrap().1).unwrap());
+        assert_eq!(repo.head().unwrap(), journal.target, "fault {n}");
+        assert_eq!(Journal::read(&repo).unwrap(), None, "fault {n}");
+        assert_holds(dir.path(), NEW);
+        assert_eq!(names_in(dir.path()), ["a.txt", "b.txt", "dir", "new"]);
+        // Said when the save had a switch to finish; only the journal's removal is silent.
+        let finished = kinds(&warnings).contains(&warning::SWITCH_FINISHED);
+        assert_eq!(finished, result.is_err() && !took_effect, "fault {n}");
+        if result.is_err() && !took_effect {
+            stops_before_head += 1;
+        }
+        if let Ok(done) = result {
+            assert!(done.in_use.is_empty());
+            // A stop after each change, before the head, and in removing the journal.
+            assert!(stops_before_head >= 8, "only {stops_before_head} stops");
+            assert!(n > stops_before_head + 1, "no stop after the head moved");
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_journal_whose_target_is_the_head_is_only_removed() {
+    let (dir, mut repo, journal) = stopped_switch();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    repo.move_head_to(&lock, journal.target).unwrap();
+    assert_eq!(finish_interrupted(&mut repo, &lock).unwrap(), None);
+    assert_eq!(Journal::read(&repo).unwrap(), None);
+    // Nothing of it was carried out again.
+    assert_holds(dir.path(), OLD);
+}
+
+#[test]
+fn status_says_a_switch_is_unfinished() {
+    let (_dir, repo, _) = stopped_switch();
+    let found = crate::status::status(&repo, false, None).unwrap();
+    assert!(found.unfinished_switch.is_some());
+    assert!(kinds(&found.warnings).contains(&warning::SWITCH_UNFINISHED));
+}
+
+#[test]
+fn a_switch_that_cant_write_a_file_names_it_and_waits_for_the_next_command() {
+    let (dir, mut repo, mut journal) = stopped_switch();
+    // A journal whose size for a file isn't its content's, as damage would leave it.
+    let a = journal
+        .actions
+        .iter_mut()
+        .find(|a| a.path == "dir/c.txt")
+        .unwrap();
+    let Change::File(c) = &mut a.change else {
+        panic!("{a:?}")
+    };
+    c.size += 1;
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    journal.write(&repo, &lock).unwrap();
+    for _ in 0..2 {
+        let e = finish_interrupted(&mut repo, &lock).unwrap_err();
+        assert!(
+            matches!(&e, RepoError::SwitchStopped { path, .. } if path == "dir/c.txt"),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("dir/c.txt"), "{e}");
+        let hint = e.hint().unwrap();
+        assert!(
+            hint.contains("next command") && hint.contains("damaged"),
+            "{hint}"
+        );
+        // Not taken back, and not passed over either.
+        assert_eq!(Journal::read(&repo).unwrap(), Some(journal.clone()));
+        assert_eq!(repo.head().unwrap(), journal.from);
+        assert_eq!(held(dir.path(), "dir/c.txt").unwrap(), b"old c");
+        assert_eq!(held(dir.path(), "a.txt").unwrap(), b"new a");
+    }
+    drop(lock);
+    assert!(matches!(
+        save_now(&mut repo),
+        Err(SaveError::Repo(RepoError::SwitchStopped { .. }))
+    ));
+}
+
+#[test]
+fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
+    let (dir, mut repo, journal) = stopped_switch();
+    let on_disk = dir.path().join(".bolt/state/journal");
+    let mut bytes = fs::read(&on_disk).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    fs::write(&on_disk, &bytes).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let e = finish_interrupted(&mut repo, &lock).unwrap_err();
+    assert!(matches!(e, RepoError::JournalUnusable { .. }), "{e:?}");
+    assert!(e.to_string().contains(".bolt/state/journal"), "{e}");
+    assert!(e.hint().unwrap().contains("delete .bolt/state/journal"));
+    assert_holds(dir.path(), OLD);
+    drop(lock);
+    let found = crate::status::status(&repo, false, None).unwrap();
+    assert!(kinds(&found.warnings).contains(&warning::SWITCH_UNFINISHED));
+    assert!(
+        found
+            .unfinished_switch
+            .unwrap()
+            .contains(".bolt/state/journal")
+    );
+
+    // One made for another save than the head's is no switch of this folder.
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let stray = Journal {
+        from: journal.target,
+        target: Id([7; 32]),
+        ..journal
+    };
+    stray.write(&repo, &lock).unwrap();
+    let e = finish_interrupted(&mut repo, &lock).unwrap_err();
+    assert!(matches!(e, RepoError::JournalUnusable { .. }), "{e:?}");
+    assert_holds(dir.path(), OLD);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_file_held_open_keeps_the_switch_unfinished_until_let_go() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (dir, mut repo, journal) = stopped_switch();
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(dir.path().join("a.txt"))
+        .unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let e = finish_interrupted(&mut repo, &lock).unwrap_err();
+    assert!(matches!(e, RepoError::SwitchInUse { .. }), "{e:?}");
+    assert!(e.to_string().contains("a.txt"), "{e}");
+    assert_eq!(repo.head().unwrap(), journal.from);
+    assert!(Journal::read(&repo).unwrap().is_some());
+    drop(handle);
+    let done = finish_interrupted(&mut repo, &lock).unwrap().unwrap();
+    assert!(kinds(&done.warnings).contains(&warning::SWITCH_FINISHED));
+    assert_eq!(repo.head().unwrap(), journal.target);
+    assert_holds(dir.path(), NEW);
+}

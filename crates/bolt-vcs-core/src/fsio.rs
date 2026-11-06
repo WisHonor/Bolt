@@ -96,16 +96,6 @@ pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
     dir.remove_file(name)
 }
 
-/// Deletes the file `name` in the folder `dir`, if it is there, and flushes `dir` so the removal
-/// survives a crash.
-pub fn remove_file_durable(dir: &Dir, name: &OsStr) -> io::Result<()> {
-    match dir.remove_file(name) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
-    dir.sync()
-}
-
 /// Opens the change-lock file `name` in the folder `state` for reading and writing, making it if
 /// needed, never through a link (`safe_fs::open_or_create_in`); errors name it `shown`. Its
 /// contents never matter, so it is never truncated.

@@ -13,12 +13,12 @@ use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change_in, for_each_entry_change_in};
-use crate::drive::Drive;
+use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
 use crate::fsio;
 use crate::history::tip_of;
 use crate::id::{ContentHasher, Id};
-use crate::journal::{Action, Change, Content, Expected, Journal};
+use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{
@@ -287,6 +287,94 @@ pub fn apply(
     run.finish()
 }
 
+/// Carries out `journal`, then, unless another program held a file open, moves `head` to its
+/// entry and removes it: the switch has then happened. With files in use the journal stays and
+/// `head` doesn't move, so the next command finishes the rest.
+pub fn carry_out(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    journal: &Journal,
+    drive: Drive,
+) -> Result<Applied, RepoError> {
+    let done = apply(repo, lock, journal, drive)?;
+    if done.in_use.is_empty() {
+        repo.move_head_to(lock, journal.target)?;
+        Journal::remove(repo, lock)?;
+    }
+    Ok(done)
+}
+
+/// Finishes a switch that a crash or a stop left in `state/journal`, before a command changes
+/// anything (decision 049): never rolled back. `None` when there was none, or when `head`
+/// already names its entry and only the journal was left. A switch that still can't finish is
+/// an error, the journal kept, so no command builds on a half-switched folder.
+pub fn finish_interrupted(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+) -> Result<Option<Applied>, RepoError> {
+    let Some(journal) = Journal::read(repo)? else {
+        return Ok(None);
+    };
+    let head = repo.head()?;
+    if head == journal.target {
+        Journal::remove(repo, lock)?;
+        return Ok(None);
+    }
+    if head != journal.from {
+        return Err(journal::unusable(
+            "was made for another save than the one the project is on",
+        ));
+    }
+    // Its entry must read before anything is written for it.
+    let entry = repo
+        .store()
+        .read_record(&journal.target, ObjectKind::DiaryEntry)
+        .map_err(RepoError::from)
+        .and_then(|bytes| Ok(DiaryEntry::decode(&bytes)?));
+    if let Err(e) = entry {
+        return Err(journal::unusable(format!(
+            "names a diary entry that can't be read ({e})"
+        )));
+    }
+    let drive = drive::probe(repo.tmp_folder())?;
+    let mut done = carry_out(repo, lock, &journal, drive)?;
+    if !done.in_use.is_empty() {
+        return Err(RepoError::SwitchInUse {
+            detail: in_use_warning(&done.in_use).message,
+        });
+    }
+    done.warnings.push(Warning::new(
+        warning::SWITCH_FINISHED,
+        format!(
+            "Finished a switch between saves that was stopped before it was done: wrote {} and \
+             removed {}.",
+            counted(done.written, "file", "files"),
+            counted(done.removed, "entry", "entries")
+        ),
+    ));
+    Ok(Some(done))
+}
+
+/// For commands that only read: says a switch between saves is still to finish, or that its
+/// journal can't be used.
+#[must_use]
+pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
+    let message = match Journal::read(repo) {
+        Ok(None) => return None,
+        // It took effect; the next change only removes the journal.
+        Ok(Some(j)) if repo.head().ok() == Some(j.target) => return None,
+        Ok(Some(_)) => "A switch between saves was stopped before it was done, so some files may \
+                        still be as they were. Running `bolt goto` or `bolt discard` again, or any \
+                        command that changes the project, finishes it first."
+            .to_owned(),
+        Err(e) => format!(
+            "{e} Commands that change the project won't run until it is dealt with. {}",
+            e.hint().unwrap_or_default()
+        ),
+    };
+    Some(Warning::new(warning::SWITCH_UNFINISHED, message))
+}
+
 /// What one change came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -339,7 +427,11 @@ impl Run<'_> {
             return Ok(());
         }
         let path = a.path.clone();
-        match change(self)? {
+        let outcome = change(self).map_err(|e| RepoError::SwitchStopped {
+            path: path.clone(),
+            source: Box::new(e),
+        })?;
+        match outcome {
             Outcome::Wrote => self.applied.written += 1,
             Outcome::Made => {}
             Outcome::Placeholder => {

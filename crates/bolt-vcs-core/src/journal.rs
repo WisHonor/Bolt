@@ -12,7 +12,7 @@ use crate::fsio;
 use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::names::{MAX_PATH_BYTES, validate_path};
-use crate::repo::{ChangeLock, RepoError, Repository, damaged, refused};
+use crate::repo::{ChangeLock, RepoError, Repository, refused};
 use crate::safe_fs;
 
 const MAGIC: &[u8; 8] = b"BOLTJRNL";
@@ -217,16 +217,32 @@ impl Journal {
         match safe_fs::read_capped_in(repo.state_folder(), OsStr::new(FILE), &shown, MAX_BYTES) {
             Ok(bytes) => Journal::decode(&bytes)
                 .map(Some)
-                .map_err(|e| damaged(format!("state/journal can't be used ({e})"))),
+                .map_err(|e| unusable(format!("can't be read ({e})"))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(refused(e)),
+            Err(e) => Err(match refused(e) {
+                RepoError::Damaged { detail } => unusable(format!("can't be used ({detail})")),
+                other => other,
+            }),
         }
     }
 
     /// Removes `state/journal`, if it is there, for good.
     pub fn remove(repo: &Repository, _lock: &ChangeLock) -> Result<(), RepoError> {
-        fsio::remove_file_durable(repo.state_folder(), OsStr::new(FILE))?;
+        let state = repo.state_folder();
+        match state.remove_file(OsStr::new(FILE)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        fsio::fault_point("journal:removed")?;
+        state.sync()?;
         Ok(())
+    }
+}
+
+/// The journal can't be used: an error of its own, so the user hears which file it is.
+pub(crate) fn unusable(detail: impl Into<String>) -> RepoError {
+    RepoError::JournalUnusable {
+        detail: detail.into(),
     }
 }
 
@@ -450,7 +466,7 @@ mod tests {
         std::fs::write(&on_disk, bytes).unwrap();
         assert!(matches!(
             Journal::read(&repo),
-            Err(RepoError::Damaged { .. })
+            Err(RepoError::JournalUnusable { .. })
         ));
 
         Journal::remove(&repo, &lock).unwrap();

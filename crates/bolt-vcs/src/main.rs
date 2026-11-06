@@ -22,6 +22,7 @@ use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
 use bolt_core::text::escape;
 use bolt_core::warning::{self, Warning};
+use bolt_core::writeout::unfinished_warning;
 use clap::{Parser, Subcommand};
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
@@ -469,6 +470,7 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo: &Repository = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
     )?));
+    let unfinished = unfinished_warning(repo);
     if json {
         let line = match &repo.current()?.1.state.position {
             bolt_core::diary::Position::OnLine(name) => json!(name),
@@ -483,7 +485,11 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
                     each(&output::save_json(id, save, short))
                 })
             },
-            || (json!({}), repo.store().warnings()),
+            || {
+                let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
+                warnings.extend(repo.store().warnings());
+                (json!({}), warnings)
+            },
         )?;
         output::print_warnings(&warnings);
         return Ok(());
@@ -499,7 +505,9 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         );
         Ok::<(), Failure>(())
     })?;
-    output::print_warnings(&repo.store().warnings());
+    let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
+    warnings.extend(repo.store().warnings());
+    output::print_warnings(&warnings);
     Ok(())
 }
 
@@ -511,6 +519,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         Some(t) => resolve(repo, t)?,
         None => current_save(repo)?,
     };
+    let unfinished = unfinished_warning(repo);
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
     let old_root = match save.parents.first() {
@@ -534,7 +543,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
             },
             || {
                 // Shortened after the walk: if it fails first, only the store has warnings to give.
-                let mut warnings = Vec::new();
+                let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
                 let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
                 warnings.extend(store.warnings());
                 (
@@ -546,7 +555,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         output::print_warnings(&warnings);
         return Ok(());
     }
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
     let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
     let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
     println!(

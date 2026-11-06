@@ -11,6 +11,7 @@ use crate::repo::Repository;
 use crate::save::Save;
 use crate::snapshot::{SaveError, read_folder};
 use crate::warning::Warning;
+use crate::writeout;
 
 /// What changed since the current save.
 #[derive(Debug)]
@@ -54,6 +55,10 @@ pub fn status(
     let save_id = tip_of(&entry)?;
     let save = repo.store().save(&save_id, repo.signatures_allowed())?;
     let now = read_folder(repo, save.root, full, git_excludes)?;
+    let mut warnings = now.warnings;
+    let unfinished = writeout::unfinished_warning(repo);
+    let unfinished_switch = unfinished.as_ref().map(|w| w.message.clone());
+    warnings.extend(unfinished);
     let mut changes = Vec::new();
     for_each_change_in(
         repo.store(),
@@ -78,7 +83,7 @@ pub fn status(
         save,
         changes,
         not_written_here: now.not_written_here,
-        unfinished_switch: None,
-        warnings: now.warnings,
+        unfinished_switch,
+        warnings,
     })
 }
