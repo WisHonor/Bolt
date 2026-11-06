@@ -17,6 +17,7 @@ use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
+use crate::keyed::{self, KEY_LEN};
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::safe_fs;
@@ -543,6 +544,9 @@ pub struct Repository {
     /// The head read before the store was last loaded, so every object it reaches is
     /// registered. `None` when there was no head yet.
     head: Option<Id>,
+    /// What seals this handle's caches: one for this handle alone unless `set_cache_key` gave
+    /// the user's own.
+    cache_key: [u8; KEY_LEN],
 }
 
 /// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
@@ -867,6 +871,7 @@ impl Repository {
                 features: BTreeSet::new(),
             },
             head: None,
+            cache_key: keyed::run_key()?,
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
         // `start` too.
@@ -989,6 +994,7 @@ impl Repository {
             format,
             store,
             head,
+            cache_key: keyed::run_key()?,
         };
         repo.clean_tmp()?;
         Ok(repo)
@@ -1040,6 +1046,18 @@ impl Repository {
     /// `.bolt`, held open.
     pub(crate) fn bolt_folder(&self) -> &Dir {
         &self.held.bolt
+    }
+
+    /// The key that seals this project's caches for this handle.
+    #[must_use]
+    pub fn cache_key(&self) -> &[u8; KEY_LEN] {
+        &self.cache_key
+    }
+
+    /// Seals caches with `key` from now on: the user's own, which the command line reads, so
+    /// that they last from one command to the next.
+    pub fn set_cache_key(&mut self, key: [u8; KEY_LEN]) {
+        self.cache_key = key;
     }
 
     /// `cache/`, held open.

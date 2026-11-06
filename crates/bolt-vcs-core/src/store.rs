@@ -306,7 +306,7 @@ impl Store {
     }
 
     /// Keeps `warning` to come with the others.
-    pub(crate) fn note(&self, warning: Warning) {
+    pub fn note(&self, warning: Warning) {
         self.checked().notes.push(warning);
     }
 

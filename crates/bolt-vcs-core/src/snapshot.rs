@@ -17,7 +17,6 @@ use crate::drive;
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
-use crate::keyed;
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems};
@@ -323,14 +322,11 @@ pub fn save_folder(
     let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
     // Worked out before the commit, so that nothing after it can fail the save. The line's
     // change IDs come from the cache, which then learns this one.
-    let mut cache = None;
-    let shortened = (|| {
-        let key = keyed::cache_key()?;
-        let mut ids = ChangeIds::load(repo, &key);
-        let short = history::short_among(ids.line(repo, line, parent_id)?, &save.change_id, false);
-        cache = Some((ids, key));
-        Ok::<_, RepoError>(short)
-    })();
+    let key = *repo.cache_key();
+    let mut cache = ChangeIds::load(repo, &key);
+    let shortened = cache
+        .line(repo, line, parent_id)
+        .map(|ids| history::short_among(ids, &save.change_id, false));
     let short_change_id = shortened.unwrap_or_else(|why| {
         warnings.push(Warning::new(
             warning::CHANGE_ID_NOT_SHORTENED,
@@ -353,10 +349,8 @@ pub fn save_folder(
         safety_copies: vec![],
     };
     repo.commit(&lock, packs, &diary)?;
-    if let Some((mut ids, key)) = cache {
-        ids.add(line, parent_id, save_id, save.change_id);
-        ids.store(repo, &key, &diary.state);
-    }
+    cache.add(line, parent_id, save_id, save.change_id);
+    cache.store(repo, &key, &diary.state);
     // The save is committed now; failing to count its files must not make it look failed.
     let changed_files = match count_changes(repo.store(), Some(parent.root), root) {
         Ok(count) => Some(count),
@@ -972,7 +966,10 @@ mod tests {
 
     #[test]
     fn a_save_does_not_read_its_line_once_the_cache_is_built() {
+        // One key for every handle, as the user's own key would be.
+        const KEY: [u8; 32] = [7; 32];
         let (dir, mut repo) = project();
+        repo.set_cache_key(KEY);
         let mut shorts = Vec::new();
         for n in 0..6 {
             write(dir.path(), "a.txt", format!("{n}").as_bytes());
@@ -993,14 +990,16 @@ mod tests {
             shorts.push((save_id, save.change_id, short_change_id));
         }
         // The newest save's short ID is the one the line gives it.
-        let fresh = Repository::open(dir.path()).unwrap();
+        let mut fresh = Repository::open(dir.path()).unwrap();
+        fresh.set_cache_key(KEY);
         let (id, change_id, short) = shorts.last().unwrap();
         assert_eq!(
             *short,
             history::short_change_id(&fresh, id, change_id).unwrap()
         );
         // History reads the line once.
-        let fresh = Repository::open(dir.path()).unwrap();
+        let mut fresh = Repository::open(dir.path()).unwrap();
+        fresh.set_cache_key(KEY);
         history::for_each_on_line::<RepoError>(&fresh, |_, _, _| Ok(())).unwrap();
         assert_eq!(fresh.store().saves_read(), 7);
     }

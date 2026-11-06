@@ -11,6 +11,8 @@ pub const COPY_UNREADABLE: &str = "copy_unreadable";
 pub const PACK_NOT_MERGED: &str = "pack_not_merged";
 /// A change ID is shown whole because the line couldn't be read to shorten it.
 pub const CHANGE_ID_NOT_SHORTENED: &str = "change_id_not_shortened";
+/// The user's cache key can't be used, so the command went without its caches.
+pub const CACHE_KEY_UNUSABLE: &str = "cache_key_unusable";
 /// A save was made but its changed files couldn't be counted.
 pub const CHANGED_FILES_NOT_COUNTED: &str = "changed_files_not_counted";
 /// A `.gitignore` that isn't a regular file was skipped, so its rules didn't apply.

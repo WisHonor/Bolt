@@ -813,11 +813,16 @@ fn save_warns_about_a_pack_holding_a_damaged_copy() {
     );
 }
 
-/// Bit rot in the only copy of a save: its first stored byte is flipped. The change-ID cache goes
-/// too, so that the line is read again.
+/// Bit rot in the only copy of a save, as `rot` makes it. The change-ID cache goes too, so that the
+/// line is read again.
 fn damage_the_only_copy_of(root: &Path, id: &Id) {
+    std::fs::remove_file(root.join(".bolt/cache/change-ids")).unwrap();
+    rot(root, id);
+}
+
+/// Bit rot in the only copy of a save: its first stored byte is flipped.
+fn rot(root: &Path, id: &Id) {
     use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
-    let _ = std::fs::remove_file(root.join(".bolt/cache/change-ids"));
     for e in std::fs::read_dir(root.join(".bolt/store/packs")).unwrap() {
         let path = e.unwrap().path();
         let found = PackReader::open(&path).unwrap().find(id).unwrap();
@@ -1869,4 +1874,73 @@ fn history_show_and_save_hold_one_save_at_a_time() {
             text(&out.stderr)
         );
     }
+}
+
+/// A key file Bolt can't use is the user's to deal with: commands still work, without caches,
+/// and say so, and the file is left as it is.
+#[test]
+fn a_cache_key_bolt_cant_use_is_a_warning_not_a_failure() {
+    let env = Env::new();
+    let key = env.config.path().join("cache-key");
+    std::fs::write(&key, b"short").unwrap();
+    let start = json_as_user(&env, &["--json", "start"]);
+    assert_eq!(warning_kinds(&start), ["cache_key_unusable"], "{start}");
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    for args in [
+        &["--json", "save", "one"][..],
+        &["--json", "history"],
+        &["--json", "show"],
+    ] {
+        let doc = json_as_user(&env, args);
+        assert_eq!(
+            warning_kinds(&doc),
+            ["cache_key_unusable"],
+            "{args:?}: {doc}"
+        );
+        let said = doc["warnings"][0]["message"].as_str().unwrap();
+        assert!(
+            said.contains("cache-key") && said.contains("Delete"),
+            "{said}"
+        );
+    }
+    let out = env.bolt().arg("history").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("warning: Bolt can't use its cache key"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&key).unwrap(), b"short");
+}
+
+/// With the change-ID cache current, a save needn't read the line, so a damaged older save
+/// doesn't touch it; `history` hands out the newer saves and then ends its document with the error.
+#[test]
+fn a_current_cache_reads_a_damaged_older_save_only_when_history_reaches_it() {
+    let env = project_with_two_saves();
+    let history = json_as_user(&env, &["--json", "history"]);
+    let oldest = Id::from_hex(history["saves"][2]["id"].as_str().unwrap()).unwrap();
+    rot(env.root(), &oldest);
+    std::fs::write(env.root().join("c.txt"), "c").unwrap();
+    let saved = json_as_user(&env, &["--json", "save", "three"]);
+    assert_eq!(saved["result"], "saved", "{saved}");
+    assert!(warning_kinds(&saved).is_empty(), "{saved}");
+    let out = env.bolt().args(["--json", "history"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["saves"].as_array().unwrap().len(), 3, "{doc}");
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("damaged"),
+        "{doc}"
+    );
+}
+
+/// `json_of`, run as the test user, so that a save may be made.
+fn json_as_user(env: &Env, args: &[&str]) -> serde_json::Value {
+    let out = env.bolt().args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    serde_json::from_slice(&out.stdout).unwrap()
 }

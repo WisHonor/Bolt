@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use crate::changeids::ChangeIds;
 use crate::diary::{DiaryEntry, Position};
 use crate::id::{ChangeId, Id};
-use crate::keyed;
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
 use crate::text::escape;
@@ -136,7 +135,7 @@ pub fn short_change_id(
     let Position::OnLine(line) = &entry.state.position else {
         return walk_short(repo, tip, id, change_id);
     };
-    let key = keyed::cache_key()?;
+    let key = *repo.cache_key();
     let mut cache = ChangeIds::load(repo, &key);
     let ids = cache.line(repo, line, tip)?;
     let listed = ids.binary_search(change_id).is_ok();
@@ -182,7 +181,7 @@ pub fn for_each_on_line<E: From<RepoError>>(
     let tip = tip_of(&entry)?;
     let ids = match &entry.state.position {
         Position::OnLine(line) => {
-            let key = keyed::cache_key()?;
+            let key = *repo.cache_key();
             let mut cache = ChangeIds::load(repo, &key);
             let ids = cache.line(repo, line, tip)?.to_vec();
             cache.store(repo, &key, &entry.state);
@@ -676,7 +675,7 @@ mod tests {
         let (dir, repo, ids) = project_with(&["klmnopl", "klmnopk"]);
         let lie = lying_cache(&repo);
         // The lie, sealed with this account's key, is believed: the test can tell.
-        let key = crate::keyed::cache_key().unwrap();
+        let key = *repo.cache_key();
         plant_cache(dir.path(), &crate::keyed::seal(&key, &lie.encode()));
         assert_eq!(cached_line(&repo)[0], "klmnopkk");
         let other = [0x5a; crate::keyed::KEY_LEN];

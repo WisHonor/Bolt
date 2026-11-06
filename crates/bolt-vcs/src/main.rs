@@ -140,11 +140,27 @@ fn read_first_save(repo: &Repository) -> Result<(Id, Save, String), Failure> {
     Ok((id, save, short))
 }
 
+/// `repo`, sealing its caches with the user's own key. A key Bolt can't use is a warning, and
+/// the caches go unused this time: they only make Bolt faster.
+fn with_users_key(mut repo: Repository) -> Repository {
+    match bolt_core::keyed::cache_key() {
+        Ok(key) => repo.set_cache_key(key),
+        Err(e) => repo.store().note(Warning::new(
+            warning::CACHE_KEY_UNUSABLE,
+            format!(
+                "{e} Bolt worked without its caches this time. {}",
+                e.hint().unwrap_or_default()
+            ),
+        )),
+    }
+    repo
+}
+
 fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
     // The user's own settings may name this folder, so the first save is theirs too.
     let who = now_person(&load_identity(Some(&root))?);
-    let repo: &Repository = opened.insert(Repository::init(&root, &who)?);
+    let repo: &Repository = opened.insert(with_users_key(Repository::init(&root, &who)?));
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
         .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
         .into_iter()
@@ -261,7 +277,9 @@ fn save(
             printed: false,
         });
     }
-    let repo = opened.insert(Repository::discover(&std::env::current_dir()?)?);
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     // A project's own settings never say who the user is; if they try, the user is told.
     let ignored = ignored_project_identity(repo);
@@ -371,7 +389,9 @@ fn now_ms() -> i64 {
 }
 
 fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let repo: &Repository = opened.insert(Repository::discover(&std::env::current_dir()?)?);
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
     if json {
         let line = match &repo.current()?.1.state.position {
             bolt_core::diary::Position::OnLine(name) => json!(name),
@@ -407,7 +427,9 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
 }
 
 fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let repo: &Repository = opened.insert(Repository::discover(&std::env::current_dir()?)?);
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
     let id = match text {
         Some(t) => resolve(repo, t)?,
         None => current_save(repo)?,

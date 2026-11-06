@@ -3,7 +3,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config;
 use crate::repo::RepoError;
@@ -14,14 +14,15 @@ pub const KEY_LEN: usize = 32;
 /// The key file's name, in the folder of the user's `config.toml`.
 pub const KEY_FILE: &str = "cache-key";
 
-/// The user's cache key, made on first use. Two Bolts making it at once end with one key. A key
-/// file that can't be read, or isn't 32 bytes, is an error naming it: it is the user's own, and
-/// replacing it silently could hide that someone changed it. With no settings folder, a key for
-/// this run alone, so no cache is trusted again.
+/// The user's cache key, made on first use in the user's own settings folder; only the command
+/// line asks for it, and hands it to `Repository::set_cache_key`. Two Bolts making it at once end
+/// with one key. A key file that can't be read, or isn't 32 bytes, is an error naming it, never
+/// replaced: it is the user's own, and replacing it silently could hide that someone changed it.
+/// With no settings folder, a key for this run alone, so no cache is trusted again.
 pub fn cache_key() -> Result<[u8; KEY_LEN], RepoError> {
-    match settings_folder() {
-        Some(dir) => key_in(&dir),
-        None => Ok(random_key()?),
+    match config::user_config_path().as_deref().and_then(Path::parent) {
+        Some(dir) => key_in(dir),
+        None => Ok(run_key()?),
     }
 }
 
@@ -43,15 +44,8 @@ pub fn open_sealed<'a>(key: &[u8; KEY_LEN], bytes: &'a [u8]) -> Option<&'a [u8]>
     (blake3::keyed_hash(key, body) == tag).then_some(body)
 }
 
-fn settings_folder() -> Option<PathBuf> {
-    // Unit tests keep their key out of the user's own settings.
-    if cfg!(test) {
-        return Some(std::env::temp_dir().join("bolt-core-tests"));
-    }
-    Some(config::user_config_path()?.parent()?.to_owned())
-}
-
-fn random_key() -> io::Result<[u8; KEY_LEN]> {
+/// A key for one run, or one `Repository` handle, alone: what it seals no later run trusts.
+pub(crate) fn run_key() -> io::Result<[u8; KEY_LEN]> {
     let mut key = [0; KEY_LEN];
     getrandom::fill(&mut key).map_err(io::Error::other)?;
     Ok(key)
@@ -86,7 +80,7 @@ fn read_key(path: &Path) -> io::Result<[u8; KEY_LEN]> {
 /// another Bolt linked in first.
 fn make_key(dir: &Path, path: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let key = random_key()?;
+    let key = run_key()?;
     let temp = dir.join(bolt_platform::temp_name());
     let written = new_private(&temp).and_then(|mut file| {
         file.write_all(&key)?;
@@ -100,7 +94,7 @@ fn make_key(dir: &Path, path: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         // A drive without hard links (FAT): made in place, where a racing Bolt may briefly see
         // it short and say so.
-        Err(_) => match new_private(path) {
+        Err(e) if no_hard_links(&e) => match new_private(path) {
             Ok(mut file) => {
                 file.write_all(&key)?;
                 file.sync_all()?;
@@ -108,8 +102,22 @@ fn make_key(dir: &Path, path: &Path) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         },
+        Err(e) => return Err(e),
     }
     Ok(())
+}
+
+/// Whether `e`, from making a hard link, says the drive has none. Windows says so with
+/// "incorrect function" or "not supported"; Linux's FAT with EPERM; others with EOPNOTSUPP.
+fn no_hard_links(e: &io::Error) -> bool {
+    let codes: &[i32] = if cfg!(windows) {
+        &[1, 50]
+    } else if cfg!(target_os = "macos") {
+        &[1, 102]
+    } else {
+        &[1, 95]
+    };
+    e.kind() == io::ErrorKind::Unsupported || e.raw_os_error().is_some_and(|c| codes.contains(&c))
 }
 
 /// A new file only the user may read.
@@ -185,6 +193,49 @@ mod tests {
             // Never replaced.
             assert_eq!(fs::read(&path).unwrap(), bytes);
         }
+    }
+
+    /// The engine takes its key from the `Repository`, so no library path reaches the user's own
+    /// settings: only the command line asks for their key.
+    #[test]
+    fn nothing_in_the_engine_reads_the_users_key() {
+        let mut folders = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut checked = 0;
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && path.file_name().is_some_and(|n| n != "keyed.rs")
+                {
+                    let text = fs::read_to_string(&path).unwrap();
+                    assert!(
+                        !text.contains("keyed::cache_key") && !text.contains("key_in("),
+                        "{}",
+                        path.display()
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 20);
+    }
+
+    #[test]
+    fn only_a_drive_without_hard_links_makes_the_key_in_place() {
+        assert!(no_hard_links(&io::Error::from(io::ErrorKind::Unsupported)));
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!no_hard_links(&io::Error::from(kind)), "{kind:?}");
+        }
+        #[cfg(windows)]
+        assert!(no_hard_links(&io::Error::from_raw_os_error(1)));
+        #[cfg(windows)]
+        assert!(!no_hard_links(&io::Error::from_raw_os_error(5)));
     }
 
     #[test]
