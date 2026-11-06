@@ -42,6 +42,7 @@ fn a_folder_swapped_before_its_files_are_looked_at_is_refused() {
         command: "save",
         accept_crlf: false,
         git_excludes: None,
+        new_line: None,
     };
     match save_folder(&mut repo, &req, &mut |_| {}) {
         Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "sub/a.txt"),

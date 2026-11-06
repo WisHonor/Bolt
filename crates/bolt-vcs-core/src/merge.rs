@@ -333,6 +333,7 @@ mod tests {
                 command: "save",
                 accept_crlf: false,
                 git_excludes: None,
+                new_line: None,
             };
             match save_folder(&mut repo, &req, &mut |_| {}).unwrap() {
                 SaveOutcome::Saved {

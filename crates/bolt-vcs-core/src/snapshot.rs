@@ -11,9 +11,10 @@ use std::path::Path;
 use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
-use crate::diary::{Action, DiaryEntry, Position};
+use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
 use crate::diff::count_changes;
 use crate::drive;
+use crate::encoding::DecodeError;
 use crate::filecache::{self, FileCache};
 use crate::fsio;
 use crate::history;
@@ -44,6 +45,8 @@ pub struct SaveRequest<'a> {
     /// The user's own Git ignore list, from `config::git_excludes_file`, whose lines come first
     /// (decision 047); `None` reads none.
     pub git_excludes: Option<&'a Path>,
+    /// The new line a save made at a save goes on; refused on a line.
+    pub new_line: Option<&'a str>,
 }
 
 // Made once per command, so boxing the save would buy nothing.
@@ -114,8 +117,22 @@ pub enum SaveError {
         count: u64,
         first: Vec<String>,
     },
-    #[error("You are not on a line, so the save has nowhere to go.")]
-    NotOnALine,
+    #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
+    NeedsLineName,
+    // `reason` is Bolt's own wording.
+    #[error("{} can't be a line's name: {reason}.", escape(name, false))]
+    BadLineName { name: String, reason: &'static str },
+    #[error(
+        "There is already a line {}, and two lines can't have names that differ only by letter \
+         case.",
+        escape(taken, false)
+    )]
+    LineTaken { taken: String },
+    #[error(
+        "You're on line {}, and making a new line from a line comes in v0.2.",
+        escape(line, false)
+    )]
+    LineFromLine { line: String },
 }
 
 // Through `RepoError`, so a damaged pack is reported as damage.
@@ -212,13 +229,12 @@ impl SaveError {
                         .to_owned(),
                 );
             }
-            SaveError::NotOnALine => {
-                return Some(
-                    "This version of Bolt can only save on a line. Delete the hidden .bolt folder \
-                     at the top of the project, switch Git to a branch (`git switch <branch>`) and \
-                     run bolt import there again, or import a fresh clone that is on a branch."
-                        .to_owned(),
-                );
+            SaveError::NeedsLineName => "Name it: bolt save --line <name> \"message\"".into(),
+            SaveError::BadLineName { .. } | SaveError::LineTaken { .. } => {
+                "Choose another name.".into()
+            }
+            SaveError::LineFromLine { line } => {
+                format!("Leave out --line to save on {}.", escape(line, false))
             }
             SaveError::Unreadable { .. } => "Let Bolt read it, or list it in .boltignore.".into(),
             SaveError::ChangedDuringSave { .. } => {
@@ -256,16 +272,8 @@ pub fn save_folder(
         }
     }
     let (head, entry) = repo.current()?;
-    let Position::OnLine(line) = &entry.state.position else {
-        return Err(SaveError::NotOnALine);
-    };
-    let parent_id = *entry
-        .state
-        .lines
-        .get(line)
-        .ok_or_else(|| RepoError::Damaged {
-            detail: format!("the current line {line} has no save"),
-        })?;
+    let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
+    let line = &line;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
@@ -372,6 +380,7 @@ pub fn save_folder(
     });
     let mut state = entry.state.clone();
     state.lines.insert(line.clone(), save_id);
+    state.position = Position::OnLine(line.clone());
     let diary = DiaryEntry {
         parent: Some(head),
         action: Action::Command,
@@ -406,6 +415,36 @@ pub fn save_folder(
         short_change_id,
         warnings,
     })
+}
+
+/// The line a save goes on, and the save it builds on: the current line or, at a save, the new
+/// line `new_line`, which the save's diary entry then makes.
+fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(String, Id), SaveError> {
+    match (&state.position, new_line) {
+        (Position::OnLine(line), None) => {
+            let tip = *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
+                detail: format!("the current line {line} has no save"),
+            })?;
+            Ok((line.clone(), tip))
+        }
+        (Position::OnLine(line), Some(_)) => Err(SaveError::LineFromLine { line: line.clone() }),
+        (Position::AtSave(_), None) => Err(SaveError::NeedsLineName),
+        (Position::AtSave(at), Some(name)) => {
+            validate_line_name(name).map_err(|e| SaveError::BadLineName {
+                name: name.to_owned(),
+                reason: match e {
+                    DecodeError::Invalid(reason) => reason,
+                    _ => "it breaks the rules for line names",
+                },
+            })?;
+            if let Some(taken) = line_named_alike(&state.lines, name) {
+                return Err(SaveError::LineTaken {
+                    taken: taken.to_owned(),
+                });
+            }
+            Ok((name.to_owned(), *at))
+        }
+    }
 }
 
 /// Writes `seen`, what this walk learned of the files, as the file-state cache, if the drive's
@@ -1109,6 +1148,7 @@ mod tests {
             command: "save",
             accept_crlf: false,
             git_excludes,
+            new_line: None,
         };
         save_folder(repo, &req, &mut |_| {})
     }

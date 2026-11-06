@@ -3,6 +3,7 @@
 mod import_output;
 mod output;
 
+use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -57,6 +58,9 @@ enum Command {
         /// After an import, save files Git wrote with CRLF line endings as they are.
         #[arg(long)]
         accept_crlf: bool,
+        /// At a save rather than on a line, the name of the new line this save starts.
+        #[arg(long, value_name = "NAME")]
+        line: Option<String>,
     },
     /// Show what changed since your last save.
     Status {
@@ -68,6 +72,8 @@ enum Command {
     History,
     /// Show one save.
     Show { save: Option<String> },
+    /// List the lines, marking the one you're on, then the server lines.
+    Line,
     /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
     Goto { target: String },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
@@ -287,10 +293,9 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
                     Some(short_or_whole(repo, id, &save.change_id, &mut warnings))
                 });
                 let short = short.unwrap_or_else(|| id.to_hex());
-                let advice = SaveError::NotOnALine.hint().unwrap_or_default();
                 format!(
-                    "You're at save {short}, where Git's HEAD was detached: not on a line, so bolt \
-                     save won't work here.\n{advice}"
+                    "You're at save {short}, where Git's HEAD was detached: not on a line. Saving \
+                     here asks for a new line's name."
                 )
             }
         };
@@ -300,10 +305,30 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Asks in the terminal for the new line's name; `None` if there is no terminal to ask in.
+fn ask_line_name() -> Result<Option<String>, Failure> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    eprint!("Name a new line for this save: ");
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return Err(Failure {
+            message: "Nothing was saved: no name was given for the new line.".into(),
+            hint: None,
+            printed: false,
+        });
+    }
+    Ok(Some(answer.to_owned()))
+}
+
 fn save(
     json: bool,
     message: Option<String>,
     accept_crlf: bool,
+    line: Option<String>,
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let message = message.unwrap_or_default();
@@ -321,16 +346,25 @@ fn save(
     // A project's own settings never say who the user is; if they try, the user is told.
     let ignored = ignored_project_identity(repo);
     let git_excludes = git_excludes_file(repo.root())?;
-    let req = SaveRequest {
+    let mut req = SaveRequest {
         message: &message,
         who: &who,
         command: "save",
         accept_crlf,
         git_excludes: git_excludes.as_deref(),
+        new_line: line.as_deref(),
     };
-    let outcome = save_folder(repo, &req, &mut |_| {
-        eprintln!("Waiting for another Bolt command to finish...");
-    })?;
+    let mut on_wait = |_: &str| eprintln!("Waiting for another Bolt command to finish...");
+    let asked;
+    let outcome = match save_folder(repo, &req, &mut on_wait) {
+        // Only now is it known that the save is at a save: a stopped switch may have moved it.
+        Err(SaveError::NeedsLineName) if !json && let Some(name) = ask_line_name()? => {
+            asked = name;
+            req.new_line = Some(&asked);
+            save_folder(repo, &req, &mut on_wait)?
+        }
+        done => done?,
+    };
     let warnings = match outcome {
         SaveOutcome::Saved {
             save_id,
@@ -358,6 +392,9 @@ fn save(
                     None => "(couldn't count the changed files)".to_owned(),
                 };
                 println!("Saved {short}  \"{title}\"  {counted}");
+                if let Some(line) = req.new_line {
+                    println!("You're on the new line {}.", escape(line, false));
+                }
             }
             warnings
         }
@@ -612,6 +649,52 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     Ok(())
 }
 
+fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let (_, entry) = repo.current()?;
+    let current = match &entry.state.position {
+        Position::OnLine(line) => Some(line.as_str()),
+        Position::AtSave(_) => None,
+    };
+    let servers = repo.server_lines(&entry.state)?;
+    let server_lines: Vec<String> = servers
+        .servers
+        .iter()
+        .flat_map(|(server, lines)| lines.keys().map(move |line| format!("{line}@{server}")))
+        .collect();
+    let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    warnings.extend(repo.store().warnings());
+    if json {
+        let lines: Vec<&String> = entry.state.lines.keys().collect();
+        println!(
+            "{}",
+            json!({
+                "bolt_json": BOLT_JSON,
+                "current": current,
+                "lines": lines,
+                "server_lines": server_lines,
+                "warnings": output::warnings_json(&warnings),
+            })
+        );
+    } else {
+        for line in entry.state.lines.keys() {
+            let mark = if current == Some(line.as_str()) {
+                '*'
+            } else {
+                ' '
+            };
+            println!("{mark} {}", escape(line, false));
+        }
+        for line in &server_lines {
+            println!("  {}", escape(line, false));
+        }
+    }
+    output::print_warnings(&warnings);
+    Ok(())
+}
+
 fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
@@ -756,7 +839,9 @@ fn main() -> ExitCode {
         Command::Save {
             message,
             accept_crlf,
-        } => save(cli.json, message, accept_crlf, &mut opened),
+            line,
+        } => save(cli.json, message, accept_crlf, line, &mut opened),
+        Command::Line => line_command(cli.json, &mut opened),
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),

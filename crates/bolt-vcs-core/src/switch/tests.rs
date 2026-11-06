@@ -26,6 +26,7 @@ fn save_now(repo: &mut Repository) -> SaveOutcome {
         command: "save",
         accept_crlf: false,
         git_excludes: None,
+        new_line: None,
     };
     save_folder(repo, &req, &mut |_| {}).unwrap()
 }

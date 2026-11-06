@@ -127,6 +127,21 @@ pub fn validate_line_name(name: &str) -> Result<(), DecodeError> {
     Ok(())
 }
 
+/// The line among `lines` that `name` names but for letter case, if any: two line names may not
+/// differ only by case.
+#[must_use]
+pub fn line_named_alike<'a>(lines: &'a BTreeMap<String, Id>, name: &str) -> Option<&'a str> {
+    let folded = fold_line_name(name);
+    lines
+        .keys()
+        .find(|line| fold_line_name(line) == folded)
+        .map(String::as_str)
+}
+
+fn fold_line_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
 fn write_lines(w: &mut Writer, lines: &BTreeMap<String, Id>) {
     w.varint(lines.len() as u64);
     for (name, save) in lines {
@@ -145,7 +160,7 @@ fn read_line_name(
 ) -> Result<String, DecodeError> {
     let name = read_sorted_name(r, prev, field)?;
     validate_line_name(&name)?;
-    if !folded.insert(name.to_lowercase()) {
+    if !folded.insert(fold_line_name(&name)) {
         return Err(DecodeError::Invalid("two names differ only by letter case"));
     }
     Ok(name)

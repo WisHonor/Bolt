@@ -77,6 +77,8 @@ Saving gives one of two documents, told apart by `result`.
 | `warnings` | list | See §4. |
 | `ignored_project_identity` | object | Only when present: see below. |
 
+**At a save, not on a line,** a save needs `--line <name>`: the new line it starts, which points at the new save; the project is then on it, and the save's `line` is that name. With `--json` Bolt never asks for the name, so without the flag the save fails (§5), saving nothing. A name that breaks the line-name rules, or that is a line's already in any letter case, fails the save too, and so does `--line` on a line ([decision 055](decisions/055-lines-in-v0.1.md)).
+
 `"result": "nothing-changed"`: the folder is as the line's last save has it, so nothing was saved. The fields are `bolt_json`, `result`, `warnings` and, if it applies, `ignored_project_identity`.
 
 **`ignored_project_identity`** is there only when the project's own settings (`.bolt/config.toml`) name a person other than the user. Bolt never takes who the user is from a project, since a project that was shared could name anyone, so the save was made as the user. The field says who was named, `{"name": …, "email": …}`, and is left out otherwise. For people, `bolt save` prints a note instead of the field. The note shows at most 256 characters of a name or email, and gives the lines to add to their own settings, if they do want that identity in this folder, only when nothing was cut: lines with a cut name would save as someone else. The field always has both in full.
@@ -128,6 +130,16 @@ Saving gives one of two documents, told apart by `result`.
 | `placeholders` | list of string | As in `goto`. |
 | `files_in_use` | list of string | Always `[]` here: files another program holds fail the command as they fail `goto`, and the next command that changes the project finishes it. |
 | `safety_copies` | number | How many safety copies were kept: one for each changed or new file thrown away (a deleted file needs none). |
+| `warnings` | list | See §4. |
+
+### `bolt line --json`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `current` | string or `null` | The line the project is on. `null` if it is at a save instead of on a line. |
+| `lines` | list of string | Every line's name, in byte order. |
+| `server_lines` | list of string | Every server line as `line@server`, by server and then line, in byte order. `[]` if none. |
 | `warnings` | list | See §4. |
 
 ### `bolt history --json`
@@ -189,7 +201,7 @@ Folders are not listed; the files in them are.
 | `placeholders_written` | `goto`, `discard`, and a command that finishes a switch a crash stopped | Links were written as plain files holding their targets: the target leads out of the project, judged from the save alone (an absolute path, a drive letter, `\\`, `..` past the top, or a way through another link), or holds a `\` on Windows, or this computer can't make links (Windows without Developer Mode or an administrator) ([decision 052](decisions/052-links-and-executable-bit-on-windows.md)). The message names the first 5 by path and counts the rest. |
 | `files_in_use` | `goto`, `discard`, and a command that finishes a switch a crash stopped | Another program (an editor or virus scanner, say) held files open on Windows for about a second, so Bolt left them as they were and wrote the rest. The switch isn't finished, so `goto` and `discard` fail, naming the files: closing the program and running the command again finishes it ([decision 049](decisions/049-writing-files-one-at-a-time.md)). The message names the first 5 by path and counts the rest. |
 | `changed_since_plan` | `goto`, `discard`, and a command that finishes a switch a crash stopped | Entries weren't what Bolt found when it planned the switch, a moment before (another program changed or made them, or put a link where a folder was), so Bolt left them as they are rather than lose that work. Nothing below such a folder is written either. The message names the first 5 by path and counts the rest. |
-| `switch_unfinished` | `status`, `history`, `show` | A switch between saves was stopped (a crash, Ctrl+C, a file in use) before it was done, so some files may still be as they were. Running `goto` or `discard` again, or any command that changes the project, finishes it first; it is never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)). If the switch's journal, `.bolt/state/journal`, can't be used (it is damaged, was made for another save than the one the project is on, or names a diary entry that can't be read), the message says so instead, with the same words the refusal uses: commands that change the project refuse to run while it is there, since the folder may be half switched, and deleting it lets them go on with the files as they are (a later `save` records the folder as it is then). A journal whose switch already took effect is no warning. |
+| `switch_unfinished` | `status`, `history`, `show`, `line` | A switch between saves was stopped (a crash, Ctrl+C, a file in use) before it was done, so some files may still be as they were. Running `goto` or `discard` again, or any command that changes the project, finishes it first; it is never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)). If the switch's journal, `.bolt/state/journal`, can't be used (it is damaged, was made for another save than the one the project is on, or names a diary entry that can't be read), the message says so instead, with the same words the refusal uses: commands that change the project refuse to run while it is there, since the folder may be half switched, and deleting it lets them go on with the files as they are (a later `save` records the folder as it is then). A journal whose switch already took effect is no warning. |
 | `switch_finished` | `save`, `goto`, and later `discard` | Before doing its own work, the command finished a switch between saves that was stopped. The message counts the files it wrote and the entries it removed. It is given even when the command then fails, since the switch is done. When only the switch's journal was left, it is removed without a warning. |
 | `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
 | `first_save_not_read` | `start` | The project was made, but Bolt couldn't read its first save back, so `save` is `null`. The message says why, and to run `bolt history` to check that the project reads. |

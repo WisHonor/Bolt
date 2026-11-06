@@ -75,7 +75,7 @@ fn stopped_switch() -> Env {
 #[test]
 fn read_only_commands_say_a_switch_is_unfinished() {
     let env = stopped_switch();
-    for command in ["status", "history", "show"] {
+    for command in ["status", "history", "show", "line"] {
         let (kinds, doc) = warning_kinds(&env, &[command]);
         assert!(
             kinds.contains(&"switch_unfinished".to_owned()),
