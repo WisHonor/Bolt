@@ -99,9 +99,8 @@ pub fn plan(
         unsaved.insert(c.path.to_owned());
         Ok::<(), SaveError>(())
     })?;
-    let carried = unsaved.len();
     // Work that already matches the target is in nothing's way, at a file or below a folder
-    // (decision 065).
+    // (decision 065), and once there it is no longer unsaved.
     if !remove_new {
         let mut unlike_target = BTreeSet::new();
         for_each_change_in(store, &now.listings, Some(to_root), now.root, |c| {
@@ -110,10 +109,15 @@ pub fn plan(
         })?;
         unsaved.retain(|p| unlike_target.contains(p));
     }
+    let carried = unsaved.len();
     let stored = HashMap::new();
-    let mut switched = BTreeSet::new();
-    for_each_entry_change_in(store, &stored, Some(from_root), to_root, |path, _, _| {
+    // Where the target differs from `from`, and, of those, where it holds an entry to write.
+    let (mut switched, mut written) = (BTreeSet::new(), BTreeSet::new());
+    for_each_entry_change_in(store, &stored, Some(from_root), to_root, |path, _, t| {
         switched.insert(path.to_owned());
+        if t.is_some() {
+            written.insert(path.to_owned());
+        }
         Ok::<(), SaveError>(())
     })?;
 
@@ -149,10 +153,11 @@ pub fn plan(
             if !remove_new {
                 if !switched.contains(path) {
                     // A folder the target holds and the user removed is made again when the
-                    // switch writes into it; making it overwrites nothing.
+                    // switch writes something of the target's into it; making it overwrites
+                    // nothing. Removals below it don't count: the folder stays gone.
                     let needed = n.is_none()
                         && t.is_some_and(|e| e.kind == EntryKind::Folder)
-                        && any_below(path, &switched);
+                        && any_below(path, &written);
                     if !needed {
                         return Ok(()); // unsaved work the switch doesn't reach comes along
                     }

@@ -446,7 +446,9 @@ fn on_first_of_two(first: &[(&str, &str)], second: &[(&str, &str)]) -> Env {
 fn a_deleted_file_the_target_lacks_too_comes_along() {
     let env = on_first_of_two(&[("a", "a"), ("b", "b")], &[("a", "a")]);
     std::fs::remove_file(env.root().join("b")).unwrap();
-    goto(&env, "main");
+    let said = goto(&env, "main");
+    // Matching the target, the deletion is no longer an unsaved change to carry.
+    assert!(!said.contains("came along"), "{said}");
     assert_eq!(files(env.root()), holding(&[("a", "a")]));
     assert!(changed(&env).is_empty());
 }
@@ -486,6 +488,15 @@ fn a_file_the_target_adds_in_a_deleted_folder_is_written() {
     std::fs::remove_dir_all(env.root().join("d")).unwrap();
     goto(&env, "main");
     assert_eq!(files(env.root()), holding(&[("d/e/b", "b")]));
+    assert_eq!(changed(&env), ["d/x"]);
+}
+
+#[test]
+fn a_deleted_folder_stays_deleted_when_the_target_only_removes_below_it() {
+    let env = on_first_of_two(&[("d/x", "x"), ("d/e/y", "y")], &[("d/x", "x")]);
+    std::fs::remove_dir_all(env.root().join("d")).unwrap();
+    goto(&env, "main");
+    assert!(!env.root().join("d").exists());
     assert_eq!(changed(&env), ["d/x"]);
 }
 
