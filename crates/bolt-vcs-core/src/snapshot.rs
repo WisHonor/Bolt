@@ -120,7 +120,7 @@ pub enum SaveError {
     #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
     NeedsLineName,
     // `reason` is Bolt's own wording.
-    #[error("{} can't be a line's name: {reason}.", escape(name, false))]
+    #[error("`{}` can't be a line's name: {reason}.", escape(name, false))]
     BadLineName { name: String, reason: &'static str },
     #[error(
         "There is already a line {}, and two lines can't have names that differ only by letter \
@@ -273,7 +273,6 @@ pub fn save_folder(
     }
     let (head, entry) = repo.current()?;
     let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
-    let line = &line;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
@@ -344,6 +343,10 @@ pub fn save_folder(
             warnings,
         });
     }
+    // Asked only now, so that a save with nothing to save never asks for a name.
+    let Some(line) = &line else {
+        return Err(SaveError::NeedsLineName);
+    };
     let save = Save {
         root,
         parents: vec![parent_id],
@@ -418,17 +421,17 @@ pub fn save_folder(
 }
 
 /// The line a save goes on, and the save it builds on: the current line or, at a save, the new
-/// line `new_line`, which the save's diary entry then makes.
-fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(String, Id), SaveError> {
+/// line `new_line`, which the save's diary entry then makes. `None` at a save without one.
+fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(Option<String>, Id), SaveError> {
     match (&state.position, new_line) {
         (Position::OnLine(line), None) => {
             let tip = *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
                 detail: format!("the current line {line} has no save"),
             })?;
-            Ok((line.clone(), tip))
+            Ok((Some(line.clone()), tip))
         }
         (Position::OnLine(line), Some(_)) => Err(SaveError::LineFromLine { line: line.clone() }),
-        (Position::AtSave(_), None) => Err(SaveError::NeedsLineName),
+        (Position::AtSave(at), None) => Ok((None, *at)),
         (Position::AtSave(at), Some(name)) => {
             validate_line_name(name).map_err(|e| SaveError::BadLineName {
                 name: name.to_owned(),
@@ -442,7 +445,7 @@ fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(String, Id), S
                     taken: taken.to_owned(),
                 });
             }
-            Ok((name.to_owned(), *at))
+            Ok((Some(name.to_owned()), *at))
         }
     }
 }

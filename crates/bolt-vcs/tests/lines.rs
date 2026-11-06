@@ -77,9 +77,98 @@ fn a_line_name_taken_in_another_case_is_refused() {
     assert!(err.contains("There is already a line main"), "{err}");
     let err = refused_save(&env, &["--line", "has space", "C"]);
     assert!(
-        err.contains("a line name can only hold letters, digits, -, _, . and /"),
+        err.contains(
+            "`has space` can't be a line's name: a line name can only hold letters, digits, -, \
+             _, . and /"
+        ),
         "{err}"
     );
+}
+
+/// `bolt save --json args`, which must fail without changing anything; returns its document.
+fn refused_save_json(env: &Env, args: &[&str]) -> serde_json::Value {
+    let before = env.standing();
+    let out = env
+        .bolt()
+        .args(["save", "--json"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(env.standing(), before);
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn bad_line_names_give_an_error_document() {
+    let (env, _) = at_first_save();
+    env.overwrite("a.txt", "c");
+    let doc = refused_save_json(&env, &["--line", "Main", "C"]);
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("There is already a line main"), "{doc}");
+    assert_eq!(
+        doc["error"]["hint"],
+        "Nothing was saved. Choose another name."
+    );
+    let doc = refused_save_json(&env, &["--line", "a//b", "C"]);
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("`a//b` can't be a line's name"),
+        "{doc}"
+    );
+    // Without a name, `--json` never asks.
+    let doc = refused_save_json(&env, &["C"]);
+    let hint = doc["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains("bolt save --line <name>"), "{doc}");
+}
+
+#[test]
+fn save_json_with_line_gives_the_line() {
+    let (env, _) = at_first_save();
+    env.overwrite("a.txt", "c");
+    let out = env
+        .bolt()
+        .args(["save", "--json", "--line", "feature", "C"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["result"], "saved");
+    assert_eq!(doc["save"]["line"], "feature");
+}
+
+#[test]
+fn nothing_changed_at_a_save_needs_no_line_name() {
+    let (env, first) = at_first_save();
+    let before = env.standing();
+    let out = env.save(&["C"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("Nothing to save"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(!text(&out.stdout).contains("No line was made"));
+    assert_eq!(env.standing(), before);
+    assert_eq!(env.state().1.position, Position::AtSave(first));
+}
+
+#[test]
+fn line_with_nothing_changed_says_no_line_was_made() {
+    let (env, first) = at_first_save();
+    let before = env.standing();
+    let out = env.save(&["--line", "feature", "C"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.contains("Nothing to save"), "{said}");
+    assert!(
+        said.contains("No line was made: a new line starts with a save, so change a file first."),
+        "{said}"
+    );
+    assert_eq!(env.standing(), before);
+    let state = env.state().1;
+    assert_eq!(state.position, Position::AtSave(first));
+    assert!(!state.lines.contains_key("feature"));
 }
 
 #[test]

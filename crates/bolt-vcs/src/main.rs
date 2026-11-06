@@ -415,6 +415,11 @@ fn save(
                 let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
                 println!("Nothing to save: no changes since your last save ({short}).");
+                if req.new_line.is_some() {
+                    println!(
+                        "No line was made: a new line starts with a save, so change a file first."
+                    );
+                }
             }
             warnings
         }
