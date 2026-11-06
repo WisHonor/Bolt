@@ -83,6 +83,25 @@ jobs:
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" sweep.txt
 
+  # The model test of edits, saves and switches (testing.md §3) with 1,024 cases, not the
+  # 64 of every push.
+  model:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Run the model test with more cases
+        shell: bash
+        env:
+          PROPTEST_CASES: "1024"
+        run: |
+          cargo test --release -p bolt-vcs --test model 2>&1 | tee model.txt
+          grep -q "test result: ok. 1 passed" model.txt
+
   # Decision 023's gate: status on an unchanged 100,000-file project. The test prints the time;
   # the gate is checked against it before v0.1. Nightly and by hand, not on pushes.
   speed:
