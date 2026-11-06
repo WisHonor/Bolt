@@ -265,8 +265,13 @@ pub fn apply(
     }
     for a in actions.iter().rev() {
         match a.change {
-            Change::RemoveFile | Change::RemoveFolder if other(&written_at, &a.path).is_none() => {
-                run.step(a, |run| run.remove(a))?;
+            Change::RemoveFile | Change::RemoveFolder => {
+                // The old spelling of a name just written is that entry where the drive folds
+                // names, and is left; where a folder keeps case apart it is a file of its own.
+                let written = other(&written_at, &a.path);
+                if written.is_none_or(|w| !run.one_entry_at(&a.path, &w)) {
+                    run.step(a, |run| run.remove(a))?;
+                }
             }
             Change::File(c) | Change::Executable(c) if holds_folder(a) => {
                 run.step(a, |run| run.put(a, c, None))?;
@@ -530,12 +535,17 @@ impl Run<'_> {
             }
         }
         // Some drives keep the old spelling when a file replaces one whose name differs only as
-        // they ignore (macOS), so the old file takes the new spelling first.
-        if let Some(old) = renaming.map(|p| split(p).1)
+        // they ignore (macOS), so the old file takes the new spelling first. Only when both
+        // names are that one file: a folder may keep case apart (Windows' per-folder setting, or
+        // another drive mounted there), and then the old one is a file of its own, which its own
+        // removal checks.
+        if let Some((old_up, old)) = renaming.map(split)
+            && old_up == parent(&a.path)
             && old != name
             && found
                 .as_ref()
-                .is_some_and(|f| f.kind != Some(EntryKind::Folder))
+                .is_some_and(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
+            && one_entry(self.folders.here(), old, name)
         {
             let dir = self.folders.here();
             if let Err(e) = retried(|| dir.rename_into(OsStr::new(old), dir, os)) {
@@ -543,6 +553,18 @@ impl Run<'_> {
             }
         }
         self.write_file(os, c, executable)
+    }
+
+    /// Whether the project paths `a` and `b` name one entry on the drive.
+    fn one_entry_at(&mut self, a: &str, b: &str) -> bool {
+        let id = |folders: &mut Folders, path: &str| {
+            let (up, name) = split(path);
+            folders.enter(up).ok()?;
+            let meta = folders.here().metadata(OsStr::new(name)).ok()?;
+            Some(meta.file_id)
+        };
+        let first = id(&mut self.folders, a);
+        first.is_some() && first == id(&mut self.folders, b)
     }
 
     /// Removes what is at `name` before something else is put there: a link or folder, which a
@@ -742,6 +764,13 @@ fn first_refused(
         }
     }
     Ok(None)
+}
+
+/// Whether the names `a` and `b` in `dir` are one entry: the same file on the drive.
+fn one_entry(dir: &Dir, a: &str, b: &str) -> bool {
+    let id = |name: &str| dir.metadata(OsStr::new(name)).ok().map(|m| m.file_id);
+    let first = id(a);
+    first.is_some() && first == id(b)
 }
 
 /// The `.git` and `.bolt` spellings in `dir` that have a short name, with it.

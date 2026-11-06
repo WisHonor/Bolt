@@ -297,9 +297,10 @@ pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<()
 
 /// Whether `name` is an NTFS fallback short name made from `prefix` the way Git's
 /// `is_ntfs_dot_generic` spells one: up to 6 of its letters, `~`, a digit 1-9, more digits to 8
-/// characters, then only dots, spaces or a `:stream`. Git refuses `gi7eba`, `.gitmodules`'
-/// prefix, so write-out does too. `.git` and `.bolt` have no such prefix known ahead (NTFS hashes
-/// the name), so their real short names are compared folder by folder instead.
+/// characters, then only dots, spaces or a `:stream`. `gi7eba` is `.gitmodules`' prefix, which
+/// Git refuses only for a link named so; write-out refuses it for every entry, on purpose, since
+/// a file there would stand for `.gitmodules` too. `.git` and `.bolt` have no such prefix known
+/// ahead (NTFS hashes the name), so their real short names are compared folder by folder instead.
 fn is_hashed_short_name(name: &str, prefix: &[u8]) -> bool {
     let bytes = name.as_bytes();
     let mut pos = 0;

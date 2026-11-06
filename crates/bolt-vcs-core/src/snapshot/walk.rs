@@ -3105,9 +3105,10 @@ mod tests {
         let saved = saved_top(repo);
         let took = started.elapsed();
         eprintln!("{what}: saved in {took:?}");
-        // Well above what a debug build takes; copying a path per folder needs gigabytes here.
+        // A debug build takes about 8 s, more on a busy runner; quadratic work (a path copied per
+        // folder, gigabytes here) takes many minutes, so a minute still tells the two apart.
         assert!(
-            took < std::time::Duration::from_secs(10),
+            took < std::time::Duration::from_secs(60),
             "{what}: {took:?}"
         );
         saved

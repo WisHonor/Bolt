@@ -727,3 +727,71 @@ fn a_link_through_a_name_that_isnt_a_folder_is_a_placeholder() {
     let plan = planned(&mut repo, empty, to.0, false);
     assert_eq!(plan.placeholders, ["through_a_file", "through_nothing"]);
 }
+
+/// Makes `dir` keep letter case apart, as WSL folders do on a drive that otherwise ignores it.
+/// False, with a note, where Windows can't.
+#[cfg(windows)]
+fn keep_case_apart(dir: &Path) -> bool {
+    let done = std::process::Command::new("fsutil")
+        .args(["file", "setCaseSensitiveInfo"])
+        .arg(dir)
+        .arg("enable")
+        .stdout(std::process::Stdio::null())
+        .status();
+    if done.is_ok_and(|s| s.success()) {
+        return true;
+    }
+    println!("Skipped: this Windows can't make a folder that keeps letter case apart.");
+    false
+}
+
+#[cfg(windows)]
+#[test]
+fn a_case_rename_in_a_folder_that_keeps_case_apart_moves_no_unchecked_file() {
+    let (dir, mut repo) = project();
+    let drive = this_drive(&mut repo);
+    assert!(drive.ignores_case);
+    fs::create_dir(dir.path().join("docs")).unwrap();
+    if !keep_case_apart(&dir.path().join("docs")) {
+        return;
+    }
+    let empty = current_save(&repo).unwrap();
+    let a = planted(&mut repo, &files(&[("docs/Readme.md", b"old")]));
+    switch(&mut repo, empty, a);
+    let b = planted(&mut repo, &files(&[("docs/README.md", b"new")]));
+    let plan = planned(&mut repo, a.0, b.0, false);
+    // After the plan: the old spelling edited, and a separate file under the new one.
+    fs::write(dir.path().join("docs/Readme.md"), b"mine").unwrap();
+    fs::write(dir.path().join("docs/README.md"), b"old").unwrap();
+    let done = applied(&mut repo, &journal(b.1, &plan));
+    assert_eq!(
+        fs::read(dir.path().join("docs/Readme.md")).unwrap(),
+        b"mine"
+    );
+    assert_eq!(fs::read(dir.path().join("docs/README.md")).unwrap(), b"new");
+    assert_eq!(done.changed_since_plan, ["docs/Readme.md"]);
+}
+
+#[test]
+fn a_link_replaced_by_a_file_named_in_other_case_is_written() {
+    let (dir, mut repo) = project();
+    let outside = tempfile::tempdir().unwrap();
+    folder_link(outside.path(), &dir.path().join("readme"));
+    let read = fs::read_link(dir.path().join("readme")).unwrap();
+    let target = read.to_string_lossy().into_owned();
+    let target = if cfg!(windows) {
+        target.replace('\\', "/")
+    } else {
+        target
+    };
+    let a = planted(
+        &mut repo,
+        &[("readme", EntryKind::Symlink, target.as_bytes())],
+    );
+    let b = planted(&mut repo, &files(&[("README", b"new")]));
+    let (_, done) = switch(&mut repo, a.0, b);
+    assert!(done.changed_since_plan.is_empty(), "{done:?}");
+    assert_eq!(names_in(dir.path()), ["README"]);
+    assert_eq!(fs::read(dir.path().join("README")).unwrap(), b"new");
+    assert!(outside.path().exists());
+}
