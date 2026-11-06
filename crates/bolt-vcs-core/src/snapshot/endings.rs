@@ -7,7 +7,9 @@ use std::io::{self, Read, Write};
 
 use bolt_platform::dir::Dir;
 
-use super::{Child, Folders, Handles, Kind, NAMED, SaveError, open_scanned, saved_file, stamp};
+use super::{
+    Child, Folders, Handles, Kind, NAMED, SaveError, open_scanned, saved_file, stamp, stamp_of,
+};
 use crate::listing::{Entry, Listing};
 use crate::store::Store;
 
@@ -56,7 +58,7 @@ fn converted(store: &Store, was: &Entry, dir: &Dir, c: &Child) -> Result<bool, S
         source,
     };
     let (file, opened) = open_scanned(dir, &c.name, &c.rel, c.meta.as_ref())?;
-    let before = (opened.size, opened.modified_ns);
+    let before = stamp_of(&opened);
     // Each LF adds a byte, so a conversion is longer, and at most twice as long.
     if before.0 <= was.size || before.0 > was.size.saturating_mul(2) {
         return Ok(false);

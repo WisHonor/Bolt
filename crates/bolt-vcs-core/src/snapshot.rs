@@ -1074,7 +1074,7 @@ pub(crate) fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, Sa
 }
 
 /// Opens the file `name` in `dir`, at the project path `rel`, to read, if it is still the regular
-/// file the walk saw (`seen`): the same file, size and time, so what is stored is what the walk
+/// file the walk saw (`seen`): the same file, size and times, so what is stored is what the walk
 /// described. Anything else changed since, unless it is a Windows reparse point that isn't a link
 /// (a cloud placeholder, say), which Bolt can't save yet. Returns the file and its details.
 fn open_scanned(
@@ -1101,16 +1101,22 @@ fn open_scanned(
         path: path(),
         source,
     })?;
-    let what = |m: &EntryMeta| (m.file_id, m.size, m.modified_ns);
+    let what = |m: &EntryMeta| (m.file_id, stamp_of(m));
     if seen.is_none_or(|seen| what(seen) != what(&now)) {
         return Err(SaveError::ChangedDuringSave { path: path() });
     }
     Ok((file, now))
 }
 
-/// A file's size and modification time, to see whether it changed while it was read.
-fn stamp(file: &File) -> io::Result<(u64, i128)> {
-    Dir::file_meta(file).map(|m| (m.size, m.modified_ns))
+/// What tells that a file changed: its size and its modification and change times, as the
+/// file-state cache compares them.
+fn stamp_of(m: &EntryMeta) -> (u64, i128, i128) {
+    (m.size, m.modified_ns, m.changed_ns)
+}
+
+/// The `stamp_of` the open `file` has now, to see whether it changed while it was read.
+fn stamp(file: &File) -> io::Result<(u64, i128, i128)> {
+    Dir::file_meta(file).map(|m| stamp_of(&m))
 }
 
 /// Stores one file in two passes: hash it, then copy it into `packs` unless already held. The
@@ -1160,7 +1166,7 @@ fn hash_scanned(
         path: rel.to_owned(),
     };
     let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
-    let before = (opened.size, opened.modified_ns);
+    let before = stamp_of(&opened);
     let mut hasher = ContentHasher::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut size = 0u64;
@@ -2188,6 +2194,23 @@ mod tests {
             fs::write(&b, b"two").unwrap();
             set_time(&b, walked);
             fs::rename(&b, &a).unwrap();
+        });
+    }
+
+    /// The file the walk saw, written over in place with as many bytes and the time the walk saw:
+    /// only its change time tells.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_written_over_in_place_after_the_walk_is_refused_by_its_change_time() {
+        let (dir, mut repo) = project();
+        let a = dir.path().join("a.txt");
+        fs::write(&a, b"one").unwrap();
+        let walked = fs::metadata(&a).unwrap().modified().unwrap();
+        assert_changed_after_the_walk(&mut repo, move || {
+            // Past the clock's tick, so the change time moves.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            fs::write(&a, b"two").unwrap();
+            set_time(&a, walked);
         });
     }
 
