@@ -171,6 +171,7 @@ pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]
     let path = w.finish(made.path()).expect("finish").expect("a pack");
     let mut pack = std::fs::read(&path).expect("read the pack");
     for e in PackReader::open(&path).expect("open the pack").entries() {
+        let e = e.expect("an index line");
         assert!(e.stored_size > 0, "an empty object has no byte to flip");
         pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).expect("an offset")] ^= 1;
     }

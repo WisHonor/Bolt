@@ -265,12 +265,12 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 
 ## 11. Pack files
 
-Pack version 2 ([decision 057](decisions/057-pack-index-on-disk-and-merging.md); its exact bytes and a test vector come with milestone 3, before the code) replaces the index below with fixed-width lines after a fan-out table, so a reader can search it on disk; readers keep reading version 1, and writers write only version 2. Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
+Writers write pack version 2, whose index has a fan-out table and fixed-width lines, so a reader can search it on disk; readers read versions 2 and 1 ([decision 057](decisions/057-pack-index-on-disk-and-merging.md)). The two versions differ only in the index. Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
 
 ```text
 header:
   [8]     magic "BOLTPACK"
-  u32     pack version = 1
+  u32     pack version = 2 (1 in packs written before milestone 3)
   u32     flags = 0
 entries, one after another:
   u8      object kind
@@ -279,7 +279,16 @@ entries, one after another:
   u64     stored size
   u8      compression (0 = none, 1 = zstd)
   stored bytes
-index:
+index, version 2:
+  u64     entry count
+  u32 × 256  fan-out: number i is how many IDs have a first byte ≤ i
+  id × count  the IDs, strictly ascending
+  lines, one per ID in the same order, 25 bytes each:
+    u8      object kind
+    u64     offset of the entry's header
+    u64     uncompressed size
+    u64     stored size
+index, version 1:
   varint  entry count
   entries, sorted by id:
     id      id
@@ -305,14 +314,18 @@ trailer:
 | Tag list | 22 |
 | Server lines | 23 |
 
+In version 2, ID `i` is at `index + 1,032 + 32 × i` and its line at `index + 1,032 + 32 × count + 25 × i`, where `index` is the offset of the index, so a reader finds an object by a binary search of the IDs from `fan-out[b − 1]` (0 when `b` is 0) up to `fan-out[b]`, `b` being the ID's first byte.
+
 A reader must:
-- check both magic values, the index checksum, and that every offset and size stays inside the file;
-- read the index a piece at a time, never whole: refuse an entry count above the limit below, or an index whose length doesn't fit its count, before reading any line, then check each line as it is read (a known kind, IDs strictly ascending, its entry inside the entry area);
+- check both magic values, a pack version of 1 or 2, flags of 0, and that every offset and size it uses stays inside the file;
+- in version 2, refuse an entry count above the limit below, an index that isn't exactly `8 + 1,024 + 57 × count` bytes, or a fan-out that decreases or doesn't end at the count, before reading any ID; then read only the IDs and lines it needs, by position, and check each line it reads (a known kind, a size within the limits below, its entry inside the entry area), so an open pack costs the same memory whatever its count. Reading every line in order (as `verify` does) also checks that the IDs ascend and that each sits in its fan-out range. The index checksum is checked by `verify`, not on every open: every object read is checked against its own ID anyway;
+- in version 1, check the index checksum, and read the index a piece at a time, never whole: refuse an entry count above the limit below, or an index whose length doesn't fit its count, before reading any line, then check each line as it is read (a known kind, IDs strictly ascending, its entry inside the entry area), and that no two entries overlap;
 - check that each entry's header matches its index line;
 - decompress zstd data without ever producing more than the recorded uncompressed size, and require the zstd frame's own content size, if present, to match;
 - check the fingerprint of every object it reads: plain BLAKE3 for content, the record's context string otherwise;
 - treat the same ID found in two packs as the same object (packs can overlap while being merged), and when one pack's copy fails for any reason (a failed check, a read error, too little memory), try the other packs' copies before giving up, so a damaged or planted pack never hides a good copy; a pack whose copy failed a check is reported as damaged;
-- try the copies smallest recorded size first, ties in pack order (a copy already checked in this process may go first), so a planted copy that claims a huge size is read last; only when no copy works does the read fail, naming a read error or lack of memory if there was one (the object may still be fine), else the damage.
+- search the packs one at a time, first the pack that held the last object read, then the others in order of name; open a pack only when first searching it, and keep at most 16 open, closing the least recently used first; a pack listed but gone when it is opened (merged into another) sends the reader to list the packs again, once per lookup;
+- read the first copy found when it records at most 1 MiB; when it records more, or fails, search every pack and try the copies smallest recorded size first, ties in pack order (a copy already checked in this process may go first), so a planted copy that claims a huge size is read last, and one found first costs at most a 1 MiB read; only when no copy works does the read fail, naming a read error or lack of memory if there was one (the object may still be fine), else the damage.
 
 Before skipping an object because the store already holds it, a writer must read a stored copy of the same kind in full and check its fingerprint (once per process is enough). The writer knows the object's size (a file's length, a link's target, an encoded record), so it passes over a copy that records another size without reading it, and reports that copy's pack as damaged. If no copy passes, it stores its own.
 
@@ -320,7 +333,7 @@ Each entry's header is a fixed 50 bytes, so a writer that streams an object can 
 
 Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
 
-**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
+**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). In version 2 the index of a pack with `count` objects is exactly `1,032 + 57 × count` bytes. In version 1 an index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
 
@@ -365,6 +378,7 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `shattered-prefix.bin`: not a record. It is the first 320 bytes of one of the two PDFs of SHAttered, the first public SHA-1 collision. The Git reader's SHA-1 must refuse it as a collision attack, and must accept it with one bit changed.
 - **Milestone 3:**
   - `listing.json`: a fourth vector, `long-name`, a file whose name is 600 bytes (200 characters of three bytes each), past the 255 bytes names had until [decision 051](decisions/051-names-this-computer-cant-write-and-length-limits.md); its length is a two-byte varint. The first three vectors are byte for byte what milestone 1 wrote.
+  - `pack_v2.json`: a version 2 pack (§11) of the same two objects as `pack.json`'s `two-objects`, which the writer must write byte for byte. `pack.json` stays as milestone 1 wrote it, in version 1, which readers must still read.
 
 ## 14. Open points
 

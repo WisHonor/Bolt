@@ -1064,7 +1064,11 @@ mod tests {
         let packs = fs::read_dir(dir.join(name).join("packs")).unwrap();
         packs
             .map(|pack| PackReader::open(&pack.unwrap().path()).unwrap())
-            .map(|pack| pack.entries().iter().filter(|e| e.kind == kind).count())
+            .map(|pack| {
+                pack.entries()
+                    .filter(|e| e.as_ref().unwrap().kind == kind)
+                    .count()
+            })
             .sum()
     }
 

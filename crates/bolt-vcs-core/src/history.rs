@@ -554,7 +554,7 @@ mod tests {
             let found = crate::pack::PackReader::open(&path)
                 .unwrap()
                 .find(&ids[0])
-                .copied();
+                .unwrap();
             if let Some(found) = found {
                 let mut bytes = std::fs::read(&path).unwrap();
                 bytes[usize::try_from(found.offset + crate::pack::ENTRY_HEADER_LEN).unwrap()] ^= 1;

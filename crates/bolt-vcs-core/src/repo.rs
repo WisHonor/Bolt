@@ -653,16 +653,7 @@ fn diary_of(bolt: &Path) -> Result<Diary, RepoError> {
         Some(head) => has_parent(&head)?,
         None if store.pack_count() == 0 => return Ok(Diary::Nothing),
         // Without a head, the entries of the saves it led to are still in the packs.
-        None => {
-            let mut saves = false;
-            for id in store.diary_entries() {
-                if has_parent(&id)? {
-                    saves = true;
-                    break;
-                }
-            }
-            saves
-        }
+        None => store.any_entry(ObjectKind::DiaryEntry, has_parent)?,
     };
     Ok(if saves { Diary::Saves } else { Diary::Begun })
 }
@@ -728,7 +719,7 @@ impl Repository {
     ) -> Result<Repository, RepoError> {
         let (mut repo, lock) = Repository::begin_with(root, owner_check)?;
         // A start stores no file, so files are an import's.
-        if repo.store.holds_content() {
+        if repo.store.holds_content()? {
             return Err(RepoError::ImportUnfinished);
         }
         let mut packs = repo.new_packs()?;
@@ -853,7 +844,7 @@ impl Repository {
         let packs = bolt.join("store").join("packs");
         let mut repo = Repository {
             root: root.to_owned(),
-            store: Store::open_in(&held.packs, &packs)?,
+            store: Store::open_in(Arc::clone(&held.packs), &packs)?,
             held,
             bolt,
             tmp,
@@ -949,10 +940,14 @@ impl Repository {
             }
         }
         let state = fixed(&top, &bolt, "state")?;
-        let packs_dir = fixed(&fixed(&top, &bolt, "store")?, &bolt.join("store"), "packs")?;
+        let packs_dir = Arc::new(fixed(
+            &fixed(&top, &bolt, "store")?,
+            &bolt.join("store"),
+            "packs",
+        )?);
         // The head first: its pack was in the store before the head pointed at it.
         let head = read_head(&state, &bolt)?;
-        let store = Store::open_in(&packs_dir, &packs)?;
+        let store = Store::open_in(Arc::clone(&packs_dir), &packs)?;
         // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
         // project found damaged is left as it was.
         for name in ["tmp", "cache"] {
@@ -966,7 +961,7 @@ impl Repository {
             tmp: Arc::new(fixed(&top, &bolt, "tmp")?),
             bolt: top,
             state,
-            packs: Arc::new(packs_dir),
+            packs: packs_dir,
         };
         let repo = Repository {
             root: root.to_owned(),
@@ -1125,7 +1120,7 @@ impl Repository {
         write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())?;
         // Another command may have committed since this handle was opened.
         self.head = read_head(&self.held.state, &self.bolt)?;
-        self.store.refresh(&self.held.packs, &self.packs)?;
+        self.store.refresh()?;
         Ok(ChangeLock { _file: file })
     }
 
@@ -1144,7 +1139,7 @@ impl Repository {
         DiaryEntry::decode(&bytes)?;
         let id = packs.add_record(ObjectKind::DiaryEntry, &bytes)?;
         for path in packs.finish()? {
-            self.store.register(&self.held.packs, &path)?;
+            self.store.register(&path);
         }
         fault_point("commit:before-head")?;
         let head = format!("{id}\n");
@@ -1255,7 +1250,9 @@ mod tests {
     /// before the project is found damaged.
     #[test]
     fn a_damaged_project_is_left_as_found() {
-        for spoil in ["state/head", "store/packs/00.pack"] {
+        // Not a damaged pack: packs are opened only when first searched, so opening the project
+        // doesn't find one.
+        for spoil in ["state/head"] {
             let (dir, repo) = project();
             drop(repo);
             let bolt = dir.path().join(".bolt");
@@ -1341,7 +1338,7 @@ mod tests {
         for pack in std::fs::read_dir(repo.packs_dir()).unwrap() {
             for e in PackReader::open(&pack.unwrap().path()).unwrap().entries() {
                 assert!(!matches!(
-                    e.kind,
+                    e.unwrap().kind,
                     ObjectKind::TagList | ObjectKind::ServerLines
                 ));
             }
@@ -2896,13 +2893,13 @@ mod tests {
         let mut holders = Vec::new();
         for pack in std::fs::read_dir(repo.packs_dir()).unwrap() {
             let reader = PackReader::open(&pack.unwrap().path()).unwrap();
-            if reader.find(&entry_id).is_some() {
+            if reader.find(&entry_id).unwrap().is_some() {
                 holders.push(reader);
             }
         }
         assert_eq!(holders.len(), 1);
         // The last pack holds what came last: the seventh object and the entry.
-        let held: BTreeSet<Id> = holders[0].entries().iter().map(|e| e.id).collect();
+        let held: BTreeSet<Id> = holders[0].entries().map(|e| e.unwrap().id).collect();
         assert_eq!(held, BTreeSet::from([ids[6], entry_id]));
     }
 

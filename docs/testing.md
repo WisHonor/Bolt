@@ -66,7 +66,7 @@ Git before 2.52 reads a `**` right after the literal start of a pattern with a `
 
 **Fuzz targets.** Fifteen cover the decoders and parsers of data from outside Bolt:
 - Bolt's records: `decode_listing` (folder listings), `decode_save`, `decode_diary` (diary entries), `decode_tag_list` and `decode_server_lines`.
-- Bolt's files: `open_pack` (a pack, with its index, trailer and every entry), `format_file` (`.bolt/format`) and `name_rules` (a list of names given to `validate_name`, `is_git_alias` and `folder_problems`: the always-on name rules, the `.git` spellings and the clashes among one folder's names).
+- Bolt's files: `open_pack` (a pack of either version, with its index, trailer and every entry, each also looked up by its ID), `format_file` (`.bolt/format`) and `name_rules` (a list of names given to `validate_name`, `is_git_alias` and `folder_problems`: the always-on name rules, the `.git` spellings and the clashes among one folder's names).
 - `ignore_rules`: ignore files, the matcher and wildmatch, on drives that do and don't ignore letter case or compose Unicode.
 - The Git reader: `git_loose` (loose objects, as they are and compressed, to get past zlib), `git_pack` (a pack and its index, given the checksums no fuzzer finds by chance), `git_delta`, `git_objects` (commits, trees, tags, people, and the tests for Git LFS pointers), `git_refs` (`packed-refs` and `HEAD`, then the renaming of branch and tag names) and `git_config`.
 

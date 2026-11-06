@@ -818,7 +818,7 @@ fn damage_the_only_copy_of(root: &Path, id: &Id) {
     use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
     for e in std::fs::read_dir(root.join(".bolt/store/packs")).unwrap() {
         let path = e.unwrap().path();
-        let found = PackReader::open(&path).unwrap().find(id).copied();
+        let found = PackReader::open(&path).unwrap().find(id).unwrap();
         if let Some(entry) = found {
             let mut bytes = std::fs::read(&path).unwrap();
             bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
@@ -839,7 +839,7 @@ fn plant_damaged_copy_of(root: &Path, id: &Id, kind: ObjectKind) {
     w.add_record(kind, &record).unwrap();
     let path = w.finish(made.path()).unwrap().unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
-    let entry = PackReader::open(&path).unwrap().find(id).copied().unwrap();
+    let entry = PackReader::open(&path).unwrap().find(id).unwrap().unwrap();
     bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
     std::fs::write(root.join(".bolt/store/packs/00.pack"), bytes).unwrap();
 }
@@ -1478,13 +1478,15 @@ fn plant_two_non_portable_names(root: &Path) {
 }
 
 /// A refused save as JSON: the error, with the warnings the store gave before the save was refused.
-/// Here the first save's folder listing has a damaged copy, which is read first and passed over.
+/// Here the head's diary entry has a damaged copy. It is the first object read, before any pack
+/// has held one, so the pack that sorts first is searched first, and its copy is passed over.
 #[test]
 fn save_json_error_lists_the_warnings_found_before_it_failed() {
+    use bolt_core::repo::Repository;
     let env = Env::new();
     env.bolt().arg("start").assert().success();
-    let empty = Listing::empty().id();
-    plant_damaged_copy_of(env.root(), &empty, ObjectKind::FolderListing);
+    let head = Repository::open(env.root()).unwrap().head().unwrap();
+    plant_damaged_copy_of(env.root(), &head, ObjectKind::DiaryEntry);
     plant_two_non_portable_names(env.root());
     let out = env.bolt().args(["--json", "save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));

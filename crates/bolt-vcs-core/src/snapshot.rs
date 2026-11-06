@@ -1075,7 +1075,7 @@ mod tests {
     pub(super) fn damage_the_only_copy_of(repo: &Repository, id: &Id) {
         for e in fs::read_dir(repo.packs_dir()).unwrap() {
             let path = e.unwrap().path();
-            let found = PackReader::open(&path).unwrap().find(id).copied();
+            let found = PackReader::open(&path).unwrap().find(id).unwrap();
             if let Some(entry) = found {
                 let mut bytes = fs::read(&path).unwrap();
                 bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
