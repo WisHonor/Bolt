@@ -278,7 +278,6 @@ fn rt5_5_a_file_copied_over_a_saved_one_keeping_its_time_is_seen_and_never_lost(
 /// Unverified: needs a drive that ignores case (Windows, macOS).
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
-#[ignore = "RT5-6: a folder that becomes a file named in another case is always in the way"]
 fn rt5_6_a_folder_becoming_a_file_in_another_case_is_not_in_its_own_way() {
     let env = project();
     fs::create_dir(env.root().join("d")).unwrap();

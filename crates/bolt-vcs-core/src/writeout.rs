@@ -228,6 +228,8 @@ pub fn plan(
             .filter(|a| removes(a.change))
             .map(|a| a.path.as_str())
             .collect();
+        // Spelled as the drive compares names, since the walk meets them as they are on disk.
+        let folded: HashSet<String> = removed.iter().map(|p| fold_path(p, drive)).collect();
         let goes: HashSet<&str> = kept
             .iter()
             .filter(|a| {
@@ -241,7 +243,7 @@ pub fn plan(
             if ancestors(path).any(|up| goes.contains(up)) {
                 continue;
             }
-            let left = left_below(&mut disk, path, &removed)?;
+            let left = left_below(&mut disk, path, &folded, drive)?;
             if left.is_empty() {
                 continue;
             }
@@ -1289,12 +1291,14 @@ fn in_the_way(disk: &mut Folders, folder: &mut Tree, path: &str) -> Result<bool,
     }
 }
 
-/// What is on disk below the folder `path` that no action in `removed` takes away. A folder that
-/// can't be opened counts as left, since the switch couldn't empty it either.
+/// What is on disk below the folder `path` that no action takes away; `removed` holds their
+/// paths as `drive` compares them. A folder that can't be opened counts as left, since the switch
+/// couldn't empty it either.
 fn left_below(
     disk: &mut Folders,
     path: &str,
-    removed: &HashSet<&str>,
+    removed: &HashSet<String>,
+    drive: Drive,
 ) -> Result<Vec<String>, SaveError> {
     let mut left = Vec::new();
     let mut todo = vec![path.to_owned()];
@@ -1310,7 +1314,7 @@ fn left_below(
         };
         for e in entries {
             let below = format!("{dir}/{}", e.name.to_string_lossy());
-            let gone = e.name.to_str().is_some() && removed.contains(below.as_str());
+            let gone = e.name.to_str().is_some() && removed.contains(&fold_path(&below, drive));
             if !gone {
                 left.push(below);
             } else if e.kind == EntryType::Dir {

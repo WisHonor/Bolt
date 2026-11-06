@@ -622,6 +622,25 @@ fn what_the_plan_never_read_in_a_folder_that_goes_is_in_the_way_or_kept() {
     }
 }
 
+/// Needs a drive that ignores case.
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_folder_becoming_a_file_in_another_case_is_judged_as_the_drive_names_it() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let ignore: (&str, &[u8]) = (".boltignore", b"*.o\n");
+    let a = planted(&mut repo, &files(&[ignore, ("d/f", b"f"), ("d/s/g", b"g")]));
+    switch(&mut repo, empty, a);
+    let b = planted(&mut repo, &files(&[ignore, ("D", b"file D")]));
+    // Its own saved files are not in its way.
+    let clean = planned(&mut repo, a.0, b.0, false);
+    assert!(clean.collisions.is_empty(), "{:?}", clean.collisions);
+    // An ignored file still is.
+    fs::write(dir.path().join("d/s/x.o"), b"build").unwrap();
+    let plan = planned(&mut repo, a.0, b.0, false);
+    assert_eq!(plan.collisions, ["D/s/x.o"]);
+}
+
 #[test]
 fn every_name_of_a_path_is_checked_against_its_folders_real_short_names() {
     let own = |folder: &str| -> io::Result<Vec<(String, String)>> {
