@@ -238,3 +238,68 @@ fn rt5_4_goto_never_changes_a_file_outside_through_a_hard_link() {
         text(&out.stderr)
     );
 }
+
+#[test]
+#[ignore = "RT5-5: the file cache trusts a file overwritten in place with its time kept (cp -p, unzip -o)"]
+fn rt5_5_a_file_copied_over_a_saved_one_keeping_its_time_is_seen_and_never_lost() {
+    let env = project();
+    write_at(
+        &env,
+        "a.txt",
+        "XXXX",
+        SystemTime::now() - Duration::from_secs(3600),
+    );
+    env.bolt().args(["save", "First"]).assert().success();
+    let first = json(&env, &["status"])["save"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    write_at(&env, "a.txt", "AAAA", one_time());
+    env.bolt()
+        .args(["save", "Second", "a.txt"])
+        .assert()
+        .success();
+    json(&env, &["status"]);
+    // `cp -p notes.txt a.txt` (or `unzip -o`): the same file is truncated and rewritten, then
+    // given the source's time. Its file ID doesn't change.
+    write_at(&env, "a.txt", "KKKK", one_time());
+    let after = json(&env, &["status"]);
+    let shown = after["changes"].to_string();
+    let out = env.bolt().args(["goto", &first]).output().unwrap();
+    let survived = kept(&env, "a.txt", b"KKKK");
+    assert!(
+        shown.contains("a.txt") && survived,
+        "status after the copy: {shown}\ngoto: {:?} {}\nthe notes (KKKK) survived the goto: \
+         {survived}",
+        out.status.code(),
+        text(&out.stderr)
+    );
+}
+
+/// Unverified: needs a drive that ignores case (Windows, macOS).
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+#[ignore = "RT5-6: a folder that becomes a file named in another case is always in the way"]
+fn rt5_6_a_folder_becoming_a_file_in_another_case_is_not_in_its_own_way() {
+    let env = project();
+    fs::create_dir(env.root().join("d")).unwrap();
+    fs::write(env.root().join("d/f"), "f").unwrap();
+    env.bolt().args(["save", "A"]).assert().success();
+    let a = json(&env, &["status"])["save"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::remove_dir_all(env.root().join("d")).unwrap();
+    fs::write(env.root().join("D"), "file D").unwrap();
+    env.bolt().args(["save", "B"]).assert().success();
+    env.bolt().args(["goto", &a]).assert().success();
+    // Nothing unsaved, nothing ignored: the folder d holds only the saved d/f.
+    let out = env.bolt().args(["goto", "main"]).output().unwrap();
+    assert!(
+        out.status.success() && fs::read(env.root().join("D")).is_ok_and(|b| b == b"file D"),
+        "goto: {:?} {}\nfolder now: {:?}",
+        out.status.code(),
+        text(&out.stderr),
+        walk(env.root())
+    );
+}
