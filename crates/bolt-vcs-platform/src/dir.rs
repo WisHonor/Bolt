@@ -23,6 +23,9 @@ use windows as sys;
 #[derive(Debug)]
 pub struct Dir {
     handle: sys::Handle,
+    /// The count of the thread that opened it, which its closing lowers wherever it happens.
+    #[cfg(feature = "test-support")]
+    counted: std::sync::Arc<open_count::Count>,
 }
 
 /// What an entry is.
@@ -77,9 +80,11 @@ impl Dir {
     }
 
     fn held(handle: sys::Handle) -> Dir {
-        #[cfg(feature = "test-support")]
-        open_count::opened();
-        Dir { handle }
+        Dir {
+            handle,
+            #[cfg(feature = "test-support")]
+            counted: open_count::opened(),
+        }
     }
 
     /// What is in this folder, without `.` and `..`, in no particular order.
@@ -191,39 +196,54 @@ impl Dir {
 #[cfg(feature = "test-support")]
 impl Drop for Dir {
     fn drop(&mut self) {
-        open_count::closed();
+        self.counted.closed();
     }
 }
 
-/// How many folders this thread holds open, for tests that bound it.
+/// How many folders this thread opened and are still open, wherever they are held, for tests
+/// that bound it.
 #[cfg(feature = "test-support")]
 pub mod open_count {
-    use std::cell::Cell;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Default)]
+    pub struct Count {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    impl Count {
+        pub(super) fn closed(&self) {
+            // Each folder counted here was counted once when it was opened.
+            self.now.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 
     thread_local! {
-        static NOW: Cell<usize> = const { Cell::new(0) };
-        static MOST: Cell<usize> = const { Cell::new(0) };
+        static COUNT: Arc<Count> = Arc::default();
     }
 
-    pub(super) fn opened() {
-        let now = NOW.get().saturating_add(1);
-        NOW.set(now);
-        MOST.set(MOST.get().max(now));
+    pub(super) fn opened() -> Arc<Count> {
+        COUNT.with(|count| {
+            let now = count.now.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            count.most.fetch_max(now, Ordering::Relaxed);
+            Arc::clone(count)
+        })
     }
 
-    pub(super) fn closed() {
-        NOW.set(NOW.get().saturating_sub(1));
-    }
-
-    /// How many folders this thread holds open now.
+    /// How many folders this thread opened are open now.
     pub fn now() -> usize {
-        NOW.get()
+        COUNT.with(|count| count.now.load(Ordering::Relaxed))
     }
 
-    /// The most folders this thread has held open at once since the last call, which starts the
-    /// count again from those open now.
+    /// The most of them open at once since the last call, which starts the count again from
+    /// those open now.
     pub fn most_since_last() -> usize {
-        MOST.replace(NOW.get())
+        COUNT.with(|count| {
+            let now = count.now.load(Ordering::Relaxed);
+            count.most.swap(now, Ordering::Relaxed)
+        })
     }
 }
 

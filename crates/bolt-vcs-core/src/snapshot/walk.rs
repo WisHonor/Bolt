@@ -9,7 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -22,10 +22,10 @@ use crate::ignore::{Decision, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{holdable_here, is_bolt_alias, is_git_alias, own_folder, validate_name};
 use crate::repo::RepoError;
-use crate::safe_fs;
 use crate::store::{Store, StoreError};
 use crate::text::{escape, escape_all};
 use crate::warning::{self, Warning};
+use crate::{fsio, safe_fs};
 
 /// A project path as the user should see it; names that aren't UTF-8 are shown lossily.
 fn shown(rel: &Path) -> String {
@@ -54,9 +54,9 @@ const MOST_HELD: usize = 256;
 /// most `MOST_HELD` are open, and one more for a moment while the next is opened.
 pub(super) struct Handles {
     top: Arc<Dir>,
-    down: Vec<(OsString, Dir)>,
-    past: Option<(PathBuf, Dir)>,
-    /// The most it holds; less than `MOST_HELD` when several share the limit.
+    down: Vec<(OsString, Arc<Dir>)>,
+    past: Option<(PathBuf, Arc<Dir>)>,
+    /// The most it holds; less than `MOST_HELD` while others hold folders too.
     most: usize,
 }
 
@@ -71,19 +71,14 @@ impl Handles {
         })
     }
 
-    /// Another set from the same top folder, holding at most `most`.
-    fn sharing_top(&self, most: usize) -> Handles {
-        Handles {
-            top: Arc::clone(&self.top),
-            down: Vec::new(),
-            past: None,
-            most,
-        }
-    }
-
     /// The folder at the project path `rel`, opened from the deepest folder held on the way to
     /// it, one name at a time.
     fn dir(&mut self, rel: &Path) -> io::Result<&Dir> {
+        self.held(rel).map(|dir| &**dir)
+    }
+
+    /// `dir`, as a handle that can be kept after this set lets it go.
+    fn held(&mut self, rel: &Path) -> io::Result<&Arc<Dir>> {
         let names: Vec<&OsStr> = rel.iter().collect();
         let same = self
             .down
@@ -96,7 +91,7 @@ impl Handles {
             && let Some(&name) = names.get(self.down.len())
         {
             let next = self.deepest().open_dir(name)?;
-            self.down.push((name.to_owned(), next));
+            self.down.push((name.to_owned(), Arc::new(next)));
         }
         let Some((first, rest)) = names
             .get(self.down.len()..)
@@ -109,7 +104,7 @@ impl Handles {
         let dir = match self.past.take() {
             Some((path, dir)) if path == rel => dir,
             Some((path, dir)) if rel.parent() == Some(path.as_path()) => {
-                dir.open_dir(rest.last().unwrap_or(first))?
+                Arc::new(dir.open_dir(rest.last().unwrap_or(first))?)
             }
             other => {
                 drop(other);
@@ -117,7 +112,7 @@ impl Handles {
                 for name in rest {
                     dir = dir.open_dir(name)?;
                 }
-                dir
+                Arc::new(dir)
             }
         };
         Ok(&self.past.insert((rel.to_owned(), dir)).1)
@@ -128,7 +123,7 @@ impl Handles {
         self.dir(Path::new(rel)).map_err(|e| folder_problem(rel, e))
     }
 
-    fn deepest(&self) -> &Dir {
+    fn deepest(&self) -> &Arc<Dir> {
         self.down.last().map_or(&self.top, |(_, dir)| dir)
     }
 }
@@ -790,21 +785,30 @@ struct InFolder {
     rel: String,
     depth: usize,
     left: Vec<DirEntry>,
+    /// The handle that listed it, kept until its files are handed out.
+    dir: Option<Arc<Dir>>,
 }
 
 impl InFolder {
     /// The folder `rel`, `depth` levels down, with what it holds. Its files and links come before
     /// its folders, so a folder past those held is opened again only to go into its next folder.
     fn listed(handles: &mut Handles, rel: String, depth: usize) -> Result<InFolder, SaveError> {
-        let mut left = handles
-            .folder(&rel)?
-            .entries()
-            .map_err(|e| folder_problem(&rel, e))?;
+        let dir = Arc::clone(
+            handles
+                .held(Path::new(&rel))
+                .map_err(|e| folder_problem(&rel, e))?,
+        );
+        let mut left = dir.entries().map_err(|e| folder_problem(&rel, e))?;
         // Backwards, as they are taken from the end.
         left.sort_by(|a, b| {
             (b.kind == EntryType::Dir, &b.name).cmp(&(a.kind == EntryType::Dir, &a.name))
         });
-        Ok(InFolder { rel, depth, left })
+        Ok(InFolder {
+            rel,
+            depth,
+            left,
+            dir: Some(dir),
+        })
     }
 }
 
@@ -930,10 +934,20 @@ struct Look {
     rel: String,
 }
 
+/// Files of one folder to look at, with the handle that listed the folder: a folder swapped since
+/// is never looked into, and the read that opens it again by name finds other files there.
+struct Job {
+    number: usize,
+    dir: Arc<Dir>,
+    looks: Vec<Look>,
+}
+
 /// The most files one thread looks at in one go.
 const LOOKS_PER_JOB: usize = 256;
 /// The most threads that look at files at once; more only wait on each other in the drive.
 const MOST_LOOKERS: usize = 6;
+/// Jobs waiting for a looker, for each looker.
+const WAITING_PER_LOOKER: usize = 2;
 
 /// Walks the folder (`walk_folders`) and fills in the details of every file and link it keeps,
 /// each from a look at the entry itself. Never from the folder listing: on Windows it keeps the
@@ -950,24 +964,27 @@ fn walk_and_look(
     let threads = thread::available_parallelism()
         .map_or(1, usize::from)
         .clamp(1, MOST_LOOKERS);
-    // Half the folders held are the walk's; the lookers share the rest.
-    rules.handles.most = MOST_HELD / 2;
-    let most = MOST_HELD / 2 / threads;
-    let (send, jobs) = mpsc::channel();
-    let jobs = Mutex::new(jobs);
+    let waiting = threads * WAITING_PER_LOOKER;
+    // Jobs hold their folders open: those waiting, one per looker, one the walk is filling or
+    // sending, and the folder the walk is in.
+    rules.handles.most = MOST_HELD - waiting - threads - 2;
+    let (send, jobs) = mpsc::sync_channel(waiting);
+    // The lookers alone hold it, so once they have all stopped the walk can't send.
+    let jobs = Arc::new(Mutex::new(jobs));
     let failed = AtomicBool::new(false);
     let (walked, looked) = thread::scope(|scope| {
         let mut lookers = Vec::new();
         for _ in 0..threads {
-            let mine = rules.handles.sharing_top(most);
-            let (jobs, failed) = (&jobs, &failed);
-            match thread::Builder::new().spawn_scoped(scope, move || look(mine, jobs, failed)) {
+            let (jobs, failed) = (Arc::clone(&jobs), &failed);
+            match thread::Builder::new().spawn_scoped(scope, move || look(&jobs, failed)) {
                 Ok(looker) => lookers.push(looker),
                 // Dropping `send` lets those started finish.
                 Err(e) => return (Err(SaveError::Repo(e.into())), Vec::new()),
             }
         }
-        let walked = walk_folders(root, base, limits, drive, rules, send);
+        drop(jobs);
+        let walked = walk_folders(root, base, limits, drive, rules, &send, &failed);
+        drop(send);
         let mut looked = Vec::new();
         for looker in lookers {
             match looker.join() {
@@ -982,22 +999,28 @@ fn walk_and_look(
         (walked, looked)
     });
     rules.handles.most = MOST_HELD;
-    // Only the top: what is read next opens its folders again by name, so one swapped since the
-    // walk is found, never read where it went.
+    // Only the top: what is read next opens its folders again by name, so a file in a folder
+    // swapped since the walk is found to be another file, never read as this one.
     rules.handles.down.clear();
     rules.handles.past = None;
-    let mut folders = walked?;
+    let folders = walked?;
     // Every job before a failed one was taken, so the first problem is always the same one.
     let mut looked = looked;
     looked.sort_by_key(|(i, _)| *i);
-    for (_, found) in looked {
-        for (look, meta) in found? {
-            if let Some(c) = folders
-                .get_mut(&look.folder)
-                .and_then(|c| c.get_mut(look.at))
-            {
-                c.meta = Some(meta);
-            }
+    let mut found = Vec::new();
+    for (_, job) in looked {
+        found.extend(job?);
+    }
+    let Some(mut folders) = folders else {
+        let stopped = io::Error::other("the looks at the project's files stopped");
+        return Err(SaveError::Repo(stopped.into()));
+    };
+    for (look, meta) in found {
+        if let Some(c) = folders
+            .get_mut(&look.folder)
+            .and_then(|c| c.get_mut(look.at))
+        {
+            c.meta = Some(meta);
         }
     }
     Ok(folders)
@@ -1007,35 +1030,30 @@ fn walk_and_look(
 type Looked = Result<Vec<(Look, EntryMeta)>, SaveError>;
 
 /// A looker: takes jobs from `jobs` until there are none, or until one fails.
-fn look(
-    mut handles: Handles,
-    jobs: &Mutex<Receiver<(usize, Vec<Look>)>>,
-    failed: &AtomicBool,
-) -> Vec<(usize, Looked)> {
+fn look(jobs: &Mutex<Receiver<Job>>, failed: &AtomicBool) -> Vec<(usize, Looked)> {
     let mut done = Vec::new();
     while !failed.load(Ordering::Relaxed) {
         let next = match jobs.lock() {
             Ok(jobs) => jobs.recv(),
             Err(_) => break,
         };
-        let Ok((i, job)) = next else { break };
-        let found = look_at(&mut handles, job);
+        let Ok(job) = next else { break };
+        let number = job.number;
+        let found = look_at(job);
         failed.fetch_or(found.is_err(), Ordering::Relaxed);
-        done.push((i, found));
+        done.push((number, found));
     }
     done
 }
 
-/// The details of each file and link in `job`, all in one folder.
-fn look_at(handles: &mut Handles, job: Vec<Look>) -> Looked {
-    let Some(first) = job.first() else {
-        return Ok(Vec::new());
-    };
-    let dir = handles.folder(&first.folder)?;
-    let mut found = Vec::with_capacity(job.len());
-    for look in job {
+/// The details of each file and link in `job`, through the handle that listed their folder.
+fn look_at(job: Job) -> Looked {
+    fsio::act_point("walk:looking");
+    let mut found = Vec::with_capacity(job.looks.len());
+    for look in job.looks {
         let meta =
-            dir.metadata(OsStr::new(&look.name))
+            job.dir
+                .metadata(OsStr::new(&look.name))
                 .map_err(|source| SaveError::Unreadable {
                     path: look.rel.clone(),
                     source,
@@ -1050,28 +1068,37 @@ fn look_at(handles: &mut Handles, job: Vec<Look>) -> Looked {
 }
 
 /// The walk itself, handing the files and links it keeps to `send` a folder at a time, numbered
-/// in the order met, to be looked at while it goes on.
+/// in the order met, to be looked at while it goes on. Stops early, with nothing, once a look has
+/// `failed`: that look's problem is the answer.
 fn walk_folders(
     root: &Path,
     base: &mut Base,
     limits: &mut SaveLimits,
     drive: Drive,
     rules: &mut WalkState,
-    send: Sender<(usize, Vec<Look>)>,
-) -> Result<Folders, SaveError> {
+    send: &SyncSender<Job>,
+    failed: &AtomicBool,
+) -> Result<Option<Folders>, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
     // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
     let mut path = vec![InFolder::listed(&mut rules.handles, String::new(), 0)?];
-    let (mut job, mut jobs) = (Vec::new(), 0);
+    let (mut job, mut jobs) = (None, 0);
     while let Some(here) = path.last_mut() {
         let Some(entry) = here.left.pop() else {
             path.pop();
             continue;
         };
         let (up, depth) = (here.rel.clone(), here.depth + 1);
+        // Its files come first, so once a folder is met they are all handed out.
+        let listed_by = if entry.kind == EntryType::Dir {
+            here.dir.take();
+            None
+        } else {
+            here.dir.clone()
+        };
         // A Windows reparse point that isn't a link but is marked as a folder: a folder to the
         // ignore rules, though Bolt never goes into it.
         let closed = entry.kind == EntryType::Other && entry.folder;
@@ -1125,12 +1152,27 @@ fn walk_folders(
         let children = folders.entry(up.clone()).or_default();
         if kind == Kind::Folder {
             // Every file here is met before any folder, so they can be looked at now.
-            send_job(&mut job, &mut jobs, &send);
-        } else {
-            if job.len() == LOOKS_PER_JOB || job.first().is_some_and(|l: &Look| l.folder != up) {
-                send_job(&mut job, &mut jobs, &send);
+            if !send_job(&mut job, &mut jobs, send, failed) {
+                return Ok(None);
             }
-            job.push(Look {
+        } else {
+            let full = |j: &Job| {
+                j.looks.len() == LOOKS_PER_JOB || j.looks.first().is_some_and(|l| l.folder != up)
+            };
+            if job.as_ref().is_some_and(full) && !send_job(&mut job, &mut jobs, send, failed) {
+                return Ok(None);
+            }
+            let dir = listed_by.ok_or_else(|| {
+                SaveError::Repo(
+                    io::Error::other("a file was met after its folder's folders").into(),
+                )
+            })?;
+            let job = job.get_or_insert_with(|| Job {
+                number: jobs,
+                dir,
+                looks: Vec::new(),
+            });
+            job.looks.push(Look {
                 folder: up,
                 at: children.len(),
                 listed: entry.kind,
@@ -1148,18 +1190,28 @@ fn walk_folders(
             path.push(InFolder::listed(&mut rules.handles, rel, depth)?);
         }
     }
-    send_job(&mut job, &mut jobs, &send);
-    Ok(folders)
+    if !send_job(&mut job, &mut jobs, send, failed) {
+        return Ok(None);
+    }
+    Ok(Some(folders))
 }
 
-/// Sends `job`, if it holds anything, as number `jobs`, and starts the next.
-fn send_job(job: &mut Vec<Look>, jobs: &mut usize, send: &Sender<(usize, Vec<Look>)>) {
-    if job.is_empty() {
-        return;
+/// Sends `job`, if there is one, and counts it; waits while the lookers are busy. False once a
+/// look has failed, or every looker has stopped.
+fn send_job(
+    job: &mut Option<Job>,
+    jobs: &mut usize,
+    send: &SyncSender<Job>,
+    failed: &AtomicBool,
+) -> bool {
+    if failed.load(Ordering::Relaxed) {
+        return false;
     }
-    // Only fails once every looker has stopped, and then their own error says why.
-    let _ = send.send((*jobs, std::mem::take(job)));
+    let Some(job) = job.take() else {
+        return true;
+    };
     *jobs += 1;
+    send.send(job).is_ok()
 }
 
 /// Says the save left out entries whose names Git treats as `.git` or Bolt as `.bolt`, naming the

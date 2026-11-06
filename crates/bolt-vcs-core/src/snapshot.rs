@@ -2040,14 +2040,14 @@ mod tests {
         let kept = dir.path().join("kept.txt");
         // Nothing can read it now, so a save that opened it would fail.
         #[cfg(unix)]
-        let _shut = {
+        {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&kept, fs::Permissions::from_mode(0o000)).unwrap();
             // Root reads it anyway.
             if fs::read(&kept).is_ok() {
                 return;
             }
-        };
+        }
         #[cfg(windows)]
         let _shut = {
             use std::os::windows::fs::OpenOptionsExt;
@@ -2082,6 +2082,26 @@ mod tests {
         let tree = saved_tree(repo.store(), root);
         assert_eq!(tree["a.txt"].1, b"two");
         assert_eq!(tree["b.txt"].1, b"three");
+    }
+
+    #[test]
+    fn an_edit_status_vouched_for_is_still_stored() {
+        let (dir, mut repo) = project();
+        write_old(dir.path(), "a.txt", b"one");
+        save_now(&mut repo).unwrap();
+        // Another content at another old time, and a new file, both learned by status.
+        write_old(dir.path(), "a.txt", b"two!");
+        let a = dir.path().join("a.txt");
+        let then = fs::metadata(&a).unwrap().modified().unwrap();
+        set_time(&a, then - std::time::Duration::from_secs(60));
+        write_old(dir.path(), "b.txt", b"new");
+        crate::status::status(&repo, false, None).unwrap();
+        // The cache now vouches for both, but the base save holds neither, so both are stored.
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let fresh = Repository::open(dir.path()).unwrap();
+        let tree = saved_tree(fresh.store(), root);
+        assert_eq!(tree["a.txt"].1, b"two!");
+        assert_eq!(tree["b.txt"].1, b"new");
     }
 
     #[test]

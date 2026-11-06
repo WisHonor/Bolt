@@ -144,8 +144,8 @@ pub fn act_point(label: &'static str) {
 pub mod fault {
     use std::cell::{Cell, RefCell};
     use std::io;
-    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
 
     /// What a test does when this thread reaches a named point.
     type Action = (&'static str, Box<dyn FnOnce()>);
@@ -187,9 +187,28 @@ pub mod fault {
             .as_deref()
     }
 
+    /// What a test does when any thread reaches a named point.
+    type SharedAction = (&'static str, Box<dyn FnOnce() + Send>);
+    static SHARED: Mutex<Option<SharedAction>> = Mutex::new(None);
+
+    /// `act_at` for a point reached on another thread, such as one the walk starts. Only one test
+    /// in a process should use it at a time.
+    pub fn act_at_on_any_thread(label: &'static str, action: impl FnOnce() + Send + 'static) {
+        if let Ok(mut shared) = SHARED.lock() {
+            *shared = Some((label, Box::new(action)));
+        }
+    }
+
     pub(super) fn act(label: &'static str) {
         let due = ACTION.with_borrow_mut(|action| action.take_if(|(at, _)| *at == label));
         if let Some((_, action)) = due {
+            action();
+        }
+        let shared = SHARED
+            .lock()
+            .ok()
+            .and_then(|mut shared| shared.take_if(|(at, _)| *at == label));
+        if let Some((_, action)) = shared {
             action();
         }
     }
