@@ -31,13 +31,38 @@
 
 **Property tests.** An in-memory model tracks what the folder and history should contain. Each random action (create, change, move or delete files; save; goto; discard; undo; redo) is applied to both Bolt and the model. After every action: `status` matches the model, every save restores byte-identically, `undo` returns to the previous state, and nothing the model says exists is missing.
 
-Milestone 3's model test, `crates/bolt-vcs/tests/model.rs`, drives the engine in the test's own process (a process per action would be too slow on Windows) through 30 random actions: write, delete or rename one of six files, make or delete one of three folders, save, `goto` a random save or line, discard everything or one path, and a status that reads every file. The model holds the folder's files and folders, every save's, the lines and the position. After each action the folder on disk holds exactly what the model holds, `status` (trusting the file cache, except in that last action) lists exactly the files added, changed and removed since the model's save, and the lines and position match; each save, when made and again at the end, holds exactly the model's files and folders in the store. A few things keep the model simple:
-- every write gives the file a size no earlier write had, so one size always means one content, and no edit can pass as unchanged behind the same size and time ([decision 011](decisions/011-status-and-write-out.md)'s accepted case);
-- before a `goto`, unsaved work is saved or discarded, so nothing collides and nothing is carried along; carrying is tested in `goto.rs`;
-- names differ in more than letter case, so every drive holds them all;
-- a save made at a save starts a new line, as it must.
+Milestone 3's model test, `crates/bolt-vcs/tests/model.rs`, drives the engine in the test's own process (a process per action would be too slow on Windows) through up to 30 random actions:
+- write one of six files, at one of three lengths, so that files often keep their size when they change;
+- write other bytes of the same length over a file;
+- on Unix, turn a file's executable bit on or off;
+- delete or rename a file, and make or delete one of three folders;
+- save;
+- `goto` a random save or line, first saving or discarding unsaved work, or keeping it;
+- discard everything or one path;
+- a status that reads every file.
 
-It runs 64 cases on every push (about 35 s in a debug build on a Windows laptop), and 1,024 nightly, through `PROPTEST_CASES`. A failure prints the action it failed after and the shrunk sequence.
+The model holds the folder's files (bytes and executable bit) and folders, every save's, the lines and the position. After each action:
+- the folder on disk holds exactly what the model holds;
+- `status`, trusting the file cache, lists exactly the files added, changed, removed or changed in kind since the model's save;
+- the lines and position match.
+
+Each save holds exactly the model's files and folders in the store, checked when it is made and again at the end.
+
+Each write leaves the file one of three modified times, which together cover the file cache's rules ([decision 053](decisions/053-file-state-cache.md)):
+- the clock's, often within 2 s of the cache's last look, so the racy rule must make status read the file again;
+- a time long past that no earlier write had, so the cache trusts the file and must notice the new time;
+- the time the file had before. With the same size, that is [decision 011](decisions/011-status-and-write-out.md)'s accepted case, once the old time is more than 2 s old (1.5 s by the test's clock, for slack between clocks): status that trusts the cache may then miss the change, and a status that reads every file must see it, which also puts the cache right for the actions after. A file given an earlier time keeps that leeway when it is renamed. When the old time is newer than that, the racy rule applies and plain status must see the change.
+
+A `goto` that keeps unsaved work is held to [decision 050](decisions/050-unsaved-work-in-goto-and-discard.md):
+- It must stop, with nothing changed, when unsaved work that differs from the target sits at, above or below a path where the target changes a file or removes a folder: going ahead would overwrite or remove it.
+- It must go ahead when no unsaved work is near any difference between the two saves.
+- Between the two, either is accepted. That covers work the target already agrees with (a file deleted that the target doesn't hold) and files put in a folder the target only adds. The engine goes ahead in some of these cases and stops in others; the owner is to rule which it should do.
+
+When it goes ahead, the folder must end as the target's own differences applied around the unsaved work, and folders made since the save stay, with the folders above them.
+
+Names differ in more than letter case, so every drive holds them all, and a save made at a save starts a new line, as it must.
+
+It runs 64 cases on every push (about 17 s in a debug build on a Windows laptop), and 1,024 nightly, through `PROPTEST_CASES`. A failure prints the action it failed after and the shrunk sequence. Breaking the cache's time comparison, or its racy rule, makes it fail within the 64 cases.
 
 **Crash tests.** Every disk write goes through one small layer that tests can make fail (return an error, or abort the process) at the N-th operation, or fail at one named point (`BOLT_FAULT_FAIL=start:read-back`) and let the command carry on. For each N, a test runs a command, fails it at step N, then checks that the repository opens, `bolt verify` passes, no saved data is missing, and the next command finishes or rolls back the interrupted one. Separately, a loop kills real Bolt processes at random moments.
 
