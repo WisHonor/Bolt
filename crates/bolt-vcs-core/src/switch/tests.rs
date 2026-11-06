@@ -1,9 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
+use crate::diary::ServerLines;
 use crate::id::hash_content;
 use crate::listing::EntryKind;
 use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
-use crate::test_support::plant_save;
+use crate::test_support::{commit_records, plant_save, sample_records};
+use crate::warning::Warning;
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -138,7 +140,8 @@ fn a_switch_records_safety_copies_in_its_diary_entry() {
         plan,
         drive,
     };
-    let (_, kept) = switch(&mut repo, &lock, s, &who(), "discard").unwrap();
+    let earlier = &mut Earlier::default();
+    let (_, kept) = switch(&mut repo, &lock, s, &who(), "discard", earlier).unwrap();
     assert_eq!(kept, 2);
     let (_, entry) = repo.current().unwrap();
     let copies: Vec<(&str, Id)> = entry
@@ -204,4 +207,75 @@ fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
             break;
         }
     }
+}
+
+#[test]
+fn a_server_line_is_read_again_under_the_lock() {
+    let (dir, mut repo) = two_lines();
+    let main = repo.current().unwrap().1.state.lines["main"];
+    let (tags, _) = sample_records();
+    let servers = ServerLines {
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([("x".to_owned(), main)]),
+        )]),
+    };
+    commit_records(&mut repo, &tags, &servers);
+    // Resolved before another command moved it.
+    let stale = |line: &str| Target::ServerLine {
+        server: "origin".into(),
+        line: line.into(),
+        save: Id([9; 32]),
+    };
+    let gone = goto(&mut repo, &stale("gone"), &who(), "goto", None, &mut |_| {});
+    assert!(matches!(
+        gone,
+        Err(SwitchError::Resolve(ResolveError::NotFound(_)))
+    ));
+    let done = goto(&mut repo, &stale("x"), &who(), "goto", None, &mut |_| {}).unwrap();
+    assert_eq!(done.position, Position::AtSave(main));
+    assert_eq!(files(dir.path()), holding(NEW));
+}
+
+#[test]
+fn a_command_gives_one_warning_for_its_placeholders_and_one_for_what_it_left_unwritten() {
+    let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<String>>();
+    let plan = Plan {
+        placeholders: names(&["p1"]),
+        not_written: names(&["n1"]),
+        ..Plan::default()
+    };
+    let applied = Applied {
+        placeholders: names(&["p2"]),
+        not_written: names(&["n2"]),
+        warnings: vec![
+            writeout::placeholders_warning(&names(&["p2"])),
+            writeout::not_written_warning(&names(&["n2"])),
+        ],
+        ..Applied::default()
+    };
+    let mut earlier = Earlier {
+        placeholders: names(&["p0"]),
+        not_written: names(&["n0"]),
+    };
+    let done = switch_warnings(plan, applied, &mut earlier);
+    let of =
+        |kind: &str| -> Vec<&Warning> { done.warnings.iter().filter(|w| w.kind == kind).collect() };
+    for (kind, paths) in [
+        (warning::PLACEHOLDERS_WRITTEN, ["p0", "p1", "p2"]),
+        (warning::NOT_WRITTEN_HERE, ["n0", "n1", "n2"]),
+    ] {
+        let found = of(kind);
+        assert_eq!(found.len(), 1, "{kind}: {found:?}");
+        for path in paths {
+            assert!(
+                found[0].message.contains(path),
+                "{kind}: {}",
+                found[0].message
+            );
+        }
+    }
+    assert_eq!(done.placeholders, names(&["p0", "p1", "p2"]));
+    assert_eq!(done.not_written, names(&["n0", "n1", "n2"]));
+    assert_eq!(earlier, Earlier::default());
 }

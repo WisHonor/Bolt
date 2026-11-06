@@ -297,7 +297,7 @@ head ─► redo     main → ptvz
   - The journal's order is not the order of the work: folders are made top down, then files are written, then removals run deepest first (so a folder's contents go before the folder becomes a file), and links come last. Each entry must be what the plan found, or already what the switch puts there (so carrying out a journal twice changes nothing more); anything else is left and reported (`changed_since_plan`).
   - On a drive that ignores letter case, a file renamed only in case (`Readme.md` to `README.md`) is written over the old one under its new spelling and the old name's removal is skipped; a folder renamed only in case keeps its old spelling.
   - File contents stream from the store into a file in `.bolt/tmp`, which is flushed and renamed into place, so memory stays small whatever the file's size.
-- **Files in use (Windows):** retry 10 times, 100 ms apart, finish the rest, say which files another program has open (`files_in_use`), then finish with one more command; naming the program comes later ([decision 049](decisions/049-writing-files-one-at-a-time.md)).
+- **Files in use (Windows):** retry 10 times, 100 ms apart, finish the rest, say which files another program has open (`files_in_use`) and fail, keeping the journal, then finish with one more command; naming the program comes later ([decision 049](decisions/049-writing-files-one-at-a-time.md)).
 
 ### 5.10 Lines ([decision 012](decisions/012-lines.md))
 
@@ -305,7 +305,7 @@ head ─► redo     main → ptvz
 
 - **Stored in the diary**, not as files: renaming or deleting a line can be undone, and filesystem case rules never interfere.
 - **Names:** letters, digits, `-`, `_`, `.`, `/`; no spaces; no two names differing only by letter case; `bolt start` creates `main`.
-- **Not on a line:** after `goto` to a save, Bolt says you're looking at an older save; saving there asks for a new line name, or takes it from `--line <name>`. `goto` to a save is at that save even when it is a line's newest; `goto <line>` puts you on the line ([decision 055](decisions/055-lines-in-v0.1.md)).
+- **Not on a line:** after `goto` to a save, Bolt says you're looking at an older save; saving there asks for a new line name, or takes it from `--line <name>`. `goto` to a save is at that save even when it is a line's newest, and then says how to keep saving on that line (the first by name, when several lines are there); `goto <line>` puts you on the line ([decision 055](decisions/055-lines-in-v0.1.md)).
 - **Tags:** fixed names for important saves; they never move, and changing one asks first.
 - **In v0.1:** lines can be created (by saving away from a line), listed and switched; combining, renaming and deleting come in v0.2.
 - **Combining (v0.2):** three-way merge per file; text merged line by line; binaries never merged automatically; move notes followed.

@@ -13,7 +13,7 @@ use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
-use crate::warning;
+use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
 /// What `goto` did.
@@ -22,13 +22,11 @@ pub struct GotoOutcome {
     pub position: Position,
     /// The save the folder is now on.
     pub save: Id,
-    /// What was written and removed. Its `placeholders` are every link written as a file, and
-    /// its `warnings` all the switch's own.
+    /// What was written and removed. Its `placeholders` are every link written as a file, its
+    /// `not_written` every entry left unwritten, and its `warnings` all the switch's own.
     pub applied: Applied,
-    /// Entries of the save this computer can't hold, left unwritten.
-    pub not_written: Vec<String>,
     pub safety_copies: usize,
-    /// Unsaved changes that stayed in the folder.
+    /// Unsaved changes that came along to the new save; 0 when there was nothing to switch.
     pub carried: usize,
 }
 
@@ -72,9 +70,14 @@ impl SwitchError {
     }
 }
 
+/// The warnings that name entries left unwritten or links written as files: one of each per
+/// command, whichever switch they came from.
+const LISTED: [&str; 2] = [warning::PLACEHOLDERS_WRITTEN, warning::NOT_WRITTEN_HERE];
+
 /// Moves the project to `target`. Unsaved work the switch would overwrite stops it before
 /// anything changes; the rest stays in the folder. `git_excludes` is the user's own Git ignore
-/// list, read as a save reads it.
+/// list, read as a save reads it. Files another program holds stop it with `SwitchInUse`, the
+/// journal kept for the next command to finish.
 pub fn goto(
     repo: &mut Repository,
     target: &Target,
@@ -84,12 +87,44 @@ pub fn goto(
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<GotoOutcome, SwitchError> {
     let lock = repo.lock_for_change(command, on_wait)?;
+    let mut earlier = Earlier::default();
     // Kept with the store's warnings, so it is told even if the goto then fails.
     if let Some(done) = writeout::finish_interrupted(repo, &lock)? {
         for w in done.warnings {
-            repo.store().note(w);
+            if !LISTED.contains(&w.kind) {
+                repo.store().note(w);
+            }
         }
+        earlier = Earlier {
+            placeholders: done.placeholders,
+            not_written: done.not_written,
+        };
     }
+    let result = go(
+        repo,
+        &lock,
+        target,
+        who,
+        command,
+        git_excludes,
+        &mut earlier,
+    );
+    // What a goto that stopped early didn't take into its own warnings.
+    for w in earlier.warnings() {
+        repo.store().note(w);
+    }
+    result
+}
+
+fn go(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    target: &Target,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    earlier: &mut Earlier,
+) -> Result<GotoOutcome, SwitchError> {
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
     // Read again under the lock: another command may have moved the line.
@@ -98,7 +133,18 @@ pub fn goto(
             Some(save) => (Position::OnLine(line.clone()), *save),
             None => return Err(ResolveError::NotFound(line.clone()).into()),
         },
-        Target::ServerLine { save, .. } | Target::Save(save) => (Position::AtSave(*save), *save),
+        Target::ServerLine { server, line, .. } => {
+            let servers = repo.server_lines(&entry.state)?;
+            match servers
+                .servers
+                .get(server)
+                .and_then(|lines| lines.get(line))
+            {
+                Some(save) => (Position::AtSave(*save), *save),
+                None => return Err(ResolveError::NotFound(format!("{line}@{server}")).into()),
+            }
+        }
+        Target::Save(save) => (Position::AtSave(*save), *save),
     };
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
@@ -109,29 +155,56 @@ pub fn goto(
     }
     let mut state = entry.state.clone();
     state.position = position.clone();
+    if state == entry.state && plan.actions.is_empty() {
+        // Already there: nothing to record, and nothing came along.
+        return Ok(GotoOutcome {
+            position,
+            save: to,
+            applied: switch_warnings(plan, Applied::default(), earlier),
+            safety_copies: 0,
+            carried: 0,
+        });
+    }
     let carried = plan.carried;
-    let not_written = plan.not_written.clone();
-    let (applied, safety_copies) = if state == entry.state && plan.actions.is_empty() {
-        // Already there: nothing to record.
-        (switch_warnings(plan, Applied::default()), 0)
-    } else {
-        let to_make = Switch {
-            head,
-            from,
-            state,
-            plan,
-            drive,
-        };
-        switch(repo, &lock, to_make, who, command)?
+    let to_make = Switch {
+        head,
+        from,
+        state,
+        plan,
+        drive,
     };
+    let (applied, safety_copies) = switch(repo, lock, to_make, who, command, earlier)?;
     Ok(GotoOutcome {
         position,
         save: to,
         applied,
-        not_written,
         safety_copies,
         carried,
     })
+}
+
+/// What finishing a stopped switch left unwritten or wrote as placeholders, told together with
+/// what the command itself does.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Earlier {
+    placeholders: Vec<String>,
+    not_written: Vec<String>,
+}
+
+impl Earlier {
+    /// Its warnings, once: what it holds is taken.
+    fn warnings(&mut self) -> Vec<Warning> {
+        let placeholders = std::mem::take(&mut self.placeholders);
+        let not_written = std::mem::take(&mut self.not_written);
+        let mut warnings = Vec::new();
+        if !not_written.is_empty() {
+            warnings.push(writeout::not_written_warning(&not_written));
+        }
+        if !placeholders.is_empty() {
+            warnings.push(writeout::placeholders_warning(&placeholders));
+        }
+        warnings
+    }
 }
 
 /// A switch planned, ready to be made.
@@ -147,14 +220,16 @@ struct Switch {
 
 /// Makes a planned switch in decision 049's order: the safety copies and the diary entry are
 /// stored, then the journal written, the folder changed, `head` moved and the journal removed.
-/// A crash at any step leaves what the next changing command finishes. Gives what was done and
-/// how many safety copies were kept.
+/// A crash at any step leaves what the next changing command finishes, and so do files another
+/// program holds, which stop it with `SwitchInUse` after its warnings are noted. Gives what was
+/// done and how many safety copies were kept.
 fn switch(
     repo: &mut Repository,
     lock: &ChangeLock,
     s: Switch,
     who: &Person,
     command: &str,
+    earlier: &mut Earlier,
 ) -> Result<(Applied, usize), SwitchError> {
     let mut packs = repo.new_packs()?;
     let safety_copies =
@@ -178,30 +253,52 @@ fn switch(
     journal.write(repo, lock)?;
     let applied = writeout::carry_out(repo, lock, &journal, s.drive)?;
     crate::merge::merge_after_commit(repo, lock);
-    Ok((switch_warnings(s.plan, applied), kept))
+    let applied = switch_warnings(s.plan, applied, earlier);
+    if !applied.in_use.is_empty() {
+        let detail = applied
+            .warnings
+            .iter()
+            .find(|w| w.kind == warning::FILES_IN_USE)
+            .map(|w| w.message.clone())
+            .unwrap_or_default();
+        for w in applied.warnings {
+            repo.store().note(w);
+        }
+        return Err(RepoError::SwitchInUse { detail }.into());
+    }
+    Ok((applied, kept))
 }
 
-/// `applied` with the plan's warnings first, and one warning for every link written as a file,
-/// whether the plan chose it or this computer couldn't make the link.
-fn switch_warnings(plan: Plan, mut applied: Applied) -> Applied {
-    let mut warnings = plan.warnings;
-    if !plan.not_written.is_empty() {
-        warnings.push(writeout::not_written_warning(&plan.not_written));
-    }
-    let mut placeholders = plan.placeholders;
-    placeholders.append(&mut applied.placeholders);
-    placeholders.sort_unstable();
-    placeholders.dedup();
-    if !placeholders.is_empty() {
-        warnings.push(writeout::placeholders_warning(&placeholders));
-    }
-    applied.placeholders = placeholders;
-    warnings.extend(
-        applied
-            .warnings
-            .drain(..)
-            .filter(|w| w.kind != warning::PLACEHOLDERS_WRITTEN),
+/// `applied` with the plan's warnings first, then one warning for every entry left unwritten
+/// and one for every link written as a file, wherever the list came from: `earlier`, the plan,
+/// or carrying it out.
+fn switch_warnings(plan: Plan, mut applied: Applied, earlier: &mut Earlier) -> Applied {
+    let merged = |mut a: Vec<String>, b: &mut Vec<String>, c: &mut Vec<String>| {
+        a.append(b);
+        a.append(c);
+        a.sort_unstable();
+        a.dedup();
+        a
+    };
+    applied.not_written = merged(
+        plan.not_written,
+        &mut earlier.not_written,
+        &mut applied.not_written,
     );
+    applied.placeholders = merged(
+        plan.placeholders,
+        &mut earlier.placeholders,
+        &mut applied.placeholders,
+    );
+    let mut warnings = plan.warnings;
+    if !applied.not_written.is_empty() {
+        warnings.push(writeout::not_written_warning(&applied.not_written));
+    }
+    if !applied.placeholders.is_empty() {
+        warnings.push(writeout::placeholders_warning(&applied.placeholders));
+    }
+    let own = applied.warnings.drain(..);
+    warnings.extend(own.filter(|w| !LISTED.contains(&w.kind)));
     applied.warnings = warnings;
     applied
 }

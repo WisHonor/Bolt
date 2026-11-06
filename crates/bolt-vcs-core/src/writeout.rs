@@ -62,6 +62,8 @@ pub struct Applied {
     pub changed_since_plan: Vec<String>,
     /// Links written as files holding their targets because this computer couldn't make them.
     pub placeholders: Vec<String>,
+    /// Names this system mustn't write that the journal held, left unwritten.
+    pub not_written: Vec<String>,
     pub warnings: Vec<Warning>,
 }
 
@@ -933,9 +935,9 @@ impl Run<'_> {
         let mut applied = self.applied;
         applied.changed_since_plan = self.changed.into_iter().collect();
         applied.placeholders = self.placeholders;
-        let refused: Vec<String> = self.refused.into_iter().collect();
+        applied.not_written = self.refused.into_iter().collect();
         let warnings = [
-            (!refused.is_empty()).then(|| not_written_warning(&refused)),
+            (!applied.not_written.is_empty()).then(|| not_written_warning(&applied.not_written)),
             (!applied.placeholders.is_empty()).then(|| placeholders_warning(&applied.placeholders)),
             (!applied.in_use.is_empty()).then(|| in_use_warning(&applied.in_use)),
             (!applied.changed_since_plan.is_empty())

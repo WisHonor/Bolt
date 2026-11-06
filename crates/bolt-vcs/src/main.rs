@@ -625,7 +625,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
                 "save": output::save_json(&done.save, &save, &short),
                 "written": done.applied.written,
                 "removed": done.applied.removed,
-                "not_written": done.not_written,
+                "not_written": done.applied.not_written,
                 "placeholders": done.applied.placeholders,
                 "files_in_use": done.applied.in_use,
                 "safety_copies": done.safety_copies,

@@ -204,7 +204,8 @@ fn write_all(env: &Env, entries: &[(&str, &str)]) {
 }
 
 /// An imported Git repository with two lines: `main`, holding `MAIN`, which the project is on,
-/// and `feature`, holding `FEATURE`. The server line `x@origin` is at `feature`'s save.
+/// and `feature`, holding `FEATURE`. The line `zz` and the server line `x@origin` are at
+/// `feature`'s save.
 fn two_lines() -> Env {
     let env = Env::new();
     write_all(&env, MAIN);
@@ -216,6 +217,7 @@ fn two_lines() -> Env {
     env.git(&["add", "-A"]);
     env.git(&["commit", "-q", "-m", "Feature"]);
     env.git(&["update-ref", "refs/remotes/origin/x", "HEAD"]);
+    env.git(&["branch", "zz", "HEAD"]);
     env.git(&["checkout", "-q", "main"]);
     env.import();
     assert_eq!(files(env.root()), holding(MAIN));
@@ -318,6 +320,8 @@ fn goto_a_save_at_a_lines_tip_is_at_the_save() {
         said.contains("To keep saving on feature: bolt goto feature"),
         "{said}"
     );
+    // Of the lines there, the first by name.
+    assert!(!said.contains("bolt goto zz"), "{said}");
     assert_eq!(env.state().1.position, Position::AtSave(feature));
     assert_eq!(files(env.root()), holding(FEATURE));
 }
@@ -411,4 +415,62 @@ fn goto_json_matches_its_snapshot() {
         }
     }
     insta::assert_json_snapshot!(doc);
+}
+
+#[test]
+fn goto_where_the_project_is_carries_nothing_along() {
+    let env = two_lines();
+    env.overwrite(
+        "a.txt", "mine
+",
+    );
+    let before = env.standing();
+    let said = goto(&env, "main");
+    assert!(said.contains("You're on line main."), "{said}");
+    assert!(!said.contains("came along"), "{said}");
+    assert_eq!(env.standing(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_goto_with_a_file_in_use_fails_and_the_next_one_finishes() {
+    use std::time::{Duration, SystemTime};
+    let env = two_lines();
+    // Old enough for the file-state cache to vouch for, so neither the plan nor the switch has to
+    // read the held file.
+    let then = SystemTime::now() - Duration::from_secs(3600);
+    for path in files(env.root()).keys() {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(env.root().join(path))
+            .unwrap();
+        file.set_modified(then).unwrap();
+    }
+    assert!(changed(&env).is_empty());
+    let held = hold_open(&env.root().join("b.txt"));
+    let out = env.bolt().args(["goto", "feature"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let said = text(&out.stderr);
+    assert!(said.contains("error:") && said.contains("b.txt"), "{said}");
+    assert!(!text(&out.stdout).contains("You're on line"));
+    let out = env
+        .bolt()
+        .args(["goto", "feature", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        doc["error"]["message"].as_str().unwrap().contains("b.txt"),
+        "{doc}"
+    );
+    let (kinds, _) = warning_kinds(&env, &["status"]);
+    assert!(kinds.contains(&"switch_unfinished".to_owned()), "{kinds:?}");
+
+    drop(held);
+    let (kinds, doc) = warning_kinds(&env, &["goto", "feature"]);
+    assert!(kinds.contains(&"switch_finished".to_owned()), "{doc}");
+    assert_eq!(doc["position"]["line"], "feature", "{doc}");
+    assert_eq!(files(env.root()), holding(FEATURE));
+    assert!(!env.root().join(".bolt/state/journal").exists());
 }
