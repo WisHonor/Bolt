@@ -1,0 +1,100 @@
+---
+source: crates/bolt-vcs/tests/changes.rs
+expression: doc
+---
+{
+  "bolt_json": 1,
+  "changes": [
+    {
+      "change": "modified",
+      "hunks": [
+        {
+          "lines": [
+            {
+              "tag": "same",
+              "text": "one\n"
+            },
+            {
+              "tag": "removed",
+              "text": "two\n"
+            },
+            {
+              "tag": "added",
+              "text": "2\n"
+            },
+            {
+              "tag": "same",
+              "text": "three\n"
+            }
+          ],
+          "new_lines": 3,
+          "new_start": 1,
+          "old_lines": 3,
+          "old_start": 1
+        }
+      ],
+      "kind": "file",
+      "lines": "text",
+      "new_size": 12,
+      "old_size": 14,
+      "only_line_endings": false,
+      "path": "a.txt",
+      "timed_out": false
+    },
+    {
+      "change": "modified",
+      "hunks": [],
+      "kind": "file",
+      "lines": "binary",
+      "new_size": 2,
+      "old_size": 1,
+      "only_line_endings": false,
+      "path": "b.bin",
+      "timed_out": false
+    },
+    {
+      "change": "added",
+      "hunks": [
+        {
+          "lines": [
+            {
+              "tag": "added",
+              "text": "new"
+            }
+          ],
+          "new_lines": 1,
+          "new_start": 1,
+          "old_lines": 0,
+          "old_start": 0
+        }
+      ],
+      "kind": "file",
+      "lines": "text",
+      "new_size": 3,
+      "old_size": null,
+      "only_line_endings": false,
+      "path": "c.txt",
+      "timed_out": false
+    }
+  ],
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Files",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "warnings": []
+}

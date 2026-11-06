@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod changeids;
+pub mod changes;
 pub mod config;
 pub mod diary;
 pub mod diff;

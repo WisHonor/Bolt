@@ -25,6 +25,7 @@ miniz_oxide = "0.9.1"
 serde = { version = "1", features = ["derive"] }
 sha1-checked = { version = "0.10.0", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
+similar = { version = "2.7.0", default-features = false }
 thiserror = "2.0.21"
 toml = "1.1.8"
 unicode-normalization = "0.1.26"

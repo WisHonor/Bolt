@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
+use bolt_core::changes::{Lines, Tag, only_line_endings};
 use bolt_core::diary::Position;
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
@@ -78,6 +79,121 @@ pub fn change_line(c: &FileChange) -> String {
             format!("  changed   {p}  ({old} → {})", c.kind.as_str())
         }
     }
+}
+
+/// A file's change with its lines, for `bolt changes --json`.
+pub fn lines_json(c: &FileChange, lines: &Lines) -> Value {
+    let (shown, hunks, timed_out) = match lines {
+        Lines::Binary => ("binary", &[][..], false),
+        Lines::TooBig => ("too-big", &[][..], false),
+        Lines::Hunks { hunks, timed_out } => ("text", &hunks[..], *timed_out),
+    };
+    let hunks: Vec<Value> = hunks
+        .iter()
+        .map(|h| {
+            let lines: Vec<Value> = h
+                .lines
+                .iter()
+                .map(|(tag, line)| {
+                    json!({"tag": tag_name(*tag), "text": String::from_utf8_lossy(line)})
+                })
+                .collect();
+            json!({
+                "old_start": h.old_start,
+                "old_lines": h.old_lines,
+                "new_start": h.new_start,
+                "new_lines": h.new_lines,
+                "lines": lines,
+            })
+        })
+        .collect();
+    let mut file = change_json(c);
+    file["lines"] = shown.into();
+    file["hunks"] = hunks.into();
+    file["timed_out"] = timed_out.into();
+    file["only_line_endings"] = only_line_endings(match lines {
+        Lines::Hunks { hunks, .. } => hunks,
+        _ => &[],
+    })
+    .into();
+    file
+}
+
+fn tag_name(tag: Tag) -> &'static str {
+    match tag {
+        Tag::Same => "same",
+        Tag::Removed => "removed",
+        Tag::Added => "added",
+    }
+}
+
+/// A file's change with its lines, in the unified form, for people. The header starts with a
+/// letter, which no line of the file shown below it can. Colored when `color`.
+pub fn lines_text(c: &FileChange, lines: &Lines, color: bool) -> String {
+    let paint = |code: &str, text: &str| {
+        if color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    };
+    let mut out = change_line(c).trim_start().to_owned();
+    let hunks = match lines {
+        Lines::Binary => {
+            out.push_str("  (binary: no lines shown)\n");
+            return out;
+        }
+        Lines::TooBig => {
+            out.push_str("  (over 64 MiB: no lines shown)\n");
+            return out;
+        }
+        Lines::Hunks { hunks, .. } => hunks,
+    };
+    if only_line_endings(hunks) {
+        let crlf_to_lf = hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .any(|(t, l)| *t == Tag::Removed && l.ends_with(b"\r\n"));
+        let way = if crlf_to_lf {
+            "CRLF to LF"
+        } else {
+            "LF to CRLF"
+        };
+        let _ = write!(out, "  (only line endings changed: {way})");
+    }
+    out.push('\n');
+    for h in hunks {
+        let at = format!(
+            "@@ -{},{} +{},{} @@",
+            h.old_start, h.old_lines, h.new_start, h.new_lines
+        );
+        let _ = writeln!(out, "{}", paint("36", &at));
+        for (tag, line) in &h.lines {
+            let (mark, code) = match tag {
+                Tag::Same => (' ', ""),
+                Tag::Removed => ('-', "31"),
+                Tag::Added => ('+', "32"),
+            };
+            let body = line
+                .strip_suffix(b"\r\n")
+                .or_else(|| line.strip_suffix(b"\n"));
+            // Tabs are kept: they can't drive a terminal, and code is full of them.
+            let shown: Vec<String> = String::from_utf8_lossy(body.unwrap_or(line))
+                .split('\t')
+                .map(|piece| escape(piece, false))
+                .collect();
+            let shown = format!("{mark}{}", shown.join("\t"));
+            if code.is_empty() {
+                let _ = writeln!(out, "{shown}");
+            } else {
+                let _ = writeln!(out, "{}", paint(code, &shown));
+            }
+            if body.is_none() {
+                out.push_str("\\ No newline at end of file\n");
+            }
+        }
+    }
+    out
 }
 
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.

@@ -370,7 +370,7 @@ head ─► redo     main → ptvz
 | Upkeep | `verify` (fsck) · `tidy` (gc) |
 
 - **Output:** `--json` on every command; colors and progress only in a terminal; no questions without a terminal; examples first in help.
-- **`changes`** shows unsaved changes, or what a save changed, line by line, with the `similar` crate; binary files (a zero byte in the first 8,000) and files over 64 MiB show as changed without lines, and each file gets at most 2 seconds ([decision 058](decisions/058-changes-line-by-line.md)).
+- **`changes`** shows unsaved changes (`bolt changes [paths]`), or what a save changed against its first parent (`bolt changes --save <save>`, so a path is never taken for a save), line by line in the unified form with 3 lines of context, with the `similar` crate; binary files (a zero byte in the first 8,000) and files over 64 MiB show as changed without lines, a file whose only change is its line endings says so, and each file gets at most 2 seconds, past which its changes show coarser and a `diff_timed_out` warning says so ([decision 058](decisions/058-changes-line-by-line.md)).
 - **`--json` formats:** every document, field and kind of warning is in [json.md](json.md).
 
 ### 5.16 Importing from Git (milestone 2)

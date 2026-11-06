@@ -28,6 +28,9 @@ pub struct FileChange<'a> {
     pub old_kind: Option<EntryKind>,
     pub old_size: Option<u64>,
     pub new_size: Option<u64>,
+    /// What each side holds, if it has a file.
+    pub old_id: Option<Id>,
+    pub new_id: Option<Id>,
 }
 
 /// Hands every file that differs between two saves to `each`, in whole-path byte order. `old_root`
@@ -84,6 +87,8 @@ fn walk_files<E: From<StoreError>>(
             old_kind: fo.map(|e| e.kind),
             old_size: fo.map(|e| e.size),
             new_size: fnew.map(|e| e.size),
+            old_id: fo.map(|e| e.id),
+            new_id: fnew.map(|e| e.id),
         })
     };
     walk(store, unstored, old_root, new_root, max_entries, files)

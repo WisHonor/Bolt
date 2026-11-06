@@ -1389,13 +1389,13 @@ fn hash(file: &mut std::fs::File) -> io::Result<Id> {
 
 /// The project's folders, each opened from the top one name at a time, never through a link. One
 /// is held at a time, so a folder about to be removed is never held open.
-struct Folders {
+pub(crate) struct Folders {
     top: Dir,
     at: Option<(String, Dir)>,
 }
 
 impl Folders {
-    fn open(root: &Path) -> io::Result<Folders> {
+    pub(crate) fn open(root: &Path) -> io::Result<Folders> {
         Ok(Folders {
             top: Dir::open_top(root)?,
             at: None,
@@ -1403,7 +1403,7 @@ impl Folders {
     }
 
     /// Opens the folder at the project path `rel` (`""` for the top).
-    fn enter(&mut self, rel: &str) -> io::Result<()> {
+    pub(crate) fn enter(&mut self, rel: &str) -> io::Result<()> {
         if rel.is_empty() || self.at.as_ref().is_some_and(|(at, _)| at == rel) {
             if rel.is_empty() {
                 self.at = None;
@@ -1420,7 +1420,7 @@ impl Folders {
         Ok(())
     }
 
-    fn here(&self) -> &Dir {
+    pub(crate) fn here(&self) -> &Dir {
         self.at.as_ref().map_or(&self.top, |(_, dir)| dir)
     }
 }

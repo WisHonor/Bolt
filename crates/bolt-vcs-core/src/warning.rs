@@ -56,6 +56,8 @@ pub const CHANGED_SINCE_PLAN: &str = "changed_since_plan";
 pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 /// A command finished a switch between saves that was stopped, before doing its own work.
 pub const SWITCH_FINISHED: &str = "switch_finished";
+/// A file's diff ran out of time, so its changes show in bigger pieces than they could.
+pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 
 /// Whether people see a warning of `kind` when the command then fails: it tells of a switch
 /// the command finished first, which happened all the same. Others are only in `--json`.

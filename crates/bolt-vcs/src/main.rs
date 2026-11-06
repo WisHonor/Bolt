@@ -7,6 +7,7 @@ use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use bolt_core::changes::{Lines, save_changes, unsaved_changes};
 use bolt_core::config::{
     ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
     load_identity, now_person,
@@ -73,6 +74,15 @@ enum Command {
         /// Read every file, not only those that look changed.
         #[arg(long)]
         full: bool,
+    },
+    /// Show your unsaved changes line by line, in these files and folders or everywhere; or what
+    /// a save changed.
+    Changes {
+        /// The save to show, by line name, change ID or fingerprint, against its first parent.
+        #[arg(long, value_name = "SAVE")]
+        save: Option<String>,
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
     /// List the saves on this line.
     History,
@@ -536,6 +546,8 @@ fn file_change(c: &PathChange) -> bolt_core::diff::FileChange<'_> {
         old_kind: c.old_kind,
         old_size: c.old_size,
         new_size: c.new_size,
+        old_id: c.old_id,
+        new_id: c.new_id,
     }
 }
 
@@ -591,6 +603,100 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
             for path in &found.not_written_here {
                 println!("  {}", escape(path, false));
             }
+        }
+    }
+    output::print_warnings(&warnings);
+    Ok(())
+}
+
+fn changes_command(
+    json: bool,
+    save: Option<&str>,
+    given: &[PathBuf],
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(&here)?));
+    let drive = repo.drive()?;
+    let paths = given
+        .iter()
+        .map(|p| project_path(repo.root(), &here, p, drive))
+        .collect::<Result<Vec<_>, _>>()?;
+    let only = (!paths.is_empty()).then_some(&paths[..]);
+    let id = match save {
+        Some(t) => resolve(repo, t)?,
+        None => current_save(repo)?,
+    };
+    let color = !json
+        && std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    // shortcut: the JSON document is held whole; stream it if documents get big.
+    let mut files = Vec::new();
+    let mut shown = 0;
+    let mut timed_out = Vec::new();
+    let mut each = |path: &str, c: &PathChange, lines: Lines| {
+        if matches!(
+            lines,
+            Lines::Hunks {
+                timed_out: true,
+                ..
+            }
+        ) {
+            timed_out.push(path.to_owned());
+        }
+        if json {
+            files.push(output::lines_json(&file_change(c), &lines));
+        } else {
+            if shown > 0 {
+                println!();
+            }
+            print!("{}", output::lines_text(&file_change(c), &lines, color));
+        }
+        shown += 1;
+        Ok(())
+    };
+    let walked = match save {
+        Some(_) => save_changes(repo, id, only, &mut each),
+        None => {
+            let git_excludes = git_excludes_file(repo.root())?;
+            unsaved_changes(repo, only, git_excludes.as_deref(), &mut each)
+        }
+    };
+    // Only reading, so the hints never say that nothing was saved.
+    walked.map_err(|e| Failure {
+        hint: e.hint_when_reading(),
+        message: e.to_string(),
+        printed: false,
+    })?;
+    let mut warnings: Vec<Warning> = timed_out
+        .iter()
+        .map(|path| {
+            Warning::new(
+                warning::DIFF_TIMED_OUT,
+                format!(
+                    "Bolt stopped comparing {} line by line after 2 seconds, so its changes show                      in bigger pieces than they could.",
+                    escape(path, false)
+                ),
+            )
+        })
+        .collect();
+    let saved = repo.store().save(&id, repo.signatures_allowed())?;
+    let short = short_or_whole(repo, &id, &saved.change_id, &mut warnings);
+    warnings.extend(repo.store().warnings());
+    if json {
+        println!(
+            "{}",
+            json!({
+                "bolt_json": BOLT_JSON,
+                "save": output::save_json(&id, &saved, &short),
+                "changes": files,
+                "warnings": output::warnings_json(&warnings),
+            })
+        );
+    } else if shown == 0 {
+        match save {
+            Some(_) => println!("Save {short} changed no files there."),
+            None => println!("Nothing changed since {short}."),
         }
     }
     output::print_warnings(&warnings);
@@ -918,6 +1024,9 @@ fn main() -> ExitCode {
         ),
         Command::Line => line_command(cli.json, &mut opened),
         Command::Status { full } => status_command(cli.json, full, &mut opened),
+        Command::Changes { save, paths } => {
+            changes_command(cli.json, save.as_deref(), &paths, &mut opened)
+        }
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),

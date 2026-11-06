@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::diary::Position;
-use crate::diff::{ChangeKind, for_each_change_in};
+use crate::diff::{ChangeKind, FileChange, for_each_change_in};
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::listing::EntryKind;
@@ -41,6 +41,24 @@ pub struct PathChange {
     pub old_kind: Option<EntryKind>,
     pub old_size: Option<u64>,
     pub new_size: Option<u64>,
+    /// What each side holds, if it has a file.
+    pub old_id: Option<Id>,
+    pub new_id: Option<Id>,
+}
+
+impl From<FileChange<'_>> for PathChange {
+    fn from(c: FileChange<'_>) -> PathChange {
+        PathChange {
+            path: c.path.to_owned(),
+            change: c.change,
+            kind: c.kind,
+            old_kind: c.old_kind,
+            old_size: c.old_size,
+            new_size: c.new_size,
+            old_id: c.old_id,
+            new_id: c.new_id,
+        }
+    }
 }
 
 /// Compares the project folder with the current save, walking it as a save would. Only files the
@@ -66,14 +84,7 @@ pub fn status(
         Some(save.root),
         now.root,
         |c| {
-            changes.push(PathChange {
-                path: c.path.to_owned(),
-                change: c.change,
-                kind: c.kind,
-                old_kind: c.old_kind,
-                old_size: c.old_size,
-                new_size: c.new_size,
-            });
+            changes.push(PathChange::from(c));
             Ok::<(), SaveError>(())
         },
     )?;
