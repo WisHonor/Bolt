@@ -141,3 +141,10 @@ path = "fuzz_targets/decode_journal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_project_link"
+path = "fuzz_targets/decode_project_link.rs"
+test = false
+doc = false
+bench = false

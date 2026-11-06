@@ -5,10 +5,10 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(text) = std::str::from_utf8(data) {
-        let names: Vec<&str> = text.split('\n').collect();
+        let given: Vec<&str> = text.split('\n').collect();
         // Each pair of names as a long name and the short name a folder gives it.
-        let short_names: Vec<(&str, &str)> = names.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-        for n in &names {
+        let short_names: Vec<(&str, &str)> = given.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+        for n in &given {
             let _ = names::validate_name(n);
             let _ = names::is_git_alias(n);
             for ignores_case in [false, true] {
@@ -25,6 +25,6 @@ fuzz_target!(|data: &[u8]| {
                 assert!(!names::is_git_alias(n) && !names::is_bolt_alias(n));
             }
         }
-        let _ = names::folder_problems(&names);
+        let _ = names::folder_problems(&given);
     }
 });

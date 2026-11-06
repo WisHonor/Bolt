@@ -218,15 +218,20 @@ pub fn bolt_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> 
         ))
         .arg(assert_cmd::cargo::cargo_bin("bolt"))
         .args(args)
-        .current_dir(dir)
-        .env_remove("BOLT_FAULT_AT")
-        .env("BOLT_USER_NAME", "Test")
+        .current_dir(dir);
+    as_test_user(&mut cmd, config);
+    cmd
+}
+
+/// Runs `cmd` as the test user, with no fault point and its own settings folder `config`.
+fn as_test_user(cmd: &mut Command, config: &Path) {
+    cmd.env("BOLT_USER_NAME", "Test")
         .env("BOLT_USER_EMAIL", "test@example.com")
+        .env_remove("BOLT_FAULT_AT")
         .env("BOLT_CONFIG_DIR", config)
         // Git's own settings and ignore list are found from here (decision 047).
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config);
-    cmd
 }
 
 /// `bolt_capped_at`, with about 1.5 GB.
@@ -337,14 +342,8 @@ impl Env {
     /// `bolt_in` as a process of the standard library, for a test that spawns it.
     pub fn bolt_process_in(&self, dir: &Path) -> Command {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("bolt"));
-        cmd.current_dir(dir)
-            .env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com")
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path())
-            // Git's own settings and ignore list are found from here (decision 047).
-            .env("HOME", self.config.path())
-            .env("XDG_CONFIG_HOME", self.config.path());
+        cmd.current_dir(dir);
+        as_test_user(&mut cmd, self.config.path());
         cmd
     }
 

@@ -7,52 +7,31 @@ use bolt_core::listing::{EntryKind, Listing, MAX_SAVE_DEPTH};
 use bolt_core::pack::{ObjectKind, PackWriter};
 use bolt_core::repo::FORMAT_TEXT;
 use std::path::Path;
-use tempfile::TempDir;
 
 mod support;
 use support::{add_listing, plant_save, text};
 
-/// A folder to work in, and an empty folder for the user's config.
-struct Env {
-    work: TempDir,
-    config: TempDir,
+/// An empty folder to work in, and one for the user's config.
+struct Env(support::Env);
+
+impl std::ops::Deref for Env {
+    type Target = support::Env;
+    fn deref(&self) -> &support::Env {
+        &self.0
+    }
 }
 
 impl Env {
     fn new() -> Env {
-        Env {
-            work: tempfile::tempdir().unwrap(),
-            config: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn root(&self) -> &Path {
-        self.work.path()
+        Env(support::Env::empty())
     }
 
     /// `bolt`, run in `dir`, with no user identity set.
     fn bolt_anonymous(&self, dir: &Path) -> Command {
-        let mut cmd = Command::cargo_bin("bolt").unwrap();
-        cmd.current_dir(dir)
-            .env_remove("BOLT_USER_NAME")
-            .env_remove("BOLT_USER_EMAIL")
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path())
-            .env("HOME", self.config.path())
-            .env("XDG_CONFIG_HOME", self.config.path());
+        let mut cmd = self.bolt_in(dir);
+        cmd.env_remove("BOLT_USER_NAME")
+            .env_remove("BOLT_USER_EMAIL");
         cmd
-    }
-
-    /// `bolt`, run in `dir`, as the test user.
-    fn bolt_in(&self, dir: &Path) -> Command {
-        let mut cmd = self.bolt_anonymous(dir);
-        cmd.env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com");
-        cmd
-    }
-
-    fn bolt(&self) -> Command {
-        self.bolt_in(self.root())
     }
 }
 
@@ -209,7 +188,7 @@ fn start_without_a_name_explains_how_to_set_it() {
 #[test]
 fn a_settings_file_that_cant_be_read_is_named_once() {
     let env = Env::new();
-    let settings = env.config.path().join("config.toml");
+    let settings = env.config().join("config.toml");
     std::fs::create_dir(&settings).unwrap();
     let out = env
         .bolt_anonymous(env.root())
@@ -235,7 +214,7 @@ fn start_reads_the_users_own_config_through_a_link() {
         "[user]\nname = \"Ada\"\nemail = \"ada@example.com\"\n",
     )
     .unwrap();
-    std::os::unix::fs::symlink(&real, env.config.path().join("config.toml")).unwrap();
+    std::os::unix::fs::symlink(&real, env.config().join("config.toml")).unwrap();
     let out = env
         .bolt_anonymous(env.root())
         .arg("start")
@@ -254,7 +233,7 @@ const MALLORY: &str = "[user]\nname = \"Mallory\"\nemail = \"mallory@evil.exampl
 /// project can bring) that names someone else; `a.txt` is waiting to be saved.
 fn project_naming_mallory() -> Env {
     let env = Env::new();
-    std::fs::write(env.config.path().join("config.toml"), REAL_USER).unwrap();
+    std::fs::write(env.config().join("config.toml"), REAL_USER).unwrap();
     env.bolt_anonymous(env.root())
         .arg("start")
         .assert()
@@ -289,7 +268,7 @@ fn save_notes_an_ignored_project_identity() {
 
     let stdout = text(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
-    let config = env.config.path().join("config.toml");
+    let config = env.config().join("config.toml");
     let folder = env.root().file_name().unwrap().to_str().unwrap();
     assert_eq!(lines.len(), 7, "{stdout}");
     assert!(lines[0].starts_with("Saved "), "{stdout}");
@@ -399,7 +378,7 @@ fn approving_the_ignored_identity_takes_effect() {
         .unwrap();
     let stdout = text(&out.stdout);
     let snippet = &stdout[stdout.find("[[project]]").expect(&stdout)..];
-    let config = env.config.path().join("config.toml");
+    let config = env.config().join("config.toml");
     std::fs::write(&config, format!("{REAL_USER}\n{snippet}")).unwrap();
 
     std::fs::write(env.root().join("b.txt"), "b").unwrap();
@@ -428,7 +407,7 @@ fn start_uses_the_project_entry_for_its_folder() {
         env.root().display()
     );
     std::fs::write(
-        env.config.path().join("config.toml"),
+        env.config().join("config.toml"),
         format!("{REAL_USER}{entry}"),
     )
     .unwrap();
@@ -484,7 +463,7 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     // The address space is capped at about 1.5 GB, so a read of the link that did not stop could
     // not take the machine down.
-    let cmd = support::bolt_capped(env.config.path(), env.root(), &["save", "my work"]);
+    let cmd = support::bolt_capped(env.config(), env.root(), &["save", "my work"]);
     let (out, peak_kb) = run_noting_peak_memory(cmd, 30);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(
@@ -1778,7 +1757,7 @@ fn plant_long_paths(root: &Path) {
 /// enforced (macOS), the test passes without proving anything.
 #[cfg(unix)]
 fn bolt_capped(env: &Env, args: &[&str]) -> std::process::Command {
-    support::bolt_capped_at(env.config.path(), env.root(), CAP_KB, args)
+    support::bolt_capped_at(env.config(), env.root(), CAP_KB, args)
 }
 
 /// Runs `cmd` for at most `secs` seconds, then kills it, and returns its output with the peak
@@ -1935,7 +1914,7 @@ fn history_show_and_save_hold_one_save_at_a_time() {
 #[test]
 fn a_cache_key_bolt_cant_use_is_a_warning_not_a_failure() {
     let env = Env::new();
-    let key = env.config.path().join("cache-key");
+    let key = env.config().join("cache-key");
     std::fs::write(&key, b"short").unwrap();
     let start = json_as_user(&env, &["--json", "start"]);
     assert_eq!(warning_kinds(&start), ["cache_key_unusable"], "{start}");

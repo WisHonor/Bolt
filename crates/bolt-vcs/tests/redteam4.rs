@@ -15,38 +15,26 @@ use bolt_core::history::current_save;
 use bolt_core::listing::EntryKind;
 use bolt_core::repo::Repository;
 use support::run_limited;
-use tempfile::TempDir;
 
 use ObjectType::{Blob, Commit, Tree};
 
-struct Env {
-    work: TempDir,
-    config: TempDir,
+struct Env(support::Env);
+
+impl std::ops::Deref for Env {
+    type Target = support::Env;
+    fn deref(&self) -> &support::Env {
+        &self.0
+    }
 }
 
 impl Env {
     fn new() -> Env {
-        Env {
-            work: tempfile::tempdir().unwrap(),
-            config: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn root(&self) -> &Path {
-        self.work.path()
+        Env(support::Env::empty())
     }
 
     fn bolt(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("bolt"));
-        cmd.args(args)
-            .current_dir(self.root())
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path())
-            // Git's own settings and ignore list are found from here (decision 047).
-            .env("HOME", self.config.path())
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com");
+        let mut cmd = self.bolt_process_in(self.root());
+        cmd.args(args);
         cmd
     }
 
