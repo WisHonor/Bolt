@@ -153,7 +153,7 @@ pub enum SaveError {
     )]
     NotAFolder { path: String, what: &'static str },
     #[error(
-        "Bolt can't save part of {}: every save keeps it as it was, because this computer can't          hold it as it is.",
+        "Bolt can't save part of {}: every save keeps it as it was, because this computer can't hold it as it is.",
         escape(path, false)
     )]
     KeptWhole { path: String },
