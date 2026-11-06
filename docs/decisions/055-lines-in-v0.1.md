@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 8)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (saving away from a line asks for a new line's name, or takes one from a flag) and [decision 021](021-v0.1-command-scope.md) (lines are created by saving away from a line)
+- **Refined by:** [decision 068](068-a-goto-target-that-names-both.md) (a line name that is also the start of another save's ID is refused)
 
 ## Context
 

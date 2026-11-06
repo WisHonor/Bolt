@@ -166,7 +166,6 @@ fn hex_bytes(hex: &str) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "RT5-3: a line named like a save's short change ID silently takes goto elsewhere"]
 fn rt5_3_goto_by_the_change_id_history_shows_reaches_that_save() {
     let env = Env::new();
     let good = env.commit("app.txt", "safe version\n", "Fix the security bug");
@@ -187,15 +186,23 @@ fn rt5_3_goto_by_the_change_id_history_shows_reaches_that_save() {
         .unwrap()
         .to_owned();
     assert!(shown.contains(short), "{history}");
-    // The user copies the change ID history shows for the fix.
+    // The user copies the change ID history shows for the fix: it names the line too, so goto
+    // refuses it, naming both, and changes nothing.
     let out = env.bolt().args(["goto", short]).output().unwrap();
+    let said = text(&out.stderr);
     let now = fs::read_to_string(env.root().join("app.txt")).unwrap();
     assert!(
-        now == "safe version\n",
-        "history shows: {shown}\nbolt goto {short}: {}{}app.txt now holds: {now:?}",
-        text(&out.stdout),
-        text(&out.stderr)
+        !out.status.success()
+            && now == "newer\n"
+            && said.contains("name of a line")
+            && said.contains(&letters),
+        "history shows: {shown}\nbolt goto {short}: {}{said}app.txt now holds: {now:?}",
+        text(&out.stdout)
     );
+    // One more letter reaches the save.
+    env.bolt().args(["goto", &letters[..5]]).assert().success();
+    let now = fs::read_to_string(env.root().join("app.txt")).unwrap();
+    assert_eq!(now, "safe version\n");
 }
 
 #[cfg(unix)]

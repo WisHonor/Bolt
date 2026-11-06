@@ -128,7 +128,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `bolt goto --json`
 
-`bolt goto <target>` moves the project to a line or a save. The target is, in this order, a line's name (the project is then on that line), a server line `line@server` (at its save, not on a line), the start of a change ID on the current line, or at least 8 hex digits of a fingerprint (at that save, not on a line, even when it is a line's newest; the text output then says how to keep saving on that line, naming the first such line by name when several are there) ([decision 055](decisions/055-lines-in-v0.1.md)). Unsaved changes come along unless the switch would overwrite them; then nothing changes, and the command fails, naming them ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)).
+`bolt goto <target>` moves the project to a line or a save. The target is, in this order, a line's name (the project is then on that line), a server line `line@server` (at its save, not on a line), the start of a change ID on the current line, or at least 8 hex digits of a fingerprint (at that save, not on a line, even when it is a line's newest; the text output then says how to keep saving on that line, naming the first such line by name when several are there) ([decision 055](decisions/055-lines-in-v0.1.md)). A line's name that is also the start of another save's change ID or fingerprint is refused (exit code 1), and `error.message` lists the IDs it matched, so a line named like a save's ID never passes for that save; type more of the ID to reach the save ([decision 068](decisions/068-a-goto-target-that-names-both.md)). Unsaved changes come along unless the switch would overwrite them; then nothing changes, and the command fails, naming them ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -180,7 +180,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `bolt show --json`
 
-`bolt show` takes a line name, the start of a change ID, or the start of a fingerprint (at least 8 hex digits), and shows the save the project is on when given none.
+`bolt show` takes a line name, the start of a change ID, or the start of a fingerprint (at least 8 hex digits), and shows the save the project is on when given none. A text that is both a line's name and the start of another save's ID is refused, as for `goto` (and for `changes --save`).
 
 | Field | Type | Meaning |
 |---|---|---|
