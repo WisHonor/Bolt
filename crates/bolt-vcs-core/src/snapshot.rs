@@ -144,10 +144,10 @@ fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
 }
 
 /// How many paths a message names; it counts the rest.
-const NAMED: usize = 5;
+pub(crate) const NAMED: usize = 5;
 
 /// The paths `first` of `count`, escaped, one to a line, and how many more there are.
-fn listed<S: AsRef<str>>(first: impl IntoIterator<Item = S>, count: u64) -> String {
+pub(crate) fn listed<S: AsRef<str>>(first: impl IntoIterator<Item = S>, count: u64) -> String {
     let mut text = String::new();
     let mut shown = 0;
     for path in first {

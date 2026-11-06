@@ -44,6 +44,14 @@ pub const CONFIG_INCLUDES_IGNORED: &str = "config_includes_ignored";
 pub const NESTED_PROJECTS_LEFT_OUT: &str = "nested_projects_left_out";
 /// The file-state cache couldn't be written, so the next status reads every file again.
 pub const FILE_CACHE_NOT_STORED: &str = "file_cache_not_stored";
+/// Entries of the save being written that this computer can't hold were left unwritten.
+pub const NOT_WRITTEN_HERE: &str = "not_written_here";
+/// Links were written as files holding their targets.
+pub const PLACEHOLDERS_WRITTEN: &str = "placeholders_written";
+/// Files another program held open were left for the next run.
+pub const FILES_IN_USE: &str = "files_in_use";
+/// Entries that changed after a switch was planned were left as they were.
+pub const CHANGED_SINCE_PLAN: &str = "changed_since_plan";
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

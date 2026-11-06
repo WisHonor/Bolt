@@ -30,6 +30,7 @@ pub mod store;
 pub mod text;
 pub mod verify;
 pub mod warning;
+pub mod writeout;
 
 #[cfg(test)]
 pub(crate) mod test_support;

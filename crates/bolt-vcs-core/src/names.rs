@@ -80,6 +80,8 @@ pub enum PortabilityProblem {
 /// Why write-out won't write a name on this system.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotWritable {
+    /// Not a name at all ([`validate_name`]).
+    Invalid(NameError),
     /// A spelling of `.git` ([`is_git_alias`]).
     GitName,
     /// A spelling of `.bolt` ([`is_bolt_alias`]).
@@ -258,7 +260,13 @@ pub fn fits_here(name: &str) -> bool {
 /// `short_names_here` (Windows' 8.3 names, as `Dir::entries` gives them). Never a spelling of
 /// `.git` or `.bolt`, on any system: Linux reaches NTFS and vfat drives too (CVE-2019-1353). Nor
 /// a name this system can't hold, nor the real short name of a `.git` or `.bolt` in that folder.
+/// Nor anything [`validate_name`] refuses, on any system.
 pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<(), NotWritable> {
+    match validate_name(name) {
+        Err(NameError::BoltSpelling) => return Err(NotWritable::BoltName),
+        Err(e) => return Err(NotWritable::Invalid(e)),
+        Ok(()) => {}
+    }
     if is_git_alias(name) {
         return Err(NotWritable::GitName);
     }
@@ -479,6 +487,18 @@ mod tests {
         for n in ["Player.cs", ".gitignore", "bolt.toml", "名前"] {
             assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
         }
+    }
+
+    #[test]
+    fn writable_here_refuses_whatever_validate_name_refuses() {
+        for n in ["", ".", "..", "a/b", "a\0b", &"x".repeat(766)] {
+            assert!(validate_name(n).is_err(), "{n:?}");
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        assert_eq!(
+            writable_here("..", &[]),
+            Err(NotWritable::Invalid(NameError::DotOrDotDot))
+        );
     }
 
     #[test]
