@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, its docs brought up to date the same day, with its red-team session, its whole-branch review and the owner's review of its `unsafe` code still to come before it is merged (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 65
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, its docs brought up to date the same day, with its red-team session, its whole-branch review and the owner's review of its `unsafe` code still to come before it is merged (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 66
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -161,6 +161,7 @@ Ordered so the most foundational, hardest-to-change decisions come first. Stage 
 - [x] `bolt changes` takes the save with `--save` (building `bolt changes`) → [decision 063](decisions/063-changes-takes-the-save-with-a-flag.md)
 - [x] `bolt changes` shows no lines for a file of more than 1,000,000 lines (review of `bolt changes`) → [decision 064](decisions/064-changes-line-limit.md)
 - [x] Unsaved work that already matches the target doesn't collide in `goto` (the model test) → [decision 065](decisions/065-matching-work-doesnt-collide.md)
+- [x] A pack Bolt can't open for a reason other than damage (the docs pass) → [decision 066](decisions/066-a-pack-bolt-cant-open-for-another-reason.md)
 
 Questions 2 to 12 were decided by Claude on 2026-11-05 at the owner's request to go on without them; each record says so and can be reversed.
 

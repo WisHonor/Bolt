@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3, Task 5 review)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 029](029-red-team-m1-final-review-rulings.md) #1 (copies tried smallest first) and [decision 057](057-pack-index-on-disk-and-merging.md) (packs opened when searched, at most 16 open)
+- **Refined by:** [decision 066](066-a-pack-bolt-cant-open-for-another-reason.md) (only real damage is reported as damage)
 
 ## Context
 
