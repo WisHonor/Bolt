@@ -539,8 +539,8 @@ impl Run<'_> {
         // names are that one file: a folder may keep case apart (Windows' per-folder setting, or
         // another drive mounted there), and then the old one is a file of its own, which its own
         // removal checks.
-        if let Some((old_up, old)) = renaming.map(split)
-            && old_up == parent(&a.path)
+        // Both paths fold to one, so `old` is in this folder however its folders are spelled.
+        if let Some((_, old)) = renaming.map(split)
             && old != name
             && found
                 .as_ref()

@@ -247,7 +247,7 @@ fn a_case_only_rename_is_written_on_a_case_blind_drive() {
         &files(&[
             ("README.md", b"new"),
             ("SAME.txt", b"same"),
-            ("docs/x.txt", b"x2"),
+            ("docs/X.txt", b"x2"),
         ]),
     );
     let drive = this_drive(&mut repo);
@@ -263,7 +263,13 @@ fn a_case_only_rename_is_written_on_a_case_blind_drive() {
     }
     assert_eq!(fs::read(dir.path().join("README.md")).unwrap(), b"new");
     assert_eq!(fs::read(dir.path().join("SAME.txt")).unwrap(), b"same");
-    assert_eq!(fs::read(dir.path().join("docs/x.txt")).unwrap(), b"x2");
+    // A file in a folder renamed with it takes its new spelling too.
+    let folder = if drive.ignores_case { "Docs" } else { "docs" };
+    assert_eq!(names_in(&dir.path().join(folder)), ["X.txt"]);
+    assert_eq!(
+        fs::read(dir.path().join(folder).join("X.txt")).unwrap(),
+        b"x2"
+    );
 }
 
 #[cfg(windows)]
