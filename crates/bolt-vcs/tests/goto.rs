@@ -417,6 +417,94 @@ fn goto_json_matches_its_snapshot() {
     insta::assert_json_snapshot!(doc);
 }
 
+/// A project whose line `main` holds `second`, on the save before, which holds `first`.
+fn on_first_of_two(first: &[(&str, &str)], second: &[(&str, &str)]) -> Env {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    write_all(&env, first);
+    env.bolt().args(["save", "First"]).assert().success();
+    let saved = env.state().1.lines["main"];
+    for e in std::fs::read_dir(env.root()).unwrap() {
+        let e = e.unwrap();
+        if e.file_name() != ".bolt" {
+            let path = e.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+    write_all(&env, second);
+    env.bolt().args(["save", "Second"]).assert().success();
+    goto(&env, &saved.to_hex());
+    assert_eq!(files(env.root()), holding(first));
+    env
+}
+
+#[test]
+fn a_deleted_file_the_target_lacks_too_comes_along() {
+    let env = on_first_of_two(&[("a", "a"), ("b", "b")], &[("a", "a")]);
+    std::fs::remove_file(env.root().join("b")).unwrap();
+    goto(&env, "main");
+    assert_eq!(files(env.root()), holding(&[("a", "a")]));
+    assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn a_deleted_folder_the_target_lacks_too_comes_along() {
+    let env = on_first_of_two(&[("a", "a"), ("d/x", "x")], &[("a", "a")]);
+    std::fs::remove_dir_all(env.root().join("d")).unwrap();
+    goto(&env, "main");
+    assert_eq!(files(env.root()), holding(&[("a", "a")]));
+    assert!(!env.root().join("d").exists());
+    assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn a_file_deleted_from_a_folder_the_target_lacks_comes_along() {
+    let env = on_first_of_two(&[("a", "a"), ("d/x", "x")], &[("a", "a")]);
+    std::fs::remove_file(env.root().join("d/x")).unwrap();
+    goto(&env, "main");
+    assert_eq!(files(env.root()), holding(&[("a", "a")]));
+    assert!(!env.root().join("d").exists());
+    assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn a_file_changed_to_the_targets_contents_comes_along() {
+    let env = on_first_of_two(&[("a", "old")], &[("a", "new")]);
+    env.overwrite("a", "new");
+    goto(&env, "main");
+    assert_eq!(files(env.root()), holding(&[("a", "new")]));
+    assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn a_file_the_target_adds_in_a_deleted_folder_is_written() {
+    let env = on_first_of_two(&[("d/x", "x")], &[("d/x", "x"), ("d/e/b", "b")]);
+    std::fs::remove_dir_all(env.root().join("d")).unwrap();
+    goto(&env, "main");
+    assert_eq!(files(env.root()), holding(&[("d/e/b", "b")]));
+    assert_eq!(changed(&env), ["d/x"]);
+}
+
+#[test]
+fn a_new_file_in_a_folder_the_target_lacks_still_collides() {
+    let env = on_first_of_two(&[("a", "a"), ("d/x", "x")], &[("a", "a")]);
+    std::fs::remove_file(env.root().join("d/x")).unwrap();
+    env.overwrite("d/y", "mine");
+    let before = (env.standing(), files(env.root()));
+    let out = env.bolt().args(["goto", "main"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("in the way"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!((env.standing(), files(env.root())), before);
+}
+
 #[test]
 fn goto_where_the_project_is_carries_nothing_along() {
     let env = two_lines();

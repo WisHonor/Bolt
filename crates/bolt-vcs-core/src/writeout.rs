@@ -77,10 +77,10 @@ const BETWEEN_TRIES: Duration = Duration::from_millis(100);
 
 /// Works out how to switch the folder from the save `from`, the one it is on, to the save `to`.
 /// The folder is read as `status` reads it. Unsaved work (a difference between the folder and
-/// `from`) where `to` differs from `from`, at the same path or a folder above or below it, is a
-/// collision and left out; the rest of it stays as it is. With `remove_new`, the folder is made
-/// to match `to` exactly instead, new files removed, and nothing collides. `only` limits the
-/// switch to those paths and what is in them.
+/// `from`) where `to` differs from `from`, at the same path or a folder above or below it, and
+/// that doesn't already match `to`, is a collision and left out; the rest of it stays as it is.
+/// With `remove_new`, the folder is made to match `to` exactly instead, new files removed, and
+/// nothing collides. `only` limits the switch to those paths and what is in them.
 pub fn plan(
     repo: &Repository,
     from: Id,
@@ -99,8 +99,19 @@ pub fn plan(
         unsaved.insert(c.path.to_owned());
         Ok::<(), SaveError>(())
     })?;
+    let carried = unsaved.len();
+    // Work that already matches the target is in nothing's way, at a file or below a folder
+    // (decision 065).
+    if !remove_new {
+        let mut unlike_target = BTreeSet::new();
+        for_each_change_in(store, &now.listings, Some(to_root), now.root, |c| {
+            unlike_target.insert(c.path.to_owned());
+            Ok::<(), SaveError>(())
+        })?;
+        unsaved.retain(|p| unlike_target.contains(p));
+    }
     let stored = HashMap::new();
-    let mut switched = HashSet::new();
+    let mut switched = BTreeSet::new();
     for_each_entry_change_in(store, &stored, Some(from_root), to_root, |path, _, _| {
         switched.insert(path.to_owned());
         Ok::<(), SaveError>(())
@@ -112,7 +123,7 @@ pub fn plan(
     let mut folder = Tree::new(store, &now.listings, now.root, drive);
     let mut refused = BTreeSet::new();
     let mut plan = Plan {
-        carried: unsaved.len(),
+        carried,
         warnings: now.warnings,
         ..Plan::default()
     };
@@ -137,9 +148,15 @@ pub fn plan(
             }
             if !remove_new {
                 if !switched.contains(path) {
-                    return Ok(()); // unsaved work the switch doesn't reach comes along
-                }
-                if collides(path, &unsaved) {
+                    // A folder the target holds and the user removed is made again when the
+                    // switch writes into it; making it overwrites nothing.
+                    let needed = n.is_none()
+                        && t.is_some_and(|e| e.kind == EntryKind::Folder)
+                        && any_below(path, &switched);
+                    if !needed {
+                        return Ok(()); // unsaved work the switch doesn't reach comes along
+                    }
+                } else if collides(path, &unsaved) {
                     plan.collisions.push(path.to_owned());
                     return Ok(());
                 }
@@ -1095,13 +1112,18 @@ fn in_scope(path: &str, only: Option<&Scope>, t: Option<&Entry>) -> bool {
 
 /// Whether unsaved work at `path`, or in a folder above or below it, is in the way.
 fn collides(path: &str, unsaved: &BTreeSet<String>) -> bool {
-    let below = format!("{path}/");
     unsaved.contains(path)
         || ancestors(path).any(|up| unsaved.contains(up))
-        || unsaved
-            .range(below.clone()..)
-            .next()
-            .is_some_and(|p| p.starts_with(&below))
+        || any_below(path, unsaved)
+}
+
+/// Whether `paths` holds something inside the folder `path`.
+fn any_below(path: &str, paths: &BTreeSet<String>) -> bool {
+    let below = format!("{path}/");
+    paths
+        .range(below.clone()..)
+        .next()
+        .is_some_and(|p| p.starts_with(&below))
 }
 
 /// The first part of `path` (itself or a folder above it) that a journal must never write:

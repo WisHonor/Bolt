@@ -165,6 +165,13 @@ fn changed_files(a: &Tree, b: &Tree) -> BTreeSet<String> {
         .collect()
 }
 
+/// The paths where two trees differ: a file, or a folder on one side only.
+fn differences(a: &Tree, b: &Tree) -> BTreeSet<String> {
+    let mut paths = changed_files(a, b);
+    paths.extend(a.folders.symmetric_difference(&b.folders).cloned());
+    paths
+}
+
 struct Model {
     folder: Tree,
     saves: Vec<(Id, Tree)>,
@@ -305,26 +312,24 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             let removed: BTreeSet<String> =
                 from.folders.difference(&into.folders).cloned().collect();
             let added: BTreeSet<String> = into.folders.difference(&from.folders).cloned().collect();
-            let near = |work: &BTreeSet<String>, diffs: &[&BTreeSet<String>]| {
-                work.iter().any(|u| {
-                    diffs
-                        .iter()
-                        .flat_map(|d| d.iter())
-                        .any(|s| within(u, s) || within(s, u))
-                })
-            };
-            // Decision 050: unsaved work where the target differs, at the path or a folder above
-            // or below it, stops the goto. It must when the switch would overwrite or remove it;
-            // it may when the work already agrees with the target, or sits in a folder the
-            // target only adds, where nothing of it would be lost.
-            let must = near(&unlike_target, &[&files, &removed]);
-            let may = near(&unsaved, &[&files, &removed, &added]);
+            // Decisions 050 and 065: a change unlike the target collides at, above or below a
+            // path where the target differs from the save and the folder isn't already as the
+            // target is.
+            let in_the_way: BTreeSet<String> = differences(from, into)
+                .intersection(&differences(&m.folder, into))
+                .cloned()
+                .collect();
+            let collides = unlike_target
+                .iter()
+                .any(|u| in_the_way.iter().any(|s| within(u, s) || within(s, u)));
             let done = goto(repo, &target, &who, "goto", None, &mut |_| {});
-            if let Err(SwitchError::Collisions { .. }) = done {
-                assert!(may, "stopped with nothing in the way");
+            if collides {
+                assert!(
+                    matches!(done, Err(SwitchError::Collisions { .. })),
+                    "{done:?}"
+                );
             } else {
                 done.unwrap();
-                assert!(!must, "unsaved work in the way, but the goto went ahead");
                 // The target's own differences, around the unsaved work that comes along.
                 let into = into.clone();
                 // Folders made since the save stay, with the folders above them.
