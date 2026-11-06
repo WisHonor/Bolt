@@ -4,6 +4,8 @@ use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
+use bolt_core::diary::Position;
+use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::text::{escape, thousands};
@@ -33,6 +35,49 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
         "saver": person_json(&save.saver),
         "line": save.line(),
     })
+}
+
+/// Where the project is: `{"line": …}`, or `{"save": …}` when it is at a save.
+pub fn position_json(position: &Position) -> Value {
+    match position {
+        Position::OnLine(line) => json!({ "line": line }),
+        Position::AtSave(id) => json!({ "save": id.to_hex() }),
+    }
+}
+
+/// A file's change as JSON (docs/json.md, "A change").
+pub fn change_json(c: &FileChange) -> Value {
+    json!({
+        "path": c.path,
+        "change": match c.change {
+            ChangeKind::Added => "added",
+            ChangeKind::Removed => "removed",
+            ChangeKind::Modified => "modified",
+            ChangeKind::KindChanged => "kind-changed",
+        },
+        "kind": c.kind.as_str(),
+        "old_size": c.old_size,
+        "new_size": c.new_size,
+    })
+}
+
+/// A file's change as people see it, its path escaped.
+pub fn change_line(c: &FileChange) -> String {
+    let p = escape(c.path, false);
+    let size = |s: Option<u64>| format_size(s.unwrap_or(0));
+    match c.change {
+        ChangeKind::Added => format!("  added     {p}  ({})", size(c.new_size)),
+        ChangeKind::Removed => format!("  removed   {p}  ({})", size(c.old_size)),
+        ChangeKind::Modified => format!(
+            "  modified  {p}  ({} → {})",
+            size(c.old_size),
+            size(c.new_size)
+        ),
+        ChangeKind::KindChanged => {
+            let old = c.old_kind.map_or("none", |k| k.as_str());
+            format!("  changed   {p}  ({old} → {})", c.kind.as_str())
+        }
+    }
 }
 
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.

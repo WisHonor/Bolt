@@ -755,6 +755,8 @@ pub(super) struct Scan {
     pub(super) old: HashMap<String, Option<Listing>>,
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
+    /// The paths of the entries kept as they were in those folders.
+    pub(super) gone_kept: Vec<String>,
     /// The project paths of the files and links an ignore rule matches, kept because the base
     /// save holds them.
     pub(super) ignored: HashSet<String>,
@@ -921,6 +923,7 @@ fn scan_folder(
     // A folder gone from disk comes back if something below it is kept as it was.
     let mut back = Vec::new();
     let mut rebuilt = Vec::new();
+    let mut gone_kept = Vec::new();
     for (rel, name, id) in rules.gone(&folders) {
         let found = |c: &[Child]| c.binary_search_by(|c| c.name.as_str().cmp(&name)).is_ok();
         let taken = folders.get(&rel).is_some_and(|c| found(c));
@@ -930,8 +933,9 @@ fn scan_folder(
             rebuilt.extend(gone.listings);
             let kind = Kind::Back {
                 id: gone.id,
-                kept: gone.kept,
+                kept: gone.kept.len(),
             };
+            gone_kept.extend(gone.kept);
             let child = Child {
                 name,
                 kind,
@@ -984,6 +988,7 @@ fn scan_folder(
         folders,
         old: rules.old,
         rebuilt,
+        gone_kept,
         ignored: rules.ignored,
         gitignored: rules.gitignored,
         warnings: rules.warnings,
@@ -1047,8 +1052,8 @@ fn nested_projects_left_out(named: &Named) -> Warning {
 struct Gone {
     /// Its new listing's ID.
     id: Id,
-    /// How many entries below it are kept as they were.
-    kept: usize,
+    /// The paths of the entries below it kept as they were.
+    kept: Vec<String>,
     /// Its new listings, its own last.
     listings: Vec<Listing>,
 }
@@ -1094,7 +1099,7 @@ fn rebuild_gone(
     let too_large = |detail| SaveError::TooLarge { detail };
     let depth = top.split('/').count();
     let mut open: Vec<Open> = Vec::new();
-    let mut kept_in_all = 0;
+    let mut kept_in_all = Vec::new();
     let mut listings = Vec::new();
     let mut read = Some((String::new(), top.len() + 1, id));
     loop {
@@ -1120,8 +1125,8 @@ fn rebuild_gone(
                 }
                 limits.add(1).map_err(too_large)?;
                 holds.push(e.clone());
+                kept_in_all.push(path_below(top, &open, &name, &e.name));
             }
-            kept_in_all += holds.len();
             open.push(Open {
                 name,
                 prefix,

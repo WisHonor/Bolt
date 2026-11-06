@@ -57,7 +57,7 @@ fn chain(repo: &Repository, start: Id) -> impl Iterator<Item = Result<(Id, Save)
 }
 
 /// The newest save of the current line, or the checked-out save.
-fn tip_of(entry: &DiaryEntry) -> Result<Id, RepoError> {
+pub(crate) fn tip_of(entry: &DiaryEntry) -> Result<Id, RepoError> {
     match &entry.state.position {
         Position::OnLine(name) => {
             entry

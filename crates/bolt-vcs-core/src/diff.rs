@@ -1,6 +1,7 @@
 //! What changed between two saves, file by file.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES, SaveLimits};
@@ -39,7 +40,26 @@ pub fn for_each_change<E: From<StoreError>>(
     new_root: Id,
     each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    walk(store, old_root, new_root, MAX_SAVE_ENTRIES, each)
+    walk(
+        store,
+        &HashMap::new(),
+        old_root,
+        new_root,
+        MAX_SAVE_ENTRIES,
+        each,
+    )
+}
+
+/// [`for_each_change`] where the new side's listings may be in `unstored` rather than in the
+/// store, as a folder read but not saved has them.
+pub(crate) fn for_each_change_in<E: From<StoreError>>(
+    store: &Store,
+    unstored: &HashMap<Id, Listing>,
+    old_root: Option<Id>,
+    new_root: Id,
+    each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    walk(store, unstored, old_root, new_root, MAX_SAVE_ENTRIES, each)
 }
 
 /// How many files differ between the two saves. It is the walk of [`for_each_change`] with nothing
@@ -91,6 +111,7 @@ impl Todo {
 /// The walk behind [`for_each_change`], with the entry limit of the saves as a parameter.
 fn walk<E: From<StoreError>>(
     store: &Store,
+    unstored: &HashMap<Id, Listing>,
     old_root: Option<Id>,
     new_root: Id,
     max_entries: u64,
@@ -135,7 +156,10 @@ fn walk<E: From<StoreError>>(
                 if depth > 0 {
                     path.push('/');
                 }
-                let (old, new) = (listing_of(store, old)?, listing_of(store, new)?);
+                let (old, new) = (
+                    listing_of(store, unstored, old)?,
+                    listing_of(store, unstored, new)?,
+                );
                 old_seen.add(old.entries().len()).map_err(too_large)?;
                 new_seen.add(new.entries().len()).map_err(too_large)?;
                 let (here, first) = (path.len(), todo.len());
@@ -212,8 +236,18 @@ fn pairs<'a>(
     })
 }
 
-fn listing_of(store: &Store, id: Option<Id>) -> Result<Listing, StoreError> {
-    id.map_or_else(|| Ok(Listing::empty()), |id| store.listing(&id))
+fn listing_of(
+    store: &Store,
+    unstored: &HashMap<Id, Listing>,
+    id: Option<Id>,
+) -> Result<Listing, StoreError> {
+    match id {
+        None => Ok(Listing::empty()),
+        Some(id) => unstored
+            .get(&id)
+            .cloned()
+            .map_or_else(|| store.listing(&id), Ok),
+    }
 }
 
 fn folder_id(e: Option<&Entry>) -> Option<Id> {
@@ -252,7 +286,7 @@ mod tests {
         max_entries: u64,
     ) -> Result<Vec<Seen>, StoreError> {
         let mut seen = Vec::new();
-        walk(store, old, new, max_entries, |c| {
+        walk(store, &HashMap::new(), old, new, max_entries, |c| {
             seen.push(Seen {
                 path: c.path.to_owned(),
                 change: c.change,

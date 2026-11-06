@@ -14,6 +14,7 @@ use crate::changeids::ChangeIds;
 use crate::diary::{Action, DiaryEntry, Position};
 use crate::diff::count_changes;
 use crate::drive;
+use crate::filecache::{self, FileCache};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
@@ -258,6 +259,7 @@ pub fn save_folder(
         ignored,
         gitignored,
         mut warnings,
+        ..
     } = walk(
         repo.root(),
         base,
@@ -515,6 +517,57 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
     }
 }
 
+/// Where `build` puts what it reads: the store, for a save, or nowhere, for a look at what changed.
+trait Contents {
+    /// The ID and size of the file `c` in `dir`.
+    fn file(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError>;
+    /// The ID and size of the link `c`'s target.
+    fn link(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError>;
+    fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
+}
+
+/// A save's: everything goes into `packs` unless the store holds a good copy.
+struct Storing<'a> {
+    store: &'a Store,
+    packs: &'a mut PackSet,
+}
+
+impl Contents for Storing<'_> {
+    fn file(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
+        let meta = c.meta.as_ref();
+        store_file(
+            self.packs,
+            self.store,
+            dir,
+            &c.name,
+            &c.rel,
+            meta,
+            &mut || {},
+        )
+    }
+
+    fn link(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
+        store_link(self.packs, self.store, dir, &c.name, &c.rel)
+    }
+
+    fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
+        store_listing(self.store, self.packs, &listing)
+    }
+}
+
+/// What `build_with` found.
+struct Built {
+    root: Id,
+    /// The paths of the entries kept as they were, but for those in folders gone from disk.
+    kept: Vec<String>,
+    /// How many entries were kept as they were in folders gone from disk.
+    kept_below_gone: usize,
+    /// The files and links in `ignored` that changed.
+    changed: Vec<String>,
+    /// The files and links in `gitignored` that are new or changed.
+    taken_back: Vec<String>,
+}
+
 /// Stores every file and listing, deepest folders first, reading the files and links through
 /// `handles`. Returns the top listing's ID, how many entries were kept as they were, which of the
 /// files and links in `ignored` changed, and which of those in `gitignored` are new or changed.
@@ -527,6 +580,22 @@ fn build(
     ignored: &HashSet<String>,
     gitignored: &HashSet<String>,
 ) -> Result<(Id, usize, Vec<String>, Vec<String>), SaveError> {
+    let mut storing = Storing { store, packs };
+    let b = build_with(&mut storing, handles, folders, old, ignored, gitignored)?;
+    let kept = b.kept.len() + b.kept_below_gone;
+    Ok((b.root, kept, b.changed, b.taken_back))
+}
+
+/// The listings of `folders`, deepest first, with each file, link and listing handed to
+/// `contents`.
+fn build_with(
+    contents: &mut dyn Contents,
+    handles: &mut Handles,
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+    ignored: &HashSet<String>,
+    gitignored: &HashSet<String>,
+) -> Result<Built, SaveError> {
     let mut order: Vec<&String> = folders.keys().collect();
     order.sort_by_key(|rel| {
         Reverse(if rel.is_empty() {
@@ -537,7 +606,7 @@ fn build(
     });
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
-    let mut kept = 0;
+    let (mut kept, mut kept_below_gone) = (Vec::new(), 0);
     let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
     for rel in order {
         let before = old.get(rel).and_then(Option::as_ref);
@@ -549,17 +618,14 @@ fn build(
                     (EntryKind::Folder, id, 0)
                 }
                 Kind::File => {
-                    let dir = handles.folder(rel)?;
-                    let meta = c.meta.as_ref();
-                    let (id, size) =
-                        store_file(packs, store, dir, &c.name, &c.rel, meta, &mut || {})?;
+                    let (id, size) = contents.file(handles.folder(rel)?, c)?;
                     let was = before.and_then(|l| l.get(&c.name));
                     // Git writes a link it can't make as a file holding its target: the link
                     // stays (decision 039).
                     let links_target =
                         |e: &Entry| e.kind == EntryKind::Symlink && (e.id, e.size) == (id, size);
                     if was.is_some_and(links_target) {
-                        kept += 1;
+                        kept.push(c.rel.clone());
                         (EntryKind::Symlink, id, size)
                     } else {
                         // Without `x` bits, a file stays executable if it was (decision 004).
@@ -575,16 +641,15 @@ fn build(
                     }
                 }
                 Kind::Symlink => {
-                    let dir = handles.folder(rel)?;
-                    let (id, size) = store_link(packs, store, dir, &c.name, &c.rel)?;
+                    let (id, size) = contents.link(handles.folder(rel)?, c)?;
                     (EntryKind::Symlink, id, size)
                 }
                 Kind::Kept { kind, id, size } => {
-                    kept += 1;
+                    kept.push(c.rel.clone());
                     (kind, id, size)
                 }
                 Kind::Back { id, kept: below } => {
-                    kept += below;
+                    kept_below_gone += below;
                     (EntryKind::Folder, id, 0)
                 }
             };
@@ -604,10 +669,16 @@ fn build(
             });
         }
         let listing = Listing::new(entries).map_err(StoreError::from)?;
-        built.insert(rel, store_listing(store, packs, &listing)?);
+        built.insert(rel, contents.listing(listing)?);
     }
     let root = built.remove("").ok_or_else(missing)?;
-    Ok((root, kept, changed, taken_back))
+    Ok(Built {
+        root,
+        kept,
+        kept_below_gone,
+        changed,
+        taken_back,
+    })
 }
 
 /// Stores `listing` unless a good copy is held already, and returns its ID.
@@ -630,6 +701,16 @@ fn store_link(
     name: &str,
     rel: &str,
 ) -> Result<(Id, u64), SaveError> {
+    let target = link_target(dir, name, rel)?;
+    let id = hash_content(target.as_bytes());
+    if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
+        packs.add_content(target.as_bytes())?;
+    }
+    Ok((id, target.len() as u64))
+}
+
+/// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it.
+fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
         source,
@@ -641,12 +722,7 @@ fn store_link(
             "the link's target is not valid UTF-8",
         ))
     })?;
-    let target = link::stored_target(target);
-    let id = hash_content(target.as_bytes());
-    if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
-        packs.add_content(target.as_bytes())?;
-    }
-    Ok((id, target.len() as u64))
+    Ok(link::stored_target(target))
 }
 
 /// Opens the file `name` in `dir`, at the project path `rel`, to read, if it is still the regular
@@ -701,6 +777,33 @@ pub(crate) fn store_file(
     seen: Option<&EntryMeta>,
     between_passes: &mut dyn FnMut(),
 ) -> Result<(Id, u64), SaveError> {
+    let (mut file, id, size) = hash_scanned(dir, name, rel, seen, between_passes)?;
+    if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
+        return Ok((id, size));
+    }
+    let unreadable = |source| SaveError::Unreadable {
+        path: rel.to_owned(),
+        source,
+    };
+    file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
+    match packs.add_content_from(&mut file, id) {
+        Ok(_) => Ok((id, size)),
+        Err(PackError::ContentChanged) => Err(SaveError::ChangedDuringSave {
+            path: rel.to_owned(),
+        }),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `store_file`'s first pass: reads the file `name` in `dir` through and gives it, still open,
+/// with its content ID and size. It must stay the file the walk saw (`seen`) until read.
+fn hash_scanned(
+    dir: &Dir,
+    name: &str,
+    rel: &str,
+    seen: Option<&EntryMeta>,
+    between_passes: &mut dyn FnMut(),
+) -> Result<(File, Id, u64), SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
         source,
@@ -728,14 +831,125 @@ pub(crate) fn store_file(
     if size != before.0 || stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }
-    if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
-        return Ok((id, size));
+    Ok((file, id, size))
+}
+
+/// What the project folder holds now, as a save would take it, read but not stored.
+pub(crate) struct FolderNow {
+    /// Its top listing.
+    pub(crate) root: Id,
+    /// Its listings, which the store may not hold, by ID.
+    pub(crate) listings: HashMap<Id, Listing>,
+    /// The entries kept as the save has them because this computer can't hold them as they are,
+    /// by path.
+    pub(crate) not_written_here: Vec<String>,
+    pub(crate) warnings: Vec<Warning>,
+}
+
+/// Reads the project folder as a save on top of the save whose top listing is `base` would, by
+/// the same rules, but stores nothing. A file the file-state cache vouches for isn't opened,
+/// unless `full`; the cache is then written again, and failing to is only a warning.
+pub(crate) fn read_folder(
+    repo: &Repository,
+    base: Id,
+    full: bool,
+    git_excludes: Option<&Path>,
+) -> Result<FolderNow, SaveError> {
+    // Taken before the walk, so a file changed during it is too new to trust next time. Without
+    // it no time can be trusted, so every file is read and nothing cached.
+    let now = filecache::drive_now(repo).ok();
+    let trusted = match now {
+        Some(_) if !full => FileCache::load(repo),
+        _ => FileCache::default(),
+    };
+    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let Scan {
+        mut handles,
+        folders,
+        old,
+        rebuilt,
+        gone_kept,
+        ignored,
+        gitignored,
+        mut warnings,
+    } = walk(
+        repo.root(),
+        Base::new(repo.store(), base, SaveLimits::default()),
+        SaveLimits::default(),
+        drive,
+        git_excludes,
+    )?;
+    let mut reading = Reading {
+        trusted,
+        seen: FileCache::default(),
+        listings: HashMap::new(),
+    };
+    for listing in rebuilt {
+        reading.listing(listing)?;
     }
-    file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
-    match packs.add_content_from(&mut file, id) {
-        Ok(_) => Ok((id, size)),
-        Err(PackError::ContentChanged) => Err(changed()),
-        Err(e) => Err(e.into()),
+    let built = build_with(
+        &mut reading,
+        &mut handles,
+        &folders,
+        &old,
+        &ignored,
+        &gitignored,
+    )?;
+    if let Some(now) = now
+        && let Err(why) = reading.seen.store(repo, now)
+    {
+        warnings.push(Warning::new(
+            warning::FILE_CACHE_NOT_STORED,
+            format!(
+                "Bolt couldn't keep what it learned about your files, so the next status reads                  them all again: {why}"
+            ),
+        ));
+    }
+    let mut not_written_here = built.kept;
+    not_written_here.extend(gone_kept);
+    not_written_here.sort_unstable();
+    Ok(FolderNow {
+        root: built.root,
+        listings: reading.listings,
+        not_written_here,
+        warnings,
+    })
+}
+
+/// Reads files and links to know their IDs, opening only those `trusted` doesn't vouch for, and
+/// keeps listings in memory. `seen` learns every file met.
+struct Reading {
+    trusted: FileCache,
+    seen: FileCache,
+    listings: HashMap<Id, Listing>,
+}
+
+impl Contents for Reading {
+    fn file(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
+        if let Some(meta) = &c.meta
+            && let Some(known) = self.trusted.matches(&c.rel, meta)
+        {
+            let id = known.id;
+            self.seen.record(&c.rel, meta, id);
+            return Ok((id, meta.size));
+        }
+        let (_, id, size) = hash_scanned(dir, &c.name, &c.rel, c.meta.as_ref(), &mut || {})?;
+        // The walk's details: the read found the file still had them.
+        if let Some(meta) = &c.meta {
+            self.seen.record(&c.rel, meta, id);
+        }
+        Ok((id, size))
+    }
+
+    fn link(&mut self, dir: &Dir, c: &Child) -> Result<(Id, u64), SaveError> {
+        let target = link_target(dir, &c.name, &c.rel)?;
+        Ok((hash_content(target.as_bytes()), target.len() as u64))
+    }
+
+    fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
+        let id = listing.id();
+        self.listings.insert(id, listing);
+        Ok(id)
     }
 }
 

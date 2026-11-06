@@ -10,7 +10,7 @@ use bolt_core::config::{
     load_identity, now_person,
 };
 use bolt_core::diary::Position;
-use bolt_core::diff::{ChangeKind, count_changes, for_each_change};
+use bolt_core::diff::{count_changes, for_each_change};
 use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
 use bolt_core::id::{ChangeId, Id};
@@ -18,6 +18,7 @@ use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
+use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
 use bolt_core::text::escape;
 use bolt_core::warning::{self, Warning};
@@ -51,6 +52,12 @@ enum Command {
         /// After an import, save files Git wrote with CRLF line endings as they are.
         #[arg(long)]
         accept_crlf: bool,
+    },
+    /// Show what changed since your last save.
+    Status {
+        /// Read every file, not only those that look changed.
+        #[arg(long)]
+        full: bool,
     },
     /// List the saves on this line.
     History,
@@ -388,6 +395,71 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// A change `bolt status` found, as the diff walk hands one out.
+fn file_change(c: &PathChange) -> bolt_core::diff::FileChange<'_> {
+    bolt_core::diff::FileChange {
+        path: &c.path,
+        change: c.change,
+        kind: c.kind,
+        old_kind: c.old_kind,
+        old_size: c.old_size,
+        new_size: c.new_size,
+    }
+}
+
+fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let git_excludes = git_excludes_file(repo.root())?;
+    let found = status(repo, full, git_excludes.as_deref())?;
+    let mut warnings = found.warnings.clone();
+    let save = repo.store().save(&found.save, repo.signatures_allowed())?;
+    let short = short_or_whole(repo, &found.save, &save.change_id, &mut warnings);
+    warnings.extend(repo.store().warnings());
+    if json {
+        let changes: Vec<serde_json::Value> = found
+            .changes
+            .iter()
+            .map(|c| output::change_json(&file_change(c)))
+            .collect();
+        println!(
+            "{}",
+            json!({
+                "bolt_json": BOLT_JSON,
+                "position": output::position_json(&found.position),
+                "save": output::save_json(&found.save, &save, &short),
+                "changes": changes,
+                "not_written_here": found.not_written_here,
+                "unfinished_switch": found.unfinished_switch,
+                "warnings": output::warnings_json(&warnings),
+            })
+        );
+    } else {
+        match &found.position {
+            Position::OnLine(line) => println!("On line {}.", escape(line, false)),
+            Position::AtSave(_) => println!("At save {short}, not on a line."),
+        }
+        if found.changes.is_empty() {
+            println!("Nothing changed since {short}.");
+        }
+        for c in &found.changes {
+            println!("{}", output::change_line(&file_change(c)));
+        }
+        if !found.not_written_here.is_empty() {
+            println!(
+                "Not written here, because this computer can't hold them as they are (saves keep \
+                 them as they were):"
+            );
+            for path in &found.not_written_here {
+                println!("  {}", escape(path, false));
+            }
+        }
+    }
+    output::print_warnings(&warnings);
+    Ok(())
+}
+
 fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo: &Repository = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
@@ -452,18 +524,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
             &format!("{{\"bolt_json\":{BOLT_JSON},\"changes\":["),
             |each| {
                 for_each_change(store, old_root, save.root, |c| {
-                    each(&json!({
-                        "path": c.path,
-                        "change": match c.change {
-                            ChangeKind::Added => "added",
-                            ChangeKind::Removed => "removed",
-                            ChangeKind::Modified => "modified",
-                            ChangeKind::KindChanged => "kind-changed",
-                        },
-                        "kind": c.kind.as_str(),
-                        "old_size": c.old_size,
-                        "new_size": c.new_size,
-                    }))
+                    each(&output::change_json(&c))
                 })
             },
             || {
@@ -496,24 +557,8 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         }
     }
     println!();
-    let size = |s: Option<u64>| output::format_size(s.unwrap_or(0));
     for_each_change(store, old_root, save.root, |c| {
-        let p = &escape(c.path, false);
-        match c.change {
-            ChangeKind::Added => println!("  added     {p}  ({})", size(c.new_size)),
-            ChangeKind::Removed => println!("  removed   {p}  ({})", size(c.old_size)),
-            ChangeKind::Modified => {
-                println!(
-                    "  modified  {p}  ({} → {})",
-                    size(c.old_size),
-                    size(c.new_size)
-                );
-            }
-            ChangeKind::KindChanged => {
-                let old = c.old_kind.map_or("none", |k| k.as_str());
-                println!("  changed   {p}  ({old} → {})", c.kind.as_str());
-            }
-        }
+        println!("{}", output::change_line(&c));
         Ok::<(), Failure>(())
     })?;
     if count == 0 {
@@ -536,6 +581,7 @@ fn main() -> ExitCode {
             message,
             accept_crlf,
         } => save(cli.json, message, accept_crlf, &mut opened),
+        Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
     };

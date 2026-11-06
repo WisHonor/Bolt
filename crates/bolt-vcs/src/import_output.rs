@@ -1,6 +1,5 @@
 //! What `bolt import` prints: its summary for people, and its `--json` document.
 
-use bolt_core::diary::Position;
 use bolt_core::import::{ImportReport, MAX_LISTED};
 use bolt_core::text::{escape, escape_all, thousands};
 use bolt_core::warning::Warning;
@@ -139,10 +138,7 @@ pub fn print_import(report: &ImportReport, standing: &str) {
 
 /// The `--json` document of `bolt import` (docs/json.md).
 pub fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::Value {
-    let position = match &report.position {
-        Position::OnLine(line) => json!({ "line": line }),
-        Position::AtSave(id) => json!({ "save": id.to_hex() }),
-    };
+    let position = crate::output::position_json(&report.position);
     let renamed: Vec<serde_json::Value> = report
         .renamed
         .iter()

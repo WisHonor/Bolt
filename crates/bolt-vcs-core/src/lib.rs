@@ -24,6 +24,7 @@ pub mod repo;
 pub mod safe_fs;
 pub mod save;
 pub mod snapshot;
+pub mod status;
 pub mod store;
 pub mod text;
 pub mod verify;
