@@ -567,45 +567,55 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     let (id, save) = (&found.save_id, &found.save);
     let short = short_or_whole(repo, id, &save.change_id, &mut warnings);
     warnings.extend(repo.store().warnings());
-    if json {
-        let changes: Vec<serde_json::Value> = found
-            .changes
-            .iter()
-            .map(|c| output::change_json(&file_change(c)))
-            .collect();
-        println!(
-            "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "position": output::position_json(&found.position),
-                "save": output::save_json(id, save, &short),
-                "changes": changes,
-                "not_written_here": found.not_written_here,
-                "unfinished_switch": found.unfinished_switch,
-                "warnings": output::warnings_json(&warnings),
-            })
-        );
-    } else {
+    let mut out = output::Stdout::new();
+    let done = (|| -> std::io::Result<()> {
+        if json {
+            let changes: Vec<serde_json::Value> = found
+                .changes
+                .iter()
+                .map(|c| output::change_json(&file_change(c)))
+                .collect();
+            return writeln!(
+                out,
+                "{}",
+                json!({
+                    "bolt_json": BOLT_JSON,
+                    "position": output::position_json(&found.position),
+                    "save": output::save_json(id, save, &short),
+                    "changes": changes,
+                    "not_written_here": found.not_written_here,
+                    "unfinished_switch": found.unfinished_switch,
+                    "warnings": output::warnings_json(&warnings),
+                })
+            );
+        }
         match &found.position {
-            Position::OnLine(line) => println!("On line {}.", escape(line, false)),
-            Position::AtSave(_) => println!("At save {short}, not on a line."),
+            Position::OnLine(line) => writeln!(out, "On line {}.", escape(line, false))?,
+            Position::AtSave(_) => writeln!(out, "At save {short}, not on a line.")?,
         }
         if found.changes.is_empty() {
-            println!("Nothing changed since {short}.");
+            writeln!(out, "Nothing changed since {short}.")?;
         }
         for c in &found.changes {
-            println!("{}", output::change_line(&file_change(c)));
+            writeln!(out, "{}", output::change_line(&file_change(c)))?;
         }
         if !found.not_written_here.is_empty() {
-            println!(
+            writeln!(
+                out,
                 "Not written here, because this computer can't hold them as they are (saves keep \
                  them as they were):"
-            );
+            )?;
             for path in &found.not_written_here {
-                println!("  {}", escape(path, false));
+                writeln!(out, "  {}", escape(path, false))?;
             }
         }
+        Ok(())
+    })();
+    // As in `history`: a reader that went away ends the command quietly.
+    if out.closed {
+        return Ok(());
     }
+    done?;
     output::print_warnings(&warnings);
     Ok(())
 }
@@ -779,14 +789,30 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         &std::env::current_dir()?,
     )?));
     let unfinished = unfinished_warning(repo);
+    let mut out = output::Stdout::new();
+    let done = history_to(&mut out, repo, json, unfinished);
+    // Whoever read the output stopped reading (`bolt history | head`): nothing more to say.
+    if out.closed {
+        return Ok(());
+    }
+    output::print_warnings(&done?);
+    Ok(())
+}
+
+fn history_to(
+    out: &mut output::Stdout,
+    repo: &Repository,
+    json: bool,
+    unfinished: Option<Warning>,
+) -> Result<Vec<Warning>, Failure> {
     if json {
         let line = match &repo.current()?.1.state.position {
             bolt_core::diary::Position::OnLine(name) => json!(name),
             bolt_core::diary::Position::AtSave(_) => json!(null),
         };
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
-        let warnings = output::stream_document(
-            &mut std::io::stdout(),
+        return output::stream_document(
+            out,
             &format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":["),
             |each| {
                 for_each_on_line(repo, |id, save, short| {
@@ -798,25 +824,23 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
                 warnings.extend(repo.store().warnings());
                 (json!({}), warnings)
             },
-        )?;
-        output::print_warnings(&warnings);
-        return Ok(());
+        );
     }
     let now = now_ms();
     for_each_on_line(repo, |_, s, short| {
         let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
         let title = s.message.lines().next().unwrap_or_default();
-        println!(
+        writeln!(
+            out,
             "{short}  {when}  {}  {}",
             escape(&s.author.name, false),
             escape(title, false)
-        );
+        )?;
         Ok::<(), Failure>(())
     })?;
     let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
     warnings.extend(repo.store().warnings());
-    output::print_warnings(&warnings);
-    Ok(())
+    Ok(warnings)
 }
 
 fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -838,56 +862,64 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     // printed, so a save that can't be listed prints only the error. The changes are then
     // printed as the walk finds them, and none is kept.
     let count = count_changes(store, old_root, save.root)?;
-    if json {
-        // The document `json!` would make, in pieces: serde_json writes an object's keys in
-        // alphabetical order, so `changes` comes between `bolt_json` and `save`.
-        let warnings = output::stream_document(
-            &mut std::io::stdout(),
-            &format!("{{\"bolt_json\":{BOLT_JSON},\"changes\":["),
-            |each| {
-                for_each_change(store, old_root, save.root, |c| {
-                    each(&output::change_json(&c))
-                })
-            },
-            || {
-                // Shortened after the walk: if it fails first, only the store has warnings to give.
-                let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
-                let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-                warnings.extend(store.warnings());
-                (
-                    json!({"save": output::save_json(&id, &save, &short)}),
-                    warnings,
-                )
-            },
+    let mut out = output::Stdout::new();
+    let done = (|| -> Result<Vec<Warning>, Failure> {
+        if json {
+            // The document `json!` would make, in pieces: serde_json writes an object's keys in
+            // alphabetical order, so `changes` comes between `bolt_json` and `save`.
+            return output::stream_document(
+                &mut out,
+                &format!("{{\"bolt_json\":{BOLT_JSON},\"changes\":["),
+                |each| {
+                    for_each_change(store, old_root, save.root, |c| {
+                        each(&output::change_json(&c))
+                    })
+                },
+                || {
+                    // Shortened after the walk: if it fails first, only the store has warnings to
+                    // give.
+                    let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
+                    let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
+                    warnings.extend(store.warnings());
+                    (
+                        json!({"save": output::save_json(&id, &save, &short)}),
+                        warnings,
+                    )
+                },
+            );
+        }
+        let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
+        let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
+        let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
+        writeln!(
+            out,
+            "Save {short} · {} · {when}",
+            escape(&save.author.name, false)
         )?;
-        output::print_warnings(&warnings);
+        // Indented, as Git does, so that no line of the message can pass for a change below it.
+        for line in escape(save.message.trim_end(), true).lines() {
+            if line.trim().is_empty() {
+                writeln!(out)?;
+            } else {
+                writeln!(out, "    {line}")?;
+            }
+        }
+        writeln!(out)?;
+        for_each_change(store, old_root, save.root, |c| {
+            writeln!(out, "{}", output::change_line(&c))?;
+            Ok::<(), Failure>(())
+        })?;
+        if count == 0 {
+            writeln!(out, "  (no file changes)")?;
+        }
+        warnings.extend(store.warnings());
+        Ok(warnings)
+    })();
+    // As in `history`: a reader that went away ends the command quietly.
+    if out.closed {
         return Ok(());
     }
-    let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
-    let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-    let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
-    println!(
-        "Save {short} · {} · {when}",
-        escape(&save.author.name, false)
-    );
-    // Indented, as Git does, so that no line of the message can pass for a change below it.
-    for line in escape(save.message.trim_end(), true).lines() {
-        if line.trim().is_empty() {
-            println!();
-        } else {
-            println!("    {line}");
-        }
-    }
-    println!();
-    for_each_change(store, old_root, save.root, |c| {
-        println!("{}", output::change_line(&c));
-        Ok::<(), Failure>(())
-    })?;
-    if count == 0 {
-        println!("  (no file changes)");
-    }
-    warnings.extend(store.warnings());
-    output::print_warnings(&warnings);
+    output::print_warnings(&done?);
     Ok(())
 }
 
@@ -910,31 +942,28 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     warnings.extend(repo.store().warnings());
     if json {
         let lines: Vec<&String> = entry.state.lines.keys().collect();
-        println!(
-            "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "current": current,
-                "lines": lines,
-                "server_lines": server_lines,
-                "warnings": output::warnings_json(&warnings),
-            })
-        );
-    } else {
-        for line in entry.state.lines.keys() {
-            let mark = if current == Some(line.as_str()) {
-                '*'
-            } else {
-                ' '
-            };
-            println!("{mark} {}", escape(line, false));
-        }
-        for line in &server_lines {
-            println!("  {}", escape(line, false));
-        }
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "current": current,
+            "lines": lines,
+            "server_lines": server_lines,
+            "warnings": output::warnings_json(&warnings),
+        });
+        return output::print_quietly(&format!("{document}\n"), &warnings);
     }
-    output::print_warnings(&warnings);
-    Ok(())
+    let mut shown = String::new();
+    for line in entry.state.lines.keys() {
+        let mark = if current == Some(line.as_str()) {
+            '*'
+        } else {
+            ' '
+        };
+        shown += &format!("{mark} {}\n", escape(line, false));
+    }
+    for line in &server_lines {
+        shown += &format!("  {}\n", escape(line, false));
+    }
+    output::print_quietly(&shown, &warnings)
 }
 
 fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Result<(), Failure> {

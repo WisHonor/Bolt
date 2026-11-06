@@ -200,8 +200,8 @@ fn link_file(target: &Path, link: &Path) -> bool {
     #[cfg(windows)]
     match std::os::windows::fs::symlink_file(target, link) {
         Ok(()) => true,
-        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights.
-        Err(e) if e.raw_os_error() == Some(1314) => {
+        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights, which CI has.
+        Err(e) if e.raw_os_error() == Some(1314) && std::env::var_os("CI").is_none() => {
             eprintln!("note: skipped, this account can't make links");
             false
         }

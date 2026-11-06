@@ -59,8 +59,9 @@ pub const SWITCH_FINISHED: &str = "switch_finished";
 /// A file's diff ran out of time, so its changes show in bigger pieces than they could.
 pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 
-/// Whether people see a warning of `kind` when the command then fails: it tells of a switch
-/// the command finished first, which happened all the same. Others are only in `--json`.
+/// Whether people see a warning of `kind` when the command then fails: it tells of files
+/// already written, by a switch the command finished first or by the command itself before it
+/// stopped, which happened all the same. Others are only in `--json`.
 #[must_use]
 pub fn told_on_failure(kind: &str) -> bool {
     [

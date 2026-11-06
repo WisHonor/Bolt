@@ -244,6 +244,18 @@ impl Write for Stdout {
     }
 }
 
+/// Prints `text` on stdout, then `warnings` on stderr; a reader that went away ends it quietly.
+pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+    let mut out = Stdout::new();
+    let done = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+    if out.closed {
+        return Ok(());
+    }
+    done?;
+    print_warnings(warnings);
+    Ok(())
+}
+
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
 pub fn warnings_json(warnings: &[Warning]) -> Value {
     warnings

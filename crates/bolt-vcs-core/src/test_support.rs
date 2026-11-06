@@ -236,12 +236,10 @@ pub(crate) fn symlink(target: &Path, link: &Path) -> bool {
         };
         match made {
             Ok(()) => true,
-            // ERROR_PRIVILEGE_NOT_HELD: symlinks need Developer Mode or admin rights.
-            Err(e) if e.raw_os_error() == Some(1314) => {
-                eprintln!("note: symlink check skipped, this account can't create symlinks");
+            Err(e) => {
+                skip_without_link_right(e);
                 false
             }
-            Err(e) => panic!("can't create a symlink: {e}"),
         }
     }
 }

@@ -419,3 +419,28 @@ fn status_json_matches_its_snapshot() {
     }
     insta::assert_json_snapshot!(doc);
 }
+
+#[test]
+fn a_reader_that_goes_away_ends_it_quietly() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let env = project(&[]);
+    // More than any pipe holds, so status is still printing when the reader leaves.
+    for i in 0..4000 {
+        fs::write(env.root().join(format!("{i:0>60}.txt")), "x").unwrap();
+    }
+    let mut child = env
+        .bolt_process_in(env.root())
+        .arg("status")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0; 16];
+    stdout.read_exact(&mut first).unwrap();
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "");
+}
