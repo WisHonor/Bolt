@@ -165,21 +165,36 @@ fn lock(path: &Path) -> Option<Box<dyn std::any::Any>> {
     }
 }
 
+#[cfg(any(windows, feature = "fault-injection"))]
 #[test]
 fn status_does_not_open_unchanged_files() {
     let env = project(&[("a.txt", "a"), ("locked.txt", "secret")]);
     // The first status reads every file and caches what it saw.
     assert!(changes(&status_json(&env, &[])).is_empty());
-    let Some(_held) = lock(&env.root().join("locked.txt")) else {
-        return;
-    };
+    // Bolt can't open it now. Not by taking the right to read it on Unix: that moves its change
+    // time, and the cache stops vouching for it.
+    #[cfg(windows)]
+    let _held = lock(&env.root().join("locked.txt"));
     fs::write(env.root().join("a.txt"), "changed").unwrap();
-    let doc = status_json(&env, &[]);
+    let status = |args: &[&str]| {
+        env.bolt()
+            .env("BOLT_FAULT_UNREADABLE", "locked.txt")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = status(&["--json", "status"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         changes(&doc),
         [change("a.txt", "modified", "file")],
         "{doc}"
     );
+    // And a status that must open it can't.
+    let out = status(&["status", "--full"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("Can't read locked.txt"));
 }
 
 #[test]

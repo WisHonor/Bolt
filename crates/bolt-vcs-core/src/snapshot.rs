@@ -1085,8 +1085,8 @@ fn open_scanned(
 ) -> Result<(File, EntryMeta), SaveError> {
     let name = OsStr::new(name);
     let path = || rel.to_owned();
-    let file = dir
-        .open_file(name)
+    let file = fsio::open_point(rel)
+        .and_then(|()| dir.open_file(name))
         .map_err(|source| match dir.metadata(name) {
             Ok(now) if cfg!(windows) && now.kind == EntryType::Other => {
                 SaveError::SpecialFile { path: path() }
@@ -2302,22 +2302,17 @@ mod tests {
         set_time(&root.join(rel), hour_ago);
     }
 
+    #[cfg(any(windows, feature = "fault-injection"))]
     #[test]
     fn an_unchanged_file_is_not_read_by_save() {
         let (dir, mut repo) = project();
         write_old(dir.path(), "kept.txt", b"kept");
         save_now(&mut repo).unwrap();
         let kept = dir.path().join("kept.txt");
-        // Nothing can read it now, so a save that opened it would fail.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&kept, fs::Permissions::from_mode(0o000)).unwrap();
-            // Root reads it anyway.
-            if fs::read(&kept).is_ok() {
-                return;
-            }
-        }
+        // Nothing can read it now, so a save that opened it would fail. Not by taking the right
+        // to read it: that moves its change time, and the cache stops vouching for it.
+        #[cfg(feature = "fault-injection")]
+        crate::fsio::fault::unreadable(Some("kept.txt"));
         #[cfg(windows)]
         let _shut = {
             use std::os::windows::fs::OpenOptionsExt;
@@ -2330,6 +2325,18 @@ mod tests {
         let tree = saved_tree(repo.store(), root);
         assert_eq!(tree["kept.txt"].1, b"kept");
         assert_eq!(tree["new.txt"].1, b"new");
+        // And a save that must open it can't.
+        #[cfg(windows)]
+        drop(_shut);
+        #[cfg(feature = "fault-injection")]
+        {
+            write(dir.path(), "kept.txt", b"changed");
+            match save_now(&mut repo) {
+                Err(SaveError::Unreadable { path, .. }) => assert_eq!(path, "kept.txt"),
+                other => panic!("{:?}", other.map(|_| ())),
+            }
+            crate::fsio::fault::unreadable(None);
+        }
     }
 
     #[test]

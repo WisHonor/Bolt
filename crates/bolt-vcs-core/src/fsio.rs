@@ -137,9 +137,24 @@ pub fn act_point(label: &'static str) {
     let _ = label;
 }
 
+/// Where a project file at `path` is opened to be read. A test can make it fail
+/// (`fault::unreadable`) to prove Bolt doesn't open a file. Does nothing without `fault-injection`.
+pub fn open_point(path: &str) -> io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    {
+        fault::opening(path)
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Fault injection for crash tests: per-thread errors (`arm`), a process abort
-/// (`BOLT_FAULT_AT=N`), an error at one named point (`BOLT_FAULT_FAIL=label`), or a test's own
-/// change to the disk at one named point (`act_at`).
+/// (`BOLT_FAULT_AT=N`), an error at one named point (`BOLT_FAULT_FAIL=label`), a test's own
+/// change to the disk at one named point (`act_at`), or a project file that can't be opened
+/// (`unreadable`, `BOLT_FAULT_UNREADABLE=path`).
 #[cfg(feature = "fault-injection")]
 pub mod fault {
     use std::cell::{Cell, RefCell};
@@ -154,6 +169,31 @@ pub mod fault {
         static ARMED: Cell<Option<u64>> = const { Cell::new(None) };
         static COUNT: Cell<u64> = const { Cell::new(0) };
         static ACTION: RefCell<Option<Action>> = const { RefCell::new(None) };
+        static UNREADABLE: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Makes this thread's opens of the project file at `path` fail, until called with `None`.
+    pub fn unreadable(path: Option<&str>) {
+        UNREADABLE.set(path.map(str::to_owned));
+    }
+
+    /// `unreadable` for a command run in a process of its own.
+    fn unreadable_in_process() -> Option<&'static str> {
+        static AT: OnceLock<Option<String>> = OnceLock::new();
+        AT.get_or_init(|| std::env::var("BOLT_FAULT_UNREADABLE").ok())
+            .as_deref()
+    }
+
+    pub(super) fn opening(path: &str) -> io::Result<()> {
+        let refused = UNREADABLE.with_borrow(|p| p.as_deref() == Some(path))
+            || unreadable_in_process() == Some(path);
+        if refused {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("injected: {path} can't be opened"),
+            ));
+        }
+        Ok(())
     }
 
     /// Runs `action` once, when this thread next reaches the point `label`, so a test can change
