@@ -155,6 +155,18 @@ impl Case {
     /// where Bolt keeps its state, holding no planted name or contents.
     fn assert_nothing_escaped(&self) {
         assert_eq!(seen(self.outside.path()), self.beside, "beside the project");
+        // Where `../pwned` and `../../pwned` would land. Only their own names: these are the
+        // system's temporary folders, shared with everything else.
+        for up in self.root().ancestors().skip(1).take(2) {
+            for e in std::fs::read_dir(up).unwrap() {
+                let name = e.unwrap().file_name();
+                assert!(
+                    !name.to_string_lossy().contains("pwned"),
+                    "{}",
+                    up.join(name).display()
+                );
+            }
+        }
         assert_eq!(seen(&self.root().join(".git")), self.git, "in .git");
         for (path, what) in seen(&self.root().join(".bolt")) {
             assert!(!path.contains("pwned"), ".bolt/{path}");
@@ -489,6 +501,11 @@ fn a_journal_naming_git_or_its_real_short_name_writes_nothing_there() {
     #[cfg(not(windows))]
     let hashed: Option<String> = None;
     if cfg!(windows) && hashed.is_none() {
+        // CI must run this check, so a runner whose drive gives no 8.3 names fails it.
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "this drive gives .git no 8.3 name, so the hashed short-name check can't run"
+        );
         println!("Skipped the hashed short name: this drive gives no 8.3 names.");
     }
     let c = stored_payload(case.root());
@@ -757,40 +774,43 @@ fn links_that_leave_the_project_are_placeholders_never_followed() {
 #[test]
 fn modes_are_exactly_0644_and_0755_whatever_the_umask() {
     use std::os::unix::fs::PermissionsExt;
-    let case = Case::new();
-    case.plant(&[
-        ("plain", File, b"p"),
-        ("tool", Executable, b"t"),
-        ("deep/tool", Executable, b"t2"),
-    ]);
-    // With no umask to narrow them, any mode Bolt doesn't set itself shows.
-    let bolt = case.env.bolt_process_in(case.root());
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg("umask 000; exec \"$0\" \"$@\"")
-        .arg(bolt.get_program())
-        .args(["goto", "main", "--json"])
-        .current_dir(case.root());
-    for (key, value) in bolt.get_envs() {
-        match value {
-            Some(value) => cmd.env(key, value),
-            None => cmd.env_remove(key),
+    // With no umask, any bit Bolt doesn't take away itself shows; with 077, any it doesn't set.
+    for umask in ["000", "077"] {
+        let case = Case::new();
+        case.plant(&[
+            ("plain", File, b"p"),
+            ("tool", Executable, b"t"),
+            ("deep/tool", Executable, b"t2"),
+        ]);
+        let bolt = case.env.bolt_process_in(case.root());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("umask {umask}; exec \"$0\" \"$@\""))
+            .arg(bolt.get_program())
+            .args(["goto", "main", "--json"])
+            .current_dir(case.root());
+        for (key, value) in bolt.get_envs() {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let mode = |path: &str| {
+            std::fs::symlink_metadata(case.root().join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
         };
+        assert_eq!(
+            (mode("plain"), mode("tool"), mode("deep/tool")),
+            (0o644, 0o755, 0o755),
+            "umask {umask}"
+        );
+        case.assert_nothing_escaped();
     }
-    let out = cmd.output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let mode = |path: &str| {
-        std::fs::symlink_metadata(case.root().join(path))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777
-    };
-    assert_eq!(
-        (mode("plain"), mode("tool"), mode("deep/tool")),
-        (0o644, 0o755, 0o755)
-    );
-    case.assert_nothing_escaped();
 }
 
 // No folder checked once and trusted after (gitoxide, 2026).
