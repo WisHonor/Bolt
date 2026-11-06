@@ -25,6 +25,7 @@ pub mod pack;
 pub mod repo;
 pub mod safe_fs;
 pub mod save;
+pub(crate) mod scope;
 pub mod snapshot;
 pub mod status;
 pub mod store;

@@ -26,6 +26,7 @@ use crate::names::{
 };
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
+use crate::scope::{Scope, ancestors};
 use crate::snapshot::{NAMED, SaveError, listed, read_folder};
 use crate::store::{Store, StoreError};
 use crate::warning::{self, Warning};
@@ -106,7 +107,7 @@ pub fn plan(
     })?;
 
     // Compared as the drive compares names, so a path given in another case still matches.
-    let only: Option<Vec<String>> = only.map(|o| o.iter().map(|p| drive.compared(p)).collect());
+    let only = only.map(|o| Scope::paths(o, drive));
     let mut target = Tree::new(store, &stored, to_root, drive);
     let mut folder = Tree::new(store, &now.listings, now.root, drive);
     let mut refused = BTreeSet::new();
@@ -121,7 +122,7 @@ pub fn plan(
         Some(now.root),
         to_root,
         |path, n, t| {
-            if !in_scope(&drive.compared(path), only.as_deref(), t) {
+            if !in_scope(path, only.as_ref(), t) {
                 return Ok(());
             }
             if let Some(at) = refused_at(path, &mut target, &mut folder)? {
@@ -1085,28 +1086,11 @@ fn parent(path: &str) -> &str {
     split(path).0
 }
 
-/// The folders above `path`, nearest last: `a`, `a/b` for `a/b/c`.
-fn ancestors(path: &str) -> impl Iterator<Item = &str> {
-    path.match_indices('/').filter_map(|(at, _)| path.get(..at))
-}
-
-/// Whether `path` is `top` or below it; `""` is the whole project.
-pub(crate) fn within(path: &str, top: &str) -> bool {
-    top.is_empty()
-        || path == top
-        || path
-            .strip_prefix(top)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
-
 /// Whether the entry at `path` belongs to a switch limited to `only`: it is at or below one of
-/// them, or is a folder that must be made on the way to one. Both as the drive compares names.
-fn in_scope(path: &str, only: Option<&[String]>, t: Option<&Entry>) -> bool {
+/// them, or is a folder that must be made on the way to one.
+fn in_scope(path: &str, only: Option<&Scope>, t: Option<&Entry>) -> bool {
     let folder = t.is_some_and(|e| e.kind == EntryKind::Folder);
-    only.is_none_or(|only| {
-        only.iter()
-            .any(|top| within(path, top) || (folder && within(top, path)))
-    })
+    only.is_none_or(|only| only.holds(path) || (folder && only.reaches_below(path)))
 }
 
 /// Whether unsaved work at `path`, or in a folder above or below it, is in the way.

@@ -25,6 +25,7 @@ use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, Person, Save};
+use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::escape;
 use crate::warning::{self, Warning};
@@ -146,6 +147,27 @@ pub enum SaveError {
         escape(path, false)
     )]
     LeftOut { path: String },
+    #[error(
+        "Bolt can't save part of {}: it is {what}, not a folder.",
+        escape(path, false)
+    )]
+    NotAFolder { path: String, what: &'static str },
+    #[error(
+        "Bolt can't save part of {}: every save keeps it as it was, because this computer can't          hold it as it is.",
+        escape(path, false)
+    )]
+    KeptWhole { path: String },
+    #[error(
+        "Bolt never saves {}: Git treats its name as `.git`, or Bolt as `.bolt`.",
+        escape(path, false)
+    )]
+    NeverSaved { path: String },
+    #[error(
+        "{} holds a repository or project of its own, so saves leave out {}.",
+        escape(at, false),
+        escape(path, false)
+    )]
+    NestedProject { path: String, at: String },
 }
 
 // Through `RepoError`, so a damaged pack is reported as damage.
@@ -253,6 +275,16 @@ impl SaveError {
                 "Name files, folders or patterns from the folder you are in.".into()
             }
             SaveError::LeftOut { .. } => "To save it, change the rule that ignores it.".into(),
+            SaveError::NotAFolder { path, .. } => {
+                format!("Name {} itself to save it as it is.", escape(path, false))
+            }
+            SaveError::KeptWhole { .. } => {
+                "Leave it out of what you name: it stays as the last save has it.".into()
+            }
+            SaveError::NeverSaved { .. } => "Rename it if it should be saved.".into(),
+            SaveError::NestedProject { .. } => {
+                "Save it in that repository or project instead.".into()
+            }
             SaveError::Unreadable { .. } => "Let Bolt read it, or list it in .boltignore.".into(),
             SaveError::ChangedDuringSave { .. } => {
                 "Try again when the file stops changing, or list it in .boltignore.".into()
@@ -315,10 +347,10 @@ pub fn save_folder(
     )?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
     if let Some(given) = req.only {
-        let scope = only::Scope::new(given, drive);
+        let scope = Scope::new(given, drive);
         let store = repo.store();
-        let matched = only::narrow(&scope, given, store, &mut folders, &mut old, &mut rebuilt)?;
-        only::check_matched(given, &matched, &mut handles)?;
+        let narrowed = only::narrow(&scope, given, store, &mut folders, &mut old, &mut rebuilt)?;
+        only::check_matched(&scope, given, &narrowed, &mut handles)?;
     }
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
@@ -2493,5 +2525,90 @@ mod tests {
             newest_files(&fresh),
             files(&[("a.txt", "two!"), ("b.txt", "two!")])
         );
+    }
+
+    #[test]
+    fn a_pattern_keeps_an_empty_folder_gone_from_disk_that_it_doesnt_match() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        fs::create_dir(dir.path().join("old")).unwrap();
+        save_now(&mut repo).unwrap();
+        assert!(newest_tree(&repo).contains_key("old"));
+        fs::remove_dir(dir.path().join("old")).unwrap();
+        write(dir.path(), "a.txt", b"2");
+        save_only(&mut repo, &[pattern("", "**/*.txt")]).unwrap();
+        let tree = newest_tree(&repo);
+        assert_eq!(tree["a.txt"].1, b"2");
+        assert!(tree.contains_key("old"), "{tree:?}");
+        // Named, it goes.
+        save_only(&mut repo, &[path("old")]).unwrap();
+        assert!(!newest_tree(&repo).contains_key("old"));
+    }
+
+    /// The refusal a partial save of `only` gives, which must save nothing.
+    fn refused(repo: &mut Repository, only: &[Given]) -> SaveError {
+        let before = repo.current().unwrap().1.state.lines["main"];
+        let err = save_only(repo, only).unwrap_err();
+        assert_eq!(repo.current().unwrap().1.state.lines["main"], before);
+        err
+    }
+
+    #[test]
+    fn naming_inside_what_isnt_a_folder_says_so() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "x/a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        fs::remove_dir_all(dir.path().join("x")).unwrap();
+        write(dir.path(), "x", b"now a file");
+        let err = refused(&mut repo, &[path("x/a.txt")]);
+        assert!(
+            matches!(&err, SaveError::NotAFolder { path, what: "a file" } if path == "x"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "Bolt can't save part of x: it is a file, not a folder."
+        );
+    }
+
+    #[test]
+    fn naming_inside_an_entry_kept_as_it_was_says_so() {
+        const COMMIT: &[u8] = &[0x5a; 20];
+        let (dir, mut repo) = project();
+        plant_save(&mut repo, &[("sub", EntryKind::ProjectLink, COMMIT)]);
+        write(dir.path(), "sub/a.txt", b"x");
+        let err = refused(&mut repo, &[path("sub/a.txt")]);
+        assert!(
+            matches!(&err, SaveError::KeptWhole { path } if path == "sub"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn naming_what_saves_never_hold_says_why() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        write(dir.path(), ".git/config", b"[core]");
+        write(dir.path(), "nested/.git/HEAD", b"ref: refs/heads/main");
+        write(dir.path(), "nested/a.txt", b"x");
+        write(dir.path(), "inner/.bolt/format", b"x");
+        write(dir.path(), "inner/b.txt", b"x");
+        let err = refused(&mut repo, &[path(".git/config")]);
+        assert!(
+            matches!(&err, SaveError::NeverSaved { path } if path == ".git"),
+            "{err:?}"
+        );
+        for (named, at) in [
+            ("nested/a.txt", "nested"),
+            ("nested", "nested"),
+            ("inner/b.txt", "inner"),
+        ] {
+            let err = refused(&mut repo, &[path(named)]);
+            assert!(
+                matches!(&err, SaveError::NestedProject { path, at: a } if path == named && a == at),
+                "{named}: {err:?}"
+            );
+        }
     }
 }

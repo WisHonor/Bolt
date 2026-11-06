@@ -12,6 +12,7 @@ use crate::lines::Target;
 use crate::listing::EntryKind;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
+use crate::scope::within;
 use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
 use crate::text::escape;
@@ -215,7 +216,7 @@ fn throw_away(
         let reached = plan
             .actions
             .iter()
-            .any(|a| writeout::within(&drive.compared(&a.path), &top));
+            .any(|a| within(&drive.compared(&a.path), &top));
         if !reached && spellings.is_empty() {
             return Err(SwitchError::NoMatch { path: path.clone() });
         }
@@ -258,7 +259,7 @@ fn throw_away(
                 !applied
                     .changed_since_plan
                     .iter()
-                    .any(|left| writeout::within(p, left))
+                    .any(|left| within(p, left))
             })
             .collect()
     };

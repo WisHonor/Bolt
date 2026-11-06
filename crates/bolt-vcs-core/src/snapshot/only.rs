@@ -6,93 +6,26 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::iter;
 
-use super::walk::{Handles, kept_as_they_were, path_in, without_git_names};
+use super::walk::{Handles, holds_own_repository, kept_as_they_were, path_in, without_git_names};
 use super::{Child, Folders, Kind, SaveError};
-use crate::drive::Drive;
 use crate::id::Id;
-use crate::ignore::wildmatch;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
-use crate::names::Given;
+use crate::names::{Given, is_bolt_alias, is_git_alias};
+use crate::scope::{Scope, ancestors, within};
 use crate::store::{Store, StoreError};
-use crate::writeout::within;
 
-/// What a partial save takes, with names as the drive compares them, so that on a drive that
-/// ignores letter case a path or pattern matches whatever the case.
-pub(super) struct Scope {
-    tops: Vec<Top>,
-    drive: Drive,
+/// What `narrow` found: which of the named matched anything, in the folder or the base save, and
+/// the entries that aren't folders but that something named reaches below.
+pub(super) struct Narrowed {
+    pub(super) matched: Vec<bool>,
+    blocked: Vec<Blocked>,
 }
 
-enum Top {
-    Path(String),
-    Pattern { below: String, glob: Vec<u8> },
-}
-
-impl Scope {
-    pub(super) fn new(given: &[Given], drive: Drive) -> Scope {
-        let tops = given
-            .iter()
-            .map(|g| match g {
-                Given::Path(path) => Top::Path(drive.compared(path)),
-                Given::Pattern { below, glob } => Top::Pattern {
-                    below: drive.compared(below),
-                    glob: drive.compared(glob).into_bytes(),
-                },
-            })
-            .collect();
-        Scope { tops, drive }
-    }
-
-    /// Whether anything named takes the project path `path`; each that does is marked in
-    /// `matched`.
-    fn mark(&self, path: &str, matched: &mut [bool]) -> bool {
-        let path = self.drive.compared(path);
-        let mut any = false;
-        for (top, seen) in self.tops.iter().zip(matched.iter_mut()) {
-            if takes(top, &path) {
-                *seen = true;
-                any = true;
-            }
-        }
-        any
-    }
-
-    fn holds(&self, path: &str) -> bool {
-        let path = self.drive.compared(path);
-        self.tops.iter().any(|top| takes(top, &path))
-    }
-
-    /// Whether something named can be below the folder `folder`.
-    fn reaches_below(&self, folder: &str) -> bool {
-        let folder = self.drive.compared(folder);
-        self.tops.iter().any(|top| match top {
-            Top::Path(path) => within(path, &folder),
-            Top::Pattern { below, .. } => within(&folder, below) || within(below, &folder),
-        })
-    }
-}
-
-/// Whether `top` takes `path`: it is at or below a path, or a pattern matches it or a folder above
-/// it, below the pattern's own folder.
-fn takes(top: &Top, path: &str) -> bool {
-    match top {
-        Top::Path(top) => within(path, top),
-        Top::Pattern { below, glob } => {
-            let rest = if below.is_empty() {
-                Some(path)
-            } else {
-                path.strip_prefix(below.as_str())
-                    .and_then(|r| r.strip_prefix('/'))
-            };
-            let Some(rest) = rest.filter(|r| !r.is_empty()) else {
-                return false;
-            };
-            rest.match_indices('/')
-                .filter_map(|(at, _)| rest.get(..at))
-                .chain(iter::once(rest))
-                .any(|p| wildmatch(glob, p.as_bytes(), false))
-        }
-    }
+/// An entry something named reaches below that a save can't go into.
+struct Blocked {
+    path: String,
+    /// What it is on disk, or `None` where every save keeps it as it was.
+    what: Option<&'static str>,
 }
 
 /// An entry of the base save, at the project path `rel`, as `kind` keeps it.
@@ -113,7 +46,7 @@ fn base_child(e: &Entry, rel: String, kept: bool) -> Child {
 /// Narrows what the walk found, `folders`, whose base save's listings are `old`, to what `scope`
 /// takes, the base save's entries standing in for everything else. Folders gone from disk with
 /// something named below them are read from `store` into `old`; `rebuilt` keeps only the
-/// listings still used. Gives which of the named matched anything, in the folder or the base save.
+/// listings still used.
 pub(super) fn narrow(
     scope: &Scope,
     given: &[Given],
@@ -121,7 +54,7 @@ pub(super) fn narrow(
     folders: &mut Folders,
     old: &mut HashMap<String, Option<Listing>>,
     rebuilt: &mut Vec<Listing>,
-) -> Result<Vec<bool>, SaveError> {
+) -> Result<Narrowed, SaveError> {
     let too_large = |detail| SaveError::from(StoreError::SaveTooLarge { detail });
     // The whole project always matches, even with nothing in it.
     let mut matched: Vec<bool> = given
@@ -131,6 +64,7 @@ pub(super) fn narrow(
     let mut limits = SaveLimits::default();
     let mut out = Folders::new();
     let mut gone = HashSet::new();
+    let mut blocked = Vec::new();
     let mut todo = vec![String::new()];
     while let Some(rel) = todo.pop() {
         let is_gone = gone.contains(&rel);
@@ -144,6 +78,19 @@ pub(super) fn narrow(
                 continue;
             }
             met.insert(c.name.clone());
+            let what = match c.kind {
+                Kind::File => Some(Some("a file")),
+                Kind::Symlink => Some(Some("a link")),
+                Kind::Kept { .. } => Some(None),
+                _ => None,
+            };
+            if let Some(what) = what
+                && !inside
+                && scope.reaches_below(&c.rel)
+            {
+                let path = c.rel.clone();
+                blocked.push(Blocked { path, what });
+            }
             if inside || (c.kind == Kind::Folder && scope.reaches_below(&c.rel)) {
                 if c.kind == Kind::Folder {
                     todo.push(c.rel.clone());
@@ -157,7 +104,7 @@ pub(super) fn narrow(
         let mut read = Vec::new();
         if let Some(listing) = before {
             let held = if is_gone {
-                kept_as_they_were(listing, scope.drive)
+                kept_as_they_were(listing, scope.drive())
             } else {
                 vec![false; listing.entries().len()]
             };
@@ -169,6 +116,10 @@ pub(super) fn narrow(
                 let inside = scope.mark(&path, &mut matched);
                 // What this computer can't hold stays, as a full save keeps it.
                 if held {
+                    if !inside && scope.reaches_below(&path) {
+                        let path = path.clone();
+                        blocked.push(Blocked { path, what: None });
+                    }
                     kept.push(base_child(e, path, inside));
                     continue;
                 }
@@ -204,11 +155,11 @@ pub(super) fn narrow(
     drop_empty(scope, &gone, old, &mut out);
     *folders = out;
     keep_used(folders, rebuilt);
-    Ok(matched)
+    Ok(Narrowed { matched, blocked })
 }
 
 /// Removes, deepest first, the folders left empty that the new save shouldn't hold: those gone
-/// from disk, and new ones nothing named takes.
+/// from disk that are named or whose last named entries went, and new ones nothing named takes.
 fn drop_empty(
     scope: &Scope,
     gone: &HashSet<String>,
@@ -218,9 +169,15 @@ fn drop_empty(
     let mut order: Vec<String> = out.keys().filter(|r| !r.is_empty()).cloned().collect();
     order.sort_by_key(|rel| Reverse(rel.split('/').count()));
     for rel in order {
-        let new = old.get(&rel).is_none_or(Option::is_none);
-        let empty = out.get(&rel).is_some_and(Vec::is_empty);
-        if empty && (gone.contains(&rel) || (new && !scope.holds(&rel))) {
+        let saved = old.get(&rel).and_then(Option::as_ref);
+        let emptied = saved.is_some_and(|l| !l.entries().is_empty());
+        let named = scope.holds(&rel);
+        let drop = if gone.contains(&rel) {
+            named || emptied
+        } else {
+            saved.is_none() && !named
+        };
+        if drop && out.get(&rel).is_some_and(Vec::is_empty) {
             out.remove(&rel);
             let (up, name) = rel.rsplit_once('/').unwrap_or(("", &rel));
             if let Some(children) = out.get_mut(up) {
@@ -252,60 +209,56 @@ fn keep_used(folders: &Folders, rebuilt: &mut Vec<Listing>) {
     rebuilt.retain(|l| used.contains(&l.id()));
 }
 
-/// Refuses the save if something named matched nothing: a path on disk the walk left out is new
-/// and ignored, and anything else names nothing.
+/// Refuses the save if something named matched nothing, saying why: it is below an entry the save
+/// can't go into, the walk left it out (a name Git or Bolt keeps for itself, a repository or
+/// project of its own, an ignore rule), or it names nothing.
 pub(super) fn check_matched(
+    scope: &Scope,
     given: &[Given],
-    matched: &[bool],
+    narrowed: &Narrowed,
     handles: &mut Handles,
 ) -> Result<(), SaveError> {
-    let Some((g, _)) = given.iter().zip(matched).find(|(_, m)| !**m) else {
+    let unmatched = given.iter().zip(&narrowed.matched).find(|(_, m)| !**m);
+    let Some((g, _)) = unmatched else {
         return Ok(());
     };
-    if let Given::Path(path) = g {
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
-        let on_disk = handles
-            .folder(up)
-            .is_ok_and(|dir| dir.metadata(OsStr::new(name)).is_ok());
-        if on_disk {
-            return Err(SaveError::LeftOut { path: path.clone() });
+    let Given::Path(path) = g else {
+        return Err(SaveError::NoMatch { given: g.shown() });
+    };
+    let drive = scope.drive();
+    let named = drive.compared(path);
+    let below = |b: &&Blocked| within(&named, &drive.compared(&b.path));
+    if let Some(b) = narrowed.blocked.iter().find(below) {
+        let path = b.path.clone();
+        return Err(match b.what {
+            Some(what) => SaveError::NotAFolder { path, what },
+            None => SaveError::KeptWhole { path },
+        });
+    }
+    for at in ancestors(path).chain(iter::once(path.as_str())) {
+        let name = at.rsplit_once('/').map_or(at, |(_, name)| name);
+        if is_git_alias(name) || is_bolt_alias(name) {
+            return Err(SaveError::NeverSaved {
+                path: at.to_owned(),
+            });
+        }
+        match handles.folder(at) {
+            Ok(dir) if holds_own_repository(dir) => {
+                return Err(SaveError::NestedProject {
+                    path: path.clone(),
+                    at: at.to_owned(),
+                });
+            }
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
-    Err(SaveError::NoMatch { given: g.shown() })
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-
-    #[test]
-    fn what_a_scope_takes() {
-        let exact = Drive {
-            ignores_case: false,
-            composes_unicode: false,
-        };
-        let folding = Drive {
-            ignores_case: true,
-            composes_unicode: false,
-        };
-        let pattern = |below: &str, glob: &str| Given::Pattern {
-            below: below.into(),
-            glob: glob.into(),
-        };
-        let src = Scope::new(&[Given::Path("src".into())], exact);
-        assert!(src.holds("src") && src.holds("src/a/b.rs"));
-        assert!(!src.holds("srcx") && !src.holds("Src/a.rs"));
-        assert!(src.reaches_below("") && !src.reaches_below("lib"));
-        assert!(Scope::new(&[Given::Path("src".into())], folding).holds("SRC/a.rs"));
-        let cs = Scope::new(&[pattern("dir", "*.cs")], exact);
-        assert!(cs.holds("dir/a.cs") && !cs.holds("dir/x/a.cs") && !cs.holds("a.cs"));
-        assert!(!cs.holds("dir"));
-        assert!(cs.reaches_below("") && cs.reaches_below("dir/x") && !cs.reaches_below("lib"));
-        let deep = Scope::new(&[pattern("", "**/*.png")], folding);
-        assert!(deep.holds("A.PNG") && deep.holds("x/y/a.png"));
-        // A folder a pattern matches takes everything in it.
-        let folder = Scope::new(&[pattern("", "s?b")], exact);
-        assert!(folder.holds("sub/x/y.txt") && !folder.holds("sbb2/y.txt"));
+    let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let on_disk = handles
+        .folder(up)
+        .is_ok_and(|dir| dir.metadata(OsStr::new(name)).is_ok());
+    if on_disk {
+        return Err(SaveError::LeftOut { path: path.clone() });
     }
+    Err(SaveError::NoMatch { given: g.shown() })
 }

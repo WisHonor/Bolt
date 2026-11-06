@@ -38,7 +38,7 @@ fn shown(rel: &Path) -> String {
 /// Whether the folder `dir` holds a Git repository or Bolt project of its own: an entry named
 /// `.git` of any kind (a worktree's or submodule's is a file), or a `.bolt` folder. Where the
 /// drive ignores letter case, `.GIT` is found as `.git` (decision 046).
-fn holds_own_repository(dir: &Dir) -> bool {
+pub(super) fn holds_own_repository(dir: &Dir) -> bool {
     dir.metadata(OsStr::new(".git")).is_ok()
         || dir
             .metadata(OsStr::new(".bolt"))
