@@ -8,6 +8,7 @@ use crate::history::tip_of;
 use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::repo::Repository;
+use crate::save::Save;
 use crate::snapshot::{SaveError, read_folder};
 use crate::warning::Warning;
 
@@ -15,8 +16,9 @@ use crate::warning::Warning;
 #[derive(Debug)]
 pub struct Status {
     pub position: Position,
-    /// The save the folder was compared with.
-    pub save: Id,
+    /// The save the folder was compared with, and its ID.
+    pub save_id: Id,
+    pub save: Save,
     /// The files that differ from it, in path order.
     pub changes: Vec<PathChange>,
     /// Entries of the save this computer can't hold as they are, by path: saves keep them as
@@ -72,7 +74,8 @@ pub fn status(
     )?;
     Ok(Status {
         position: entry.state.position,
-        save: save_id,
+        save_id,
+        save,
         changes,
         not_written_here: now.not_written_here,
         unfinished_switch: None,

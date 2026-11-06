@@ -1,6 +1,6 @@
 # Bolt `--json` Formats
 
-> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05. It holds every document and every kind of warning these five commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
+> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05. It holds every document and every kind of warning these six commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
 
 **In plain words.** Every Bolt command takes `--json`. Instead of text for people, it then prints one JSON document that a script, an editor plugin or the desktop app can read. This page says what is in each document, what each field means, and what `null` means where it can appear. The formats are a public interface: they are versioned, and the CLI tests keep them from changing by accident.
 
@@ -85,7 +85,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `bolt status --json`
 
-`bolt status` compares the project folder with the save the project is on, walking it as a save would (the same ignore rules, the same entries kept as they were). It reads only the files its file-state cache doesn't vouch for, and every file with `--full`. It never changes the project; it may only rewrite `.bolt/cache/files`.
+`bolt status` compares the project folder with the save the project is on, walking it as a save would (the same ignore rules, the same entries kept as they were). It reads only the files its file-state cache doesn't vouch for, and every file with `--full`. It never changes the project; it may only rewrite its caches in `.bolt/cache/`.
 
 | Field | Type | Meaning |
 |---|---|---|

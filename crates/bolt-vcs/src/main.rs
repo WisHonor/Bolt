@@ -412,10 +412,15 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         &std::env::current_dir()?,
     )?));
     let git_excludes = git_excludes_file(repo.root())?;
-    let found = status(repo, full, git_excludes.as_deref())?;
+    // Status only reads, so its hints never say that nothing was saved.
+    let found = status(repo, full, git_excludes.as_deref()).map_err(|e| Failure {
+        hint: e.hint_when_reading(),
+        message: e.to_string(),
+        printed: false,
+    })?;
     let mut warnings = found.warnings.clone();
-    let save = repo.store().save(&found.save, repo.signatures_allowed())?;
-    let short = short_or_whole(repo, &found.save, &save.change_id, &mut warnings);
+    let (id, save) = (&found.save_id, &found.save);
+    let short = short_or_whole(repo, id, &save.change_id, &mut warnings);
     warnings.extend(repo.store().warnings());
     if json {
         let changes: Vec<serde_json::Value> = found
@@ -428,7 +433,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
             json!({
                 "bolt_json": BOLT_JSON,
                 "position": output::position_json(&found.position),
-                "save": output::save_json(&found.save, &save, &short),
+                "save": output::save_json(id, save, &short),
                 "changes": changes,
                 "not_written_here": found.not_written_here,
                 "unfinished_switch": found.unfinished_switch,

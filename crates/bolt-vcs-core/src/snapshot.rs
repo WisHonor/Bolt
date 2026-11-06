@@ -80,10 +80,10 @@ pub enum SaveError {
         escape(&source.to_string(), false)
     )]
     Unreadable { path: String, source: io::Error },
-    #[error("{} changed while Bolt was saving it.", escape(path, false))]
+    #[error("{} changed while Bolt was reading it.", escape(path, false))]
     ChangedDuringSave { path: String },
     #[error(
-        "{} is a special file Bolt can't save yet, such as a cloud placeholder.",
+        "{} is a special file Bolt can't read yet, such as a cloud placeholder.",
         escape(path, false)
     )]
     SpecialFile { path: String },
@@ -177,54 +177,65 @@ fn line_endings_changed(count: u64, first: &[String]) -> String {
 }
 
 impl SaveError {
-    /// What the user can do next, if there is something to say.
+    /// What the user can do next after a save, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
-        Some(
-            match self {
-                SaveError::Repo(e) => return e.hint(),
-                SaveError::InTheWay { path, .. } => {
-                    return Some(format!(
-                        "Nothing was saved. Rename or move {}, then save again.",
-                        escape(path, false)
-                    ));
+        self.next_step(true)
+    }
+
+    /// The same, for a command that only reads the folder, such as `status`: nothing was going
+    /// to be saved.
+    #[must_use]
+    pub fn hint_when_reading(&self) -> Option<String> {
+        self.next_step(false)
+    }
+
+    fn next_step(&self, saving: bool) -> Option<String> {
+        let step = match self {
+            SaveError::Repo(e) => return e.hint(),
+            SaveError::InTheWay { path, .. } => {
+                let path = escape(path, false);
+                if saving {
+                    format!("Rename or move {path}, then save again.")
+                } else {
+                    format!("Rename or move {path}.")
                 }
-                // `git checkout` alone skips files whose stat data the index matches.
-                SaveError::LineEndingsChanged { .. } => {
+            }
+            // `git checkout` alone skips files whose stat data the index matches.
+            SaveError::LineEndingsChanged { .. } => {
+                return Some(
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
                      run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git \
                      reset --hard`, and save again. To save the files with CRLF anyway: bolt save \
                      --accept-crlf \"message\""
-                }
-                SaveError::NotOnALine => {
+                        .to_owned(),
+                );
+            }
+            SaveError::NotOnALine => {
+                return Some(
                     "This version of Bolt can only save on a line. Delete the hidden .bolt folder \
                      at the top of the project, switch Git to a branch (`git switch <branch>`) and \
                      run bolt import there again, or import a fresh clone that is on a branch."
-                }
-                SaveError::Unreadable { .. } => {
-                    "Nothing was saved. Let Bolt read it, or list it in .boltignore."
-                }
-                SaveError::ChangedDuringSave { .. } => {
-                    "Nothing was saved. Try again when the file stops changing, or list it in .boltignore."
-                }
-                SaveError::SpecialFile { .. } => "Nothing was saved. List it in .boltignore for now.",
-                SaveError::InvalidName { .. } => {
-                    "Nothing was saved. Rename it, or list it in .boltignore."
-                }
-                SaveError::NotPortable { .. } => {
-                    "Nothing was saved. Rename them, or list them in .boltignore."
-                }
-                SaveError::Ignore { .. } => {
-                    // No line is ever refused, so the file itself is at fault: too big,
-                    // unreadable, or a `.boltignore` that isn't a regular file.
-                    "Nothing was saved. Fix that ignore file and try again."
-                }
-                SaveError::TooLarge { .. } => {
-                    "Nothing was saved. List the deep or huge folder in .boltignore."
-                }
+                        .to_owned(),
+                );
             }
-            .to_owned(),
-        )
+            SaveError::Unreadable { .. } => "Let Bolt read it, or list it in .boltignore.".into(),
+            SaveError::ChangedDuringSave { .. } => {
+                "Try again when the file stops changing, or list it in .boltignore.".into()
+            }
+            SaveError::SpecialFile { .. } => "List it in .boltignore for now.".into(),
+            SaveError::InvalidName { .. } => "Rename it, or list it in .boltignore.".into(),
+            SaveError::NotPortable { .. } => "Rename them, or list them in .boltignore.".into(),
+            // No line is ever refused, so the file itself is at fault: too big, unreadable, or a
+            // `.boltignore` that isn't a regular file.
+            SaveError::Ignore { .. } => "Fix that ignore file and try again.".into(),
+            SaveError::TooLarge { .. } => "List the deep or huge folder in .boltignore.".into(),
+        };
+        Some(if saving {
+            format!("Nothing was saved. {step}")
+        } else {
+            step
+        })
     }
 }
 
@@ -901,7 +912,8 @@ pub(crate) fn read_folder(
         warnings.push(Warning::new(
             warning::FILE_CACHE_NOT_STORED,
             format!(
-                "Bolt couldn't keep what it learned about your files, so the next status reads                  them all again: {why}"
+                "Bolt couldn't keep what it learned about your files, so the next status reads \
+                 them all again: {why}"
             ),
         ));
     }
@@ -1593,6 +1605,37 @@ mod tests {
             other => panic!("{:?}", other.map(|_| ())),
         }
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// Status only reads, so what it says of a file it couldn't read never speaks of saving.
+    #[test]
+    fn a_file_problem_reads_right_for_a_command_that_only_reads() {
+        let path = || "a.txt".to_owned();
+        let cases = [
+            (
+                SaveError::ChangedDuringSave { path: path() },
+                "a.txt changed while Bolt was reading it.",
+                "Try again when the file stops changing, or list it in .boltignore.",
+            ),
+            (
+                SaveError::SpecialFile { path: path() },
+                "a.txt is a special file Bolt can't read yet, such as a cloud placeholder.",
+                "List it in .boltignore for now.",
+            ),
+            (
+                SaveError::Unreadable {
+                    path: path(),
+                    source: io::Error::other("denied"),
+                },
+                "Can't read a.txt: denied.",
+                "Let Bolt read it, or list it in .boltignore.",
+            ),
+        ];
+        for (e, message, step) in cases {
+            assert_eq!(e.to_string(), message);
+            assert_eq!(e.hint_when_reading().unwrap(), step);
+            assert_eq!(e.hint().unwrap(), format!("Nothing was saved. {step}"));
+        }
     }
 
     #[test]

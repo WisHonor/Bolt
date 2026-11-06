@@ -204,7 +204,14 @@ fn status_full_reads_everything() {
     };
     let out = env.bolt().args(["status", "--full"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out.stderr).contains("b.txt"), "{}", text(&out.stderr));
+    // Status only reads, so it says nothing of saving.
+    let said = text(&out.stderr);
+    assert!(said.contains("Can't read b.txt"), "{said}");
+    assert!(
+        said.contains("hint: Let Bolt read it, or list it in .boltignore."),
+        "{said}"
+    );
+    assert!(!said.contains("save"), "{said}");
 }
 
 /// Every file in `.bolt` but the caches and temporary files, with its contents.
@@ -260,7 +267,64 @@ fn a_cache_that_cant_be_written_is_a_warning() {
         .map(|w| w["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["file_cache_not_stored"], "{doc}");
+    let said = doc["warnings"][0]["message"].as_str().unwrap();
+    assert!(
+        said.starts_with(
+            "Bolt couldn't keep what it learned about your files, so the next status reads them \
+             all again: "
+        ),
+        "{said}"
+    );
     assert!(changes(&doc).is_empty());
+}
+
+#[test]
+fn ignored_files_and_nested_projects_are_not_listed() {
+    let env = project(&[
+        (
+            ".boltignore",
+            "*.log
+",
+        ),
+        ("a.txt", "a"),
+    ]);
+    fs::write(env.root().join("x.log"), "noise").unwrap();
+    fs::create_dir_all(env.root().join("vendor/.git")).unwrap();
+    fs::write(env.root().join("vendor/v.txt"), "v").unwrap();
+    let doc = status_json(&env, &[]);
+    assert!(changes(&doc).is_empty(), "{doc}");
+    let kinds: Vec<&str> = doc["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["nested_projects_left_out"], "{doc}");
+    assert!(
+        doc["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("vendor")
+    );
+}
+
+#[test]
+fn a_file_changed_too_close_to_the_cache_is_read_again() {
+    let env = project(&[("a.txt", "aaa")]);
+    // A time the cache can't trust whenever it is written: past the drive's "now".
+    let a = env.root().join("a.txt");
+    let soon = SystemTime::now() + Duration::from_secs(600);
+    set_time(&a, soon);
+    assert!(changes(&status_json(&env, &[])).is_empty());
+    // Same size, same time: only reading the file tells.
+    fs::write(&a, "bbb").unwrap();
+    set_time(&a, soon);
+    let doc = status_json(&env, &[]);
+    assert_eq!(
+        changes(&doc),
+        [change("a.txt", "modified", "file")],
+        "{doc}"
+    );
 }
 
 /// A save whose top folder holds `a.txt`, the project link `lib`, which no computer holds as it
