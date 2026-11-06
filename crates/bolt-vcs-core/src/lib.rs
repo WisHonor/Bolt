@@ -1,29 +1,40 @@
 //! Bolt's engine library: objects, storage and history. No `unsafe` code is allowed here.
 #![forbid(unsafe_code)]
 
+pub mod changeids;
+pub mod changes;
 pub mod config;
 pub mod diary;
 pub mod diff;
 pub mod drive;
 pub mod encoding;
+pub mod filecache;
 pub mod fsio;
 pub mod git;
 pub mod history;
 pub mod id;
 pub mod ignore;
 pub mod import;
+pub mod journal;
+pub mod keyed;
+pub mod lines;
 pub mod link;
 pub mod listing;
+pub mod merge;
 pub mod names;
 pub mod pack;
 pub mod repo;
 pub mod safe_fs;
 pub mod save;
+pub(crate) mod scope;
 pub mod snapshot;
+pub mod status;
 pub mod store;
+pub mod switch;
 pub mod text;
 pub mod verify;
 pub mod warning;
+pub mod writeout;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -171,6 +171,7 @@ pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]
     let path = w.finish(made.path()).expect("finish").expect("a pack");
     let mut pack = std::fs::read(&path).expect("read the pack");
     for e in PackReader::open(&path).expect("open the pack").entries() {
+        let e = e.expect("an index line");
         assert!(e.stored_size > 0, "an empty object has no byte to flip");
         pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).expect("an offset")] ^= 1;
     }
@@ -235,14 +236,27 @@ pub(crate) fn symlink(target: &Path, link: &Path) -> bool {
         };
         match made {
             Ok(()) => true,
-            // ERROR_PRIVILEGE_NOT_HELD: symlinks need Developer Mode or admin rights.
-            Err(e) if e.raw_os_error() == Some(1314) => {
-                eprintln!("note: symlink check skipped, this account can't create symlinks");
+            Err(e) => {
+                skip_without_link_right(e);
                 false
             }
-            Err(e) => panic!("can't create a symlink: {e}"),
         }
     }
+}
+
+/// Says a test can't make links here, which on Windows takes Developer Mode or an administrator,
+/// and lets it go on without them. Any other error fails the test, and so does this one in CI
+/// (where `CI` is set): its runner has the right, and a skip there would pass for a test that
+/// never ran.
+#[cfg(windows)]
+pub(crate) fn skip_without_link_right(e: std::io::Error) {
+    if e.raw_os_error() != Some(1314) {
+        panic!("couldn't make a link: {e}");
+    }
+    if std::env::var_os("CI").is_some() {
+        panic!("CI must be able to make links, so that the link tests run there: {e}");
+    }
+    println!("Skipped: this account can't make links ({e}).");
 }
 
 /// A Windows junction (no privilege needed) at `link`, pointing at the folder `target`.

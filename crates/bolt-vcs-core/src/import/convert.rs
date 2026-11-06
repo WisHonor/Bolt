@@ -21,7 +21,7 @@ use crate::git::{
 use crate::id::{ChangeId, ContentHasher, Id, hash_content, hash_record};
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
-use crate::names::{NameError, is_git_alias, validate_name};
+use crate::names::{MAX_NAME_BYTES, NameError, is_git_alias, validate_name};
 use crate::pack::{MAX_RECORD_SIZE, ObjectKind, PackError, PackSet};
 use crate::save::{
     EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_EXTRA_VALUE_BYTES,
@@ -131,23 +131,28 @@ pub enum TagOutcome {
 }
 
 /// A converted Git tree: its listing, the entries in it and below it counting every path, how
-/// many levels of folders are below it, and whether an export gives its Git ID back.
+/// many levels of folders are below it, how long the longest path below it is from it, and whether
+/// an export gives its Git ID back.
 #[derive(Clone, Copy)]
 struct Folder {
     listing: Id,
     total: u64,
     depth: usize,
+    longest: usize,
     exact: bool,
 }
 
-/// A folder on the walk's stack, with the entries of its Git tree still to convert.
+/// A folder on the walk's stack, with the entries of its Git tree still to convert. `prefix` is
+/// how long its path is with a `/` after it (0 for the top).
 struct Frame {
     git: GitId,
     name: String,
+    prefix: usize,
     left: std::vec::IntoIter<Item>,
     entries: Vec<Entry>,
     total: u64,
     depth: usize,
+    longest: usize,
     exact: bool,
 }
 
@@ -287,6 +292,13 @@ impl Walk<'_> {
     fn add(&mut self, n: u64) -> Result<(), ImportError> {
         let added = self.limits.add(usize::try_from(n).unwrap_or(usize::MAX));
         added.map_err(|why| self.too_big(&why))
+    }
+
+    /// Checks that a path `len` bytes long is within the save's limit, naming it as `shown`
+    /// gives it if it isn't.
+    fn path(&self, len: usize, shown: impl FnOnce() -> String) -> Result<(), ImportError> {
+        let checked = self.limits.check_path(len);
+        checked.map_err(|why| self.too_big(&format!("{why}: `{}`", shown())))
     }
 
     fn too_big(&self, why: &str) -> ImportError {
@@ -608,10 +620,18 @@ impl<'r> Converter<'r> {
         name: String,
         id: &GitId,
     ) -> Result<Option<Folder>, ImportError> {
-        // The top folder is level 0.
+        // The top folder is level 0, and its path is empty.
         let level = stack.len();
+        let prefix = stack.last().map_or(0, |above| {
+            above.prefix.saturating_add(name.len()).saturating_add(1)
+        });
         if let Some(done) = self.trees.get(id).copied() {
             walk.depth(level.saturating_add(done.depth))?;
+            // Its own path was checked in the folder above; the paths below it may be too long here.
+            if done.longest > 0 {
+                let shown = || format!("{}/…", path_of(stack, &[name.as_str()]));
+                walk.path(prefix.saturating_add(done.longest), shown)?;
+            }
             walk.add(done.total)?;
             return Ok(attach(stack, name, done));
         }
@@ -620,10 +640,12 @@ impl<'r> Converter<'r> {
         stack.push(Frame {
             git: *id,
             name,
+            prefix,
             left: Vec::new().into_iter(),
             entries: Vec::new(),
             total: 0,
             depth: 0,
+            longest: 0,
             exact: true,
         });
         self.read_folder(stack, walk)?;
@@ -632,10 +654,10 @@ impl<'r> Converter<'r> {
 
     /// Reads the Git tree of the folder on top of the stack and judges its names: those that
     /// aren't UTF-8 are left out and listed, for `finish` to stop at (decision 019), dangerous
-    /// ones and spellings of `.bolt` skipped (decisions 035 and 019), and one too long stops the
-    /// import.
+    /// ones and spellings of `.bolt` skipped (decisions 035 and 019), and one too long, or with a
+    /// path too long, stops the import (decision 051).
     fn read_folder(&mut self, stack: &mut [Frame], walk: &mut Walk<'_>) -> Result<(), ImportError> {
-        let Some(id) = stack.last().map(|top| top.git) else {
+        let Some((id, prefix)) = stack.last().map(|top| (top.git, top.prefix)) else {
             return Ok(());
         };
         let commit = walk.commit;
@@ -653,6 +675,7 @@ impl<'r> Converter<'r> {
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
         let mut items = Vec::new();
         let mut exact = true;
+        let mut longest = 0;
         for e in entries {
             exact &= e.standard_mode;
             let Ok(name) = std::str::from_utf8(e.name) else {
@@ -661,15 +684,21 @@ impl<'r> Converter<'r> {
                 continue;
             };
             match validate_name(name) {
-                Ok(()) if !is_git_alias(name) => items.push(Item {
-                    name: name.to_owned(),
-                    kind: e.kind,
-                    id: e.id,
-                }),
+                Ok(()) if !is_git_alias(name) => {
+                    walk.path(prefix.saturating_add(name.len()), || {
+                        path_of(stack, &[name])
+                    })?;
+                    longest = longest.max(name.len());
+                    items.push(Item {
+                        name: name.to_owned(),
+                        kind: e.kind,
+                        id: e.id,
+                    });
+                }
                 Err(NameError::TooLong) => {
                     return Err(unimportable(format!(
-                        "commit `{commit}` has a name longer than 255 bytes, more than Bolt \
-                         allows: `{}`",
+                        "commit `{commit}` has a name longer than {MAX_NAME_BYTES} bytes, more \
+                         than Bolt allows: `{}`",
                         path_of(stack, &[shown(e.name).as_str()])
                     )));
                 }
@@ -686,6 +715,7 @@ impl<'r> Converter<'r> {
             top.entries = Vec::with_capacity(items.len());
             top.left = items.into_iter();
             top.total = total;
+            top.longest = longest;
             top.exact = exact;
         }
         Ok(())
@@ -724,6 +754,7 @@ impl<'r> Converter<'r> {
             listing: self.put(ObjectKind::FolderListing, &encoded)?,
             total: frame.total,
             depth: frame.depth,
+            longest: frame.longest,
             exact: frame.exact,
         };
         self.trees.insert(frame.git, done);
@@ -857,6 +888,10 @@ fn attach(stack: &mut [Frame], name: String, done: Folder) -> Option<Folder> {
     let Some(parent) = stack.last_mut() else {
         return Some(done);
     };
+    if done.longest > 0 {
+        let below = name.len().saturating_add(1).saturating_add(done.longest);
+        parent.longest = parent.longest.max(below);
+    }
     parent.entries.push(Entry {
         name,
         kind: EntryKind::Folder,
@@ -883,7 +918,8 @@ pub(super) fn shown_path(parts: &[&str]) -> String {
     let mut len = 0usize;
     while let Some(part) = start.checked_sub(1).and_then(|i| parts.get(i)) {
         len = len.saturating_add(part.len()).saturating_add(1);
-        // The last name is kept whatever its length; callers cut names to 255 bytes.
+        // The last name is kept whatever its length: callers cut names from Git to 255 bytes,
+        // and a valid one is at most 765.
         if len > MAX_SHOWN_PATH && start < parts.len() {
             break;
         }
@@ -1028,7 +1064,11 @@ mod tests {
         let packs = fs::read_dir(dir.join(name).join("packs")).unwrap();
         packs
             .map(|pack| PackReader::open(&pack.unwrap().path()).unwrap())
-            .map(|pack| pack.entries().iter().filter(|e| e.kind == kind).count())
+            .map(|pack| {
+                pack.entries()
+                    .filter(|e| e.as_ref().unwrap().kind == kind)
+                    .count()
+            })
             .sum()
     }
 
@@ -1359,16 +1399,59 @@ mod tests {
     fn a_long_name_stops_the_import() {
         let (dir, git) = repo(Sha1);
         let file = blob(&git, b"x");
-        let longest = "y".repeat(255);
+        // Windows' 255 UTF-16 units: 765 bytes of three-byte characters (decision 051).
+        let longest = "語".repeat(255);
         let fine = commit_of(&git, &[(b"100644", longest.as_bytes(), file)]);
-        let too_long = "x".repeat(256);
+        let too_long = "x".repeat(766);
         let deep = git.tree(&[(b"100644", too_long.as_bytes(), file)]);
         let id = commit_of(&git, &[(b"40000", b"deep", deep)]);
         let ((fine, long), _) = convert(dir.path(), "a", |c| (c.commit(&fine), c.commit(&id)));
         assert!(fine.is_ok(), "{fine:?}");
         // The name is shown cut, so a hostile one can't flood the message.
         let shown = format!("deep/{}...", "x".repeat(255));
-        assert_refused(long, &[&id.to_hex(), "255 bytes", &shown]);
+        assert_refused(long, &[&id.to_hex(), "765 bytes", &shown]);
+    }
+
+    #[test]
+    fn a_path_over_4096_bytes_stops_the_import_naming_it() {
+        let (dir, git) = repo(Sha1);
+        // Five folders of 700-byte names, and a file whose name brings its path to 4,096 bytes, or
+        // one more.
+        let folders = |below: GitId| {
+            (0..5).fold(below, |tree, _| {
+                git.tree(&[(b"40000", "d".repeat(700).as_bytes(), tree)])
+            })
+        };
+        let file = |len| git.tree(&[(b"100644", "f".repeat(len).as_bytes(), blob(&git, b"x"))]);
+        let (fits, past) = (folders(file(591)), folders(file(592)));
+        let commit = |tree: &GitId| git.commit(&commit_bytes(tree, &[], "", b"m\n"));
+        let (fits, past) = (commit(&fits), commit(&past));
+        let ((fits, stopped), _) = convert(dir.path(), "a", |c| (c.commit(&fits), c.commit(&past)));
+        assert!(fits.is_ok(), "{fits:?}");
+        // Named by the end of its path, as long paths are.
+        let name = format!("`…/{}`", "f".repeat(592));
+        assert_refused(stopped, &[&past.to_hex(), "longer than 4096 bytes", &name]);
+
+        // A folder converted before is judged where it is met again: its paths reach 2,104 bytes
+        // below it.
+        let (dir, git) = repo(Sha1);
+        let shared = (0..3).fold(
+            git.tree(&[(b"100644", b"f", blob(&git, b"x"))]),
+            |tree, _| git.tree(&[(b"40000", "s".repeat(700).as_bytes(), tree)]),
+        );
+        let above = |levels| {
+            (0..levels).fold(shared, |tree, _| {
+                git.tree(&[(b"40000", "u".repeat(700).as_bytes(), tree)])
+            })
+        };
+        let commit = |tree: GitId| git.commit(&commit_bytes(&tree, &[], "", b"m\n"));
+        let (first, fits, past) = (commit(shared), commit(above(2)), commit(above(3)));
+        let ((first, fits, stopped), _) = convert(dir.path(), "a", |c| {
+            (c.commit(&first), c.commit(&fits), c.commit(&past))
+        });
+        assert!(first.is_ok() && fits.is_ok(), "{first:?} {fits:?}");
+        let below = format!("{}/…`", "u".repeat(700));
+        assert_refused(stopped, &[&past.to_hex(), "longer than 4096 bytes", &below]);
     }
 
     #[test]
@@ -1452,11 +1535,12 @@ mod tests {
         let slashed = [&[b'a'; 50_000][..], b"/", &[b'a'; 50_000]].concat();
         let not_utf8 = [&[b'n'; 100_000][..], b"\xff"].concat();
         let long = vec![b'z'; 100_000];
-        // Each under 20 levels of 255-byte folder names: about 5 KB of path above it.
+        // Each under 15 levels of 255-byte folder names: about 4 KB of path above it, within a
+        // path's limit.
         let folder = "d".repeat(255);
         let deep = |name: &[u8]| {
             let mut tree = git.tree(&[(b"100644", name, file)]);
-            for _ in 0..20 {
+            for _ in 0..15 {
                 tree = git.tree(&[(b"40000", folder.as_bytes(), tree)]);
             }
             git.commit(&commit_bytes(&tree, &[], "", b"m\n"))
@@ -1534,12 +1618,13 @@ mod tests {
         );
     }
 
+    /// A path's limit comes before the 4,096 levels: folders named `a` reach it 2,049 deep.
     #[test]
-    fn a_deep_tree_stops_at_4096_without_running_out_of_stack() {
+    fn a_deep_tree_stops_at_the_path_limit_without_running_out_of_stack() {
         let (dir, git) = repo(Sha1);
         // Tree `k` holds `k` levels of folders; one pack holds them all.
         let mut trees = vec![(Vec::new(), object_id(ObjectType::Tree, b"", Sha1).unwrap())];
-        for _ in 0..4097 {
+        for _ in 0..2049 {
             let below = trees.last().unwrap().1;
             let bytes = [&b"40000 a\0"[..], below.as_bytes()].concat();
             let id = object_id(ObjectType::Tree, &bytes, Sha1).unwrap();
@@ -1550,8 +1635,9 @@ mod tests {
             .map(|(bytes, _)| PackEntry::Whole(ObjectType::Tree, bytes.clone()))
             .collect();
         git.pack(&entries);
-        let at_limit = git.commit(&commit_bytes(&trees[4096].1, &[], "", b"m\n"));
-        let past = git.commit(&commit_bytes(&trees[4097].1, &[], "", b"m\n"));
+        // The deepest folder's path is 4,095 bytes, and one level more 4,097.
+        let at_limit = git.commit(&commit_bytes(&trees[2048].1, &[], "", b"m\n"));
+        let past = git.commit(&commit_bytes(&trees[2049].1, &[], "", b"m\n"));
         let path = dir.path().to_owned();
         // A walk that recursed once a level would need far more stack than this.
         let (fresh, fine, known) = std::thread::Builder::new()
@@ -1569,8 +1655,8 @@ mod tests {
             .join()
             .unwrap();
         assert!(fine.is_ok(), "{fine:?}");
-        assert_refused(fresh, &[&past.to_hex(), "more than 4096 levels"]);
-        assert_refused(known, &[&past.to_hex(), "more than 4096 levels"]);
+        assert_refused(fresh, &[&past.to_hex(), "longer than 4096 bytes"]);
+        assert_refused(known, &[&past.to_hex(), "longer than 4096 bytes"]);
     }
 
     #[test]
@@ -2299,7 +2385,7 @@ mod tests {
         }
         // A name too long, from a real tree.
         let (dir, git) = repo(Sha1);
-        let name = format!("{HOSTILE}{}", "x".repeat(300));
+        let name = format!("{HOSTILE}{}", "x".repeat(800));
         let id = commit_of(&git, &[(b"100644", name.as_bytes(), blob(&git, b"x"))]);
         let (result, _) = convert(dir.path(), "a", |c| c.commit(&id));
         assert_hostile_text_escaped(&result.unwrap_err().to_string());

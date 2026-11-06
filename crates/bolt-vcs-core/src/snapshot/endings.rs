@@ -4,20 +4,24 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::Path;
 
-use super::{Folders, Kind, NAMED, SaveError, open_project_file, stamp};
-use crate::listing::{Entry, EntryKind, Listing};
+use bolt_platform::dir::Dir;
+
+use super::{
+    Child, Folders, Handles, Kind, NAMED, SaveError, open_scanned, saved_file, stamp, stamp_of,
+};
+use crate::listing::{Entry, Listing};
 use crate::store::Store;
 
 /// How many saved bytes are held up against the file at a time.
 const PIECE: usize = 64 << 10;
 
-/// Fails, naming the first few, if any file in `folders` is the base save's file with each LF
-/// turned into CRLF. `old` is what the base save holds in each folder. Entries kept as they were
-/// are not files in `folders`, so they are never looked at.
+/// Fails, naming the first few, if any file in `folders`, read through `handles`, is the base
+/// save's file with each LF turned into CRLF. `old` is what the base save holds in each folder.
+/// Entries kept as they were are not files in `folders`, so they are never looked at.
 pub(super) fn check(
     store: &Store,
+    handles: &mut Handles,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
 ) -> Result<(), SaveError> {
@@ -28,13 +32,10 @@ pub(super) fn check(
             continue;
         };
         for c in children.iter().filter(|c| c.kind == Kind::File) {
-            let saved = before
-                .get(&c.name)
-                .filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable));
-            let Some(was) = saved else {
+            let Some(was) = saved_file(Some(before), &c.name) else {
                 continue;
             };
-            if converted(store, was, &c.path).map_err(|e| e.at(&c.rel))? {
+            if converted(store, was, handles.folder(rel)?, c)? {
                 count += 1;
                 if first.len() < NAMED {
                     first.push(c.rel.clone());
@@ -49,14 +50,15 @@ pub(super) fn check(
     }
 }
 
-/// Whether the file at `path` is exactly the saved bytes of `was` with every LF turned into CRLF.
-fn converted(store: &Store, was: &Entry, path: &Path) -> Result<bool, SaveError> {
+/// Whether the file `c`, in `dir`, is exactly the saved bytes of `was` with every LF turned into
+/// CRLF.
+fn converted(store: &Store, was: &Entry, dir: &Dir, c: &Child) -> Result<bool, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
-        path: path.display().to_string(),
+        path: c.rel.clone(),
         source,
     };
-    let file = open_project_file(path)?;
-    let before = stamp(&file).map_err(unreadable)?;
+    let (file, opened) = open_scanned(dir, &c.name, &c.rel, c.meta.as_ref())?;
+    let before = stamp_of(&opened);
     // Each LF adds a byte, so a conversion is longer, and at most twice as long.
     if before.0 <= was.size || before.0 > was.size.saturating_mul(2) {
         return Ok(false);
@@ -72,7 +74,7 @@ fn converted(store: &Store, was: &Entry, path: &Path) -> Result<bool, SaveError>
     let ended = at_end(&file).map_err(unreadable)?;
     if stamp(&file).map_err(unreadable)? != before {
         return Err(SaveError::ChangedDuringSave {
-            path: path.display().to_string(),
+            path: c.rel.clone(),
         });
     }
     Ok(ended)
@@ -157,6 +159,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::id::hash_content;
+    use crate::listing::EntryKind;
     use crate::listing::SaveLimits;
     use crate::snapshot::tests::{project, save_now, saved_root, walk_project, write};
     use crate::test_support::{add_listing, plant_root, plant_save};
@@ -180,8 +183,8 @@ mod tests {
         write(dir.path(), "f.txt", saved);
         saved_root(save_now(&mut repo).unwrap());
         write(dir.path(), "f.txt", disk);
-        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        let result = check(repo.store(), &scan.folders, &scan.old);
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let result = check(repo.store(), &mut scan.handles, &scan.folders, &scan.old);
         // Ending a copy on purpose is no damage and no warning.
         assert!(repo.store().warnings().is_empty());
         result
@@ -238,8 +241,8 @@ mod tests {
             add_listing(packs, vec![lost]).0
         });
         write(dir.path(), "f.txt", b"\r\n\r\nx");
-        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        check(repo.store(), &scan.folders, &scan.old).unwrap();
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        check(repo.store(), &mut scan.handles, &scan.folders, &scan.old).unwrap();
     }
 
     #[test]
@@ -254,8 +257,13 @@ mod tests {
         );
         write(dir.path(), "run.sh", b"a\r\nb\r\n");
         write(dir.path(), "link", b"a\r\nb\r\n");
-        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        let found = found(check(repo.store(), &scan.folders, &scan.old));
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let found = found(check(
+            repo.store(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        ));
         assert_eq!(found, (1, vec!["run.sh".to_owned()]));
     }
 
@@ -269,8 +277,8 @@ mod tests {
         for n in 1..=7 {
             write(dir.path(), &format!("sub/f{n}.txt"), b"a\r\nb\r\n");
         }
-        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        let err = check(repo.store(), &scan.folders, &scan.old).unwrap_err();
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let err = check(repo.store(), &mut scan.handles, &scan.folders, &scan.old).unwrap_err();
         assert_eq!(
             err.to_string(),
             "7 files differ from what Git stored only in line endings: Git turned LF into CRLF \
@@ -337,9 +345,9 @@ mod tests {
             add_listing(packs, vec![lost]).0
         });
         write(dir.path(), "f.txt", b"a\r\nb\r\n");
-        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
         // Not taken for a file that differs: the store failed.
-        let err = check(repo.store(), &scan.folders, &scan.old).unwrap_err();
+        let err = check(repo.store(), &mut scan.handles, &scan.folders, &scan.old).unwrap_err();
         assert!(matches!(err, SaveError::Repo(_)), "{err:?}");
     }
 

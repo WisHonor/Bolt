@@ -1,0 +1,55 @@
+---
+source: crates/bolt-vcs/tests/status.rs
+expression: doc
+---
+{
+  "bolt_json": 1,
+  "changes": [
+    {
+      "change": "modified",
+      "kind": "file",
+      "new_size": 7,
+      "old_size": 1,
+      "path": "a.txt"
+    },
+    {
+      "change": "removed",
+      "kind": "file",
+      "new_size": null,
+      "old_size": 1,
+      "path": "b.txt"
+    },
+    {
+      "change": "added",
+      "kind": "file",
+      "new_size": 1,
+      "old_size": null,
+      "path": "c.txt"
+    }
+  ],
+  "not_written_here": [],
+  "position": {
+    "line": "main"
+  },
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Files",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "unfinished_switch": null,
+  "warnings": []
+}

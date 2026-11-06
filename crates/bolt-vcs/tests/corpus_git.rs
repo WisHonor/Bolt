@@ -187,16 +187,7 @@ fn link_folder(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    {
-        let made = std::process::Command::new("cmd")
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(made.success(), "mklink /J {}", link.display());
-    }
+    support::junction(link, target);
 }
 
 /// Makes `link` a link to the file `target`; false, with a note, where Windows lacks the right.
@@ -209,8 +200,8 @@ fn link_file(target: &Path, link: &Path) -> bool {
     #[cfg(windows)]
     match std::os::windows::fs::symlink_file(target, link) {
         Ok(()) => true,
-        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights.
-        Err(e) if e.raw_os_error() == Some(1314) => {
+        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights, which CI has.
+        Err(e) if e.raw_os_error() == Some(1314) && std::env::var_os("CI").is_none() => {
             eprintln!("note: skipped, this account can't make links");
             false
         }
@@ -339,9 +330,9 @@ fn bolt_spellings_are_skipped_and_warned_about() {
 }
 
 #[test]
-fn a_name_longer_than_255_bytes_stops_the_import() {
+fn a_name_longer_than_765_bytes_stops_the_import() {
     let (env, git) = repo();
-    let long = "x".repeat(256);
+    let long = "x".repeat(766);
     let id = main_of(
         &git,
         &[(b"100644", long.as_bytes(), git.object(Blob, b"x\n"))],
@@ -349,7 +340,7 @@ fn a_name_longer_than_255_bytes_stops_the_import() {
     let err = stopped(&env);
     let stop = format!(
         "error: Git reads this object, but Bolt can't import it as it is: commit `{}` has a name \
-         longer than 255 bytes, more than Bolt allows: `{}...`.\n",
+         longer than 765 bytes, more than Bolt allows: `{}...`.\n",
         id.to_hex(),
         "x".repeat(255)
     );
@@ -492,10 +483,13 @@ fn deep_and_wide_trees_stop_at_bolts_limits_quickly() {
     let id = commit(&git, deep_tree(&git, 100_000), &[], "Deep");
     on_main(&git, id);
     let err = stopped_quickly(&env);
+    // A path's limit comes first: `a/a/…` passes 4,096 bytes 2,049 folders down, named by the
+    // end of its path.
     let stop = format!(
         "error: Git reads this object, but Bolt can't import it as it is: commit `{}` can't \
-         become one save, because its folders nest more than 4096 levels deep.\n",
-        id.to_hex()
+         become one save, because a path in it is longer than 4096 bytes: `…/{}a`.\n",
+        id.to_hex(),
+        "a/".repeat(511)
     );
     assert!(err.contains(&stop), "{err}");
 

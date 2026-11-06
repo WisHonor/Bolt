@@ -2,9 +2,12 @@
 //! ignore files): links are never followed (except to the user's own settings), only regular
 //! files are accepted, and reads are capped (storage-format.md §10 and §12).
 
+use std::ffi::OsStr;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
+
+use bolt_platform::dir::{Dir, EntryType};
 
 // Read limits (storage-format.md §10 and §12).
 pub const MAX_FORMAT_BYTES: u64 = 4096;
@@ -54,6 +57,44 @@ pub fn read_capped(path: &Path, max: u64) -> io::Result<Vec<u8>> {
         path,
         max,
     )
+}
+
+/// Opens the regular file `name` in the folder `dir` to read, as `open_regular` opens a path: a
+/// link, folder, pipe or device gives `InvalidInput`, naming it `shown`, and any other error from
+/// the open comes back unchanged.
+pub(crate) fn open_regular_in(dir: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
+    dir.open_file(name)
+        .map_err(|e| refused_in(dir, name, shown, e))
+}
+
+/// Opens the regular file `name` in the folder `dir` to read and write, making it if nothing has
+/// that name and keeping what is in it, with `open_regular_in`'s refusals.
+pub(crate) fn open_or_create_in(dir: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
+    dir.open_or_create(name)
+        .map_err(|e| refused_in(dir, name, shown, e))
+}
+
+/// `e`, from opening `name` in `dir`, as `not_regular` names it when what is there is a link,
+/// folder or special file.
+fn refused_in(dir: &Dir, name: &OsStr, shown: &Path, e: io::Error) -> io::Error {
+    // The open has already refused; this look only picks the message.
+    let not_a_file = || dir.metadata(name).is_ok_and(|m| m.kind != EntryType::File);
+    if e.kind() != io::ErrorKind::NotFound && not_a_file() {
+        not_regular(shown)
+    } else {
+        e
+    }
+}
+
+/// Reads the regular file `name` in the folder `dir` as `read_capped` reads a path; see
+/// `open_regular_in`.
+pub(crate) fn read_capped_in(
+    dir: &Dir,
+    name: &OsStr,
+    shown: &Path,
+    max: u64,
+) -> io::Result<Vec<u8>> {
+    read_to_cap(open_regular_in(dir, name, shown)?, shown, max)
 }
 
 /// Like `read_capped`, but follows links. Only for the user's own settings files, which dotfile
@@ -115,12 +156,6 @@ pub fn check_real_dir(path: &Path) -> io::Result<()> {
 /// never follows.
 pub fn is_link(meta: &Metadata) -> bool {
     meta.is_symlink() || is_reparse_point(meta)
-}
-
-/// Whether `meta`, from `symlink_metadata`, is a file that is a Windows reparse point but not a
-/// link: a cloud placeholder, say, which Bolt can't save yet.
-pub fn is_reparse_file(meta: &Metadata) -> bool {
-    meta.is_file() && is_reparse_point(meta)
 }
 
 /// A plain file: not a link, folder, pipe or device, and on Windows no reparse point at all.

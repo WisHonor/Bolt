@@ -327,7 +327,10 @@ fn write_for_git(root: &Path, tree: &Tree) {
 /// The drive the tests run on, as `save` finds it.
 fn this_drive() -> Drive {
     static DRIVE: OnceLock<Drive> = OnceLock::new();
-    *DRIVE.get_or_init(|| drive::probe(tempfile::tempdir().unwrap().path()).unwrap())
+    *DRIVE.get_or_init(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        drive::probe(&bolt_platform::dir::Dir::open_top(tmp.path()).unwrap()).unwrap()
+    })
 }
 
 /// A path as Git's walk reads it on this drive.
@@ -529,9 +532,9 @@ proptest! {
         let who = who();
         let mut repo = Repository::init(root, &who).unwrap();
         let req = SaveRequest {
-            message: "Save", who: &who, command: "save", accept_crlf: false, git_excludes: None,
+            message: "Save", who: &who, command: "save", accept_crlf: false, git_excludes: None, new_line: None, only: None,
         };
-        save_folder(&mut repo, &req, &mut |_| {}).unwrap();
+        save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
         let mut got: Vec<String> =
             saved_files(&repo).iter().map(|p| as_git_reads(p, drive)).collect();
         got.sort();
@@ -779,8 +782,10 @@ fn gits_personal_lists_keep_out_what_git_keeps_out() {
         command: "save",
         accept_crlf: false,
         git_excludes: Some(&list),
+        new_line: None,
+        only: None,
     };
-    save_folder(&mut repo, &req, &mut |_| {}).unwrap();
+    save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
     let mut got: Vec<String> = saved_files(&repo)
         .iter()
         .map(|p| as_git_reads(p, drive))

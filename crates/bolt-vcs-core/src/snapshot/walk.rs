@@ -1,27 +1,31 @@
 //! The walk of the project folder for `bolt save`: what the ignore rules let in, what the last
 //! save holds along the way, and the entries a save keeps as they were, in folders gone from disk
-//! too.
+//! too. Each folder is opened from the one above it, a name at a time, never through a link
+//! (decision 048).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::{self, Metadata};
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use ignore::WalkBuilder;
+use bolt_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, Matcher, Rules};
-use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, SaveLimits};
-use crate::names::{holdable_here, is_git_alias, validate_name};
+use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
+use crate::names::{holdable_here, is_bolt_alias, is_git_alias, own_folder, validate_name};
 use crate::repo::RepoError;
-use crate::safe_fs;
 use crate::store::{Store, StoreError};
 use crate::text::{escape, escape_all};
 use crate::warning::{self, Warning};
+use crate::{fsio, safe_fs};
 
 /// A project path as the user should see it; names that aren't UTF-8 are shown lossily.
 fn shown(rel: &Path) -> String {
@@ -31,29 +35,113 @@ fn shown(rel: &Path) -> String {
         .join("/")
 }
 
-#[cfg(unix)]
-fn executable_bits(meta: &Metadata) -> Option<bool> {
-    use std::os::unix::fs::PermissionsExt;
-    Some(meta.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn executable_bits(_meta: &Metadata) -> Option<bool> {
-    None
-}
-
-/// Whether a folder of this name is Bolt's or Git's, which a save never enters. Where the drive
-/// ignores letter case, Git's folder may be spelled `.GIT`.
-fn is_internal_folder(name: &str, ignores_case: bool) -> bool {
-    name == ".bolt" || name == ".git" || (ignores_case && name.eq_ignore_ascii_case(".git"))
-}
-
 /// Whether the folder `dir` holds a Git repository or Bolt project of its own: an entry named
 /// `.git` of any kind (a worktree's or submodule's is a file), or a `.bolt` folder. Where the
 /// drive ignores letter case, `.GIT` is found as `.git` (decision 046).
-fn holds_own_repository(dir: &Path) -> bool {
-    fs::symlink_metadata(dir.join(".git")).is_ok()
-        || fs::symlink_metadata(dir.join(".bolt")).is_ok_and(|m| m.is_dir())
+pub(super) fn holds_own_repository(dir: &Dir) -> bool {
+    dir.metadata(OsStr::new(".git")).is_ok()
+        || dir
+            .metadata(OsStr::new(".bolt"))
+            .is_ok_and(|m| m.kind == EntryType::Dir)
+}
+
+/// The most folders a save holds open at once (half macOS's default limit of 256 open files, which
+/// counts packs and the rest too): past them, a folder is opened again from the
+/// deepest one held, a name at a time.
+const MOST_HELD: usize = 128;
+
+/// The project's folders a save holds open: the top, those below it on the way to the folder last
+/// asked for, at most `MOST_HELD - 2`, and that folder itself when it is deeper than those. So at
+/// most `MOST_HELD` are open, and one more for a moment while the next is opened.
+pub(super) struct Handles {
+    top: Arc<Dir>,
+    down: Vec<(OsString, Arc<Dir>)>,
+    past: Option<(PathBuf, Arc<Dir>)>,
+    /// The most it holds; less than `MOST_HELD` while others hold folders too.
+    most: usize,
+}
+
+impl Handles {
+    /// The project folder at `root`, a path the caller has resolved.
+    fn open(root: &Path) -> io::Result<Handles> {
+        Ok(Handles {
+            top: Arc::new(Dir::open_top(root)?),
+            down: Vec::new(),
+            past: None,
+            most: MOST_HELD,
+        })
+    }
+
+    /// The folder at the project path `rel`, opened from the deepest folder held on the way to
+    /// it, one name at a time.
+    fn dir(&mut self, rel: &Path) -> io::Result<&Dir> {
+        self.held(rel).map(|dir| &**dir)
+    }
+
+    /// `dir`, as a handle that can be kept after this set lets it go.
+    fn held(&mut self, rel: &Path) -> io::Result<&Arc<Dir>> {
+        let names: Vec<&OsStr> = rel.iter().collect();
+        let same = self
+            .down
+            .iter()
+            .zip(&names)
+            .take_while(|((held, _), name)| held.as_os_str() == **name)
+            .count();
+        self.down.truncate(same);
+        while self.down.len() < self.most.saturating_sub(2)
+            && let Some(&name) = names.get(self.down.len())
+        {
+            let next = self.deepest().open_dir(name)?;
+            self.down.push((name.to_owned(), Arc::new(next)));
+        }
+        let Some((first, rest)) = names
+            .get(self.down.len()..)
+            .and_then(<[&OsStr]>::split_first)
+        else {
+            return Ok(self.deepest());
+        };
+        // Deeper than those held: the folder last opened down there, or one in it, or else again
+        // from the deepest held.
+        let dir = match self.past.take() {
+            Some((path, dir)) if path == rel => dir,
+            Some((path, dir)) if rel.parent() == Some(path.as_path()) => {
+                Arc::new(dir.open_dir(rest.last().unwrap_or(first))?)
+            }
+            other => {
+                drop(other);
+                let mut dir = self.deepest().open_dir(first)?;
+                for name in rest {
+                    dir = dir.open_dir(name)?;
+                }
+                Arc::new(dir)
+            }
+        };
+        Ok(&self.past.insert((rel.to_owned(), dir)).1)
+    }
+
+    /// The folder at the project path `rel`, as `dir` opens it, or what a save says when it can't.
+    pub(super) fn folder(&mut self, rel: &str) -> Result<&Dir, SaveError> {
+        self.dir(Path::new(rel)).map_err(|e| folder_problem(rel, e))
+    }
+
+    fn deepest(&self) -> &Arc<Dir> {
+        self.down.last().map_or(&self.top, |(_, dir)| dir)
+    }
+}
+
+/// What a save says of the folder `rel` that it can't open or list: one swapped for a link or a
+/// file since it was listed changed during the save; anything else is unreadable.
+fn folder_problem(rel: &str, e: io::Error) -> SaveError {
+    let path = if rel.is_empty() {
+        "the project folder".to_owned()
+    } else {
+        rel.to_owned()
+    };
+    if is_link_refusal(&e) || e.kind() == io::ErrorKind::NotADirectory {
+        SaveError::ChangedDuringSave { path }
+    } else {
+        SaveError::Unreadable { path, source: e }
+    }
 }
 
 /// The folder holding the project path `rel`, as an error names it.
@@ -65,7 +153,7 @@ fn folder_of(rel: &str) -> String {
 }
 
 /// The project path of `name` in the folder `rel` (`""` for the top folder).
-fn path_in(rel: &str, name: &str) -> String {
+pub(super) fn path_in(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         name.to_owned()
     } else {
@@ -76,7 +164,7 @@ fn path_in(rel: &str, name: &str) -> String {
 /// Which entries of `listing`, a folder of the last save, every save keeps as they were because
 /// this computer can't hold them as they are: project links, names this system can't hold, and
 /// names that are one file with another on this drive (decisions 036 and 039).
-fn kept_as_they_were(listing: &Listing, drive: Drive) -> Vec<bool> {
+pub(super) fn kept_as_they_were(listing: &Listing, drive: Drive) -> Vec<bool> {
     let entries = listing.entries();
     let mut kept: Vec<bool> = entries
         .iter()
@@ -136,21 +224,24 @@ impl<'a> Base<'a> {
         without_git_names(listing)
     }
 
-    /// The listing `id` of a folder `depth` levels down that is gone from disk, or `None` from
-    /// the first time a read would pass the limits on. Past them the base save is invalid and
-    /// nothing can be kept, so the whole search ends there, reading nothing more, and the save
-    /// goes ahead, as one beside a save too large to compare does.
+    /// The listing `id` of a folder `depth` levels down that is gone from disk, whose path with a
+    /// `/` after it is `prefix` bytes long, or `None` from the first time a read would pass the
+    /// limits on. Past them the base save is invalid and nothing can be kept, so the whole search
+    /// ends there, reading nothing more, and the save goes ahead, as one beside a save too large
+    /// to compare does.
     fn gone_listing(
         &mut self,
         id: Id,
         depth: usize,
+        prefix: usize,
     ) -> Result<Option<(Listing, Vec<String>)>, SaveError> {
         if self.spent || self.limits.check_depth(depth).is_err() {
             self.spent = true;
             return Ok(None);
         }
         let listing = self.store.listing(&id)?;
-        if self.limits.add(listing.entries().len()).is_err() {
+        let long = |e: &Entry| self.limits.check_path(prefix + e.name.len()).is_err();
+        if listing.entries().iter().any(long) || self.limits.add(listing.entries().len()).is_err() {
             self.spent = true;
             return Ok(None);
         }
@@ -159,7 +250,7 @@ impl<'a> Base<'a> {
 }
 
 /// `listing` without its names Git treats as `.git`, and those names.
-fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String>), SaveError> {
+pub(super) fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String>), SaveError> {
     if !listing.entries().iter().any(|e| is_git_alias(&e.name)) {
         return Ok((listing, Vec::new()));
     }
@@ -190,8 +281,7 @@ impl Named {
 }
 
 /// The walk met `path` before reading what the base save holds in the folder above it. It hands
-/// over every folder before anything in it, so this is a fault in Bolt, or a folder that became
-/// a link mid-walk (a known limit, security.md T20).
+/// over every folder before anything in it, so this is a fault in Bolt.
 fn unnoted(path: &str) -> SaveError {
     let fault = format!(
         "Bolt reached {} before reading what the last save holds in the folder above it, so \
@@ -201,18 +291,19 @@ fn unnoted(path: &str) -> SaveError {
     RepoError::from(io::Error::other(fault)).into()
 }
 
-/// What a walk keeps track of: the ignore rules of the folders it is inside, what the base save
-/// holds there, what it leaves untouched, and the first problem found.
+/// What a walk keeps track of: the folders it holds open, the ignore rules of those it is inside,
+/// what the base save holds there, what it leaves untouched, and the first problem found.
 struct WalkState {
     root: PathBuf,
+    handles: Handles,
     matcher: Matcher,
     /// The bytes of every ignore file the walk has read (storage-format.md §12).
     read: u64,
     problem: Option<SaveError>,
     /// One for each `.gitignore` skipped.
     warnings: Vec<Warning>,
-    /// What the save leaves out because Git treats its name as `.git`: from the folder, and from
-    /// the base save.
+    /// What the save leaves out because Git treats its name as `.git`, or Bolt as `.bolt`: from
+    /// the folder, and from the base save.
     git_names: Named,
     /// Folders that hold a repository or project of their own (decision 046), for the warning.
     nested: Named,
@@ -249,8 +340,13 @@ impl WalkState {
         dropped: Vec<String>,
         own_list: Option<&Path>,
     ) -> Result<WalkState, SaveError> {
+        let handles = Handles::open(root).map_err(|source| SaveError::Unreadable {
+            path: "the project folder".to_owned(),
+            source,
+        })?;
         let mut rules = WalkState {
             root: root.to_owned(),
+            handles,
             matcher: Matcher::new(drive),
             read: 0,
             problem: None,
@@ -270,7 +366,7 @@ impl WalkState {
         rules.drop_saved("", dropped);
         rules.note_untouched("", &top);
         rules.old.insert(String::new(), Some(top));
-        rules.enter(root, own_list)?;
+        rules.enter(Path::new(""), own_list)?;
         Ok(rules)
     }
 
@@ -316,9 +412,8 @@ impl WalkState {
                     id: e.id,
                     size: e.size,
                 },
-                path: self.root.join(&path),
                 rel: path.clone(),
-                executable: None,
+                meta: None,
             };
             self.untouched.insert(path, child);
         }
@@ -342,12 +437,12 @@ impl WalkState {
         gone
     }
 
-    /// Puts the rules of the ignore files in `dir` in force: its `.gitignore`, then its
+    /// Puts the rules of the ignore files in the folder `rel` in force: its `.gitignore`, then its
     /// `.boltignore`, whose lines come later so they can add to Git's rules or undo them. At the
     /// top, Git's personal lists come first, as in Git: the user's own `own_list`, then
     /// `.git/info/exclude` (decision 047).
-    fn enter(&mut self, dir: &Path, own_list: Option<&Path>) -> Result<(), SaveError> {
-        let folder = shown(dir.strip_prefix(&self.root).unwrap_or(dir));
+    fn enter(&mut self, rel: &Path, own_list: Option<&Path>) -> Result<(), SaveError> {
+        let folder = shown(rel);
         let mut in_force = self.matcher.in_force_bytes();
         let mut rules = Vec::new();
         if let Some(list) = own_list {
@@ -360,7 +455,8 @@ impl WalkState {
         }
         let gitignore_why = "Git skips a linked .gitignore too";
         for (name, why) in [(".gitignore", Some(gitignore_why)), (".boltignore", None)] {
-            rules.extend(self.file_rules(&dir.join(name), &folder, why, &mut in_force)?);
+            let name = OsStr::new(name);
+            rules.extend(self.file_rules(rel, name, &folder, why, &mut in_force)?);
         }
         if !rules.is_empty() {
             self.matcher.enter(&folder, rules);
@@ -377,10 +473,15 @@ impl WalkState {
         file: &Path,
         in_force: &mut u64,
     ) -> Result<Option<Rules>, SaveError> {
-        // shortcut: only a path spelled from the project's top counts as in it, not one with `..`,
-        // in other letter case or through a link of the user's own; compare resolved paths if
-        // settings like that turn up.
-        if let Ok(rel) = file.strip_prefix(&self.root)
+        // In the project however it is spelled (short names, letter case, `..`, a link of the
+        // user's own to the top). Only folders above it are resolved: the file, or a folder on
+        // the way, may be a link in the project, which must be seen as one.
+        let top = fs::canonicalize(&self.root).ok();
+        let rel = file.ancestors().skip(1).find_map(|up| {
+            let at_top = up == self.root || (top.is_some() && fs::canonicalize(up).ok() == top);
+            at_top.then(|| file.strip_prefix(up))
+        });
+        if let Some(Ok(rel)) = rel
             && !rel.as_os_str().is_empty()
             && rel.components().all(|c| matches!(c, Component::Normal(_)))
         {
@@ -414,67 +515,77 @@ impl WalkState {
         why: &str,
         in_force: &mut u64,
     ) -> Result<Option<Rules>, SaveError> {
-        let mut dir = self.root.clone();
-        for name in rel.parent().unwrap_or(Path::new("")) {
-            dir.push(name);
-            let folder = shown(dir.strip_prefix(&self.root).unwrap_or(&dir));
-            let meta = match fs::symlink_metadata(&dir) {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        let (Some(up), Some(name)) = (rel.parent(), rel.file_name()) else {
+            return Ok(None);
+        };
+        let mut dir = PathBuf::new();
+        for part in up {
+            dir.push(part);
+            match self.handles.dir(&dir) {
+                Ok(_) => {}
+                Err(e) if is_link_refusal(&e) => {
+                    self.warnings.push(Warning::new(
+                        warning::GITIGNORE_SKIPPED,
+                        format!(
+                            "Bolt skipped {}: {folder} is a link, not a real folder, so its rules \
+                             weren't used. {why}. Make {folder} a real folder if they should \
+                             apply.",
+                            escape(&shown(rel), false),
+                            folder = escape(&shown(&dir), false)
+                        ),
+                    ));
+                    return Ok(None);
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    return Ok(None);
+                }
                 Err(source) => {
-                    let path = folder_of(&folder);
+                    let path = shown(&dir);
                     return Err(SaveError::Unreadable { path, source });
                 }
-            };
-            if safe_fs::is_link(&meta) {
-                self.warnings.push(Warning::new(
-                    warning::GITIGNORE_SKIPPED,
-                    format!(
-                        "Bolt skipped {}: {folder} is a link, not a real folder, so its rules \
-                         weren't used. {why}. Make {folder} a real folder if they should apply.",
-                        escape(&shown(rel), false),
-                        folder = escape(&folder, false)
-                    ),
-                ));
-                return Ok(None);
-            }
-            if !meta.is_dir() {
-                return Ok(None);
             }
         }
-        let file = self.root.join(rel);
-        self.file_rules(&file, "", Some(why), in_force)
+        self.file_rules(up, name, "", Some(why), in_force)
     }
 
-    /// The rules of the ignore file `file`, for the project's `folder`, or none if there isn't
-    /// one. Read through `safe_fs`. One of Git's lists (`why` says why one is skipped) that isn't
-    /// a regular file is skipped with a warning, as Git skips a linked `.gitignore`; for a
-    /// `.boltignore` (`why` is `None`) that stops the save. A folder Bolt may not look into is
-    /// `Unreadable`.
+    /// The rules of the ignore file `name` in the folder `up`, for the project's `folder`, or none
+    /// if there isn't one. Read through `safe_fs`. One of Git's lists (`why` says why one is
+    /// skipped) that isn't a regular file is skipped with a warning, as Git skips a linked
+    /// `.gitignore`; for a `.boltignore` (`why` is `None`) that stops the save. A folder Bolt may
+    /// not look into is `Unreadable`.
     fn file_rules(
         &mut self,
-        file: &Path,
+        up: &Path,
+        name: &OsStr,
         folder: &str,
         why: Option<&str>,
         in_force: &mut u64,
     ) -> Result<Option<Rules>, SaveError> {
-        let rel = shown(file.strip_prefix(&self.root).unwrap_or(file));
-        let bytes = match safe_fs::read_capped(file, safe_fs::MAX_IGNORE_FILE_BYTES) {
+        let rel = shown(&up.join(name));
+        let unreadable = |source| SaveError::Unreadable {
+            path: folder_of(&rel),
+            source,
+        };
+        let dir = self.handles.dir(up).map_err(unreadable)?;
+        let max = safe_fs::MAX_IGNORE_FILE_BYTES;
+        let bytes = match safe_fs::read_capped_in(dir, name, Path::new(&rel), max) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                let meta = match fs::symlink_metadata(file) {
+                let meta = match dir.metadata(name) {
                     Ok(meta) => Some(meta),
                     Err(source) if source.kind() == io::ErrorKind::NotFound => None,
-                    Err(source) => {
-                        let path = folder_of(&rel);
-                        return Err(SaveError::Unreadable { path, source });
-                    }
+                    Err(source) => return Err(unreadable(source)),
                 };
                 // Judged by what the file is: an open can fail for other reasons with the same
                 // error kind, and a regular .gitignore that can't be read must stop the save.
                 if let Some(why) = why
-                    && meta.is_some_and(|m| !safe_fs::is_regular(&m))
+                    && meta.is_some_and(|m| m.kind != EntryType::File)
                 {
                     self.warnings.push(Warning::new(
                         warning::GITIGNORE_SKIPPED,
@@ -487,13 +598,14 @@ impl WalkState {
                     ));
                     return Ok(None);
                 }
-                // `safe_fs` refusals start with the full path; the project path replaces it, so
-                // the file is named once.
+                // `safe_fs` refusals start with the project path already, so the file is named
+                // once.
                 let said = e.to_string();
                 return Err(SaveError::Ignore {
-                    detail: match said.strip_prefix(&file.display().to_string()) {
-                        Some(rest) => format!("{rel}{rest}"),
-                        None => format!("{rel}: {said}"),
+                    detail: if said.starts_with(&rel) {
+                        said
+                    } else {
+                        format!("{rel}: {said}")
                     },
                 });
             }
@@ -534,11 +646,25 @@ impl WalkState {
     }
 
     /// Whether the walk keeps `path`: never what it leaves untouched, and what the ignore rules
-    /// keep out stays out, unless the base save has it. A name Git treats as `.git` stays out too,
-    /// noted for the warning. What it keeps that Git's rules alone would leave out is noted too.
+    /// keep out stays out, unless the base save has it. A name Git treats as `.git` or Bolt as
+    /// `.bolt` stays out too, noted for the warning. What it keeps that Git's rules alone would
+    /// leave out is noted too.
     /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
     /// is: the save will stop anyway.
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
+        self.judged(path, is_dir, is_dir)
+    }
+
+    /// `keeps` for a folder Bolt can't go into: a Windows reparse point that isn't a link but is
+    /// marked as a folder (a cloud folder, say). The ignore rules take it for a folder, and it is
+    /// never opened, for its ignore files or to see whether it holds a repository.
+    fn keeps_closed_folder(&mut self, path: &Path) -> bool {
+        self.judged(path, true, false)
+    }
+
+    /// `keeps` for what the ignore rules take for a folder when `is_dir`, and the walk opens only
+    /// when `opens`.
+    fn judged(&mut self, path: &Path, is_dir: bool, opens: bool) -> bool {
         if self.problem.is_some() {
             return false;
         }
@@ -562,17 +688,26 @@ impl WalkState {
         }
         let git_ignores = self.git_held.contains(&folder) || verdict.git == Decision::Ignored;
         // After the rules, so an ignored one stays out without a word, unless the base save held
-        // it: `Base` dropped and named those.
+        // it: `Base` dropped and named those. No save holds a `.bolt` spelling.
         let name = rel.file_name().and_then(|n| n.to_str());
-        if name.is_some_and(is_git_alias) {
+        if name.is_some_and(|n| is_git_alias(n) || is_bolt_alias(n)) {
             let rel = shown(rel);
             if !self.saved_git_names.contains(&rel) {
                 self.git_names.add(rel);
             }
             return false;
         }
-        // After the rules, so an ignored one stays out without a word.
-        if is_dir && holds_own_repository(path) {
+        // After the rules, so an ignored one stays out without a word. Only now is the folder
+        // opened: an ignored one may be one Bolt can't read.
+        let nested = opens
+            && match self.handles.dir(rel) {
+                Ok(dir) => holds_own_repository(dir),
+                Err(e) => {
+                    self.problem.get_or_insert(folder_problem(&shown(rel), e));
+                    return false;
+                }
+            };
+        if nested {
             let kept_rel = shown(rel);
             self.nested.add(kept_rel.clone());
             let kept = self.saved_before(&folder, rel, is_dir);
@@ -581,7 +716,7 @@ impl WalkState {
             }
             return kept;
         }
-        if is_dir && let Err(problem) = self.enter(path, None) {
+        if opens && let Err(problem) = self.enter(rel, None) {
             self.problem.get_or_insert(problem);
             return false;
         }
@@ -622,30 +757,68 @@ impl WalkState {
     }
 }
 
-/// Stack for the scan thread: 4 KiB per folder level the depth limit allows. Dropping the linked
-/// `ignore` matchers of a deep tree recurses once per level and needs about 2 MiB in a Windows
-/// debug build, more than the main thread's 1 MiB. Unused stack costs address space only.
-const WALK_STACK_BYTES: usize = (MAX_SAVE_DEPTH + 2) * 4096;
-
 /// What a walk of the project folder found.
 pub(super) struct Scan {
+    /// The project folder, held open from the walk on, so that the files it found are read
+    /// through it.
+    pub(super) handles: Handles,
     pub(super) folders: Folders,
     /// The base save's listing of each folder in `folders`, if it has that folder.
     pub(super) old: HashMap<String, Option<Listing>>,
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
+    /// The paths of the entries kept as they were in those folders.
+    pub(super) gone_kept: Vec<String>,
     /// The project paths of the files and links an ignore rule matches, kept because the base
     /// save holds them.
     pub(super) ignored: HashSet<String>,
     /// The project paths of the files and links kept that Git's rules alone would leave out,
     /// because a `.boltignore` line takes them back, or a folder they are in.
     pub(super) gitignored: HashSet<String>,
-    /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` left out.
+    /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` or Bolt as
+    /// `.bolt` left out.
     pub(super) warnings: Vec<Warning>,
 }
 
-/// Scans the project folder on a thread of its own, so callers don't need a deep stack. `drive`
-/// is what `drive::probe` found there, and `own_list` the user's own Git ignore list, if any.
+/// A folder the walk is in: its project path, how many levels down it is, and what it holds that
+/// the walk hasn't looked at yet, the next last.
+struct InFolder {
+    rel: String,
+    depth: usize,
+    left: Vec<DirEntry>,
+    /// The handle that listed it, kept until its files are handed out.
+    dir: Option<Arc<Dir>>,
+}
+
+impl InFolder {
+    /// The folder `rel`, `depth` levels down, with what it holds. Its files and links come before
+    /// its folders, so a folder past those held is opened again only to go into its next folder.
+    fn listed(handles: &mut Handles, rel: String, depth: usize) -> Result<InFolder, SaveError> {
+        let dir = Arc::clone(
+            handles
+                .held(Path::new(&rel))
+                .map_err(|e| folder_problem(&rel, e))?,
+        );
+        let mut left = dir.entries().map_err(|e| folder_problem(&rel, e))?;
+        // Backwards, as they are taken from the end.
+        left.sort_by(|a, b| {
+            (b.kind == EntryType::Dir, &b.name).cmp(&(a.kind == EntryType::Dir, &a.name))
+        });
+        Ok(InFolder {
+            rel,
+            depth,
+            left,
+            dir: Some(dir),
+        })
+    }
+}
+
+/// Stack for the scan thread. The walk recurses nowhere, but its calls take up to about 100 KiB in
+/// a debug build, more than some callers have. Unused stack costs address space only.
+const WALK_STACK_BYTES: usize = 1 << 20;
+
+/// Scans the project folder on a thread of its own, so callers don't need a deep stack; see
+/// `scan_folder`.
 pub(super) fn walk(
     root: &Path,
     base: Base,
@@ -665,6 +838,9 @@ pub(super) fn walk(
     })
 }
 
+/// Walks the project folder at `root`, which the caller has resolved, a folder at a time, going
+/// into each it keeps as soon as it meets it, as Git does. `drive` is what `drive::probe` found
+/// there, and `own_list` the user's own Git ignore list, if any.
 fn scan_folder(
     root: &Path,
     mut base: Base,
@@ -673,91 +849,10 @@ fn scan_folder(
     own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
-    // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
-    // read.
-    let mut folders = Folders::from([(String::new(), Vec::new())]);
+    let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     let (top, dropped) = base.listing(base.root)?;
-    // Bolt reads each ignore file itself: `ignore` would reopen it by path, following links and
-    // reading without a limit.
-    let rules = Arc::new(Mutex::new(WalkState::new(
-        root, drive, top, dropped, own_list,
-    )?));
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(false)
-        .git_exclude(false)
-        .git_global(false)
-        .ignore(false)
-        .parents(false)
-        .follow_links(false)
-        .filter_entry({
-            let rules = Arc::clone(&rules);
-            move |e| {
-                let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-                let internal = |name: &str| is_internal_folder(name, drive.ignores_case);
-                if is_dir && e.file_name().to_str().is_some_and(internal) {
-                    return false;
-                }
-                let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
-                rules.keeps(e.path(), is_dir)
-            }
-        })
-        .build();
-    for item in walker {
-        let entry = item.map_err(|e| walk_error(root, e))?;
-        let path = entry.path();
-        let rel_path = path.strip_prefix(root).unwrap_or(path);
-        let rel = shown(rel_path);
-        let mut names = Vec::new();
-        for part in rel_path.iter() {
-            names.push(part.to_str().ok_or_else(|| SaveError::InvalidName {
-                path: rel.clone(),
-                reason: "its name is not valid UTF-8".into(),
-            })?);
-        }
-        let Some((name, parents)) = names.split_last() else {
-            continue; // the project folder itself
-        };
-        validate_name(name).map_err(|e| SaveError::InvalidName {
-            path: rel.clone(),
-            reason: e.to_string(),
-        })?;
-        let meta = fs::symlink_metadata(path).map_err(|source| SaveError::Unreadable {
-            path: rel.clone(),
-            source,
-        })?;
-        let t = meta.file_type();
-        let kind = if t.is_symlink() {
-            Kind::Symlink
-        } else if t.is_dir() {
-            limits.check_depth(names.len()).map_err(too_large)?;
-            folders.entry(rel.clone()).or_default();
-            // The walk hands a folder over before it asks about anything inside.
-            rules
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .note_folder(&rel, &mut base)?;
-            Kind::Folder
-        } else if t.is_file() {
-            Kind::File
-        } else {
-            // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
-            continue;
-        };
-        limits.add(1).map_err(too_large)?;
-        folders.entry(parents.join("/")).or_default().push(Child {
-            name: (*name).to_owned(),
-            kind,
-            path: path.to_owned(),
-            rel,
-            executable: executable_bits(&meta),
-        });
-    }
-    let mut rules = rules.lock().unwrap_or_else(PoisonError::into_inner);
-    // Going on without the rules of an ignore file that failed would save what it keeps out.
-    if let Some(problem) = rules.problem.take() {
-        return Err(problem);
-    }
+    let mut rules = WalkState::new(root, drive, top, dropped, own_list)?;
+    let mut folders = walk_and_look(root, &mut base, &mut limits, drive, &mut rules)?;
     // Sorted, so a name the walk found can be looked up.
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -765,6 +860,7 @@ fn scan_folder(
     // A folder gone from disk comes back if something below it is kept as it was.
     let mut back = Vec::new();
     let mut rebuilt = Vec::new();
+    let mut gone_kept = Vec::new();
     for (rel, name, id) in rules.gone(&folders) {
         let found = |c: &[Child]| c.binary_search_by(|c| c.name.as_str().cmp(&name)).is_ok();
         let taken = folders.get(&rel).is_some_and(|c| found(c));
@@ -774,15 +870,14 @@ fn scan_folder(
             rebuilt.extend(gone.listings);
             let kind = Kind::Back {
                 id: gone.id,
-                kept: gone.kept,
+                kept: gone.kept.len(),
             };
-            let path = root.join(&top);
+            gone_kept.extend(gone.kept);
             let child = Child {
                 name,
                 kind,
-                path,
                 rel: top,
-                executable: None,
+                meta: None,
             };
             back.push((rel, child));
         }
@@ -791,13 +886,17 @@ fn scan_folder(
         folders.entry(rel).or_default().push(child);
     }
     for (_, kept) in rules.untouched.drain() {
+        limits
+            .check_path(kept.rel.len())
+            .map_err(|why| too_long(why, &kept.rel))?;
         if let Kind::Kept {
             kind: EntryKind::Folder,
             id,
             ..
         } = kept.kind
         {
-            count_kept_folder(base.store, &mut limits, kept.rel.split('/').count(), id)?;
+            let depth = kept.rel.split('/').count();
+            count_kept_folder(base.store, &mut limits, depth, kept.rel.len() + 1, id)?;
         }
         limits.add(1).map_err(too_large)?;
         let (up, _) = kept.rel.rsplit_once('/').unwrap_or_default();
@@ -815,35 +914,331 @@ fn scan_folder(
         rules.warnings.push(left_out);
     }
     Ok(Scan {
+        handles: rules.handles,
         folders,
-        old: std::mem::take(&mut rules.old),
+        old: rules.old,
         rebuilt,
-        ignored: std::mem::take(&mut rules.ignored),
-        gitignored: std::mem::take(&mut rules.gitignored),
-        warnings: std::mem::take(&mut rules.warnings),
+        gone_kept,
+        ignored: rules.ignored,
+        gitignored: rules.gitignored,
+        warnings: rules.warnings,
     })
 }
 
-/// Says the save left out entries whose names Git treats as `.git`, naming the first few.
+/// A file or link the walk found, still to be looked at: child `at` of `folder`, named `name`, at
+/// the project path `rel`, which the folder's listing said was `listed`.
+struct Look {
+    folder: String,
+    at: usize,
+    listed: EntryType,
+    name: String,
+    rel: String,
+}
+
+/// Files of one folder to look at, with the handle that listed the folder: a folder swapped since
+/// is never looked into, and the read that opens it again by name finds other files there.
+struct Job {
+    number: usize,
+    dir: Arc<Dir>,
+    looks: Vec<Look>,
+}
+
+/// The most files one thread looks at in one go.
+const LOOKS_PER_JOB: usize = 256;
+/// The most threads that look at files at once; more only wait on each other in the drive.
+const MOST_LOOKERS: usize = 6;
+/// Jobs waiting for a looker, for each looker.
+const WAITING_PER_LOOKER: usize = 2;
+
+/// Walks the folder (`walk_folders`) and fills in the details of every file and link it keeps,
+/// each from a look at the entry itself. Never from the folder listing: on Windows it keeps the
+/// old size and time of a file that is open and being written, so a change would hide behind them.
+/// Each look opens the file there, so they run on other threads while the walk goes on, as Git's
+/// preloaded index does.
+fn walk_and_look(
+    root: &Path,
+    base: &mut Base,
+    limits: &mut SaveLimits,
+    drive: Drive,
+    rules: &mut WalkState,
+) -> Result<Folders, SaveError> {
+    let threads = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MOST_LOOKERS);
+    let waiting = threads * WAITING_PER_LOOKER;
+    // Jobs hold their folders open: those waiting, one per looker, one the walk is filling or
+    // sending, and the folder the walk is in.
+    rules.handles.most = MOST_HELD - waiting - threads - 2;
+    let (send, jobs) = mpsc::sync_channel(waiting);
+    // The lookers alone hold it, so once they have all stopped the walk can't send.
+    let jobs = Arc::new(Mutex::new(jobs));
+    let failed = AtomicBool::new(false);
+    let (walked, looked) = thread::scope(|scope| {
+        let mut lookers = Vec::new();
+        for _ in 0..threads {
+            let (jobs, failed) = (Arc::clone(&jobs), &failed);
+            match thread::Builder::new().spawn_scoped(scope, move || look(&jobs, failed)) {
+                Ok(looker) => lookers.push(looker),
+                // Dropping `send` lets those started finish.
+                Err(e) => return (Err(SaveError::Repo(e.into())), Vec::new()),
+            }
+        }
+        drop(jobs);
+        let walked = walk_folders(root, base, limits, drive, rules, &send, &failed);
+        drop(send);
+        let mut looked = Vec::new();
+        for looker in lookers {
+            match looker.join() {
+                Ok(found) => looked.extend(found),
+                Err(_) => {
+                    let stopped =
+                        io::Error::other("a look at the project's files stopped unexpectedly");
+                    looked.push((0, Err(SaveError::Repo(stopped.into()))));
+                }
+            }
+        }
+        (walked, looked)
+    });
+    rules.handles.most = MOST_HELD;
+    // Only the top: what is read next opens its folders again by name, so a file in a folder
+    // swapped since the walk is found to be another file, never read as this one.
+    rules.handles.down.clear();
+    rules.handles.past = None;
+    let folders = walked?;
+    // Every job before a failed one was taken, so the first problem is always the same one.
+    let mut looked = looked;
+    looked.sort_by_key(|(i, _)| *i);
+    let mut found = Vec::new();
+    for (_, job) in looked {
+        found.extend(job?);
+    }
+    let Some(mut folders) = folders else {
+        let stopped = io::Error::other("the looks at the project's files stopped");
+        return Err(SaveError::Repo(stopped.into()));
+    };
+    for (look, meta) in found {
+        if let Some(c) = folders
+            .get_mut(&look.folder)
+            .and_then(|c| c.get_mut(look.at))
+        {
+            c.meta = Some(meta);
+        }
+    }
+    Ok(folders)
+}
+
+/// A job's files, each with its details, or the first problem a look at them found.
+type Looked = Result<Vec<(Look, EntryMeta)>, SaveError>;
+
+/// A looker: takes jobs from `jobs` until there are none, or until one fails.
+fn look(jobs: &Mutex<Receiver<Job>>, failed: &AtomicBool) -> Vec<(usize, Looked)> {
+    let mut done = Vec::new();
+    while !failed.load(Ordering::Relaxed) {
+        let next = match jobs.lock() {
+            Ok(jobs) => jobs.recv(),
+            Err(_) => break,
+        };
+        let Ok(job) = next else { break };
+        let number = job.number;
+        let found = look_at(job);
+        failed.fetch_or(found.is_err(), Ordering::Relaxed);
+        done.push((number, found));
+    }
+    done
+}
+
+/// The details of each file and link in `job`, through the handle that listed their folder.
+fn look_at(job: Job) -> Looked {
+    fsio::act_point("walk:looking");
+    let mut found = Vec::with_capacity(job.looks.len());
+    for look in job.looks {
+        let meta =
+            job.dir
+                .metadata(OsStr::new(&look.name))
+                .map_err(|source| SaveError::Unreadable {
+                    path: look.rel.clone(),
+                    source,
+                })?;
+        // The listing and this look disagree: it changed in between.
+        if meta.kind != look.listed {
+            return Err(SaveError::ChangedDuringSave { path: look.rel });
+        }
+        found.push((look, meta));
+    }
+    Ok(found)
+}
+
+/// The walk itself, handing the files and links it keeps to `send` a folder at a time, numbered
+/// in the order met, to be looked at while it goes on. Stops early, with nothing, once a look has
+/// `failed`: that look's problem is the answer.
+fn walk_folders(
+    root: &Path,
+    base: &mut Base,
+    limits: &mut SaveLimits,
+    drive: Drive,
+    rules: &mut WalkState,
+    send: &SyncSender<Job>,
+    failed: &AtomicBool,
+) -> Result<Option<Folders>, SaveError> {
+    let too_large = |detail| SaveError::TooLarge { detail };
+    let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
+    // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
+    // read.
+    let mut folders = Folders::from([(String::new(), Vec::new())]);
+    let mut path = vec![InFolder::listed(&mut rules.handles, String::new(), 0)?];
+    let (mut job, mut jobs) = (None, 0);
+    while let Some(here) = path.last_mut() {
+        let Some(entry) = here.left.pop() else {
+            path.pop();
+            continue;
+        };
+        let (up, depth) = (here.rel.clone(), here.depth + 1);
+        // Its files come first, so once a folder is met they are all handed out.
+        let listed_by = if entry.kind == EntryType::Dir {
+            here.dir.take();
+            None
+        } else {
+            here.dir.clone()
+        };
+        // A Windows reparse point that isn't a link but is marked as a folder: a folder to the
+        // ignore rules, though Bolt never goes into it.
+        let closed = entry.kind == EntryType::Other && entry.folder;
+        let is_dir = entry.kind == EntryType::Dir || closed;
+        let own = |name: &str| own_folder(name, drive);
+        if is_dir && depth == 1 && entry.name.to_str().is_some_and(own) {
+            continue;
+        }
+        let rel_path = Path::new(&up).join(&entry.name);
+        let kept = if closed {
+            rules.keeps_closed_folder(&root.join(&rel_path))
+        } else {
+            rules.keeps(&root.join(&rel_path), is_dir)
+        };
+        // Going on without the rules of an ignore file that failed would save what it keeps out.
+        if let Some(problem) = rules.problem.take() {
+            return Err(problem);
+        }
+        if !kept {
+            continue;
+        }
+        let rel = shown(&rel_path);
+        let name = entry.name.to_str().ok_or_else(|| SaveError::InvalidName {
+            path: rel.clone(),
+            reason: "its name is not valid UTF-8".into(),
+        })?;
+        validate_name(name).map_err(|e| SaveError::InvalidName {
+            path: rel.clone(),
+            reason: e.to_string(),
+        })?;
+        limits
+            .check_path(rel.len())
+            .map_err(|why| too_long(why, &rel))?;
+        let kind = match entry.kind {
+            EntryType::Dir => {
+                limits.check_depth(depth).map_err(too_large)?;
+                folders.entry(rel.clone()).or_default();
+                // The walk hands a folder over before it asks about anything inside.
+                rules.note_folder(&rel, base)?;
+                Kind::Folder
+            }
+            EntryType::Symlink => Kind::Symlink,
+            EntryType::File => Kind::File,
+            // A Windows reparse point that isn't a link (a cloud placeholder, say): reading it
+            // says that Bolt can't save it yet.
+            EntryType::Other if cfg!(windows) => Kind::File,
+            // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
+            EntryType::Other => continue,
+        };
+        limits.add(1).map_err(too_large)?;
+        let children = folders.entry(up.clone()).or_default();
+        if kind == Kind::Folder {
+            // Every file here is met before any folder, so they can be looked at now.
+            if !send_job(&mut job, &mut jobs, send, failed) {
+                return Ok(None);
+            }
+        } else {
+            let full = |j: &Job| {
+                j.looks.len() == LOOKS_PER_JOB || j.looks.first().is_some_and(|l| l.folder != up)
+            };
+            if job.as_ref().is_some_and(full) && !send_job(&mut job, &mut jobs, send, failed) {
+                return Ok(None);
+            }
+            let dir = listed_by.ok_or_else(|| {
+                SaveError::Repo(
+                    io::Error::other("a file was met after its folder's folders").into(),
+                )
+            })?;
+            let job = job.get_or_insert_with(|| Job {
+                number: jobs,
+                dir,
+                looks: Vec::new(),
+            });
+            job.looks.push(Look {
+                folder: up,
+                at: children.len(),
+                listed: entry.kind,
+                name: name.to_owned(),
+                rel: rel.clone(),
+            });
+        }
+        children.push(Child {
+            name: name.to_owned(),
+            kind,
+            rel: rel.clone(),
+            meta: None,
+        });
+        if kind == Kind::Folder {
+            path.push(InFolder::listed(&mut rules.handles, rel, depth)?);
+        }
+    }
+    if !send_job(&mut job, &mut jobs, send, failed) {
+        return Ok(None);
+    }
+    Ok(Some(folders))
+}
+
+/// Sends `job`, if there is one, and counts it; waits while the lookers are busy. False once a
+/// look has failed, or every looker has stopped.
+fn send_job(
+    job: &mut Option<Job>,
+    jobs: &mut usize,
+    send: &SyncSender<Job>,
+    failed: &AtomicBool,
+) -> bool {
+    if failed.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Some(job) = job.take() else {
+        return true;
+    };
+    *jobs += 1;
+    send.send(job).is_ok()
+}
+
+/// Says the save left out entries whose names Git treats as `.git` or Bolt as `.bolt`, naming the
+/// first few.
 fn git_names_left_out(names: &Named) -> Warning {
     let count = names.count;
     let (what, next) = if count == 1 {
         (
-            "1 entry whose name Git treats as .git, with everything in it".to_owned(),
+            "1 entry whose name Git or Bolt keep for themselves, with everything in it".to_owned(),
             "If Git uses it (a submodule's or worktree's .git file), list it in .boltignore to \
              leave it out without this warning; otherwise rename it to save it.",
         )
     } else {
         (
-            format!("{count} entries whose names Git treats as .git, with everything in them"),
+            format!(
+                "{count} entries whose names Git or Bolt keep for themselves, with everything in \
+                 them"
+            ),
             "If Git uses them (a submodule's or worktree's .git file), list them in .boltignore to \
              leave them out without this warning; otherwise rename them to save them.",
         )
     };
-    // Every invisible character shown, so a spelling can be told from `.git` itself.
+    // Every invisible character shown, so a spelling can be told from `.git` or `.bolt` itself.
     let first = names.first.iter().map(|path| escape_all(path));
     let message = format!(
-        "Left out {what}:{}\nGit keeps such names for itself (some spellings only on Windows or \
+        "Left out {what}:{}\nSuch names stand for .git or .bolt (some spellings only on Windows or \
          macOS), so Bolt leaves them out of saves, as it does on import. {next}",
         listed(first, count)
     );
@@ -877,8 +1272,8 @@ fn nested_projects_left_out(named: &Named) -> Warning {
 struct Gone {
     /// Its new listing's ID.
     id: Id,
-    /// How many entries below it are kept as they were.
-    kept: usize,
+    /// The paths of the entries below it kept as they were.
+    kept: Vec<String>,
     /// Its new listings, its own last.
     listings: Vec<Listing>,
 }
@@ -887,6 +1282,8 @@ struct Gone {
 struct Open {
     /// Its name; the folder the search starts from has none.
     name: String,
+    /// How long its project path is, with a `/` after it.
+    prefix: usize,
     listing: Listing,
     /// Which of its entries are kept as they were.
     kept: Vec<bool>,
@@ -922,12 +1319,12 @@ fn rebuild_gone(
     let too_large = |detail| SaveError::TooLarge { detail };
     let depth = top.split('/').count();
     let mut open: Vec<Open> = Vec::new();
-    let mut kept_in_all = 0;
+    let mut kept_in_all = Vec::new();
     let mut listings = Vec::new();
-    let mut read = Some((String::new(), id));
+    let mut read = Some((String::new(), top.len() + 1, id));
     loop {
-        if let Some((name, id)) = read.take()
-            && let Some((listing, dropped)) = base.gone_listing(id, depth + open.len())?
+        if let Some((name, prefix, id)) = read.take()
+            && let Some((listing, dropped)) = base.gone_listing(id, depth + open.len(), prefix)?
         {
             // Only now is a path below `top` needed, to name it.
             for git_name in &dropped {
@@ -943,14 +1340,16 @@ fn rebuild_gone(
                     });
                 }
                 if e.kind == EntryKind::Folder {
-                    count_kept_folder(base.store, limits, depth + open.len() + 1, e.id)?;
+                    let inside = prefix + e.name.len() + 1;
+                    count_kept_folder(base.store, limits, depth + open.len() + 1, inside, e.id)?;
                 }
                 limits.add(1).map_err(too_large)?;
                 holds.push(e.clone());
+                kept_in_all.push(path_below(top, &open, &name, &e.name));
             }
-            kept_in_all += holds.len();
             open.push(Open {
                 name,
+                prefix,
                 listing,
                 kept,
                 next: 0,
@@ -964,7 +1363,7 @@ fn rebuild_gone(
             let kept = folder.kept.get(folder.next).copied().unwrap_or(false);
             folder.next += 1;
             if e.kind == EntryKind::Folder && !kept {
-                read = Some((e.name.clone(), e.id));
+                read = Some((e.name.clone(), folder.prefix + e.name.len() + 1, e.id));
             }
             continue;
         }
@@ -999,72 +1398,31 @@ fn rebuild_gone(
     }
 }
 
-/// Counts everything the kept folder `depth` levels down holds, from its listing `id` down,
-/// against `limits`, one listing at a time: kept or not, a save holds no more than its format
-/// allows.
+/// Counts everything a kept folder holds, from its listing `id` down, against `limits`, one
+/// listing at a time: kept or not, a save holds no more than its format allows. The folder is
+/// `depth` levels down, and its path with a `/` after it is `prefix` bytes long.
 fn count_kept_folder(
     store: &Store,
     limits: &mut SaveLimits,
     depth: usize,
+    prefix: usize,
     id: Id,
 ) -> Result<(), SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
-    let mut todo = vec![(id, depth)];
-    while let Some((id, depth)) = todo.pop() {
+    let mut todo = vec![(id, depth, prefix)];
+    while let Some((id, depth, prefix)) = todo.pop() {
         limits.check_depth(depth).map_err(too_large)?;
         let listing = store.listing(&id)?;
         limits.add(listing.entries().len()).map_err(too_large)?;
-        let inner = listing
-            .entries()
-            .iter()
-            .filter(|e| e.kind == EntryKind::Folder);
-        todo.extend(inner.map(|e| (e.id, depth + 1)));
+        for e in listing.entries() {
+            let path = prefix + e.name.len();
+            limits.check_path(path).map_err(too_large)?;
+            if e.kind == EntryKind::Folder {
+                todo.push((e.id, depth + 1, path + 1));
+            }
+        }
     }
     Ok(())
-}
-
-/// An `ignore` error with paths shown as project paths.
-fn describe(root: &Path, err: &ignore::Error) -> String {
-    match err {
-        ignore::Error::WithPath { path, err } => {
-            let rel = shown(path.strip_prefix(root).unwrap_or(path));
-            format!("{rel}: {}", describe(root, err))
-        }
-        ignore::Error::WithLineNumber { line, err } => {
-            format!("line {line}: {}", describe(root, err))
-        }
-        ignore::Error::WithDepth { err, .. } => describe(root, err),
-        ignore::Error::Partial(errs) => errs
-            .iter()
-            .map(|e| describe(root, e))
-            .collect::<Vec<_>>()
-            .join("; "),
-        other => other.to_string(),
-    }
-}
-
-fn walk_error(root: &Path, err: ignore::Error) -> SaveError {
-    fn path_of(err: &ignore::Error) -> Option<&Path> {
-        match err {
-            ignore::Error::WithPath { path, .. } => Some(path),
-            ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
-                path_of(err)
-            }
-            _ => None,
-        }
-    }
-    let path = path_of(&err).map(|p| shown(p.strip_prefix(root).unwrap_or(p)));
-    match (err.io_error(), path) {
-        (Some(e), Some(path)) => SaveError::Unreadable {
-            path,
-            source: io::Error::new(e.kind(), e.to_string()),
-        },
-        (Some(e), None) => RepoError::from(io::Error::new(e.kind(), e.to_string())).into(),
-        // The walker reads no ignore files itself, so this is not expected; it fails closed.
-        (None, _) => SaveError::Ignore {
-            detail: describe(root, &err),
-        },
-    }
 }
 
 #[cfg(test)]
@@ -1072,7 +1430,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::id::hash_content;
-    use crate::listing::MAX_SAVE_ENTRIES;
+    use crate::listing::{MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES};
+    use crate::names::MAX_PATH_BYTES;
     use crate::repo::Repository;
     use crate::snapshot::SaveOutcome;
     use crate::snapshot::tests::{
@@ -1080,6 +1439,7 @@ mod tests {
         this_drive, walk_project, write,
     };
     use crate::test_support::{add_link, add_listing, plant_root, plant_save};
+    use std::fs;
 
     #[test]
     fn boltignore_git_and_bolt_folders_are_skipped() {
@@ -1274,7 +1634,7 @@ mod tests {
             assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert_eq!(warnings[0].kind, "git_names_left_out");
-            let listed = ":\n  .GIT\n  sub/.Git\nGit keeps";
+            let listed = ":\n  .GIT\n  sub/.Git\nSuch names";
             assert!(warnings[0].message.contains(listed), "{warnings:?}");
         }
     }
@@ -1306,12 +1666,12 @@ mod tests {
         // Every invisible character is shown, the joiner too, so no spelling passes for `.git`.
         assert_eq!(
             warnings[0].message,
-            "Left out 4 entries whose names Git treats as .git, with everything in them:\n  \
-             .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nGit keeps such names for \
-             itself (some spellings only on Windows or macOS), so Bolt leaves them out of saves, \
-             as it does on import. If Git uses them (a submodule's or worktree's .git file), list \
-             them in .boltignore to leave them out without this warning; otherwise rename them to \
-             save them."
+            "Left out 4 entries whose names Git or Bolt keep for themselves, with everything in \
+             them:\n  .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nSuch names stand for \
+             .git or .bolt (some spellings only on Windows or macOS), so Bolt leaves them out of \
+             saves, as it does on import. If Git uses them (a submodule's or worktree's .git \
+             file), list them in .boltignore to leave them out without this warning; otherwise \
+             rename them to save them."
         );
         // Said again when nothing changed, since they are still there.
         let again = save_now(&mut repo).unwrap();
@@ -1334,9 +1694,9 @@ mod tests {
         }
         let saved = save_now(&mut repo).unwrap();
         let message = &warnings_of(&saved)[0].message;
-        let listed = "Left out 7 entries whose names Git treats as .git, with everything in them:\n  \
-                      sub1/git~1\n  sub2/git~1\n  sub3/git~1\n  sub4/git~1\n  sub5/git~1\n  and 2 \
-                      more\n";
+        let listed = "Left out 7 entries whose names Git or Bolt keep for themselves, with \
+                      everything in them:\n  sub1/git~1\n  sub2/git~1\n  sub3/git~1\n  sub4/git~1\n  \
+                      sub5/git~1\n  and 2 more\n";
         assert!(message.starts_with(listed), "{message}");
     }
 
@@ -1362,8 +1722,8 @@ mod tests {
         assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub"]);
         let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
-        let listed = "Left out 2 entries whose names Git treats as .git, with everything in them:\n  \
-                      .GIT\n  sub/.git\nGit keeps";
+        let listed = "Left out 2 entries whose names Git or Bolt keep for themselves, with \
+                      everything in them:\n  .GIT\n  sub/.git\nSuch names";
         assert!(warnings[0].message.starts_with(listed), "{warnings:?}");
     }
 
@@ -1395,7 +1755,7 @@ mod tests {
         );
         let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["git_names_left_out", "nested_projects_left_out"]);
-        let listed = ":\n  git~1\n  gone/.g\\u{200c}it\n  lib/.git\nGit keeps";
+        let listed = ":\n  git~1\n  gone/.g\\u{200c}it\n  lib/.git\nSuch names";
         assert!(warnings[0].message.contains(listed), "{warnings:?}");
         // Gone from the save, so the next one names none; `lib` still holds its `.git`.
         let again = save_now(&mut repo).unwrap();
@@ -1426,12 +1786,59 @@ mod tests {
         assert_eq!(warnings[0].kind, "git_names_left_out");
         assert_eq!(
             warnings[0].message,
-            "Left out 1 entry whose name Git treats as .git, with everything in it:\n  sub/git~1\n\
-             Git keeps such names for itself (some spellings only on Windows or macOS), so Bolt \
-             leaves them out of saves, as it does on import. If Git uses it (a submodule's or \
-             worktree's .git file), list it in .boltignore to leave it out without this warning; \
-             otherwise rename it to save it."
+            "Left out 1 entry whose name Git or Bolt keep for themselves, with everything in it:\n  \
+             sub/git~1\nSuch names stand for .git or .bolt (some spellings only on Windows or \
+             macOS), so Bolt leaves them out of saves, as it does on import. If Git uses it (a \
+             submodule's or worktree's .git file), list it in .boltignore to leave it out without \
+             this warning; otherwise rename it to save it."
         );
+    }
+
+    #[test]
+    fn a_bolt_spelling_is_left_out_of_a_save_with_a_warning() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        // Below the top, where `bolt~1` isn't the short name of the project's own `.bolt` on
+        // Windows; Windows drops a trailing dot, so there it takes a character macOS ignores.
+        let dotted = if cfg!(windows) {
+            ".b\u{200c}olt"
+        } else {
+            ".bolt."
+        };
+        write(root, "sub/bolt~1/x", b"x");
+        write(root, &format!("sub/{dotted}/y"), b"y");
+        write(root, "sub/keep.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["sub", "sub/keep.txt"]);
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out"]);
+        let shown = escape_all(&format!("sub/{dotted}"));
+        let listed = format!(":\n  {shown}\n  sub/bolt~1\nSuch names");
+        assert!(warnings[0].message.contains(&listed), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_bolt_folder_spelled_by_the_drives_rule_is_skipped_silently_at_the_top() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        if this_drive().ignores_case {
+            // The project's own folder spelled `.BOLT`, which this drive takes for `.bolt`.
+            drop(repo);
+            fs::rename(root.join(".bolt"), root.join(".BOLT")).unwrap();
+            let mut repo = Repository::open(root).unwrap();
+            let saved = save_now(&mut repo).unwrap();
+            assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        } else {
+            // Where letter case counts it is another folder, which is left out and named.
+            write(root, ".BOLT/x", b"x");
+            let saved = save_now(&mut repo).unwrap();
+            let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+            assert_eq!(kinds, ["git_names_left_out"]);
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        }
     }
 
     /// A worktree, a clone and a Bolt project inside the project keep their own history, so a save
@@ -1655,42 +2062,73 @@ mod tests {
     /// a file outside it, so there a link isn't followed (decision 060).
     #[test]
     fn a_linked_own_list_inside_the_project_is_skipped_with_a_warning() {
-        let (dir, mut repo) = project();
-        let root = dir.path();
-        let elsewhere = tempfile::tempdir().unwrap();
-        let outside = elsewhere.path().join("list");
-        fs::write(&outside, "a.txt\n").unwrap();
-        write(root, "a.txt", b"x");
-        if !crate::test_support::symlink(&outside, &root.join("mine")) {
-            return;
+        for spelled_otherwise in [false, true] {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            let (_links, top) = spelled(root, spelled_otherwise);
+            let elsewhere = tempfile::tempdir().unwrap();
+            let outside = elsewhere.path().join("list");
+            fs::write(&outside, "a.txt\n").unwrap();
+            write(root, "a.txt", b"x");
+            if !crate::test_support::symlink(&outside, &root.join("mine")) {
+                return;
+            }
+            let saved = save_with(&mut repo, Some(&top.join("mine"))).unwrap();
+            let warnings = warnings_of(&saved).to_vec();
+            assert_eq!(warnings.len(), 1, "{top:?}: {warnings:?}");
+            assert_eq!(warnings[0].kind, "gitignore_skipped");
+            assert!(
+                warnings[0].message.contains("skipped mine:"),
+                "{warnings:?}"
+            );
+            // Its rules don't apply, and the link itself is saved as a link.
+            assert_eq!(saved_paths(&repo, saved), ["a.txt", "mine"]);
         }
-        let saved = save_with(&mut repo, Some(&root.join("mine"))).unwrap();
-        let warnings = warnings_of(&saved).to_vec();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].kind, "gitignore_skipped");
-        assert!(
-            warnings[0].message.contains("skipped mine:"),
-            "{warnings:?}"
-        );
-        // Its rules don't apply, and the link itself is saved as a link.
-        assert_eq!(saved_paths(&repo, saved), ["a.txt", "mine"]);
     }
 
     #[test]
     fn an_own_list_inside_a_linked_folder_is_skipped_with_a_warning() {
+        for spelled_otherwise in [false, true] {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            let (_links, top) = spelled(root, spelled_otherwise);
+            let elsewhere = tempfile::tempdir().unwrap();
+            fs::write(elsewhere.path().join("mine"), "a.txt\n").unwrap();
+            write(root, "a.txt", b"x");
+            link_folder(&root.join("lists"), elsewhere.path());
+            let saved = save_with(&mut repo, Some(&top.join("lists").join("mine"))).unwrap();
+            let warnings = warnings_of(&saved).to_vec();
+            assert_eq!(warnings.len(), 1, "{top:?}: {warnings:?}");
+            assert_eq!(warnings[0].kind, "gitignore_skipped");
+            let named = "skipped lists/mine: lists is a link";
+            assert!(warnings[0].message.contains(named), "{warnings:?}");
+            assert_eq!(saved_paths(&repo, saved), ["a.txt", "lists"]);
+        }
+    }
+
+    /// The user's own link into the project is theirs to follow; inside, nothing is followed.
+    #[test]
+    fn an_own_list_named_through_a_link_into_the_project_is_read_there() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        let elsewhere = tempfile::tempdir().unwrap();
-        fs::write(elsewhere.path().join("mine"), "a.txt\n").unwrap();
+        let (_links, top) = spelled(root, true);
         write(root, "a.txt", b"x");
-        link_folder(&root.join("lists"), elsewhere.path());
-        let saved = save_with(&mut repo, Some(&root.join("lists").join("mine"))).unwrap();
-        let warnings = warnings_of(&saved).to_vec();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].kind, "gitignore_skipped");
-        let named = "skipped lists/mine: lists is a link";
-        assert!(warnings[0].message.contains(named), "{warnings:?}");
-        assert_eq!(saved_paths(&repo, saved), ["a.txt", "lists"]);
+        write(root, "lists/mine", b"a.txt\n");
+        let saved = save_with(&mut repo, Some(&top.join("lists").join("mine"))).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(saved_paths(&repo, saved), ["lists", "lists/mine"]);
+    }
+
+    /// `root`, or, `otherwise`, `root` spelled through a link of the user's own, as a short name
+    /// (`RUNNER~1`) or `/var` for `/private/var` spell it on CI. Keep the folder while it is used.
+    fn spelled(root: &Path, otherwise: bool) -> (tempfile::TempDir, PathBuf) {
+        let links = tempfile::tempdir().unwrap();
+        if !otherwise {
+            return (links, root.to_owned());
+        }
+        let alias = links.path().join("alias");
+        link_folder(&alias, root);
+        (links, alias)
     }
 
     #[test]
@@ -2667,9 +3105,10 @@ mod tests {
         let saved = saved_top(repo);
         let took = started.elapsed();
         eprintln!("{what}: saved in {took:?}");
-        // Well above what a debug build takes; copying a path per folder needs gigabytes here.
+        // A debug build takes about 8 s, more on a busy runner; quadratic work (a path copied per
+        // folder, gigabytes here) takes many minutes, so a minute still tells the two apart.
         assert!(
-            took < std::time::Duration::from_secs(10),
+            took < std::time::Duration::from_secs(60),
             "{what}: {took:?}"
         );
         saved
@@ -2678,23 +3117,23 @@ mod tests {
     #[test]
     fn a_deep_chain_of_gone_folders_comes_back_in_linear_time() {
         let (dir, mut repo) = project();
-        // 4,000 folders of 200-byte names with a link at the bottom: an 800 KB path that nothing
-        // may copy once per folder. Planted from the bottom up, so planting isn't quadratic.
-        let name = "n".repeat(200);
+        // 2,046 folders with a link at the bottom, as deep as a path allows: `n/n/…/n/sub` is
+        // 4,095 bytes. Planted from the bottom up, so planting isn't quadratic.
+        let name = "n";
         let mut first = None;
         plant_root(&mut repo, |packs| {
             let link = add_link(packs, COMMIT);
             let mut id = add_listing(packs, vec![entry("sub", EntryKind::ProjectLink, link)]).0;
-            for _ in 1..4000 {
-                id = add_listing(packs, vec![entry(&name, EntryKind::Folder, id)]).0;
+            for _ in 1..2046 {
+                id = add_listing(packs, vec![entry(name, EntryKind::Folder, id)]).0;
             }
             first = Some(id);
-            add_listing(packs, vec![entry(&name, EntryKind::Folder, id)]).0
+            add_listing(packs, vec![entry(name, EntryKind::Folder, id)]).0
         });
         write(dir.path(), "new.txt", b"x");
-        let saved = timed_save(&mut repo, "4,000 gone folders deep");
+        let saved = timed_save(&mut repo, "2,046 gone folders deep");
         // The chain comes back whole, so it holds the link at the bottom.
-        assert_eq!(saved.get(&name).map(|e| e.id), first);
+        assert_eq!(saved.get(name).map(|e| e.id), first);
     }
 
     #[test]
@@ -2899,22 +3338,30 @@ mod tests {
         });
         let (three, missing) = (three.unwrap(), Id([0xee; 32]));
         let base = |limits| Base::new(repo.store(), three, limits);
+        // Each is read as the listing of `x`, one level down, so its paths are `x/a` and so on.
+        let x = "x/".len();
         // Within its limits it reads, so the missing listing fails.
         assert!(
             base(SaveLimits::default())
-                .gone_listing(missing, 1)
+                .gone_listing(missing, 1, x)
                 .is_err()
         );
         // The third read of three entries passes a limit of 8; nothing is read after that.
         let mut spent = base(SaveLimits::new(MAX_SAVE_DEPTH, 8));
-        assert!(spent.gone_listing(three, 1).unwrap().is_some());
-        assert!(spent.gone_listing(three, 1).unwrap().is_some());
-        assert!(spent.gone_listing(three, 1).unwrap().is_none());
-        assert!(spent.gone_listing(missing, 1).unwrap().is_none());
-        // Likewise once a folder lies past the depth limit.
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_some());
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_some());
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1, x).unwrap().is_none());
+        // Likewise once a folder lies past the depth limit,
         let mut spent = base(SaveLimits::new(2, MAX_SAVE_ENTRIES));
-        assert!(spent.gone_listing(three, 3).unwrap().is_none());
-        assert!(spent.gone_listing(missing, 1).unwrap().is_none());
+        assert!(spent.gone_listing(three, 3, x).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1, x).unwrap().is_none());
+        // or holds a path past the path limit.
+        let within = |bytes| base(SaveLimits::default().with_max_path(bytes));
+        assert!(within(3).gone_listing(three, 1, x).unwrap().is_some());
+        let mut spent = within(2);
+        assert!(spent.gone_listing(three, 1, x).unwrap().is_none());
+        assert!(spent.gone_listing(missing, 1, x).unwrap().is_none());
     }
 
     #[test]
@@ -2994,8 +3441,9 @@ mod tests {
 
     impl DeepFolders {
         /// `levels` nested folders named `d` under `top`; `None` (with a printed reason) if the
-        /// system can't hold that path: 4,097 levels are 8 KB, over the limit on Linux (4,096) and
-        /// macOS (1,024). Windows takes it, so there a failure fails the test.
+        /// system can't hold that path: 2,048 levels are 4 KB, which with the temporary folder is
+        /// over the limit on Linux (4,096) and macOS (1,024). Windows takes it, so there a failure
+        /// fails the test.
         fn make(top: &Path, levels: usize) -> Option<DeepFolders> {
             let mut deep = DeepFolders {
                 top: top.to_path_buf(),
@@ -3056,6 +3504,64 @@ mod tests {
             panic!("5 entries were accepted under a limit of 4");
         };
         assert!(detail.contains("more than 4 "), "{detail}");
+    }
+
+    #[test]
+    fn a_path_over_4096_bytes_is_refused_by_save_and_by_readers() {
+        let (dir, mut repo) = project();
+        // A new path past the limit stops the save, named and escaped. Only Windows can make a
+        // path of 4,097 bytes in a temporary folder, so a limit of 13 bytes stands in here.
+        let within = |bytes| walk_project(&repo, SaveLimits::default().with_max_path(bytes));
+        write(dir.path(), "ab\u{202e}/cd/e.txt", b"x"); // 14 bytes
+        assert!(within(14).is_ok());
+        let Err(err) = within(13) else {
+            panic!("a path of 14 bytes was accepted under a limit of 13");
+        };
+        let SaveError::TooLarge { detail } = &err else {
+            panic!("{err:?}");
+        };
+        assert!(detail.contains("longer than 13 bytes"), "{detail}");
+        assert!(detail.ends_with("ab\\u{202e}/cd/e.txt"), "{detail}");
+        assert!(err.hint().unwrap().contains(".boltignore"), "{err:?}");
+        // What a save leaves out is no part of it.
+        write(dir.path(), ".boltignore", "ab\u{202e}/\n".as_bytes());
+        assert!(within(13).is_ok());
+
+        // The last save's paths, through 255-byte names this system holds: `a`'s link is 3,845
+        // bytes down, and `b`'s 4,101. The search of the gone folders keeps the first, and ends
+        // at the second without a word, as past any other limit: the base save is invalid there.
+        let below = |levels: usize| format!("{}/", "n".repeat(255)).repeat(levels);
+        let (a, b) = (format!("a/{}sub", below(15)), format!("b/{}sub", below(16)));
+        plant_save(
+            &mut repo,
+            &[
+                (a.as_str(), EntryKind::ProjectLink, COMMIT),
+                (b.as_str(), EntryKind::ProjectLink, COMMIT),
+            ],
+        );
+        let scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let top: Vec<&str> = scan.folders[""].iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(top, [".boltignore", "a"]);
+
+        // A folder kept as it was counts its paths against the new save's limit, as its depth.
+        let deep = format!("Docs/{}x", below(16));
+        plant_save(
+            &mut repo,
+            &[
+                (deep.as_str(), EntryKind::File, b"x"),
+                ("docs/y", EntryKind::File, b"y"),
+            ],
+        );
+        let Err(SaveError::TooLarge { detail }) = walk(
+            dir.path(),
+            newest(&repo),
+            SaveLimits::default(),
+            CASE_BLIND,
+            None,
+        ) else {
+            panic!("a kept path of 4,102 bytes was accepted");
+        };
+        assert!(detail.contains("longer than 4096 bytes"), "{detail}");
     }
 
     #[test]
@@ -3121,33 +3627,166 @@ mod tests {
         assert!(refused);
     }
 
-    // The real limit of 4,096 levels takes about a minute per test on Windows, so these run on
-    // request (and in CI on Windows only), on a 1 MiB stack like `bolt`'s main thread. Run with:
+    // The deepest real folders a save takes, 2,048 levels of `d` whose last path is 4,095 bytes
+    // (a path's limit comes before the 4,096 levels), take several seconds per test on Windows,
+    // the one system that makes them, so these run on request (and in CI on Windows only), on a
+    // 1 MiB stack like `bolt`'s main thread. Run with:
     // `cargo test -p bolt-vcs-core --all-features --lib -- --ignored real_folders`
+    const DEEPEST: usize = MAX_PATH_BYTES.div_ceil(2);
 
     #[test]
-    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    #[ignore = "slow, and Windows only: run with --ignored"]
     fn real_folders_one_level_past_the_limit_are_refused() {
         let (dir, mut repo) = project();
         let head = repo.head().unwrap();
-        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH + 1) else {
+        let Some(_deep) = DeepFolders::make(dir.path(), DEEPEST + 1) else {
             return;
         };
         match on_a_stack_of(1 << 20, || save_now(&mut repo)) {
-            Err(SaveError::TooLarge { detail }) => assert!(detail.contains("4096"), "{detail}"),
+            Err(SaveError::TooLarge { detail }) => {
+                assert!(detail.contains("longer than 4096 bytes"), "{detail}");
+            }
             other => panic!("{:?}", other.map(|_| ())),
         }
         assert_eq!(repo.head().unwrap(), head);
     }
 
     #[test]
-    #[ignore = "slow on Windows (about a minute): run with --ignored"]
+    #[ignore = "slow, and Windows only: run with --ignored"]
     fn real_folders_at_the_limit_are_saved() {
         let (dir, mut repo) = project();
-        let Some(_deep) = DeepFolders::make(dir.path(), MAX_SAVE_DEPTH) else {
+        let Some(_deep) = DeepFolders::make(dir.path(), DEEPEST) else {
             return;
         };
         let saved = on_a_stack_of(1 << 20, || save_now(&mut repo));
         assert!(matches!(saved, Ok(SaveOutcome::Saved { .. })), "{saved:?}");
+    }
+
+    /// A folder swapped for a link to one outside the project after the walk listed it: reading
+    /// the file in it stops the save, which takes nothing from outside (security.md T20).
+    #[test]
+    fn a_folder_swapped_for_a_link_mid_walk_is_refused_not_followed() {
+        let (dir, repo) = project();
+        let root = dir.path();
+        write(root, "a/x", b"mine");
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "x", b"secret");
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        fs::rename(root.join("a"), root.join("old")).unwrap();
+        link_folder(&root.join("a"), outside.path());
+        let mut packs = repo.new_packs().unwrap();
+        let built = crate::snapshot::build(
+            repo.store(),
+            &mut packs,
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        match built {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "a"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert!(!packs.contains(&hash_content(b"secret")));
+        assert!(packs.is_empty());
+    }
+
+    /// Past 127 levels the walk opens a folder again from the deepest one it holds, and so does
+    /// the save when it reads the files there.
+    #[test]
+    fn a_deep_tree_holds_at_most_128_folders_open() {
+        use bolt_platform::dir::{Dir, open_count};
+        use std::ffi::OsStr;
+        use std::io::Write;
+        let (dir, mut repo) = project();
+        // 600 levels of `d`, made a name at a time: macOS takes no path that long. Level 300 also
+        // holds `e`, which the walk reaches after all of `d`.
+        {
+            let n = OsStr::new;
+            let mut at = Dir::open_top(dir.path()).unwrap();
+            for level in 1..=600 {
+                at.create_dir(n("d")).unwrap();
+                if level == 300 {
+                    at.create_dir(n("e")).unwrap();
+                    let e = at.open_dir(n("e")).unwrap();
+                    e.create_new(n("x"), false)
+                        .unwrap()
+                        .write_all(b"e")
+                        .unwrap();
+                }
+                at = at.open_dir(n("d")).unwrap();
+            }
+            at.create_new(n("x"), false)
+                .unwrap()
+                .write_all(b"bottom")
+                .unwrap();
+        }
+        // Counted on this thread, beside the folders of `.bolt` the project holds open, so the
+        // walk runs here rather than on the thread of its own a save gives it.
+        let drive = this_drive();
+        let before = open_count::now();
+        open_count::most_since_last();
+        let limits = SaveLimits::default();
+        let mut scan = scan_folder(dir.path(), newest(&repo), limits, drive, None).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let (built, ..) = crate::snapshot::build(
+            repo.store(),
+            &mut packs,
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+            &scan.ignored,
+            &scan.gitignored,
+        )
+        .unwrap();
+        let most = open_count::most_since_last() - before;
+        assert!((1..=129).contains(&most), "{most} folders open at once");
+        drop(packs);
+        // The save, which reads the same.
+        let saved = saved_root(save_now(&mut repo).unwrap());
+        assert_eq!(saved, built);
+        let tree = saved_tree(repo.store(), saved);
+        let down = |levels: usize| "d/".repeat(levels);
+        assert_eq!(tree[&format!("{}x", down(600))].1, b"bottom");
+        assert_eq!(tree[&format!("{}e/x", down(299))].1, b"e");
+    }
+
+    /// A Windows reparse point that isn't a link but is marked as a folder (a cloud folder, say) is
+    /// a folder to the ignore rules, so a `name/` line leaves it out without a word; a kept one is
+    /// never opened (and stops the save when read, as a special file).
+    #[test]
+    fn a_folder_bolt_cant_open_is_a_folder_to_the_ignore_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, ".boltignore", b"cloud/\n");
+        let mut rules =
+            WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
+        // Neither is on disk, so a walk that opened one would have a problem.
+        assert!(!rules.keeps_closed_folder(&root.join("cloud")));
+        assert!(rules.keeps_closed_folder(&root.join("other")));
+        assert!(rules.problem.is_none());
+        // Taken for a file, `cloud` is no match for a line about folders.
+        assert!(rules.keeps(&root.join("cloud"), false));
+    }
+
+    /// A target Windows reads with `\` is stored with `/`, as Git stores it (decision 045).
+    #[cfg(windows)]
+    #[test]
+    fn link_targets_read_on_windows_are_stored_with_slashes() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "dir/target.txt", b"t");
+        // A junction needs no right to make, and holds an absolute target.
+        crate::test_support::junction(&root.join("j"), &root.join("dir"));
+        let file_link = std::os::windows::fs::symlink_file("dir\\target.txt", root.join("l"));
+        let saved = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), saved);
+        let absolute = root.join("dir").to_str().unwrap().replace('\\', "/");
+        assert_eq!(tree["j"], (EntryKind::Symlink, absolute.into_bytes()));
+        match file_link {
+            Ok(()) => assert_eq!(tree["l"], (EntryKind::Symlink, b"dir/target.txt".to_vec())),
+            Err(e) => crate::test_support::skip_without_link_right(e),
+        }
     }
 }

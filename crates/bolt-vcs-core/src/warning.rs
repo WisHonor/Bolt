@@ -7,15 +7,19 @@ use crate::text::escape;
 pub const DAMAGED_PACK: &str = "damaged_pack";
 /// A stored copy couldn't be read for a reason other than damage, though another copy worked.
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
+/// Small packs were merged after a command, but one or more couldn't be: the command happened.
+pub const PACK_NOT_MERGED: &str = "pack_not_merged";
 /// A change ID is shown whole because the line couldn't be read to shorten it.
 pub const CHANGE_ID_NOT_SHORTENED: &str = "change_id_not_shortened";
+/// The user's cache key can't be used, so the command went without its caches.
+pub const CACHE_KEY_UNUSABLE: &str = "cache_key_unusable";
 /// A save was made but its changed files couldn't be counted.
 pub const CHANGED_FILES_NOT_COUNTED: &str = "changed_files_not_counted";
 /// A `.gitignore` that isn't a regular file was skipped, so its rules didn't apply.
 pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
 /// Entries this computer doesn't hold as they are were kept as the last save has them.
 pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
-/// A save left out entries whose names Git treats as `.git`.
+/// A save left out entries whose names Git treats as `.git`, or Bolt as `.bolt`.
 pub const GIT_NAMES_LEFT_OUT: &str = "git_names_left_out";
 /// A save took changes to files an ignore rule matches, which stay saved because the last save
 /// holds them.
@@ -38,6 +42,36 @@ pub const DUPLICATE_CHANGE_ID: &str = "duplicate_change_id";
 pub const CONFIG_INCLUDES_IGNORED: &str = "config_includes_ignored";
 /// Folders that hold a repository or project of their own, which saves take nothing new from.
 pub const NESTED_PROJECTS_LEFT_OUT: &str = "nested_projects_left_out";
+/// The file-state cache couldn't be written, so the next status reads every file again.
+pub const FILE_CACHE_NOT_STORED: &str = "file_cache_not_stored";
+/// Entries of the save being written that this computer can't hold were left unwritten.
+pub const NOT_WRITTEN_HERE: &str = "not_written_here";
+/// Links were written as files holding their targets.
+pub const PLACEHOLDERS_WRITTEN: &str = "placeholders_written";
+/// Files another program held open were left for the next run.
+pub const FILES_IN_USE: &str = "files_in_use";
+/// Entries that changed after a switch was planned were left as they were.
+pub const CHANGED_SINCE_PLAN: &str = "changed_since_plan";
+/// A switch between saves was stopped, and is still to finish.
+pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
+/// A command finished a switch between saves that was stopped, before doing its own work.
+pub const SWITCH_FINISHED: &str = "switch_finished";
+/// A file's diff ran out of time, so its changes show in bigger pieces than they could.
+pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
+
+/// Whether people see a warning of `kind` when the command then fails: it tells of files
+/// already written, by a switch the command finished first or by the command itself before it
+/// stopped, which happened all the same. Others are only in `--json`.
+#[must_use]
+pub fn told_on_failure(kind: &str) -> bool {
+    [
+        SWITCH_FINISHED,
+        CHANGED_SINCE_PLAN,
+        PLACEHOLDERS_WRITTEN,
+        NOT_WRITTEN_HERE,
+    ]
+    .contains(&kind)
+}
 
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]

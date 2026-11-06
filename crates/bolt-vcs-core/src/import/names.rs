@@ -5,9 +5,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{ImportError, Renaming, lossy};
-use crate::diary::{MAX_LINES, MAX_SERVERS, MAX_TAGS, ServerLines, is_line_name_char};
+use crate::diary::{
+    MAX_LINES, MAX_NAME_BYTES, MAX_SERVERS, MAX_TAGS, ServerLines, fold_line_name,
+    is_line_name_char,
+};
 use crate::git::{GitError, GitId, Refs, shown};
-use crate::names::MAX_NAME_BYTES;
 use crate::pack::MAX_RECORD_SIZE;
 
 /// A ref an import brings in: its Git name, the name it takes in Bolt, and what it points at.
@@ -157,7 +159,7 @@ fn named(
 /// else the first of `-2`, `-3`… that leaves it free. The same names always come out the same.
 pub fn rename(names: &[&[u8]], rules: Rules) -> Vec<String> {
     let fold = |name: &str| match rules {
-        Rules::Line => name.to_lowercase(),
+        Rules::Line => fold_line_name(name),
         Rules::Tag => name.to_owned(),
     };
     let bases: Vec<String> = names.iter().map(|name| base(name, rules)).collect();

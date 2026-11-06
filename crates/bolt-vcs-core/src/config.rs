@@ -2,11 +2,14 @@
 //! `safe-folders` they trust. A project's own `.bolt/config.toml` is never asked: a shared zip
 //! carries it, so a stranger could make the user's saves claim to be someone else (decision 025).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use bolt_platform::dir::Dir;
 use serde::Deserialize;
 
 use crate::git::{UserSetting, read_user_settings};
+use crate::repo::Repository;
 use crate::safe_fs;
 use crate::save::Person;
 use crate::text::escape;
@@ -130,11 +133,12 @@ pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     a == b
 }
 
-/// The `config.toml` at `path`, or `None` if there is none. `read` is `safe_fs::read_capped` for a
-/// project's file (never follows a link) and `safe_fs::read_capped_following_links` for the user's.
+/// The `config.toml` at `path`, or `None` if there is none. `read` reads a project's file through
+/// its held `.bolt` (never following a link) and the user's with
+/// `safe_fs::read_capped_following_links`.
 fn read_file(
     path: &Path,
-    read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
+    read: &dyn Fn(&Path, u64) -> std::io::Result<Vec<u8>>,
 ) -> Result<Option<ConfigFile>, ConfigError> {
     let invalid = |detail: String| ConfigError::Invalid {
         path: path.to_owned(),
@@ -171,7 +175,7 @@ fn read_file(
 /// A project's own file is read with `None` for `project_root`: it has no say in who the user is.
 fn from_file(
     path: &Path,
-    read: fn(&Path, u64) -> std::io::Result<Vec<u8>>,
+    read: &dyn Fn(&Path, u64) -> std::io::Result<Vec<u8>>,
     project_root: Option<&Path>,
 ) -> Result<Option<Identity>, ConfigError> {
     let Some(file) = read_file(path, read)? else {
@@ -352,7 +356,8 @@ fn identity_from(
         return Ok(identity);
     }
     if let Some(path) = &user_config
-        && let Some(identity) = from_file(path, safe_fs::read_capped_following_links, project_root)?
+        && let Some(identity) =
+            from_file(path, &safe_fs::read_capped_following_links, project_root)?
     {
         return Ok(identity);
     }
@@ -360,22 +365,22 @@ fn identity_from(
 }
 
 /// The identity the project's own `.bolt/config.toml` names, if Bolt did not use it (it differs
-/// from the one `load_identity` gives, which is none if that fails). Read like every project file:
-/// never through a link, at most 1 MiB; one that can't be read names nobody.
+/// from the one `load_identity` gives, which is none if that fails). Read like every file in
+/// `.bolt`: through the `.bolt` the project holds open, never through a link, at most 1 MiB; one
+/// that can't be read names nobody.
 #[must_use]
-pub fn ignored_project_identity(project_root: &Path) -> Option<Identity> {
-    ignored_given(
-        project_root,
-        load_identity(Some(project_root)).ok().as_ref(),
-    )
+pub fn ignored_project_identity(repo: &Repository) -> Option<Identity> {
+    let used = load_identity(Some(repo.root())).ok();
+    let bolt = repo.root().join(".bolt");
+    ignored_given(repo.bolt_folder(), &bolt, used.as_ref())
 }
 
-/// `ignored_project_identity`, given the identity that is in use.
-fn ignored_given(project_root: &Path, used: Option<&Identity>) -> Option<Identity> {
-    let path = project_root.join(".bolt").join("config.toml");
-    let named = from_file(&path, safe_fs::read_capped, None)
-        .ok()
-        .flatten()?;
+/// `ignored_project_identity`, given the project's `.bolt` held open (at `bolt`) and the identity
+/// in use.
+fn ignored_given(held: &Dir, bolt: &Path, used: Option<&Identity>) -> Option<Identity> {
+    let name = OsStr::new("config.toml");
+    let read = |shown: &Path, max| safe_fs::read_capped_in(held, name, shown, max);
+    let named = from_file(&bolt.join(name), &read, None).ok().flatten()?;
     (used != Some(&named)).then_some(named)
 }
 
@@ -466,7 +471,7 @@ pub fn safe_folders() -> Result<Vec<PathBuf>, ConfigError> {
 
 /// `safe_folders`, from the user's `config.toml` at `path`.
 fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
-    let Some(file) = read_file(path, safe_fs::read_capped_following_links)? else {
+    let Some(file) = read_file(path, &safe_fs::read_capped_following_links)? else {
         return Ok(Vec::new());
     };
     if file.misplaced_safe_folders {
@@ -559,7 +564,7 @@ mod tests {
     fn reads_the_user_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let read = |path: &Path| from_file(path, safe_fs::read_capped, None);
+        let read = |path: &Path| from_file(path, &safe_fs::read_capped, None);
         assert_eq!(read(&path).unwrap(), None);
         std::fs::write(
             &path,
@@ -807,6 +812,13 @@ mod tests {
         path
     }
 
+    /// `ignored_given` for the project at `root`, its `.bolt` held open as a project holds it.
+    fn named_by(root: &Path, used: Option<&Identity>) -> Option<Identity> {
+        let bolt = root.join(".bolt");
+        std::fs::create_dir_all(&bolt).unwrap();
+        ignored_given(&Dir::open_top(&bolt).unwrap(), &bolt, used)
+    }
+
     /// The `.bolt/config.toml` a shared project can bring.
     fn project_settings(root: &Path, text: &str) {
         std::fs::create_dir_all(root.join(".bolt")).unwrap();
@@ -956,19 +968,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = folder(dir.path(), "project");
         let mallory = person("Mallory", "mallory@evil.example");
-        assert_eq!(ignored_given(&project, None), None, "no settings at all");
+        assert_eq!(named_by(&project, None), None, "no settings at all");
         project_settings(&project, MALLORY);
         let ada = person("Ada", "ada@example.com");
-        assert_eq!(ignored_given(&project, Some(&ada)), Some(mallory.clone()));
+        assert_eq!(named_by(&project, Some(&ada)), Some(mallory.clone()));
         // Nobody could be found for the user: the project's is still not used.
-        assert_eq!(ignored_given(&project, None), Some(mallory.clone()));
+        assert_eq!(named_by(&project, None), Some(mallory.clone()));
         // The same as the identity in use: nothing was ignored.
-        assert_eq!(ignored_given(&project, Some(&mallory)), None);
+        assert_eq!(named_by(&project, Some(&mallory)), None);
         // Not an identity: half of one, or none.
         for text in ["[user]\nname = \"Mallory\"\n", "[user]\n", "", "x = 1\n"] {
             project_settings(&project, text);
-            assert_eq!(ignored_given(&project, Some(&ada)), None, "{text:?}");
+            assert_eq!(named_by(&project, Some(&ada)), None, "{text:?}");
         }
+    }
+
+    /// The project's settings are read through its `.bolt` as the project holds it open: a `.bolt`
+    /// swapped for a link since can't bring settings from elsewhere.
+    #[test]
+    fn project_settings_are_read_through_the_held_bolt_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = folder(dir.path(), "project");
+        project_settings(&project, "");
+        let bolt = project.join(".bolt");
+        let held = Dir::open_top(&bolt).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("config.toml"), MALLORY).unwrap();
+        std::fs::rename(&bolt, project.join("checked")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(elsewhere.path(), &bolt).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&bolt, elsewhere.path());
+        assert_eq!(ignored_given(&held, &bolt, None), None);
     }
 
     #[test]
@@ -977,8 +1008,7 @@ mod tests {
         let project = folder(dir.path(), "project");
         let ada = person("Ada", "ada@example.com");
         let path = project.join(".bolt").join("config.toml");
-        let unreadable =
-            |what: &str| assert_eq!(ignored_given(&project, Some(&ada)), None, "{what}");
+        let unreadable = |what: &str| assert_eq!(named_by(&project, Some(&ada)), None, "{what}");
 
         project_settings(&project, "[user\n");
         unreadable("not TOML");
@@ -1008,7 +1038,7 @@ mod tests {
             // A hang fails this test instead of stopping the whole run.
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(ignored_given(&project, None));
+                let _ = tx.send(named_by(&project, None));
             });
             let got = rx.recv_timeout(std::time::Duration::from_secs(10));
             assert_eq!(got.expect("reading a named pipe hung"), None);

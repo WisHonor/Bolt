@@ -56,10 +56,14 @@ fn print_listing_vectors() {
         entry("é", EntryKind::File, 0x55, 0),
     ])
     .unwrap();
+    // A name of 600 bytes, past the 255 names had before decision 051: 200 characters of three
+    // bytes, which Windows holds as 200 UTF-16 units. Its length is a two-byte varint.
+    let long_name = Listing::new(vec![entry(&"語".repeat(200), EntryKind::File, 0x66, 3)]).unwrap();
     let rows: Vec<String> = [
         ("empty-listing", Listing::empty()),
         ("one-file", one),
         ("mixed", mixed),
+        ("long-name", long_name),
     ]
     .iter()
     .map(|(n, l)| {
@@ -428,97 +432,390 @@ struct PackObject {
     hex: String,
 }
 
-/// A pack's objects: kind and uncompressed bytes, in the order they are added.
-type PackObjects = Vec<(ObjectKind, Vec<u8>)>;
+fn pack_vectors(file: &str) -> Vec<PackVector> {
+    let path = format!("{}/tests/vectors/{file}", env!("CARGO_MANIFEST_DIR"));
+    let vectors: Vec<PackVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert!(!vectors.is_empty());
+    vectors
+}
 
-fn pack_vector_inputs() -> Vec<(&'static str, PackObjects)> {
-    // Repetitive text, so the writer stores it with zstd.
-    let content = "Hello, Bolt! ".repeat(40).into_bytes();
-    let listing = Listing::new(vec![Entry {
-        name: "hello.txt".into(),
-        kind: EntryKind::File,
-        id: Id(*blake3::hash(&content).as_bytes()),
-        size: content.len() as u64,
-    }])
-    .unwrap();
-    vec![
-        (
-            "empty-listing",
-            vec![(ObjectKind::FolderListing, Listing::empty().encode())],
-        ),
-        (
-            "two-objects",
-            // Written listing first (id 90b1…), so the index must reorder: content (437d…) first.
-            vec![
-                (ObjectKind::FolderListing, listing.encode()),
-                (ObjectKind::Content, content),
-            ],
-        ),
-    ]
+/// Opens the pack `v` describes and checks that it holds exactly its objects.
+fn pack_reads_back(v: &PackVector) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join(&v.file);
+    std::fs::write(&path, unhex(&v.hex)).unwrap();
+    let r = PackReader::open(&path).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+    let entries: Vec<_> = r.entries().collect::<Result<_, _>>().unwrap();
+    assert_eq!(entries.len(), v.objects.len(), "{}", v.name);
+    // The reader checks every fingerprint; each object must come back byte for byte.
+    let mut found: Vec<(u8, String)> = entries
+        .iter()
+        .map(|e| {
+            assert_eq!(r.find(&e.id).unwrap(), Some(*e), "{}", v.name);
+            let bytes = if e.kind == ObjectKind::Content {
+                let mut out = Vec::new();
+                r.copy_content(e, &mut out).unwrap();
+                out
+            } else {
+                r.read_record(e).unwrap()
+            };
+            (e.kind as u8, hex(&bytes))
+        })
+        .collect();
+    let mut expected: Vec<(u8, String)> =
+        v.objects.iter().map(|o| (o.kind, o.hex.clone())).collect();
+    found.sort();
+    expected.sort();
+    assert_eq!(found, expected, "{}", v.name);
 }
 
 #[test]
-#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/pack.json"]
-fn print_pack_vectors() {
-    let mut rows = Vec::new();
-    for (name, objects) in pack_vector_inputs() {
+fn version_1_packs_still_read() {
+    for v in pack_vectors("pack.json") {
+        assert_eq!(&v.hex[16..24], "01000000", "{}", v.name);
+        pack_reads_back(&v);
+    }
+}
+
+/// `pack`, a version 1 pack, with its index in version 2, built from storage-format.md section 11
+/// and not with the writer.
+fn as_version_2(pack: &[u8]) -> Vec<u8> {
+    let u64_at = |at: usize| u64::from_le_bytes(pack[at..at + 8].try_into().unwrap());
+    let trailer = pack.len() - 48;
+    let index_at = usize::try_from(u64_at(trailer)).unwrap();
+    // (id, kind, offset, uncompressed size, stored size), read from the entries' own headers.
+    let mut lines = Vec::new();
+    let mut at = 16;
+    while at < index_at {
+        let id: [u8; 32] = pack[at + 1..at + 33].try_into().unwrap();
+        let (size, stored) = (u64_at(at + 33), u64_at(at + 41));
+        lines.push((id, pack[at], at as u64, size, stored));
+        at += 50 + usize::try_from(stored).unwrap();
+    }
+    lines.sort();
+    let mut index = (lines.len() as u64).to_le_bytes().to_vec();
+    for byte in 0..=255u8 {
+        let below = lines.iter().filter(|l| l.0[0] <= byte).count();
+        index.extend_from_slice(&u32::try_from(below).unwrap().to_le_bytes());
+    }
+    for l in &lines {
+        index.extend_from_slice(&l.0);
+    }
+    for l in &lines {
+        index.push(l.1);
+        for n in [l.2, l.3, l.4] {
+            index.extend_from_slice(&n.to_le_bytes());
+        }
+    }
+    let mut out = b"BOLTPACK".to_vec();
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&pack[12..index_at]);
+    out.extend_from_slice(&index);
+    out.extend_from_slice(&(index_at as u64).to_le_bytes());
+    out.extend_from_slice(blake3::hash(&index).as_bytes());
+    out.extend_from_slice(b"BOLTPEND");
+    out
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/pack_v2.json"]
+fn print_pack_v2_vector() {
+    let v1 = pack_vectors("pack.json")
+        .into_iter()
+        .find(|v| v.name == "two-objects")
+        .unwrap();
+    let pack = as_version_2(&unhex(&v1.hex));
+    let index_at = usize::try_from(u64::from_le_bytes(
+        pack[pack.len() - 48..pack.len() - 40].try_into().unwrap(),
+    ))
+    .unwrap();
+    let name = blake3::hash(&pack[index_at..pack.len() - 48]).to_hex();
+    let objects: Vec<String> = v1
+        .objects
+        .iter()
+        .map(|o| format!("{{\"kind\": {}, \"hex\": \"{}\"}}", o.kind, o.hex))
+        .collect();
+    println!(
+        "[\n  {{\"name\": \"two-objects\", \"file\": \"{name}.pack\", \"hex\": \"{}\", \"objects\": [{}]}}\n]",
+        hex(&pack),
+        objects.join(", ")
+    );
+}
+
+#[test]
+fn pack_v2_matches_its_vector() {
+    for v in pack_vectors("pack_v2.json") {
+        // The writer, given the objects in the vector's order, writes exactly its bytes.
         let root = tempfile::tempdir().unwrap();
         let mut w = PackWriter::create(root.path()).unwrap();
-        for (kind, bytes) in &objects {
-            match kind {
-                ObjectKind::Content => w.add_content(bytes).unwrap(),
-                _ => w.add_record(*kind, bytes).unwrap(),
+        for o in &v.objects {
+            let bytes = unhex(&o.hex);
+            match ObjectKind::from_u8(o.kind).unwrap() {
+                ObjectKind::Content => w.add_content(&bytes).unwrap(),
+                kind => w.add_record(kind, &bytes).unwrap(),
             };
         }
         let path = w.finish(root.path()).unwrap().unwrap();
-        let objects: Vec<String> = objects
-            .iter()
-            .map(|(k, b)| format!("{{\"kind\": {}, \"hex\": \"{}\"}}", *k as u8, hex(b)))
-            .collect();
-        rows.push(format!(
-            "  {{\"name\": \"{name}\", \"file\": \"{}\", \"hex\": \"{}\", \"objects\": [{}]}}",
-            path.file_name().unwrap().to_str().unwrap(),
-            hex(&std::fs::read(&path).unwrap()),
-            objects.join(", ")
-        ));
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), v.file);
+        assert_eq!(hex(&std::fs::read(&path).unwrap()), v.hex, "{}", v.name);
+        pack_reads_back(&v);
     }
-    println!("[\n{}\n]", rows.join(",\n"));
+}
+
+#[derive(Deserialize)]
+struct SealedVector {
+    name: String,
+    key: String,
+    body: String,
+    sealed: String,
+}
+
+/// `main` at save 11…11 with change IDs 22…22 and 33…33, and `side` at 44…44 with 22…22, as
+/// storage-format.md §10 lays them out.
+fn change_ids_body() -> String {
+    let id = |byte: &str, n: usize| byte.repeat(n);
+    format!(
+        "424f4c5443484944010204{}{}02{}{}04{}{}01{}",
+        hex(b"main"),
+        id("11", 32),
+        id("22", 16),
+        id("33", 16),
+        hex(b"side"),
+        id("44", 32),
+        id("22", 16)
+    )
 }
 
 #[test]
-fn pack_vector_holds() {
-    let text = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/vectors/pack.json"
-    ))
-    .unwrap();
-    let vectors: Vec<PackVector> = serde_json::from_str(&text).unwrap();
-    assert!(!vectors.is_empty());
-    let root = tempfile::tempdir().unwrap();
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/change_ids.json"]
+fn print_change_ids_vector() {
+    let key = [0x42; 32];
+    let body = change_ids_body();
+    println!(
+        "[\n  {{\"name\": \"two-lines\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        hex(&key),
+        hex(&bolt_core::keyed::seal(&key, &unhex(&body)))
+    );
+}
+
+#[test]
+fn change_ids_match_their_vector() {
+    use bolt_core::changeids::ChangeIds;
+    use bolt_core::keyed::{open_sealed, seal};
+    let path = format!(
+        "{}/tests/vectors/change_ids.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<SealedVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    // The body is the one the layout above gives.
+    assert_eq!(vectors[0].body, change_ids_body());
     for v in vectors {
-        let path = root.path().join(&v.file);
-        std::fs::write(&path, unhex(&v.hex)).unwrap();
-        let r = PackReader::open(&path).unwrap_or_else(|e| panic!("{}: {e}", v.name));
-        assert_eq!(r.entries().len(), v.objects.len(), "{}", v.name);
-        // The reader checks every fingerprint; each object must come back byte for byte.
-        let mut found: Vec<(u8, String)> = r
-            .entries()
-            .iter()
-            .map(|e| {
-                let bytes = if e.kind == ObjectKind::Content {
-                    let mut out = Vec::new();
-                    r.copy_content(e, &mut out).unwrap();
-                    out
-                } else {
-                    r.read_record(e).unwrap()
-                };
-                (e.kind as u8, hex(&bytes))
-            })
-            .collect();
-        let mut expected: Vec<(u8, String)> =
-            v.objects.into_iter().map(|o| (o.kind, o.hex)).collect();
-        found.sort();
-        expected.sort();
-        assert_eq!(found, expected, "{}", v.name);
+        let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
+        let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
+        assert_eq!(seal(&key, &body), sealed, "{}", v.name);
+        assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
+        assert_eq!(open_sealed(&[0; 32], &sealed), None);
+        let ids = ChangeIds::decode(&body).unwrap();
+        assert_eq!(ids.encode(), body);
+        let main = ids.get("main").unwrap();
+        assert_eq!(main.0, Id([0x11; 32]));
+        assert_eq!(main.1, [ChangeId([0x22; 16]), ChangeId([0x33; 16])]);
+        let side = ids.get("side").unwrap();
+        assert_eq!(
+            (side.0, side.1),
+            (Id([0x44; 32]), &[ChangeId([0x22; 16])][..])
+        );
     }
+}
+
+/// `a.txt`, 3 bytes, modified at 1,700,000,000.123456789 s, changed at 1,700,000,001.5 s, file 9
+/// on drive 0x0102030405060708, racy, with content 11…11; and `b`, an executable of 300 bytes,
+/// modified at -1.5 s (whole seconds round down, to -2), changed at -0.999999999 s, file 2^64 + 5
+/// on drive 7 (a 128-bit file ID), with content 22…22.
+fn file_cache_body() -> String {
+    format!(
+        "424f4c5446494c45030205{}0103{}{}{}{}{}01{}016202ac02{}{}{}{}{}00{}",
+        hex(b"a.txt"),
+        hex(&1_700_000_000i64.to_le_bytes()),
+        hex(&123_456_789u32.to_le_bytes()),
+        hex(&1_700_000_001i64.to_le_bytes()),
+        hex(&500_000_000u32.to_le_bytes()),
+        "0807060504030201".to_owned() + "0900000000000000" + "0000000000000000",
+        "11".repeat(32),
+        hex(&(-2i64).to_le_bytes()),
+        hex(&500_000_000u32.to_le_bytes()),
+        hex(&(-1i64).to_le_bytes()),
+        hex(&1u32.to_le_bytes()),
+        "0700000000000000".to_owned() + "0500000000000000" + "0100000000000000",
+        "22".repeat(32)
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/file_cache.json"]
+fn print_file_cache_vector() {
+    let key = [0x42; 32];
+    let body = file_cache_body();
+    println!(
+        "[\n  {{\"name\": \"two-files\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        hex(&key),
+        hex(&bolt_core::keyed::seal(&key, &unhex(&body)))
+    );
+}
+
+#[test]
+fn file_cache_matches_its_vector() {
+    use bolt_core::filecache::FileCache;
+    use bolt_core::keyed::{open_sealed, seal};
+    use bolt_platform::dir::{EntryMeta, EntryType};
+    let path = format!(
+        "{}/tests/vectors/file_cache.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<SealedVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors[0].body, file_cache_body());
+    let meta = |size, modified_ns, changed_ns, executable, file_id| EntryMeta {
+        kind: EntryType::File,
+        size,
+        modified_ns,
+        changed_ns,
+        executable,
+        file_id,
+    };
+    for v in vectors {
+        let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
+        let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
+        assert_eq!(seal(&key, &body), sealed, "{}", v.name);
+        assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
+        assert_eq!(open_sealed(&[0; 32], &sealed), None);
+        let cache = FileCache::decode(&body).unwrap();
+        assert_eq!(cache.encode(), body);
+        // Racy, so never trusted.
+        let a_id = (0x0102_0304_0506_0708, 9);
+        let a = meta(
+            3,
+            1_700_000_000_123_456_789,
+            1_700_000_001_500_000_000,
+            None,
+            a_id,
+        );
+        assert!(cache.matches("a.txt", &a).is_none());
+        let (b_id, b_changed) = ((7, 1 << 64 | 5), -999_999_999);
+        let b = cache
+            .matches("b", &meta(300, -1_500_000_000, b_changed, Some(true), b_id))
+            .unwrap();
+        assert_eq!((b.kind, b.id), (EntryKind::Executable, Id([0x22; 32])));
+        // Another file there, whose number differs only in its high bits, is not trusted.
+        let other = meta(300, -1_500_000_000, b_changed, Some(true), (7, 5));
+        assert!(cache.matches("b", &other).is_none());
+        // Nor the same file written over in place, which has a new change time.
+        let rewritten = meta(300, -1_500_000_000, b_changed + 1, Some(true), b_id);
+        assert!(cache.matches("b", &rewritten).is_none());
+    }
+}
+
+#[derive(Deserialize)]
+struct JournalVector {
+    name: String,
+    hex: String,
+}
+
+/// A switch from entry 22…22 to 11…11: make the folder `a`; write `a/b.txt` (300 bytes, 44…44)
+/// over the 5-byte file 33…33; write the link `link` (a 6-byte target, 55…55); remove the empty
+/// executable `old` (66…66); remove the folder `z`. Laid out as storage-format.md §10 says,
+/// without the checksum.
+fn journal_body() -> String {
+    let id = |byte: &str| byte.repeat(32);
+    format!(
+        "{}01{}{}05\
+         0161{}\
+         07{}0101{}05{}ac02\
+         04{}0300{}06\
+         03{}050102{}00\
+         017a060104{}00",
+        hex(b"BOLTJRNL"),
+        id("11"),
+        id("22"),
+        "0400",
+        hex(b"a/b.txt"),
+        "01".to_owned() + &id("33"),
+        id("44"),
+        hex(b"link"),
+        id("55"),
+        hex(b"old"),
+        id("66"),
+        id("00"),
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/journal.json"]
+fn print_journal_vector() {
+    let body = unhex(&journal_body());
+    let mut bytes = body.clone();
+    bytes.extend_from_slice(blake3::hash(&body).as_bytes());
+    println!(
+        "[\n  {{\"name\": \"five-actions\", \"hex\": \"{}\"}}\n]",
+        hex(&bytes)
+    );
+}
+
+#[test]
+fn the_journal_matches_its_vectors() {
+    use bolt_core::journal::{Action, Change, Content, Expected, Journal};
+    let path = format!("{}/tests/vectors/journal.json", env!("CARGO_MANIFEST_DIR"));
+    let vectors: Vec<JournalVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let v = &vectors[0];
+    let bytes = unhex(&v.hex);
+    // The body is the one the layout above gives, and the last 32 bytes are its BLAKE3.
+    let (body, sum) = bytes.split_at(bytes.len() - 32);
+    assert_eq!(hex(body), journal_body(), "{}", v.name);
+    assert_eq!(sum, blake3::hash(body).as_bytes());
+    let found = |kind, id, size| {
+        Some(Expected {
+            kind,
+            id: Id([id; 32]),
+            size,
+        })
+    };
+    let at = |path: &str, change, expected| Action {
+        path: path.into(),
+        change,
+        expected,
+    };
+    let journal = Journal {
+        target: Id([0x11; 32]),
+        from: Id([0x22; 32]),
+        actions: vec![
+            at("a", Change::MakeFolder, None),
+            at(
+                "a/b.txt",
+                Change::File(Content {
+                    id: Id([0x44; 32]),
+                    size: 300,
+                }),
+                found(EntryKind::File, 0x33, 5),
+            ),
+            at(
+                "link",
+                Change::Link(Content {
+                    id: Id([0x55; 32]),
+                    size: 6,
+                }),
+                None,
+            ),
+            at(
+                "old",
+                Change::RemoveFile,
+                found(EntryKind::Executable, 0x66, 0),
+            ),
+            at("z", Change::RemoveFolder, found(EntryKind::Folder, 0, 0)),
+        ],
+    };
+    assert_eq!(Journal::decode(&bytes).unwrap(), journal);
+    assert_eq!(journal.encode(), bytes);
 }

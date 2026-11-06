@@ -52,12 +52,22 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
                 continue;
             }
         };
+        if let Err(err) = reader.check_index() {
+            report.problems.push(format!("{name}: {err}"));
+        }
         for entry in reader.entries() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    report.problems.push(format!("{name}: {err}"));
+                    break;
+                }
+            };
             report.objects_checked += 1;
             let result = if entry.kind == ObjectKind::Content {
-                reader.copy_content(entry, &mut io::sink())
+                reader.copy_content(&entry, &mut io::sink())
             } else {
-                reader.read_record(entry).map(drop)
+                reader.read_record(&entry).map(drop)
             };
             if let Err(err) = result {
                 report
@@ -106,10 +116,11 @@ mod tests {
         assert!(report.is_ok(), "{:?}", report.problems);
         assert_eq!(report.objects_checked, 6);
 
-        let entry = *PackReader::open(&paths[1])
+        let entry = PackReader::open(&paths[1])
             .unwrap()
             .entries()
-            .first()
+            .next()
+            .unwrap()
             .unwrap();
         let mut bytes = std::fs::read(&paths[1]).unwrap();
         bytes[(entry.offset + ENTRY_HEADER_LEN) as usize] ^= 1;
@@ -135,7 +146,11 @@ mod tests {
         assert!(report.is_ok(), "{:?}", report.problems);
         assert_eq!(report.objects_checked, 2);
 
-        let entry = *PackReader::open(&path).unwrap().find(&tags_id).unwrap();
+        let entry = PackReader::open(&path)
+            .unwrap()
+            .find(&tags_id)
+            .unwrap()
+            .unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes[(entry.offset + ENTRY_HEADER_LEN) as usize] ^= 1;
         std::fs::write(&path, bytes).unwrap();

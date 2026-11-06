@@ -5,16 +5,21 @@ use crate::fsio;
 use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
 use crate::safe_fs;
 use crate::text::escape;
+use bolt_platform::dir::Dir;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(any(test, feature = "fault-injection"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod v2;
+
 pub const PACK_MAGIC: [u8; 8] = *b"BOLTPACK";
 pub const PACK_END_MAGIC: [u8; 8] = *b"BOLTPEND";
-pub const PACK_VERSION: u32 = 1;
+pub const PACK_VERSION: u32 = 2;
 /// Largest uncompressed object (1 TiB).
 pub const MAX_OBJECT_SIZE: u64 = 1 << 40;
 /// Largest uncompressed structured record (512 MiB).
@@ -143,7 +148,9 @@ fn worth_compressing(compressed: usize, original: usize) -> bool {
 /// Builds a pack in the temp folder; `finish` moves it into the store.
 pub struct PackWriter {
     file: BufWriter<File>,
-    tmp_path: PathBuf,
+    /// The temp folder, and the pack's name there.
+    tmp: Arc<Dir>,
+    name: OsString,
     /// Where the next entry starts.
     end: u64,
     index: BTreeMap<Id, IndexEntry>,
@@ -152,11 +159,18 @@ pub struct PackWriter {
 }
 
 impl PackWriter {
+    /// A pack built in the folder at `tmp_dir`.
     pub fn create(tmp_dir: &Path) -> Result<PackWriter, PackError> {
-        let (file, tmp_path) = fsio::create_temp(tmp_dir)?;
+        PackWriter::create_in(&Arc::new(Dir::open_top(tmp_dir)?))
+    }
+
+    /// A pack built in the folder `tmp`.
+    pub(crate) fn create_in(tmp: &Arc<Dir>) -> Result<PackWriter, PackError> {
+        let (file, name) = fsio::create_temp(tmp)?;
         let mut w = PackWriter {
             file: BufWriter::new(file),
-            tmp_path,
+            tmp: Arc::clone(tmp),
+            name,
             end: PACK_HEADER_LEN,
             index: BTreeMap::new(),
             broken: false,
@@ -225,6 +239,22 @@ impl PackWriter {
         Ok(entry.uncompressed_size)
     }
 
+    /// Copies an object from `pack` with its stored bytes as they are. Check the copy first.
+    pub(crate) fn add_stored(
+        &mut self,
+        pack: &PackReader,
+        entry: &IndexEntry,
+    ) -> Result<(), PackError> {
+        if self.contains(&entry.id) {
+            return Ok(());
+        }
+        self.add_entry(entry.kind, entry.id, |file| {
+            let compression = pack.copy_stored(entry, file)?;
+            Ok((entry.uncompressed_size, compression, entry.id))
+        })?;
+        Ok(())
+    }
+
     #[must_use]
     pub fn contains(&self, id: &Id) -> bool {
         self.index.contains_key(id)
@@ -235,26 +265,24 @@ impl PackWriter {
         self.index.is_empty()
     }
 
-    /// Writes the index and trailer, flushes, and moves the pack into `packs_dir` under the
-    /// name `<hex of the index checksum>.pack`. An empty pack is deleted instead.
-    pub fn finish(mut self, packs_dir: &Path) -> Result<Option<PathBuf>, PackError> {
+    /// Writes the index and trailer, flushes, and moves the pack into the folder at `packs_dir`,
+    /// returning its path; see `finish_into`.
+    pub fn finish(self, packs_dir: &Path) -> Result<Option<PathBuf>, PackError> {
+        let packs = Dir::open_top(packs_dir)?;
+        Ok(self.finish_into(&packs)?.map(|name| packs_dir.join(name)))
+    }
+
+    /// Writes the index and trailer, flushes, and moves the pack into the folder `packs` under the
+    /// name `<hex of the index checksum>.pack`, which it returns. An empty pack is deleted instead.
+    pub(crate) fn finish_into(mut self, packs: &Dir) -> Result<Option<OsString>, PackError> {
         if self.broken {
             return Err(io::Error::other("an earlier write to this pack failed").into());
         }
         if self.index.is_empty() {
-            fs::remove_file(&self.tmp_path)?;
+            fsio::remove_file(&self.tmp, &self.name)?;
             return Ok(None);
         }
-        let mut index = Writer::new();
-        index.varint(self.index.len() as u64);
-        for e in self.index.values() {
-            index.id(&e.id);
-            index.u8(e.kind as u8);
-            index.u64(e.offset);
-            index.varint(e.uncompressed_size);
-            index.varint(e.stored_size);
-        }
-        let index = index.into_bytes();
+        let index = v2::encode(self.index.values());
         let checksum = blake3::hash(&index);
         self.file.write_all(&index)?;
         self.file.write_all(&self.end.to_le_bytes())?;
@@ -263,8 +291,8 @@ impl PackWriter {
         self.file.flush()?;
         self.file.get_ref().sync_all()?;
         fsio::fault_point("pack:before-rename")?;
-        let dest = packs_dir.join(format!("{}.pack", checksum.to_hex()));
-        fsio::rename_durable(&self.tmp_path, &dest)?;
+        let dest = OsString::from(format!("{}.pack", checksum.to_hex()));
+        fsio::rename_durable(&self.tmp, &self.name, packs, &dest)?;
         fsio::fault_point("pack:after-rename")?;
         Ok(Some(dest))
     }
@@ -354,7 +382,7 @@ impl PackWriter {
 impl Drop for PackWriter {
     fn drop(&mut self) {
         // After a successful finish the temp file is gone, and this fails harmlessly.
-        let _ = fs::remove_file(&self.tmp_path);
+        let _ = fsio::remove_file(&self.tmp, &self.name);
     }
 }
 
@@ -394,7 +422,9 @@ fn failed_earlier() -> PackError {
 /// new one takes its place. Nothing points at these packs until the command moves the head, so
 /// any a crash leaves behind are only unused.
 pub struct PackSet {
-    tmp_dir: PathBuf,
+    tmp: Arc<Dir>,
+    /// The store's folder, and its path, which names the packs moved there.
+    packs: Arc<Dir>,
     packs_dir: PathBuf,
     limit: u64,
     /// The pack being built.
@@ -407,23 +437,36 @@ pub struct PackSet {
 }
 
 impl PackSet {
-    /// A set that rolls over at the writer's own limit.
-    pub(crate) fn new(tmp_dir: &Path, packs_dir: &Path) -> Result<PackSet, PackError> {
-        PackSet::start(tmp_dir, packs_dir, writer_limit())
+    /// A set built in the folder `tmp` that moves its packs into `packs`, the folder at
+    /// `packs_dir`, rolling over at the writer's own limit.
+    pub(crate) fn new(
+        tmp: &Arc<Dir>,
+        packs: &Arc<Dir>,
+        packs_dir: &Path,
+    ) -> Result<PackSet, PackError> {
+        PackSet::start(tmp, packs, packs_dir, writer_limit())
     }
 
     /// A set that rolls over at `limit` objects, so tests can split small commands.
     #[cfg(any(test, feature = "fault-injection"))]
     pub fn with_limit(tmp_dir: &Path, packs_dir: &Path, limit: u64) -> Result<PackSet, PackError> {
-        PackSet::start(tmp_dir, packs_dir, limit)
+        let tmp = Arc::new(Dir::open_top(tmp_dir)?);
+        let packs = Arc::new(Dir::open_top(packs_dir)?);
+        PackSet::start(&tmp, &packs, packs_dir, limit)
     }
 
-    fn start(tmp_dir: &Path, packs_dir: &Path, limit: u64) -> Result<PackSet, PackError> {
+    fn start(
+        tmp: &Arc<Dir>,
+        packs: &Arc<Dir>,
+        packs_dir: &Path,
+        limit: u64,
+    ) -> Result<PackSet, PackError> {
         Ok(PackSet {
-            tmp_dir: tmp_dir.to_owned(),
+            tmp: Arc::clone(tmp),
+            packs: Arc::clone(packs),
             packs_dir: packs_dir.to_owned(),
             limit,
-            current: PackWriter::create(tmp_dir)?,
+            current: PackWriter::create_in(tmp)?,
             done: Vec::new(),
             broken: false,
         })
@@ -449,6 +492,15 @@ impl PackSet {
         self.add(|pack| pack.add_content_from(reader, expected))
     }
 
+    /// Copies an object from `pack` with its stored bytes as they are. Check the copy first.
+    pub(crate) fn add_stored(
+        &mut self,
+        pack: &PackReader,
+        entry: &IndexEntry,
+    ) -> Result<(), PackError> {
+        self.add(|w| w.add_stored(pack, entry))
+    }
+
     /// Whether the pack being built holds `id`. Packs already in the store aren't looked in.
     #[must_use]
     pub fn contains(&self, id: &Id) -> bool {
@@ -469,9 +521,9 @@ impl PackSet {
         }
         // An empty pack is only dropped, which removes its temp file.
         if !self.current.is_empty()
-            && let Some(path) = self.current.finish(&self.packs_dir)?
+            && let Some(name) = self.current.finish_into(&self.packs)?
         {
-            self.done.push(path);
+            self.done.push(self.packs_dir.join(name));
         }
         Ok(self.done)
     }
@@ -497,10 +549,10 @@ impl PackSet {
     /// Moves the full pack into the store and starts the next one.
     fn roll_over(&mut self) -> Result<(), PackError> {
         // The next one first, so the set always has a pack to add to.
-        let next = PackWriter::create(&self.tmp_dir)?;
+        let next = PackWriter::create_in(&self.tmp)?;
         let full = std::mem::replace(&mut self.current, next);
-        if let Some(path) = full.finish(&self.packs_dir)? {
-            self.done.push(path);
+        if let Some(name) = full.finish_into(&self.packs)? {
+            self.done.push(self.packs_dir.join(name));
         }
         fsio::fault_point("packs:rolled-over")?;
         Ok(())
@@ -538,24 +590,67 @@ fn pump(
 pub struct PackReader {
     file: File,
     path: PathBuf,
-    entries: Vec<IndexEntry>,
+    index: Index,
+}
+
+enum Index {
+    /// Version 1: read whole, and checked, when the pack is opened.
+    Whole(Vec<IndexEntry>),
+    /// Version 2: read by position as it is searched.
+    OnDisk(Box<v2::Index>),
+}
+
+/// A pack's index lines in order of ID; see `PackReader::entries`.
+pub struct Entries<'a>(Lines<'a>);
+
+enum Lines<'a> {
+    Whole(std::slice::Iter<'a, IndexEntry>),
+    OnDisk(v2::Lines<'a>),
+}
+
+impl Iterator for Entries<'_> {
+    type Item = Result<IndexEntry, PackError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.0 {
+            Lines::Whole(lines) => lines.next().map(|e| Ok(*e)),
+            Lines::OnDisk(lines) => lines.next(),
+        }
+    }
 }
 
 impl PackReader {
-    /// Opens a pack and checks its header, trailer, index checksum and that every entry lies
-    /// inside the file without overlapping another.
+    /// Opens a pack and checks its header and trailer. A version 1 index is read and checked
+    /// whole: its checksum, and that every entry lies inside the file without overlapping another.
+    /// A version 2 index is read only as far as its fan-out; see `find` and `entries`.
     pub fn open(path: &Path) -> Result<PackReader, PackError> {
         PackReader::open_with(path, MAX_PACK_OBJECTS)
     }
 
+    /// `open` for the pack `name` in the folder `dir`, at `path`, opened through `dir`.
+    pub(crate) fn open_in(dir: &Dir, name: &OsStr, path: &Path) -> Result<PackReader, PackError> {
+        let opened = safe_fs::open_regular_in(dir, name, path);
+        PackReader::checked(opened, path, MAX_PACK_OBJECTS)
+    }
+
     /// `open`, with a smaller limit on objects than the format's; tests use one.
     fn open_with(path: &Path, max_objects: u64) -> Result<PackReader, PackError> {
+        let opened = safe_fs::open_regular(path, OpenOptions::new().read(true));
+        PackReader::checked(opened, path, max_objects)
+    }
+
+    /// The pack `opened` at `path`, once it passes `open`'s checks.
+    fn checked(
+        opened: io::Result<File>,
+        path: &Path,
+        max_objects: u64,
+    ) -> Result<PackReader, PackError> {
         let corrupt = |reason: String| PackError::Corrupt {
             path: path.to_path_buf(),
             reason,
         };
         // A link, pipe or device named like a pack is damage, never followed or waited on.
-        let file = match safe_fs::open_regular(path, OpenOptions::new().read(true)) {
+        let file = match opened {
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
                 return Err(corrupt("it is not a regular file".into()));
             }
@@ -570,9 +665,8 @@ impl PackReader {
         if sub::<8>(&header, 0) != PACK_MAGIC {
             return Err(corrupt("the file does not start with BOLTPACK".into()));
         }
-        if u32::from_le_bytes(sub(&header, 8)) != PACK_VERSION
-            || u32::from_le_bytes(sub(&header, 12)) != 0
-        {
+        let version = u32::from_le_bytes(sub(&header, 8));
+        if !matches!(version, 1 | 2) || u32::from_le_bytes(sub(&header, 12)) != 0 {
             return Err(corrupt("unknown pack version or flags".into()));
         }
 
@@ -588,23 +682,50 @@ impl PackReader {
         if index_offset < PACK_HEADER_LEN || index_offset > len - TRAILER_LEN {
             return Err(corrupt("the index offset is outside the file".into()));
         }
-        let index = Section {
-            file: &file,
-            pos: index_offset,
-            end: len - TRAILER_LEN,
+        let index_end = len - TRAILER_LEN;
+        let index = if version == 1 {
+            let index = Section {
+                file: &file,
+                pos: index_offset,
+                end: index_end,
+            };
+            Index::Whole(read_index(path, index, max_objects, checksum)?)
+        } else {
+            let range = (index_offset, index_end);
+            Index::OnDisk(Box::new(v2::Index::open(
+                &file,
+                path,
+                range,
+                checksum,
+                max_objects,
+            )?))
         };
-        let entries = read_index(path, index, max_objects, checksum)?;
+        #[cfg(test)]
+        open_files::opened();
         Ok(PackReader {
             file,
             path: path.to_path_buf(),
-            entries,
+            index,
         })
     }
 
-    /// All entries, sorted by id.
+    /// Every index line, sorted by id. A version 2 pack's are read from disk as they are handed
+    /// out, and checked; the first that fails ends them.
     #[must_use]
-    pub fn entries(&self) -> &[IndexEntry] {
-        &self.entries
+    pub fn entries(&self) -> Entries<'_> {
+        match &self.index {
+            Index::Whole(entries) => Entries(Lines::Whole(entries.iter())),
+            Index::OnDisk(index) => Entries(Lines::OnDisk(index.lines(&self.file, &self.path))),
+        }
+    }
+
+    /// Checks a version 2 index against its checksum, which opening it doesn't; a version 1
+    /// index was checked when it was read.
+    pub fn check_index(&self) -> Result<(), PackError> {
+        match &self.index {
+            Index::Whole(_) => Ok(()),
+            Index::OnDisk(index) => index.check_checksum(&self.file, &self.path),
+        }
     }
 
     #[must_use]
@@ -612,12 +733,15 @@ impl PackReader {
         &self.path
     }
 
-    #[must_use]
-    pub fn find(&self, id: &Id) -> Option<&IndexEntry> {
-        self.entries
-            .binary_search_by(|e| e.id.cmp(id))
-            .ok()
-            .map(|i| &self.entries[i])
+    /// The index line of `id`, if the pack holds it.
+    pub fn find(&self, id: &Id) -> Result<Option<IndexEntry>, PackError> {
+        match &self.index {
+            Index::Whole(entries) => Ok(entries
+                .binary_search_by(|e| e.id.cmp(id))
+                .ok()
+                .and_then(|i| entries.get(i).copied())),
+            Index::OnDisk(index) => index.find(&self.file, &self.path, id),
+        }
     }
 
     /// Reads a structured record and checks its fingerprint.
@@ -662,9 +786,22 @@ impl PackReader {
         }
     }
 
-    /// Checks the entry's header against `entry`, then writes its uncompressed bytes to `out`,
-    /// never producing more than one byte beyond the recorded size.
-    fn decode_into(&self, entry: &IndexEntry, out: &mut dyn Write) -> Result<(), PackError> {
+    /// Copies the entry's stored bytes to `out` as they are, after checking its header, and
+    /// returns their compression. Nothing is checked against the ID: read the object first.
+    pub(crate) fn copy_stored(
+        &self,
+        entry: &IndexEntry,
+        out: &mut dyn Write,
+    ) -> Result<u8, PackError> {
+        let (compression, mut data) = self.stored(entry)?;
+        if io::copy(&mut data, out)? != entry.stored_size {
+            return Err(self.corrupt(format!("{} runs past the end of the file", entry.id)));
+        }
+        Ok(compression)
+    }
+
+    /// Checks the entry's header against `entry`, and returns its compression and stored bytes.
+    fn stored(&self, entry: &IndexEntry) -> Result<(u8, Section<'_>), PackError> {
         let header = read_vec(&self.file, entry.offset, ENTRY_HEADER_LEN)?;
         let mut r = Reader::new(&header);
         let fields = (r.u8(), r.id(), r.u64(), r.u64(), r.u8());
@@ -679,13 +816,22 @@ impl PackReader {
             return Err(self.corrupt(format!("the header of {id} does not match the index")));
         }
         let data_start = entry.offset + ENTRY_HEADER_LEN;
-        let mut data = Section {
+        let data = Section {
             file: &self.file,
             pos: data_start,
             end: data_start
                 .checked_add(stored)
                 .ok_or_else(|| self.corrupt("an entry runs past the end of the file"))?,
         };
+        Ok((compression, data))
+    }
+
+    /// Checks the entry's header against `entry`, then writes its uncompressed bytes to `out`,
+    /// never producing more than one byte beyond the recorded size.
+    fn decode_into(&self, entry: &IndexEntry, out: &mut dyn Write) -> Result<(), PackError> {
+        let (compression, mut data) = self.stored(entry)?;
+        let (id, size, stored) = (entry.id, entry.uncompressed_size, entry.stored_size);
+        let data_start = data.pos;
         let produced = match compression {
             NO_COMPRESSION if stored == size => io::copy(&mut data, out)?,
             ZSTD => {
@@ -717,6 +863,45 @@ impl PackReader {
             return Err(self.corrupt(format!("{id} does not have its recorded size")));
         }
         Ok(())
+    }
+}
+
+/// How many packs this thread has opened, and how many it held open at once: tests of the store's
+/// limit on open files read them.
+#[cfg(test)]
+pub(crate) mod open_files {
+    use std::cell::Cell;
+
+    thread_local! {
+        static OPENED: Cell<usize> = const { Cell::new(0) };
+        static OPEN: Cell<usize> = const { Cell::new(0) };
+        static MOST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn opened() {
+        OPENED.set(OPENED.get() + 1);
+        OPEN.set(OPEN.get() + 1);
+        MOST.set(MOST.get().max(OPEN.get()));
+    }
+
+    pub(super) fn closed() {
+        OPEN.set(OPEN.get().saturating_sub(1));
+    }
+
+    pub(crate) fn total() -> usize {
+        OPENED.get()
+    }
+
+    /// The most held open at once since the last call.
+    pub(crate) fn most_since_last() -> usize {
+        MOST.replace(OPEN.get())
+    }
+}
+
+#[cfg(test)]
+impl Drop for PackReader {
+    fn drop(&mut self) {
+        open_files::closed();
     }
 }
 
@@ -1003,6 +1188,10 @@ mod tests {
         }
     }
 
+    fn entries(r: &PackReader) -> Vec<IndexEntry> {
+        r.entries().collect::<Result<_, _>>().unwrap()
+    }
+
     /// Reads an object back whatever its kind.
     fn read_any(r: &PackReader, e: &IndexEntry) -> Result<Vec<u8>, PackError> {
         if e.kind == ObjectKind::Content {
@@ -1038,11 +1227,11 @@ mod tests {
         let path = w.finish(&packs).unwrap().unwrap();
 
         let r = PackReader::open(&path).unwrap();
-        assert_eq!(r.entries().len(), 5);
-        assert!(r.entries().windows(2).all(|p| p[0].id < p[1].id));
-        for e in r.entries() {
+        assert_eq!(r.entries().count(), 5);
+        assert!(entries(&r).windows(2).all(|p| p[0].id < p[1].id));
+        for e in &entries(&r) {
             assert_eq!(read_any(&r, e).unwrap(), expected[&e.id]);
-            assert_eq!(r.find(&e.id).unwrap().offset, e.offset);
+            assert_eq!(r.find(&e.id).unwrap().unwrap().offset, e.offset);
         }
         assert!(is_empty_dir(&tmp));
     }
@@ -1056,7 +1245,10 @@ mod tests {
         assert_eq!(tags, hash_record(Flavor::TagList, b"tags"));
         assert_eq!(servers, hash_record(Flavor::ServerLines, b"servers"));
         let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
-        let (tags, servers) = (*r.find(&tags).unwrap(), *r.find(&servers).unwrap());
+        let (tags, servers) = (
+            r.find(&tags).unwrap().unwrap(),
+            r.find(&servers).unwrap().unwrap(),
+        );
         assert_eq!((tags.kind as u8, servers.kind as u8), (22, 23));
         assert_eq!(r.read_record(&tags).unwrap(), b"tags");
         assert_eq!(r.read_record(&servers).unwrap(), b"servers");
@@ -1071,7 +1263,7 @@ mod tests {
         assert_eq!(a, b);
         assert!(w.contains(&a));
         let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
-        assert_eq!(r.entries().len(), 1);
+        assert_eq!(r.entries().count(), 1);
     }
 
     #[test]
@@ -1122,10 +1314,11 @@ mod tests {
             let failed = match PackReader::open(&flipped_path) {
                 Err(_) => true,
                 Ok(r) => {
-                    let mut failed = false;
+                    // Opening skips the index checksum, which `verify` checks.
+                    let mut failed = r.check_index().is_err();
                     for e in r.entries() {
-                        match read_any(&r, e) {
-                            Ok(data) => assert_eq!(
+                        match e.and_then(|e| read_any(&r, &e).map(|data| (e, data))) {
+                            Ok((e, data)) => assert_eq!(
                                 Some(&data),
                                 expected.get(&e.id),
                                 "byte {i}: different data returned"
@@ -1151,10 +1344,10 @@ mod tests {
         assert!(PackReader::open(&path).is_err());
     }
 
-    /// A pack with no entries but `index`, under a correct checksum.
+    /// A version 1 pack with no entries but `index`, under a correct checksum.
     fn pack_with_index(index: &[u8]) -> Vec<u8> {
         let mut out = PACK_MAGIC.to_vec();
-        out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(index);
         out.extend_from_slice(&PACK_HEADER_LEN.to_le_bytes());
@@ -1174,7 +1367,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         match PackReader::open(&path) {
             Err(PackError::Corrupt { reason, .. }) => reason,
-            other => panic!("{:?}", other.map(|r| r.entries().len())),
+            other => panic!("{:?}", other.map(|r| r.entries().count())),
         }
     }
 
@@ -1233,11 +1426,77 @@ mod tests {
             w.add_content(c).unwrap();
         }
         let path = w.finish(&packs).unwrap().unwrap();
-        assert_eq!(PackReader::open_with(&path, 3).unwrap().entries().len(), 3);
+        assert_eq!(
+            PackReader::open_with(&path, 3).unwrap().entries().count(),
+            3
+        );
         assert!(matches!(
             PackReader::open_with(&path, 2),
             Err(PackError::Corrupt { .. })
         ));
+    }
+
+    /// A pack of `n` small contents, its bytes, and where its index starts.
+    fn written(n: u32) -> (tempfile::TempDir, Vec<Id>, Vec<u8>, usize) {
+        let (root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let ids = (0..n)
+            .map(|i| w.add_content(&i.to_le_bytes()).unwrap())
+            .collect();
+        let bytes = std::fs::read(w.finish(&packs).unwrap().unwrap()).unwrap();
+        let trailer = bytes.len() - 48;
+        let at = u64::from_le_bytes(bytes[trailer..trailer + 8].try_into().unwrap());
+        (root, ids, bytes, usize::try_from(at).unwrap())
+    }
+
+    #[test]
+    fn a_v2_index_line_is_found_by_position() {
+        let (root, mut ids, mut bytes, index) = written(300);
+        assert_eq!(&bytes[8..12], &2u32.to_le_bytes());
+        ids.sort();
+        // Line 7 gets a kind no pack has: opening never reads it, only looking it up does.
+        bytes[index + 1032 + 32 * 300 + 25 * 7] = 0xee;
+        let path = root.path().join("v2.pack");
+        std::fs::write(&path, &bytes).unwrap();
+        let r = PackReader::open(&path).unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            match r.find(id) {
+                Ok(Some(e)) => {
+                    assert_ne!(i, 7);
+                    assert_eq!(e.id, *id);
+                    assert_eq!(read_any(&r, &e).unwrap().len(), 4);
+                }
+                Err(PackError::Corrupt { reason, .. }) => {
+                    assert_eq!(i, 7);
+                    assert!(reason.contains("unknown object kind 238"), "{reason}");
+                }
+                other => panic!("{i}: {other:?}"),
+            }
+        }
+        assert_eq!(r.find(&hash_content(b"not in it")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_fan_out_that_decreases_or_overshoots_is_refused() {
+        let (root, ids, good, index) = written(40);
+        let fan = |b: usize| index + 8 + 4 * b;
+        let set = |bytes: &mut Vec<u8>, b: usize, n: u32| {
+            bytes[fan(b)..fan(b) + 4].copy_from_slice(&n.to_le_bytes());
+        };
+        // Number 1 one more than number 2, still within the count.
+        let second = u32::from_le_bytes(good[fan(2)..fan(2) + 4].try_into().unwrap());
+        assert!(second < 40);
+        let mut decreasing = good.clone();
+        set(&mut decreasing, 1, second + 1);
+        let mut overshooting = good.clone();
+        set(&mut overshooting, 255, 41);
+        let mut short = good.clone();
+        set(&mut short, 255, 39);
+        assert_eq!(ids.len(), 40);
+        for bad in [decreasing, overshooting, short] {
+            let reason = refusal(root.path(), &bad);
+            assert!(reason.contains("fan-out"), "{reason}");
+        }
     }
 
     #[test]
@@ -1261,7 +1520,8 @@ mod tests {
         assert!(shown.contains("a\\u{202e}b.pack is damaged"), "{shown}");
     }
 
-    /// A pack with one content entry whose header and index claim `claimed` uncompressed bytes.
+    /// A version 1 pack with one content entry whose header and index claim `claimed`
+    /// uncompressed bytes.
     fn hand_built_pack(stored: &[u8], claimed: u64, id: Id) -> Vec<u8> {
         let mut w = crate::encoding::Writer::new();
         w.u8(ObjectKind::Content as u8);
@@ -1282,7 +1542,7 @@ mod tests {
 
         let mut out = Vec::new();
         out.extend_from_slice(&PACK_MAGIC);
-        out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&entry);
         out.extend_from_slice(stored);
@@ -1313,7 +1573,7 @@ mod tests {
             .unwrap();
             let r = PackReader::open(&path).unwrap();
             let mut out = Vec::new();
-            let err = r.copy_content(&r.entries()[0], &mut out).unwrap_err();
+            let err = r.copy_content(&entries(&r)[0], &mut out).unwrap_err();
             assert!(matches!(err, PackError::Corrupt { .. }), "{err:?}");
             assert!(out.len() <= 11, "produced {} bytes", out.len());
         }
@@ -1329,9 +1589,9 @@ mod tests {
         assert!(matches!(err, PackError::ContentChanged), "{err:?}");
         let x = w.add_content(b"x").unwrap();
         let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
-        assert_eq!(r.entries().len(), 1);
-        assert_eq!(read_any(&r, &r.entries()[0]).unwrap(), b"x");
-        assert_eq!(r.entries()[0].id, x);
+        assert_eq!(r.entries().count(), 1);
+        assert_eq!(read_any(&r, &entries(&r)[0]).unwrap(), b"x");
+        assert_eq!(entries(&r)[0].id, x);
     }
 
     #[test]
@@ -1344,8 +1604,8 @@ mod tests {
             .unwrap();
         assert_eq!(size, data.len() as u64);
         let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
-        assert!(r.entries()[0].stored_size < size);
-        assert_eq!(read_any(&r, &r.entries()[0]).unwrap(), data);
+        assert!(entries(&r)[0].stored_size < size);
+        assert_eq!(read_any(&r, &entries(&r)[0]).unwrap(), data);
     }
 
     #[cfg(feature = "fault-injection")]
@@ -1368,7 +1628,7 @@ mod tests {
                 // After the rename the pack is complete; finishing only failed to report it.
                 (2, Err(PackError::Io(_))) => {
                     let p = std::fs::read_dir(&packs).unwrap().next().unwrap().unwrap();
-                    assert_eq!(PackReader::open(&p.path()).unwrap().entries().len(), 1);
+                    assert_eq!(PackReader::open(&p.path()).unwrap().entries().count(), 1);
                 }
                 (3, Ok(Some(_))) => break,
                 (n, other) => panic!("fault {n}: unexpected {other:?}"),
@@ -1382,7 +1642,7 @@ mod tests {
     }
 
     fn objects_in(path: &Path) -> usize {
-        PackReader::open(path).unwrap().entries().len()
+        PackReader::open(path).unwrap().entries().count()
     }
 
     #[test]
@@ -1397,7 +1657,13 @@ mod tests {
         let sizes: Vec<usize> = paths.iter().map(|p| objects_in(p)).collect();
         assert_eq!(sizes, [3, 3, 1]);
         // In the order they were made, so the last one holds what came last.
-        assert!(PackReader::open(&paths[2]).unwrap().find(&ids[6]).is_some());
+        assert!(
+            PackReader::open(&paths[2])
+                .unwrap()
+                .find(&ids[6])
+                .unwrap()
+                .is_some()
+        );
         assert!(is_empty_dir(&tmp));
     }
 

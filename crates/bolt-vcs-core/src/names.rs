@@ -1,16 +1,29 @@
 //! Which file names Bolt stores, and which it flags as non-portable (decision 004):
-//! [`validate_name`] refuses a name outright; [`name_problems`] and [`folder_problems`] flag names
-//! that work here but would break on another operating system. [`is_git_alias`] spots the
-//! spellings of `.git`, [`holdable_here`] says whether this system can hold a name, and [`fold`]
-//! compares names as a drive does.
+//! [`validate_name`] refuses a name outright, and [`validate_path`] a path; [`name_problems`] and
+//! [`folder_problems`] flag names that work here but would break on another operating system.
+//! [`is_git_alias`] and [`is_bolt_alias`] spot the spellings of `.git` and `.bolt`, [`own_folder`]
+//! the project's own ones, [`holdable_here`] says whether this system can hold a name,
+//! [`writable_here`] whether write-out may write one, and [`fold`] compares names as a drive does.
+//! [`project_path`] turns a path typed on the command line into a project path, and
+//! [`project_given`] a path or pattern into a [`Given`].
+//! The limits on names and paths are here too (decision 051).
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::drive::Drive;
 use crate::text::escape;
 
-/// Longest allowed name, in bytes.
-pub const MAX_NAME_BYTES: usize = 255;
+/// Longest name the format allows, in bytes: Windows' 255 UTF-16 units, each at most three bytes
+/// in UTF-8.
+pub const MAX_NAME_BYTES: usize = 765;
+
+/// Longest name a save may add, in bytes: what macOS and Linux hold.
+pub const MAX_NEW_NAME_BYTES: usize = 255;
+
+/// Longest path, in bytes, counted from the project's top with `/` between names.
+pub const MAX_PATH_BYTES: usize = 4096;
 
 /// Why a name is refused on every system.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +40,8 @@ pub enum NameError {
     TooLong,
     #[error("a name cannot be spelled like Bolt's own folder (.bolt)")]
     BoltSpelling,
+    #[error("a path cannot be longer than {} bytes", MAX_PATH_BYTES)]
+    PathTooLong,
 }
 
 /// A name that is stored fine here but would break on another system. The names in the messages
@@ -57,6 +72,29 @@ pub enum PortabilityProblem {
         escape(name, false)
     )]
     ForbiddenCharacter { name: String, ch: char },
+    #[error(
+        "\"{}\" is longer than {} bytes, which macOS and Linux do not allow",
+        escape(.0, false),
+        MAX_NEW_NAME_BYTES
+    )]
+    TooLong(String),
+}
+
+/// Why write-out won't write a name on this system.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotWritable {
+    /// Not a name at all ([`validate_name`]).
+    Invalid(NameError),
+    /// A spelling of `.git` ([`is_git_alias`]).
+    GitName,
+    /// A spelling of `.bolt` ([`is_bolt_alias`]).
+    BoltName,
+    /// A name this system can't hold, by decision 004's rules for it.
+    NotHoldable(PortabilityProblem),
+    /// Longer than this system holds ([`fits_here`]).
+    TooLong,
+    /// The real short name of a `.git` or `.bolt` in the same folder.
+    ShortNameOf(&'static str),
 }
 
 /// The always-on rules: what no name may ever be.
@@ -76,10 +114,19 @@ pub fn validate_name(name: &str) -> Result<(), NameError> {
     if name.len() > MAX_NAME_BYTES {
         return Err(NameError::TooLong);
     }
-    if is_bolt_spelling(name) {
+    if is_bolt_alias(name) {
         return Err(NameError::BoltSpelling);
     }
     Ok(())
+}
+
+/// The always-on rules for a project path: `/` between names, each one [`validate_name`] allows,
+/// and at most [`MAX_PATH_BYTES`] in all. So no empty name, no `..`, and no `/` at either end.
+pub fn validate_path(path: &str) -> Result<(), NameError> {
+    if path.len() > MAX_PATH_BYTES {
+        return Err(NameError::PathTooLong);
+    }
+    path.split('/').try_for_each(validate_name)
 }
 
 /// Characters macOS (HFS+) ignores when comparing names; Git's `next_hfs_char` list.
@@ -95,7 +142,10 @@ fn ntfs_base(name: &str) -> &str {
     base.trim_end_matches(['.', ' '])
 }
 
-fn is_bolt_spelling(name: &str) -> bool {
+/// Whether Windows or macOS would take `name` for Bolt's own folder, `.bolt`: any letter case,
+/// trailing dots or spaces, a `:stream`, the short names `bolt~1` to `bolt~4`, or characters macOS
+/// ignores. It answers the same on every system.
+pub fn is_bolt_alias(name: &str) -> bool {
     let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
     let base = ntfs_base(&kept).to_ascii_lowercase();
     // `bolt~1`..`bolt~4` are NTFS 8.3 short names of `.bolt` (Git accepts ~1..~4).
@@ -107,6 +157,15 @@ fn is_bolt_spelling(name: &str) -> bool {
 /// backslash, and it answers the same on every system.
 pub fn is_git_alias(name: &str) -> bool {
     is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+}
+
+/// Whether `name`, in the project's top folder, is the project's own `.bolt` or Git's `.git` as
+/// this drive spells them: exactly, or in other letter case where the drive ignores it (decision
+/// 059). Other spellings of either are left out of saves with a warning instead.
+pub fn own_folder(name: &str, drive: Drive) -> bool {
+    [".bolt", ".git"]
+        .iter()
+        .any(|own| name == *own || (drive.ignores_case && name.eq_ignore_ascii_case(own)))
 }
 
 fn is_ntfs_dotgit(name: &str) -> bool {
@@ -153,8 +212,17 @@ fn is_reserved(name: &str) -> bool {
     })
 }
 
-/// Portability problems with a single name.
+/// Portability problems with a single name: Windows' rules, and the length every system holds.
 pub fn name_problems(name: &str) -> Vec<PortabilityProblem> {
+    let mut out = windows_problems(name);
+    if name.len() > MAX_NEW_NAME_BYTES {
+        out.push(PortabilityProblem::TooLong(name.into()));
+    }
+    out
+}
+
+/// What Windows refuses in a name: device names, a dot or space at its end, and characters.
+fn windows_problems(name: &str) -> Vec<PortabilityProblem> {
     let mut out = Vec::new();
     if is_reserved(name) {
         out.push(PortabilityProblem::ReservedName(name.into()));
@@ -175,10 +243,118 @@ pub fn name_problems(name: &str) -> Vec<PortabilityProblem> {
 }
 
 /// Whether this operating system can hold a file called `name` (a name `validate_name` accepts):
-/// decision 004's portability rules that apply here, which only Windows has. Names that clash on
-/// the drive are `drive::probe`'s business.
+/// it must [fit](fits_here), and pass decision 004's portability rules that apply here, which only
+/// Windows has. Names that clash on the drive are `drive::probe`'s business.
 pub fn holdable_here(name: &str) -> bool {
-    !cfg!(windows) || name_problems(name).is_empty()
+    fits_here(name) && (!cfg!(windows) || windows_problems(name).is_empty())
+}
+
+/// Whether this system holds a name this long: Windows holds 255 UTF-16 units, up to 765 bytes,
+/// and macOS and Linux 255 bytes (decision 051).
+pub fn fits_here(name: &str) -> bool {
+    if cfg!(windows) {
+        name.encode_utf16().count() <= 255
+    } else {
+        name.len() <= MAX_NEW_NAME_BYTES
+    }
+}
+
+/// Whether write-out may write `name` into a folder whose entries have the long and short names
+/// `short_names_here` (Windows' 8.3 names, as `Dir::entries` gives them). Never a spelling of
+/// `.git` or `.bolt`, on any system: Linux reaches NTFS and vfat drives too (CVE-2019-1353). Nor
+/// a name this system can't hold, nor the real short name of a `.git` or `.bolt` in that folder.
+/// Nor anything [`validate_name`] refuses, on any system.
+pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<(), NotWritable> {
+    match validate_name(name) {
+        Err(NameError::BoltSpelling) => return Err(NotWritable::BoltName),
+        Err(e) => return Err(NotWritable::Invalid(e)),
+        Ok(()) => {}
+    }
+    if is_git_alias(name)
+        || is_hashed_short_name(name, b"gi7eba")
+        || is_plain_short_name(name, b"gitmod")
+    {
+        return Err(NotWritable::GitName);
+    }
+    if is_bolt_alias(name) {
+        return Err(NotWritable::BoltName);
+    }
+    if cfg!(windows)
+        && let Some(problem) = windows_problems(name).into_iter().next()
+    {
+        return Err(NotWritable::NotHoldable(problem));
+    }
+    if !fits_here(name) {
+        return Err(NotWritable::TooLong);
+    }
+    // After four clashes NTFS hashes a short name (`GI1D2E~1`, say), so the real one is compared.
+    for (long, short) in short_names_here {
+        if short.eq_ignore_ascii_case(name) {
+            if is_git_alias(long) {
+                return Err(NotWritable::ShortNameOf(".git"));
+            }
+            if is_bolt_alias(long) {
+                return Err(NotWritable::ShortNameOf(".bolt"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is an NTFS fallback short name made from `prefix` the way Git's
+/// `is_ntfs_dot_generic` spells one: up to 6 of its letters, `~`, a digit 1-9, more digits to 8
+/// characters, then only dots, spaces or a `:stream`. `gi7eba` is `.gitmodules`' prefix, which
+/// Git refuses only for a link named so; write-out refuses it for every entry, on purpose, since
+/// a file there would stand for `.gitmodules` too. `.git` and `.bolt` have no such prefix known
+/// ahead (NTFS hashes the name), so their real short names are compared folder by folder instead.
+fn is_hashed_short_name(name: &str, prefix: &[u8]) -> bool {
+    let bytes = name.as_bytes();
+    let mut pos = 0;
+    let mut saw_tilde = false;
+    while pos < 8 {
+        let Some(&b) = bytes.get(pos) else {
+            return false;
+        };
+        if saw_tilde {
+            if !b.is_ascii_digit() {
+                return false;
+            }
+        } else if b == b'~' {
+            saw_tilde = true;
+            pos += 1;
+            if !bytes.get(pos).is_some_and(|d| (b'1'..=b'9').contains(d)) {
+                return false;
+            }
+        } else if pos >= 6 || !prefix.get(pos).is_some_and(|p| b.eq_ignore_ascii_case(p)) {
+            return false;
+        }
+        pos += 1;
+    }
+    only_dots_or_spaces(bytes.get(pos..).unwrap_or_default())
+}
+
+/// Whether `name` is the plain short name NTFS gives a name starting with `prefix`'s 6 letters
+/// before it runs out of them, as Git's `is_ntfs_dot_generic` reads it: those letters in any
+/// case, `~`, a digit 1-4, then only dots, spaces or a `:stream`. `gitmod` gives `.gitmodules`'
+/// `GITMOD~1`; write-out refuses it for every entry, as it does the hashed ones.
+fn is_plain_short_name(name: &str, prefix: &[u8; 6]) -> bool {
+    let Some((head, rest)) = name.as_bytes().split_at_checked(6) else {
+        return false;
+    };
+    let [b'~', b'1'..=b'4', rest @ ..] = rest else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(prefix) && only_dots_or_spaces(rest)
+}
+
+/// Whether what ends a short name holds only dots or spaces, up to a `:stream` if any: NTFS
+/// drops those, so the name is the short name still.
+fn only_dots_or_spaces(rest: &[u8]) -> bool {
+    let end = rest.iter().position(|&b| b == b':').unwrap_or(rest.len());
+    rest.get(..end)
+        .unwrap_or_default()
+        .iter()
+        .all(|&b| b == b'.' || b == b' ')
 }
 
 /// `name` as a drive compares names: composed (NFC) where it composes Unicode, then lowercase
@@ -230,9 +406,227 @@ pub fn folder_problems(names: &[&str]) -> Vec<PortabilityProblem> {
     out
 }
 
+/// Why a path given on the command line isn't one of the project's. Messages escape it.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GivenPathError {
+    #[error("{} is outside the project.", escape(.0, false))]
+    Outside(String),
+    #[error("{} is in .bolt, Bolt's own folder, which holds none of your files.", escape(.0, false))]
+    InBolt(String),
+    #[error("{} isn't a path Bolt can use: {}.", escape(.0, false), .1)]
+    Invalid(String, NameError),
+    #[error("{} isn't a path Bolt can use: it isn't valid Unicode.", escape(.0, false))]
+    NotUnicode(String),
+    #[error(
+        "{} isn't a pattern Bolt can use: `.` and `..` must come before the first name holding \
+         `*`, `?` or `[`.",
+        escape(.0, false)
+    )]
+    UpInPattern(String),
+}
+
+/// A path or pattern typed on the command line, taken into the project (decision 054).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Given {
+    /// A project path: everything at it or below it. `""` is the whole project.
+    Path(String),
+    /// Git's wildmatch pattern `glob`, matched against the project paths below the project path
+    /// `below`, taken from it; a folder it matches means everything in it.
+    Pattern { below: String, glob: String },
+}
+
+impl Given {
+    /// As a project path, for output: `below/glob` for a pattern.
+    #[must_use]
+    pub fn shown(&self) -> String {
+        match self {
+            Given::Path(path) => path.clone(),
+            Given::Pattern { below, glob } if below.is_empty() => glob.clone(),
+            Given::Pattern { below, glob } => format!("{below}/{glob}"),
+        }
+    }
+}
+
+/// Whether a typed name is a pattern: it holds `*`, `?` or `[`.
+fn is_pattern(given: &str) -> bool {
+    given.contains(['*', '?', '['])
+}
+
+/// `given`, typed in the folder `here`, as `project_path` takes it, or as a pattern if it holds
+/// `*`, `?` or `[`: the names before the first such name are the folder it is matched below.
+pub fn project_given(
+    root: &Path,
+    here: &Path,
+    given: &Path,
+    drive: Drive,
+) -> Result<Given, GivenPathError> {
+    let shown = || given.to_string_lossy().into_owned();
+    let parts: Vec<Component> = given.components().collect();
+    let first = parts.iter().position(|part| match part {
+        Component::Normal(name) => name.to_str().is_some_and(is_pattern),
+        _ => false,
+    });
+    let Some(first) = first else {
+        return project_path(root, here, given, drive).map(Given::Path);
+    };
+    let (lead, rest) = parts.split_at(first);
+    let below = project_path(root, here, &lead.iter().collect::<PathBuf>(), drive)?;
+    let mut glob = Vec::new();
+    for part in rest {
+        match part {
+            Component::Normal(name) => {
+                glob.push(
+                    name.to_str()
+                        .ok_or_else(|| GivenPathError::NotUnicode(shown()))?,
+                );
+            }
+            _ => return Err(GivenPathError::UpInPattern(shown())),
+        }
+    }
+    Ok(Given::Pattern {
+        below,
+        glob: glob.join("/"),
+    })
+}
+
+/// The project path of `given`, a path typed in the folder `here`, for a project at `root` on
+/// `drive`: `/` between names, `""` for the whole project. `given` is taken from `here`, the real
+/// current folder as the operating system gives it (`repo::resolved`), and each `..` in it
+/// removes the name before it, without following links. The root's names are compared as the
+/// drive compares them, so an absolute path may spell it in another case.
+pub fn project_path(
+    root: &Path,
+    here: &Path,
+    given: &Path,
+    drive: Drive,
+) -> Result<String, GivenPathError> {
+    let shown = || given.to_string_lossy().into_owned();
+    let mut full = PathBuf::new();
+    for part in here.join(given).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                full.pop();
+            }
+            other => full.push(other),
+        }
+    }
+    let same = |a: Component, b: Component| {
+        a == b
+            || matches!((a.as_os_str().to_str(), b.as_os_str().to_str()),
+                (Some(a), Some(b)) if drive.compared(a) == drive.compared(b))
+    };
+    let mut parts = full.components();
+    for top in root.components() {
+        if !parts.next().is_some_and(|part| same(part, top)) {
+            return Err(GivenPathError::Outside(shown()));
+        }
+    }
+    let mut names = Vec::new();
+    for part in parts {
+        let name = part
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| GivenPathError::NotUnicode(shown()))?;
+        names.push(name);
+    }
+    if names.first().is_some_and(|top| is_bolt_alias(top)) {
+        return Err(GivenPathError::InBolt(shown()));
+    }
+    let path = names.join("/");
+    if !path.is_empty() {
+        validate_path(&path).map_err(|e| GivenPathError::Invalid(shown(), e))?;
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn given_paths_become_project_paths() {
+        let root = Path::new(if cfg!(windows) { r"C:\p" } else { "/p" });
+        let sub = root.join("dir");
+        let exact = Drive {
+            ignores_case: false,
+            composes_unicode: false,
+        };
+        let at = |here: &Path, given: &str| project_path(root, here, Path::new(given), exact);
+        assert_eq!(at(root, "a.txt"), Ok("a.txt".into()));
+        assert_eq!(at(&sub, "c.txt"), Ok("dir/c.txt".into()));
+        assert_eq!(at(&sub, "../a.txt"), Ok("a.txt".into()));
+        assert_eq!(at(&sub, "./x/../y/"), Ok("dir/y".into()));
+        assert_eq!(at(&sub, ".."), Ok(String::new()));
+        assert_eq!(
+            at(root, &sub.join("c.txt").to_string_lossy()),
+            Ok("dir/c.txt".into())
+        );
+        assert!(matches!(at(root, "../x"), Err(GivenPathError::Outside(_))));
+        assert!(matches!(
+            at(&sub, "../../p2/x"),
+            Err(GivenPathError::Outside(_))
+        ));
+        assert!(matches!(
+            at(root, ".bolt/state"),
+            Err(GivenPathError::InBolt(_))
+        ));
+        assert!(matches!(
+            at(&sub, "../.BOLT"),
+            Err(GivenPathError::InBolt(_))
+        ));
+        assert!(matches!(
+            at(root, "a/.bolt"),
+            Err(GivenPathError::Invalid(..))
+        ));
+        let typed = if cfg!(windows) {
+            r"C:\P\dir\c.txt"
+        } else {
+            "/P/dir/c.txt"
+        };
+        assert!(matches!(at(root, typed), Err(GivenPathError::Outside(_))));
+        let folding = Drive {
+            ignores_case: true,
+            composes_unicode: false,
+        };
+        let any_case = project_path(root, root, Path::new(typed), folding);
+        assert_eq!(any_case, Ok("dir/c.txt".into()));
+    }
+
+    #[test]
+    fn given_patterns_are_matched_below_the_folder_they_start_in() {
+        let root = Path::new(if cfg!(windows) { r"C:\p" } else { "/p" });
+        let sub = root.join("dir");
+        let exact = Drive {
+            ignores_case: false,
+            composes_unicode: false,
+        };
+        let at = |here: &Path, given: &str| project_given(root, here, Path::new(given), exact);
+        let pattern = |below: &str, glob: &str| {
+            Ok(Given::Pattern {
+                below: below.into(),
+                glob: glob.into(),
+            })
+        };
+        assert_eq!(at(&sub, "a.txt"), Ok(Given::Path("dir/a.txt".into())));
+        assert_eq!(at(&sub, "*.cs"), pattern("dir", "*.cs"));
+        assert_eq!(at(&sub, "../src/**/*.png"), pattern("src", "**/*.png"));
+        assert_eq!(at(root, "a/b?/c"), pattern("a", "b?/c"));
+        assert_eq!(at(root, "*").map(|g| g.shown()), Ok("*".into()));
+        assert_eq!(
+            at(&sub, "x/[ab]").map(|g| g.shown()),
+            Ok("dir/x/[ab]".into())
+        );
+        assert!(matches!(
+            at(root, "*/../a"),
+            Err(GivenPathError::UpInPattern(_))
+        ));
+        assert!(matches!(at(root, "../*"), Err(GivenPathError::Outside(_))));
+        assert!(matches!(
+            at(root, ".bolt/*"),
+            Err(GivenPathError::InBolt(_))
+        ));
+    }
 
     #[test]
     fn always_on_rules() {
@@ -253,8 +647,36 @@ mod tests {
         assert_eq!(validate_name(".."), Err(NameError::DotOrDotDot));
         assert_eq!(validate_name("a/b"), Err(NameError::Slash));
         assert_eq!(validate_name("a\0b"), Err(NameError::Nul));
-        assert_eq!(validate_name(&"x".repeat(256)), Err(NameError::TooLong));
-        assert_eq!(validate_name(&"x".repeat(255)), Ok(()));
+        assert_eq!(validate_name(&"x".repeat(766)), Err(NameError::TooLong));
+        assert_eq!(validate_name(&"x".repeat(765)), Ok(()));
+    }
+
+    #[test]
+    fn names_up_to_765_bytes_decode_and_fit_by_this_systems_rule() {
+        let cjk = "語".repeat(200); // 600 bytes, 200 UTF-16 units
+        assert!(validate_name(&cjk).is_ok());
+        assert_eq!(fits_here(&cjk), cfg!(windows));
+        assert!(validate_name(&"a".repeat(766)).is_err());
+        // 255 of either unit fit everywhere; one more fits nowhere.
+        assert!(fits_here(&"a".repeat(255)) && !fits_here(&"a".repeat(256)));
+        // Four bytes and two UTF-16 units each: 127 fit Windows (254 units), 63 fit 255 bytes.
+        let emoji = |n| "\u{1f600}".repeat(n);
+        assert!(fits_here(&emoji(63)));
+        assert_eq!(fits_here(&emoji(64)), cfg!(windows));
+        assert!(!fits_here(&emoji(128)));
+    }
+
+    #[test]
+    fn a_new_name_over_255_bytes_is_not_portable_and_holdable_where_it_fits() {
+        let cjk = "語".repeat(200);
+        assert_eq!(
+            name_problems(&cjk),
+            [PortabilityProblem::TooLong(cjk.clone())]
+        );
+        assert!(name_problems(&"a".repeat(255)).is_empty());
+        // Holding it is this system's own question: Windows holds 255 UTF-16 units.
+        assert_eq!(holdable_here(&cjk), cfg!(windows));
+        assert!(!holdable_here(&"a".repeat(256)));
     }
 
     #[test]
@@ -278,6 +700,7 @@ mod tests {
             "\u{FEFF}.bolt",
         ] {
             assert_eq!(validate_name(bad), Err(NameError::BoltSpelling), "{bad:?}");
+            assert!(is_bolt_alias(bad), "{bad:?}");
         }
         for ok in [
             ".boltignore",
@@ -288,6 +711,200 @@ mod tests {
             "bolt~12",
         ] {
             assert_eq!(validate_name(ok), Ok(()), "{ok}");
+            assert!(!is_bolt_alias(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn the_projects_own_folders_are_spelled_as_the_drive_spells_them() {
+        let drive = |ignores_case| Drive {
+            ignores_case,
+            composes_unicode: false,
+        };
+        for ignores_case in [false, true] {
+            for name in [".bolt", ".git"] {
+                assert!(own_folder(name, drive(ignores_case)), "{name}");
+            }
+            for name in [".BOLT", ".Git", ".gIT"] {
+                assert_eq!(
+                    own_folder(name, drive(ignores_case)),
+                    ignores_case,
+                    "{name}"
+                );
+            }
+            // Other spellings are left out of saves instead, and the rest are other names.
+            for name in [
+                ".bolt.",
+                "bolt~1",
+                "git~1",
+                ".git ",
+                ".g\u{200c}it",
+                ".gitignore",
+                "bolt",
+            ] {
+                assert!(!own_folder(name, drive(ignores_case)), "{name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn writable_here_refuses_every_spelling_of_git_and_bolt_on_every_system() {
+        for n in [
+            ".git",
+            ".GIT",
+            "git~1",
+            ".git.",
+            ".bolt",
+            ".BOLT",
+            "bolt~1",
+            ".bolt::$INDEX_ALLOCATION",
+            ".g\u{200c}it",
+        ] {
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        assert_eq!(writable_here(".Git", &[]), Err(NotWritable::GitName));
+        assert_eq!(writable_here("BOLT~2", &[]), Err(NotWritable::BoltName));
+        for n in ["Player.cs", ".gitignore", "bolt.toml", "名前"] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn writable_here_refuses_whatever_validate_name_refuses() {
+        for n in ["", ".", "..", "a/b", "a\0b", &"x".repeat(766)] {
+            assert!(validate_name(n).is_err(), "{n:?}");
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        assert_eq!(
+            writable_here("..", &[]),
+            Err(NotWritable::Invalid(NameError::DotOrDotDot))
+        );
+    }
+
+    #[test]
+    fn a_hashed_short_name_of_git_as_a_folder_is_refused() {
+        // Git's fallback short names for `.gitmodules` (`gi7eba`), as its `is_ntfs_dot_generic`
+        // spells them: the prefix cut anywhere up to 6 letters, `~`, a digit 1-9, more digits to
+        // 8 characters, then only dots, spaces or a stream.
+        for n in [
+            "GI7EBA~1",
+            "gi7eba~9",
+            "gi7eb~12",
+            "g~123456",
+            "gi7eba~1 .",
+            "gi7eba~1:$DATA",
+        ] {
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        for n in [
+            "gi7eba~0",
+            "gi7ebb~1",
+            "gi7eba~1x",
+            "gi7eba~",
+            "gi7e~a12",
+            "gi7eba1",
+        ] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn the_plain_short_names_of_gitmodules_are_refused() {
+        // Git's `is_ntfs_dot_generic`: `gitmod` in any case, `~1` to `~4`, then only dots,
+        // spaces or a stream.
+        for n in [
+            "gitmod~1",
+            "GITMOD~4",
+            "GitMod~2",
+            "gitmod~1.",
+            "gitmod~3 . ",
+            "gitmod~1:$DATA",
+            "gitmod~1 :x",
+        ] {
+            assert_eq!(writable_here(n, &[]), Err(NotWritable::GitName), "{n:?}");
+        }
+        for n in [
+            "gitmod~0",
+            "gitmod~5",
+            "gitmod~1x",
+            "gitmod~12",
+            "gitmod~",
+            "gitmo~1",
+            "gitmodu~1",
+            "xgitmod~1",
+            ".gitmodules",
+        ] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
+        }
+    }
+
+    #[test]
+    fn a_real_short_name_of_git_is_refused() {
+        assert!(writable_here("GI1D2E~1", &[(".git", "GI1D2E~1")]).is_err());
+        // Ignoring case, and for `.bolt` and other spellings of either too.
+        let here = [
+            (".git", "GI1D2E~1"),
+            (".BOLT", "BOC2A3~1"),
+            ("Player.cs", "PLAYER~1.CS"),
+        ];
+        assert_eq!(
+            writable_here("gi1d2e~1", &here),
+            Err(NotWritable::ShortNameOf(".git"))
+        );
+        assert_eq!(
+            writable_here("BOC2A3~1", &here),
+            Err(NotWritable::ShortNameOf(".bolt"))
+        );
+        // Another entry's short name is write-out's to sort out as a clash, not a name to refuse.
+        assert_eq!(writable_here("PLAYER~1.CS", &here), Ok(()));
+    }
+
+    #[test]
+    fn writable_here_refuses_names_this_system_cant_hold() {
+        let long = "語".repeat(200);
+        assert_eq!(
+            writable_here(&long, &[]).is_ok(),
+            cfg!(windows),
+            "a 600-byte name"
+        );
+        assert_eq!(
+            writable_here(&"a".repeat(256), &[]),
+            Err(NotWritable::TooLong)
+        );
+        for n in ["a\\b", "c:d", "aux.txt", "name."] {
+            assert_eq!(writable_here(n, &[]).is_ok(), !cfg!(windows), "{n:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_refuses_separators_devices_and_trailing_dots() {
+        for n in [
+            "a\\b",
+            "c:d",
+            "con",
+            "aux.txt",
+            "COM\u{b9}",
+            "LPT\u{b3}.log",
+            "name.",
+            "name ",
+        ] {
+            assert!(writable_here(n, &[]).is_err(), "{n:?}");
+        }
+        assert!(matches!(
+            writable_here("con", &[]),
+            Err(NotWritable::NotHoldable(PortabilityProblem::ReservedName(
+                _
+            )))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn com0_and_lpt0_are_ordinary_names_on_windows() {
+        // Microsoft's list of reserved names doesn't hold them, and Windows 11 creates them.
+        for n in ["COM0", "LPT0", "COM0.txt", "LPT0.txt"] {
+            assert_eq!(writable_here(n, &[]), Ok(()), "{n}");
         }
     }
 
@@ -519,6 +1136,7 @@ mod tests {
                 name: name(),
                 ch: '*',
             },
+            PortabilityProblem::TooLong(name()),
         ] {
             assert_hostile_text_escaped(&problem.to_string());
         }

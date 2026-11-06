@@ -5,52 +5,38 @@
 
 use std::path::Path;
 use std::process::Command;
-#[cfg(windows)]
-use std::process::Stdio;
 
 use bolt_core::listing::{EntryKind, Listing};
 use bolt_core::pack::ObjectKind;
-use tempfile::TempDir;
 
 mod support;
 #[cfg(unix)]
 use support::bolt_capped;
 use support::{add_listing, plant_save, run_limited};
 
-struct Env {
-    work: TempDir,
-    config: TempDir,
+struct Env(support::Env);
+
+impl std::ops::Deref for Env {
+    type Target = support::Env;
+    fn deref(&self) -> &support::Env {
+        &self.0
+    }
 }
 
 impl Env {
     fn new() -> Env {
-        Env {
-            work: tempfile::tempdir().unwrap(),
-            config: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn root(&self) -> &Path {
-        self.work.path()
+        Env(support::Env::empty())
     }
 
     fn bolt_anonymous(&self, dir: &Path) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("bolt"));
-        cmd.current_dir(dir)
-            .env_remove("BOLT_USER_NAME")
-            .env_remove("BOLT_USER_EMAIL")
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path())
-            .env("HOME", self.config.path())
-            .env("XDG_CONFIG_HOME", self.config.path());
+        let mut cmd = self.bolt_in(dir);
+        cmd.env_remove("BOLT_USER_NAME")
+            .env_remove("BOLT_USER_EMAIL");
         cmd
     }
 
     fn bolt_in(&self, dir: &Path) -> Command {
-        let mut cmd = self.bolt_anonymous(dir);
-        cmd.env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com");
-        cmd
+        self.bolt_process_in(dir)
     }
 
     fn bolt(&self) -> Command {
@@ -107,14 +93,7 @@ fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
     std::fs::write(victim.path().join("thesis.docx"), "four years of work").unwrap();
     let tmp = env.root().join(".bolt").join("tmp");
     std::fs::remove_dir_all(&tmp).unwrap();
-    let st = Command::new("cmd")
-        .args(["/D", "/C", "mklink", "/J"])
-        .arg(&tmp)
-        .arg(victim.path())
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(st.success());
+    support::junction(&tmp, victim.path());
     let _ = env.bolt().arg("history").output().unwrap();
     assert!(victim.path().join("thesis.docx").exists());
 }
@@ -129,14 +108,7 @@ fn win_junction_in_project_is_not_walked_into() {
     env.ok(&["start"]);
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "hunter2").unwrap();
-    let st = Command::new("cmd")
-        .args(["/D", "/C", "mklink", "/J"])
-        .arg(env.root().join("j"))
-        .arg(outside.path())
-        .stdout(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(st.success());
+    support::junction(&env.root().join("j"), outside.path());
     env.ok(&["save", "with junction"]);
     let repo = Repository::open(env.root()).unwrap();
     let (_, entry) = repo.current().unwrap();
@@ -232,12 +204,33 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
     let env = Env::new();
     env.ok(&["start"]);
     mkfifo(&env.root().join(".bolt/store/packs/zz.pack"));
+    // History may never reach the FIFO, since packs are opened only when searched.
     let mut cmd = env.bolt();
     cmd.arg("history");
     let end = run_limited(cmd, 10);
     assert!(
-        end.code == Some(1),
+        !end.timed_out && matches!(end.code, Some(0 | 1)),
         "`bolt history` hung or crashed on a FIFO named *.pack: {end:?}"
+    );
+    // A save looks for its new file in every pack, so it reaches the FIFO and must refuse it.
+    std::fs::write(env.root().join("new.txt"), "new").unwrap();
+    let mut cmd = env.bolt();
+    cmd.args(["save", "add new"]);
+    let end = run_limited(cmd, 10);
+    assert!(
+        end.code == Some(1) && end.stderr.contains("zz.pack"),
+        "`bolt save` hung or didn't refuse a FIFO named *.pack: {end:?}"
+    );
+    // So does the check that reads every pack.
+    let packs = env.root().join(".bolt/store/packs");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(bolt_core::verify::verify_store(&packs).problems));
+    let problems = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("verify hung on a FIFO named *.pack");
+    assert!(
+        problems.iter().any(|p| p.starts_with("zz.pack: ")),
+        "{problems:?}"
     );
 }
 
@@ -276,7 +269,7 @@ fn rt4_state_head_pointing_at_dev_zero_is_refused_not_read_forever() {
     let head = env.root().join(".bolt/state/head");
     std::fs::remove_file(&head).unwrap();
     std::os::unix::fs::symlink("/dev/zero", &head).unwrap();
-    let end = run_limited(bolt_capped(env.config.path(), env.root(), &["history"]), 60);
+    let end = run_limited(bolt_capped(env.config(), env.root(), &["history"]), 60);
     // Without the cap the process grows to 4 GB and is OOM-killed (redteam/attacks/rt4-*.sh).
     assert!(
         end.code == Some(1) && !end.stderr.contains("memory"),
@@ -291,7 +284,7 @@ fn rt4_project_config_pointing_at_dev_zero_is_refused_not_read_forever() {
     env.ok(&["start"]);
     std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    let mut cmd = bolt_capped(env.config.path(), env.root(), &["save", "add a"]);
+    let mut cmd = bolt_capped(env.config(), env.root(), &["save", "add a"]);
     cmd.env_remove("BOLT_USER_NAME")
         .env_remove("BOLT_USER_EMAIL");
     let end = run_limited(cmd, 60);
@@ -444,7 +437,7 @@ fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum();
     eprintln!("all packs together: {pack_bytes} bytes");
-    let end = run_limited(bolt_capped(env.config.path(), env.root(), &["show"]), 120);
+    let end = run_limited(bolt_capped(env.config(), env.root(), &["show"]), 120);
     assert!(
         matches!(end.code, Some(0 | 1)) && !end.stderr.contains("memory"),
         "`bolt show` on a ~{pack_bytes}-byte repository died or hung: {end:?}"
@@ -493,7 +486,7 @@ fn rt8_start_does_not_print_escape_sequences_from_the_folder_name() {
 fn rt9_project_config_cannot_override_the_users_own_identity() {
     let env = Env::new();
     std::fs::write(
-        env.config.path().join("config.toml"),
+        env.config().join("config.toml"),
         "[user]\nname = \"Real User\"\nemail = \"real@example.com\"\n",
     )
     .unwrap();

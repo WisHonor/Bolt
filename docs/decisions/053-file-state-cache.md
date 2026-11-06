@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 6)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 011](011-status-and-write-out.md) (the cache and the racy rule) and [decision 028](028-red-team-m1-session-2-rulings.md) #1 (nothing in `cache/` vouches for an object)
+- **Refined by:** [decision 067](067-the-file-cache-matches-file-identity.md) (an entry matches the file's ID too) and [decision 069](069-the-file-cache-matches-the-change-time.md) (and its change time)
 
 ## Context
 

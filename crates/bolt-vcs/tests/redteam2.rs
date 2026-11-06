@@ -12,44 +12,28 @@ use bolt_core::id::ChangeId;
 use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_core::save::Save;
-use tempfile::TempDir;
 
 mod support;
 #[cfg(unix)]
 use support::bolt_capped;
 use support::run_limited;
 
-struct Env {
-    work: TempDir,
-    config: TempDir,
+struct Env(support::Env);
+
+impl std::ops::Deref for Env {
+    type Target = support::Env;
+    fn deref(&self) -> &support::Env {
+        &self.0
+    }
 }
 
 impl Env {
     fn new() -> Env {
-        Env {
-            work: tempfile::tempdir().unwrap(),
-            config: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn root(&self) -> &Path {
-        self.work.path()
-    }
-
-    fn bolt_in(&self, dir: &Path) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("bolt"));
-        cmd.current_dir(dir)
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path())
-            .env("HOME", self.config.path())
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com");
-        cmd
+        Env(support::Env::empty())
     }
 
     fn bolt(&self) -> Command {
-        self.bolt_in(self.root())
+        self.bolt_process_in(self.root())
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -151,10 +135,7 @@ fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
     plant_chain(env.root(), 2000, 0, |s| s.message = message);
     let packs = pack_bytes(env.root());
     eprintln!("all packs together: {packs} bytes");
-    let end = run_limited(
-        bolt_capped(env.config.path(), env.root(), &["history"]),
-        120,
-    );
+    let end = run_limited(bolt_capped(env.config(), env.root(), &["history"]), 120);
     assert!(
         end.code == Some(0),
         "`bolt history` on a {packs}-byte repository failed under a 1.5 GB cap: {end:?}"
@@ -173,7 +154,7 @@ fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing(
     let before = Repository::open(env.root()).unwrap().head().unwrap();
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     let end = run_limited(
-        bolt_capped(env.config.path(), env.root(), &["save", "my work"]),
+        bolt_capped(env.config(), env.root(), &["save", "my work"]),
         120,
     );
     let after = Repository::open(env.root()).unwrap().head().unwrap();
@@ -338,10 +319,7 @@ fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
         dir.push("d");
         std::fs::create_dir(&dir).unwrap();
     }
-    let end = run_limited(
-        bolt_capped(env.config.path(), env.root(), &["save", "x"]),
-        300,
-    );
+    let end = run_limited(bolt_capped(env.config(), env.root(), &["save", "x"]), 300);
     // The files in force at one folder may total 1 MiB, so the second one is refused: an ordinary
     // error that names it, not an abort for want of memory.
     assert!(
@@ -360,7 +338,7 @@ fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
 /// win) with one uncompressed entry of `kind`: `id`, holding `data`.
 fn plant_lying_pack(root: &Path, kind: ObjectKind, id: &bolt_core::id::Id, data: &[u8]) {
     use bolt_core::encoding::Writer;
-    use bolt_core::pack::{PACK_END_MAGIC, PACK_MAGIC, PACK_VERSION};
+    use bolt_core::pack::{PACK_END_MAGIC, PACK_MAGIC};
     let mut entry = Writer::new();
     entry.u8(kind as u8);
     entry.id(id);
@@ -376,7 +354,7 @@ fn plant_lying_pack(root: &Path, kind: ObjectKind, id: &bolt_core::id::Id, data:
     index.varint(data.len() as u64);
     let index = index.into_bytes();
     let mut out = PACK_MAGIC.to_vec();
-    out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // version 1, which readers still read
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&entry.into_bytes());
     out.extend_from_slice(data);
@@ -423,7 +401,7 @@ fn rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id() {
 /// 128 KiB.
 fn plant_huge_copies(root: &Path, kind: ObjectKind, ids: &[bolt_core::id::Id], claimed: u64) {
     use bolt_core::encoding::Writer;
-    use bolt_core::pack::{PACK_END_MAGIC, PACK_MAGIC, PACK_VERSION};
+    use bolt_core::pack::{PACK_END_MAGIC, PACK_MAGIC};
     const BLOCK: u64 = 128 << 10;
     assert!(claimed >= BLOCK && claimed.is_multiple_of(BLOCK));
     let blocks = usize::try_from(claimed / BLOCK).unwrap();
@@ -435,7 +413,7 @@ fn plant_huge_copies(root: &Path, kind: ObjectKind, ids: &[bolt_core::id::Id], c
     let mut ids = ids.to_vec();
     ids.sort();
     let mut out = PACK_MAGIC.to_vec();
-    out.extend_from_slice(&PACK_VERSION.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // version 1, which readers still read
     out.extend_from_slice(&0u32.to_le_bytes());
     let mut index = Writer::new();
     index.varint(ids.len() as u64);
@@ -547,7 +525,7 @@ fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
         let found = bolt_core::pack::PackReader::open(&path)
             .unwrap()
             .find(&first)
-            .copied();
+            .unwrap();
         if let Some(entry) = found {
             let mut bytes = std::fs::read(&path).unwrap();
             let data = entry.offset + bolt_core::pack::ENTRY_HEADER_LEN;
@@ -555,6 +533,8 @@ fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
             std::fs::write(&path, bytes).unwrap();
         }
     }
+    // Without the change-ID cache, the save reads the line to shorten its ID.
+    std::fs::remove_file(env.root().join(".bolt/cache/change-ids")).unwrap();
     let before = Repository::open(env.root()).unwrap().head().unwrap();
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     let out = env.bolt().args(["save", "my work"]).output().unwrap();

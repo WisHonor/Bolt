@@ -200,7 +200,7 @@ safety copies, sorted by path:
   varint  size
 ```
 
-Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case, and a position "on a line" must name one of the lines. Shelf labels are unique.
+Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case: a reader compares the two names after Unicode's lowercase mapping (Rust's `str::to_lowercase`, which also lowercases a final capital sigma as `ς`), not after full case folding, so `ß` and `SS` are two different names, and so are `ΑΣ` and `ασ`. A position "on a line" must name one of the lines. Shelf labels are unique.
 
 - **Limits:** line and shelf names at most 255 bytes; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines, 10,000 shelves and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
 
@@ -242,7 +242,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock` | Lock file for changing commands | Yes |
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
-| `cache/` | Rebuildable speed-ups, the file-state cache among them ([decision 053](decisions/053-file-state-cache.md)): a file's kind, size, modified time and content ID, with a checksum keyed by a random key kept in the user's own settings, so a cache Bolt didn't write for this account is ignored | No |
+| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), and `change-ids`, each line's change IDs (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
@@ -261,16 +261,80 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 
 **`state/lock`** is held with an operating-system lock (`LockFileEx` on Windows, `flock` elsewhere) by every command that changes the repository. Its contents mean nothing. Once a command holds the lock, it replaces `state/lock-info` (through `tmp/` and a rename) with `pid <n>\ncommand <command>\nstarted <unix ms>\n`; a command that finds the lock busy shows that text in its "waiting for another command" message. The text lives in a separate file because Windows doesn't let other processes read a locked file; it is only informational and may be stale.
 
-**`state/journal`** ([decision 049](decisions/049-writing-files-one-at-a-time.md); its exact bytes and test vectors come with milestone 3, before the code) is written (whole, through `tmp/` and a rename) before a command starts rewriting files in the folder, and removed after the command commits. It records the target diary entry, each planned file action (path, expected current ID, new ID) and the safety copies taken, followed by a BLAKE3 checksum of the bytes before it. If it exists when Bolt starts, Bolt finishes or rolls back the interrupted command (decision 010).
+**`state/journal`** ([decision 049](decisions/049-writing-files-one-at-a-time.md)) is written under the change lock, whole, through `tmp/`, flushed to disk and renamed, before a command starts rewriting files in the folder, and removed (the removal flushed too) after the command moves `state/head`. A switch that a crash stopped is finished by the next command that changes anything, never rolled back. The safety copies are not repeated in it: they are stored, and listed in the diary entry the journal names, before it is written. The actions are sorted to make the file one fixed sequence of bytes, not to give the order they are carried out in: `a` sorts before `a/x`, so turning folder `a` into a file means removing what is under it first, and a folder is made before what goes in it. The command that carries out a journal orders the actions itself, and checks each one against the folder as it finds it.
+
+```text
+bytes[8] "BOLTJRNL"
+u8       version = 1
+id       the diary entry the switch commits
+id       the diary entry `state/head` named when it began
+varint   action count (at most 10,000,000, and refused if more than the bytes left hold at 4 bytes each)
+actions, sorted by path in byte order, no path twice:
+  string   project path, `/` between names (at most 4,096 bytes)
+  u8       action: 1 write file, 2 write executable, 3 write link, 4 make folder, 5 remove file,
+           6 remove folder
+  bool     has an expected current entry; if true:
+    u8       kind: 1 file, 2 executable, 3 link, 4 folder (§3's numbers; nothing else)
+    id       its content ID (32 zero bytes for a folder)
+    varint   its size (0 for a folder)
+  if the action is 1, 2 or 3:
+    id       the new content ID (a link's: of its target)
+    varint   the new size
+bytes[32] BLAKE3 of everything before it
+```
+
+A journal drives writes into the user's folder, so a reader checks the checksum before anything else and refuses the whole journal if any rule here is broken. Every name in a path follows §3's always-on name rules (so a path has no empty name, no `.` or `..`, and no `.bolt` under any spelling, and doesn't start or end with `/`). Removing a file needs an expected entry of kind 1, 2 or 3, and removing a folder one of kind 4, so that what is removed is re-checked first. Read with a cap of 4 GiB, checksum included; a bigger journal is not written and the command stops before changing anything.
+
+**The cache key and the seal** ([decision 053](decisions/053-file-state-cache.md)). Every file in `cache/` is sealed: its body followed by 32 bytes, the keyed BLAKE3 hash of the body under the user's cache key. A file whose seal doesn't match (another account's, a copied project's from someone else, or edited) is ignored and rebuilt, never trusted and never an error. The key is the file `cache-key` in the folder of the user's own `config.toml` (`BOLT_CONFIG_DIR` if set): exactly 32 random bytes, nothing else. Bolt makes it on first use, writing a file of its own name there, readable only by the user on Unix (0600), and linking it in as `cache-key`, which never replaces a key already there, so two Bolts making it at once end with one key; only on a drive that has no hard links (the link fails with "not supported", or EPERM as Linux's FAT gives it) is it made in place, and any other failure counts as a key Bolt can't use. A key file that can't be read or isn't 32 bytes long is never replaced, since it is the user's own and replacing it silently could hide that someone changed it: the command goes on with a key for that run alone, so no cache is trusted or kept, and a `cache_key_unusable` warning names the file and says to delete it. It is the user's own, so a link there is followed. With no settings folder at all, a key for that run alone is used too, without a warning. Only the command line reads the key; the engine is handed it, and seals with a key for that handle alone when it isn't, so a program using the engine never touches the user's settings.
+
+**`cache/files`** (not normative) is the file-state cache: what each file in the folder was when Bolt last read it, so that a file whose kind, size, modified time, change time and file ID still match needn't be read again. Sealed as above; read with a 256 MiB cap, seal included, and a bigger one is not written (the command warns instead).
+
+```text
+bytes[8] "BOLTFILE"
+u8       version = 3 (a cache of another version is ignored and rebuilt)
+varint   file count (refused if more than the bytes left hold at 84 bytes each)
+files, sorted by project path in byte order, no path twice:
+  string   project path, `/` between names (at most 4,096 bytes)
+  u8       kind: 1 file, 2 executable, 3 symbolic link (§3's numbers; nothing else)
+  varint   size in bytes
+  i64      modified time: whole seconds since 1970-01-01 UTC, rounded down
+  u32      and nanoseconds past them (below 1,000,000,000)
+  i64      change time (`ctime` on Unix, `ChangeTime` on Windows): whole seconds, rounded down
+  u32      and nanoseconds past them (below 1,000,000,000)
+  u64      the drive's number (the device on Unix, the volume serial on Windows)
+  u64      the file's number on it (the inode, or Windows' file ID): its low 64 bits
+  u64      and its high 64 bits (0 but on drives with 128-bit file IDs, such as ReFS)
+  bool     racy
+  id       content ID
+bytes[32] seal
+```
+
+An entry is trusted only if it isn't racy, the file's kind, size, modified time, change time and both numbers are the ones recorded ([decision 069](decisions/069-the-file-cache-matches-the-change-time.md): a file written over in place keeps its number but not its change time), and the file's number isn't 0, which some network and FUSE drives give every file ([decision 067](decisions/067-the-file-cache-matches-file-identity.md)): a file moved or copied onto the path is another file, so it is read. At the start of a scan Bolt writes a file in `tmp/`, takes its modified time as "now" and removes it, so the drive's own clock and resolution count. When the cache is written, an entry whose modified time isn't at least 2 seconds older than that "now" (FAT's resolution) is marked racy, and stays racy until the file is read again ([decision 053](decisions/053-file-state-cache.md)). The file is replaced whole, through `tmp/` and a rename.
+
+**`cache/change-ids`** (not normative) lists the change IDs of each line's saves, so that a save and `history` can shorten change IDs (§5) without reading the line. Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
+
+```text
+bytes[8] "BOLTCHID"
+u8       version = 1
+varint   line count (at most 100,000)
+lines, sorted by name in byte order, no name twice:
+  string   name (at most 255 bytes)
+  id       the line's newest save when its IDs were read
+  varint   change-ID count (refused if more than the bytes left hold)
+  change-id × count   the change IDs of the saves from that save back along first parents, sorted, repeats kept
+bytes[32] seal
+```
+
+A line's IDs are used only for a line whose newest save is the one recorded, or one whose first parents lead back to it: Bolt reads the saves from the newest back to the recorded one and adds their IDs. If the walk reaches the line's first save without meeting it (an undo moved the line back, say), the IDs read replace the line's. Lines the current diary entry doesn't have are dropped when the file is next written. Commands write it through `tmp/` and a rename, without the lock; a write that fails is just skipped.
 
 ## 11. Pack files
 
-Pack version 2 ([decision 057](decisions/057-pack-index-on-disk-and-merging.md); its exact bytes and a test vector come with milestone 3, before the code) replaces the index below with fixed-width lines after a fan-out table, so a reader can search it on disk; readers keep reading version 1, and writers write only version 2. Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
+Writers write pack version 2, whose index has a fan-out table and fixed-width lines, so a reader can search it on disk; readers read versions 2 and 1 ([decision 057](decisions/057-pack-index-on-disk-and-merging.md)). The two versions differ only in the index. Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
 
 ```text
 header:
   [8]     magic "BOLTPACK"
-  u32     pack version = 1
+  u32     pack version = 2 (1 in packs written before milestone 3)
   u32     flags = 0
 entries, one after another:
   u8      object kind
@@ -279,7 +343,16 @@ entries, one after another:
   u64     stored size
   u8      compression (0 = none, 1 = zstd)
   stored bytes
-index:
+index, version 2:
+  u64     entry count
+  u32 × 256  fan-out: number i is how many IDs have a first byte ≤ i
+  id × count  the IDs, strictly ascending
+  lines, one per ID in the same order, 25 bytes each:
+    u8      object kind
+    u64     offset of the entry's header
+    u64     uncompressed size
+    u64     stored size
+index, version 1:
   varint  entry count
   entries, sorted by id:
     id      id
@@ -305,14 +378,18 @@ trailer:
 | Tag list | 22 |
 | Server lines | 23 |
 
+In version 2, ID `i` is at `index + 1,032 + 32 × i` and its line at `index + 1,032 + 32 × count + 25 × i`, where `index` is the offset of the index, so a reader finds an object by a binary search of the IDs from `fan-out[b − 1]` (0 when `b` is 0) up to `fan-out[b]`, `b` being the ID's first byte.
+
 A reader must:
-- check both magic values, the index checksum, and that every offset and size stays inside the file;
-- read the index a piece at a time, never whole: refuse an entry count above the limit below, or an index whose length doesn't fit its count, before reading any line, then check each line as it is read (a known kind, IDs strictly ascending, its entry inside the entry area);
+- check both magic values, a pack version of 1 or 2, flags of 0, and that every offset and size it uses stays inside the file;
+- in version 2, refuse an entry count above the limit below, an index that isn't exactly `8 + 1,024 + 57 × count` bytes, or a fan-out that decreases or doesn't end at the count, before reading any ID; then read only the IDs and lines it needs, by position, and check each line it reads (a known kind, a size within the limits below, its entry inside the entry area), so an open pack costs the same memory whatever its count. Reading every line in order (as `verify` does) also checks that the IDs ascend and that each sits in its fan-out range. The index checksum is checked by `verify`, not on every open: every object read is checked against its own ID anyway;
+- in version 1, check the index checksum, and read the index a piece at a time, never whole: refuse an entry count above the limit below, or an index whose length doesn't fit its count, before reading any line, then check each line as it is read (a known kind, IDs strictly ascending, its entry inside the entry area), and that no two entries overlap;
 - check that each entry's header matches its index line;
 - decompress zstd data without ever producing more than the recorded uncompressed size, and require the zstd frame's own content size, if present, to match;
 - check the fingerprint of every object it reads: plain BLAKE3 for content, the record's context string otherwise;
 - treat the same ID found in two packs as the same object (packs can overlap while being merged), and when one pack's copy fails for any reason (a failed check, a read error, too little memory), try the other packs' copies before giving up, so a damaged or planted pack never hides a good copy; a pack whose copy failed a check is reported as damaged;
-- try the copies smallest recorded size first, ties in pack order (a copy already checked in this process may go first), so a planted copy that claims a huge size is read last; only when no copy works does the read fail, naming a read error or lack of memory if there was one (the object may still be fine), else the damage.
+- search the packs one at a time ([decisions 061](decisions/061-pack-copy-order-and-lazy-opening.md) and [066](decisions/066-a-pack-bolt-cant-open-for-another-reason.md)): first the pack that held the last object read if it is open, then the other open packs, then the closed ones in order of name; open a pack only when first searching it, and keep at most 16 open, closing the least recently used first, however many packs hold the object; pass over a pack that can't be opened or searched, keep its error and report it as damaged when the error is damage (one that fails for another reason, such as permission denied, gets no damage warning), so a lookup that reads a good copy elsewhere succeeds and one that finds nothing, or no copy that works, fails with that error; a pack listed but gone when it is opened (merged into another) sends the reader to list the packs again, once per lookup;
+- read the first copy found when it records at most 1 MiB, holding only that copy whole; when it records more, or fails, search every pack and try the copies smallest recorded size first, streamed (content several packs hold is checked before it is streamed out), ties in pack order (a copy already checked in this process may go first), so a planted copy that claims a huge size is read last, and one found first costs at most a 1 MiB read; only when no copy works does the read fail, naming a read error or lack of memory if there was one (the object may still be fine), else the damage.
 
 Before skipping an object because the store already holds it, a writer must read a stored copy of the same kind in full and check its fingerprint (once per process is enough). The writer knows the object's size (a file's length, a link's target, an encoded record), so it passes over a copy that records another size without reading it, and reports that copy's pack as damaged. If no copy passes, it stores its own.
 
@@ -320,7 +397,9 @@ Each entry's header is a fixed 50 bytes, so a writer that streams an object can 
 
 Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at most 512 MiB uncompressed.
 
-**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). An index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index of a pack with `count` objects is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
+**Merging.** A pack is small when it is a regular file under 64 MiB on disk and the uncompressed sizes its index records total at most 256 MiB, which is judged from the index alone, without decompressing anything. Once a command has committed (moved `state/head`, and for `start` and `import` written `.bolt/format`) and more than 32 packs are small, it merges the small ones, still under the change lock ([decisions 057](decisions/057-pack-index-on-disk-and-merging.md) and [062](decisions/062-when-packs-are-merged.md)). Every other pack is left as it is, and isn't counted. The packs are taken in order of name, and each object in order of ID; each is read and checked as a reader checks it (header, size, fingerprint), and then its stored bytes and compression are copied as they are into new version 2 packs, written as any command writes its packs (so a merge rewrites version 1 packs as version 2). A pack with a copy that fails its check, or that can't be opened or read (damage, an I/O error, too little memory), is left as it is, a `pack_not_merged` warning names it, and the merge carries on; only a failure to write the new packs stops it. A damaged pack that is kept is read again at each merge, and the 256 MiB bound limits that cost. Only once every new pack is durable and renamed into the store are the old packs removed, one at a time, never one with a new pack's name. A pack that can't be removed stays as a second copy of its objects, with a warning. A stop at any point leaves every object readable: before the rename, the old packs are untouched; after it, objects in two packs are one object. A merge that fails doesn't fail the command, which has happened; it is a warning, and the next command that commits tries again.
+
+**Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). In version 2 the index of a pack with `count` objects is exactly `1,032 + 57 × count` bytes. In version 1 an index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
 
@@ -363,6 +442,12 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `project_link.json`: project links (§7), a SHA-1 submodule and a SHA-256 one;
   - `diary.json`: the `full` entry now points at the tag list and the server lines of the two files above, so it changed; the `minimal` entry is byte for byte what milestone 1 wrote;
   - `shattered-prefix.bin`: not a record. It is the first 320 bytes of one of the two PDFs of SHAttered, the first public SHA-1 collision. The Git reader's SHA-1 must refuse it as a collision attack, and must accept it with one bit changed.
+- **Milestone 3:**
+  - `listing.json`: a fourth vector, `long-name`, a file whose name is 600 bytes (200 characters of three bytes each), past the 255 bytes names had until [decision 051](decisions/051-names-this-computer-cant-write-and-length-limits.md); its length is a two-byte varint. The first three vectors are byte for byte what milestone 1 wrote.
+  - `pack_v2.json`: a version 2 pack (§11) of the same two objects as `pack.json`'s `two-objects`, which the writer must write byte for byte. `pack.json` stays as milestone 1 wrote it, in version 1, which readers must still read.
+  - `change_ids.json`: a sealed `cache/change-ids` (§10) with two lines, its key, its body and the sealed bytes.
+  - `file_cache.json`: a sealed `cache/files` (§10) with two files, one racy and one from before 1970, its key, its body and the sealed bytes.
+  - `journal.json`: a `state/journal` (§10) with one action of each kind but "write executable", and its checksum.
 
 ## 14. Open points
 

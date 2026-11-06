@@ -249,6 +249,7 @@ pub fn import_git(
     req: &mut ImportRequest,
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
+    let root = &repo::resolved(root);
     let plan = plan(root, req.progress)?;
     let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);
@@ -910,15 +911,21 @@ fn stop_at_lfs_in_head(
     if limits.add(top.len()).is_err() {
         return Ok(());
     }
-    // Each folder on the way down, by name, with the entries in it still to look at.
-    let mut stack = vec![(String::new(), top.into_iter())];
-    while let Some((_, left)) = stack.last_mut() {
+    // Each folder on the way down, by name and with how long its path is with a `/` after it, and
+    // the entries in it still to look at.
+    let mut stack = vec![(String::new(), 0usize, top.into_iter())];
+    while let Some((_, prefix, left)) = stack.last_mut() {
+        let prefix = *prefix;
         let Some((name, kind, id)) = left.next() else {
             stack.pop();
             continue;
         };
         if kind == EntryKind::ProjectLink || !seen.insert(id) {
             continue;
+        }
+        let path_len = prefix.saturating_add(name.len());
+        if limits.check_path(path_len).is_err() {
+            return Ok(());
         }
         if kind == EntryKind::Folder {
             // The new folder's level: the top folder is level 0.
@@ -929,11 +936,11 @@ fn stop_at_lfs_in_head(
             if limits.add(inner.len()).is_err() {
                 return Ok(());
             }
-            stack.push((name, inner.into_iter()));
+            stack.push((name, path_len.saturating_add(1), inner.into_iter()));
             continue;
         }
         let path = || {
-            let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, _)| n.as_str()).collect();
+            let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, ..)| n.as_str()).collect();
             path.push(&name);
             shown_path(&path)
         };
@@ -1686,6 +1693,13 @@ mod tests {
         assert!(pointer_found(scan(dir.path(), &commit, 2, 3)));
         assert!(scan(dir.path(), &commit, 1, 3).is_ok(), "a level short");
         assert!(scan(dir.path(), &commit, 2, 2).is_ok(), "an entry short");
+        // `art/deep/big.psd` is 16 bytes.
+        let within = |bytes| {
+            let repo = git::Repo::open(dir.path()).unwrap();
+            stop_at_lfs_in_head(&repo, &commit, SaveLimits::default().with_max_path(bytes))
+        };
+        assert!(pointer_found(within(16)));
+        assert!(within(15).is_ok(), "a byte short");
         let line = b"*.psd filter=lfs diff=lfs merge=lfs -text\n";
         let commented = [&b" \t# "[..], line].concat();
         let (dir, commit) = made(Some(commented.as_slice()));

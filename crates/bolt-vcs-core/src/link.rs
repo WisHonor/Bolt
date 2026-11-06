@@ -1,7 +1,19 @@
-//! Project links (docs/storage-format.md section 7).
+//! Links: a link's target as a save stores it (docs/storage-format.md section 3), and project
+//! links (section 7).
 
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
+
+/// A link's target, read from disk, as a save stores it: with `/` between its parts, as Git
+/// stores it (decision 045). Windows separates them with `\`; elsewhere `\` is an ordinary
+/// character, and the target is stored as read.
+pub(crate) fn stored_target(read: String) -> String {
+    if cfg!(windows) {
+        read.replace('\\', "/")
+    } else {
+        read
+    }
+}
 
 /// A link to a commit of another project, which Bolt never fetches. So far the other project is
 /// always a Git submodule, so the record's system is always `git`.

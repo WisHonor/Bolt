@@ -220,10 +220,10 @@ fn a_detached_head_puts_you_at_its_save() {
     env.git(&["checkout", "-q", "--detach", &first]);
     let (out, _) = env.import();
     assert!(
-        out.contains(&format!(
-            "where Git's HEAD was detached: not on a line, so bolt save won't work here.\n\
-             {NOT_ON_A_LINE}\n"
-        )),
+        out.contains(
+            "where Git's HEAD was detached: not on a line. Saving here asks for a new line's \
+             name.\n"
+        ),
         "{out}"
     );
     let (repo, state) = env.state();
@@ -235,22 +235,19 @@ fn a_detached_head_puts_you_at_its_save() {
     let history = env.bolt().arg("history").output().unwrap();
     let history = text(&history.stdout);
     assert_eq!(history.lines().count(), 1, "{history}");
-    // There is no line for a save to go on, and the hint names only commands that exist.
+    // A save there needs a new line, and the hint says how to name it.
     env.overwrite("a.txt", "changed\n");
     let out = env.save(&["Change it"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
     assert!(
-        err.contains(&format!(
-            "error: You are not on a line, so the save has nowhere to go.\nhint: {NOT_ON_A_LINE}\n"
-        )),
+        err.contains(
+            "error: You're at a save, not on a line, so this save needs a new line to go on.\n\
+             hint: Nothing was saved. Name it: bolt save --line <name> \"message\"\n"
+        ),
         "{err}"
     );
 }
-
-const NOT_ON_A_LINE: &str = "This version of Bolt can only save on a line. Delete the hidden \
-    .bolt folder at the top of the project, switch Git to a branch (`git switch <branch>`) and \
-    run bolt import there again, or import a fresh clone that is on a branch.";
 
 #[test]
 fn an_unborn_branch_stops_the_import() {

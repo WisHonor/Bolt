@@ -5,6 +5,7 @@
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md); refines [decision 028](028-red-team-m1-session-2-rulings.md))
 - **Decided by:** Claude, while the owner was away, under the owner's instruction of 2026-11-01 to finish the milestone and merge. The owner can reverse any part.
 - **Reviewed:** 2026-11-02 with the owner, who left the call to Claude; kept whole.
+- **Refined by:** [decision 061](061-pack-copy-order-and-lazy-opening.md) (#1: with packs opened only when searched, a first copy found of at most 1 MiB is read before the others are looked for)
 
 ## Context
 

@@ -1,9 +1,12 @@
 //! What `bolt` prints: JSON shapes, warnings and error messages.
 
-use std::fmt::Write as _;
-use std::io::{IsTerminal, Write};
+use std::fmt::{self, Write as _};
+use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
+use bolt_core::changes::{Endings, Lines, Tag, only_line_endings};
+use bolt_core::diary::Position;
+use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::text::{escape, thousands};
@@ -33,6 +36,224 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
         "saver": person_json(&save.saver),
         "line": save.line(),
     })
+}
+
+/// Where the project is: `{"line": …}`, or `{"save": …}` when it is at a save.
+pub fn position_json(position: &Position) -> Value {
+    match position {
+        Position::OnLine(line) => json!({ "line": line }),
+        Position::AtSave(id) => json!({ "save": id.to_hex() }),
+    }
+}
+
+/// A file's change as JSON (docs/json.md, "A change").
+pub fn change_json(c: &FileChange) -> Value {
+    json!({
+        "path": c.path,
+        "change": match c.change {
+            ChangeKind::Added => "added",
+            ChangeKind::Removed => "removed",
+            ChangeKind::Modified => "modified",
+            ChangeKind::KindChanged => "kind-changed",
+        },
+        "kind": c.kind.as_str(),
+        "old_size": c.old_size,
+        "new_size": c.new_size,
+    })
+}
+
+/// A file's change as people see it, its path escaped.
+pub fn change_line(c: &FileChange) -> String {
+    let p = escape(c.path, false);
+    let size = |s: Option<u64>| format_size(s.unwrap_or(0));
+    match c.change {
+        ChangeKind::Added => format!("  added     {p}  ({})", size(c.new_size)),
+        ChangeKind::Removed => format!("  removed   {p}  ({})", size(c.old_size)),
+        ChangeKind::Modified => format!(
+            "  modified  {p}  ({} → {})",
+            size(c.old_size),
+            size(c.new_size)
+        ),
+        ChangeKind::KindChanged => {
+            let old = c.old_kind.map_or("none", |k| k.as_str());
+            format!("  changed   {p}  ({old} → {})", c.kind.as_str())
+        }
+    }
+}
+
+/// A file's change with its lines, as `bolt changes --json` gives it. It is written as it is
+/// shown, a line at a time, never held as one value.
+pub struct LinesJson<'a> {
+    pub change: &'a FileChange<'a>,
+    pub lines: &'a Lines<'a>,
+}
+
+impl fmt::Display for LinesJson<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (shown, hunks, timed_out) = match self.lines {
+            Lines::Binary => ("binary", &[][..], false),
+            Lines::TooBig => ("too-big", &[][..], false),
+            Lines::TooManyLines => ("too-many-lines", &[][..], false),
+            Lines::Hunks { hunks, timed_out } => ("text", &hunks[..], *timed_out),
+        };
+        f.write_str("{\"hunks\":[")?;
+        for (i, h) in hunks.iter().enumerate() {
+            write!(
+                f,
+                "{}{{\"new_lines\":{},\"new_start\":{},\"old_lines\":{},\"old_start\":{},\"lines\":[",
+                if i == 0 { "" } else { "," },
+                h.new_lines,
+                h.new_start,
+                h.old_lines,
+                h.old_start
+            )?;
+            for (j, (tag, line)) in h.lines.iter().enumerate() {
+                let text = Value::from(String::from_utf8_lossy(line).as_ref());
+                write!(
+                    f,
+                    "{}{{\"tag\":\"{}\",\"text\":{text}}}",
+                    if j == 0 { "" } else { "," },
+                    tag_name(*tag)
+                )?;
+            }
+            f.write_str("]}")?;
+        }
+        // The rest is small, and serde_json writes it: `{` is left out, the hunks having opened
+        // the object.
+        let mut rest = change_json(self.change);
+        rest["lines"] = shown.into();
+        rest["timed_out"] = timed_out.into();
+        rest["only_line_endings"] = only_line_endings(hunks).is_some().into();
+        let rest = rest.to_string();
+        write!(f, "],{}", rest.get(1..).unwrap_or("}"))
+    }
+}
+
+fn tag_name(tag: Tag) -> &'static str {
+    match tag {
+        Tag::Same => "same",
+        Tag::Removed => "removed",
+        Tag::Added => "added",
+    }
+}
+
+/// Writes a file's change with its lines, in the unified form, for people, a line at a time. The
+/// header starts with a letter, which no line of the file shown below it can. Colored when
+/// `color`.
+pub fn write_lines(
+    out: &mut dyn Write,
+    c: &FileChange,
+    lines: &Lines,
+    color: bool,
+) -> io::Result<()> {
+    let paint = |code: &str, text: &str| {
+        if color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    };
+    let header = change_line(c);
+    let header = header.trim_start();
+    let hunks = match lines {
+        Lines::Binary => return writeln!(out, "{header}  (binary: no lines shown)"),
+        Lines::TooBig => return writeln!(out, "{header}  (over 64 MiB: no lines shown)"),
+        Lines::TooManyLines => {
+            return writeln!(out, "{header}  (over 1,000,000 lines: no lines shown)");
+        }
+        Lines::Hunks { hunks, .. } => hunks,
+    };
+    match only_line_endings(hunks) {
+        Some(Endings::CrlfToLf) => {
+            writeln!(out, "{header}  (only line endings changed: CRLF to LF)")?;
+        }
+        Some(Endings::LfToCrlf) => {
+            writeln!(out, "{header}  (only line endings changed: LF to CRLF)")?;
+        }
+        Some(Endings::Both) => writeln!(out, "{header}  (only line endings changed)")?,
+        None => writeln!(out, "{header}")?,
+    }
+    for h in hunks {
+        let at = format!(
+            "@@ -{},{} +{},{} @@",
+            h.old_start, h.old_lines, h.new_start, h.new_lines
+        );
+        writeln!(out, "{}", paint("36", &at))?;
+        for (tag, line) in &h.lines {
+            let (mark, code) = match tag {
+                Tag::Same => (' ', ""),
+                Tag::Removed => ('-', "31"),
+                Tag::Added => ('+', "32"),
+            };
+            let body = line
+                .strip_suffix(b"\r\n")
+                .or_else(|| line.strip_suffix(b"\n"));
+            // Tabs are kept: they can't drive a terminal, and code is full of them.
+            let shown: Vec<String> = String::from_utf8_lossy(body.unwrap_or(line))
+                .split('\t')
+                .map(|piece| escape(piece, false))
+                .collect();
+            let shown = format!("{mark}{}", shown.join("\t"));
+            if code.is_empty() {
+                writeln!(out, "{shown}")?;
+            } else {
+                writeln!(out, "{}", paint(code, &shown))?;
+            }
+            if body.is_none() {
+                writeln!(out, "\\ No newline at end of file")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Standard output, remembering when whoever reads it went away (`bolt changes | head`), so the
+/// command can end quietly instead of failing.
+pub struct Stdout {
+    inner: io::StdoutLock<'static>,
+    pub closed: bool,
+}
+
+impl Stdout {
+    pub fn new() -> Stdout {
+        Stdout {
+            inner: io::stdout().lock(),
+            closed: false,
+        }
+    }
+
+    fn noting<T>(&mut self, done: io::Result<T>) -> io::Result<T> {
+        if let Err(e) = &done
+            && e.kind() == io::ErrorKind::BrokenPipe
+        {
+            self.closed = true;
+        }
+        done
+    }
+}
+
+impl Write for Stdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let done = self.inner.write(buf);
+        self.noting(done)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let done = self.inner.flush();
+        self.noting(done)
+    }
+}
+
+/// Prints `text` on stdout, then `warnings` on stderr; a reader that went away ends it quietly.
+pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+    let mut out = Stdout::new();
+    let done = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+    if out.closed {
+        return Ok(());
+    }
+    done?;
+    print_warnings(warnings);
+    Ok(())
 }
 
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
@@ -112,11 +333,11 @@ fn document_end(more: Value, warnings: &[Warning], failure: Option<&Failure>) ->
 pub fn stream_document<W: Write>(
     out: &mut W,
     opening: &str,
-    walk: impl FnOnce(&mut dyn FnMut(&Value) -> Result<(), Failure>) -> Result<(), Failure>,
+    walk: impl FnOnce(&mut dyn FnMut(&dyn fmt::Display) -> Result<(), Failure>) -> Result<(), Failure>,
     end: impl FnOnce() -> (Value, Vec<Warning>),
 ) -> Result<Vec<Warning>, Failure> {
     let mut begun = false;
-    let mut item = |value: &Value| -> Result<(), Failure> {
+    let mut item = |value: &dyn fmt::Display| -> Result<(), Failure> {
         write!(out, "{}{value}", if begun { "," } else { opening })?;
         begun = true;
         Ok(())
@@ -151,6 +372,9 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
     if json {
         println!("{}", error_document(failure, warnings));
     } else {
+        for w in warnings.iter().filter(|w| warning::told_on_failure(w.kind)) {
+            eprintln!("warning: {}", w.message);
+        }
         // Escaped once more, so that a piece nobody thought of escaping still can't drive the
         // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
         eprintln!("error: {}", escape(&failure.message, true));
@@ -290,7 +514,9 @@ mod tests {
     fn stream(
         opening: &str,
         more: Value,
-        walk: impl FnOnce(&mut dyn FnMut(&Value) -> Result<(), Failure>) -> Result<(), Failure>,
+        walk: impl FnOnce(
+            &mut dyn FnMut(&dyn fmt::Display) -> Result<(), Failure>,
+        ) -> Result<(), Failure>,
     ) -> (String, Result<Vec<Warning>, Failure>) {
         let mut out = Vec::new();
         let ended = stream_document(&mut out, opening, walk, || (more, vec![damaged()]));

@@ -2,18 +2,22 @@
 //! (docs/storage-format.md section 10, decision 010).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bolt_platform::Owner;
+use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
 use crate::config::{self, ConfigError};
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
+use crate::keyed::{self, KEY_LEN};
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::safe_fs;
@@ -63,6 +67,11 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     OwnerLookupFailed { path: PathBuf, source: io::Error },
+    #[error(
+        "The .bolt folder at {} changed while Bolt looked at it.",
+        escape(&root.display().to_string(), false)
+    )]
+    BoltChanged { root: PathBuf },
     /// `bolt start` made `.bolt` but may not use it. Once the folder is trusted, running it again
     /// finishes the project.
     #[error("The .bolt folder was made, but the project isn't finished. {refusal}")]
@@ -94,6 +103,26 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
+    /// `state/journal`, the record of a stopped switch between saves, can't be used. It is
+    /// neither carried out nor passed over, since the folder may be half switched.
+    #[error(
+        "A switch between saves was stopped here, and Bolt can't finish it: \
+         .bolt/state/journal {}.",
+        escape(detail, false)
+    )]
+    JournalUnusable { detail: String },
+    /// A switch between saves stopped at `path` with an error it can't go past.
+    #[error("A switch between saves stopped at {}: {source}", escape(path, false))]
+    SwitchStopped {
+        path: String,
+        source: Box<RepoError>,
+    },
+    /// A stopped switch was carried on, but another program still holds files it must write.
+    #[error(
+        "A switch between saves was stopped, and Bolt couldn't finish it: {}",
+        escape(detail, true)
+    )]
+    SwitchInUse { detail: String },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -104,6 +133,14 @@ pub enum RepoError {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// The user's own cache key can't be used. It is never replaced silently: a key Bolt didn't
+    /// make there may mean someone changed the user's files.
+    #[error(
+        "Bolt can't use its cache key {}: {}.",
+        escape(&path.display().to_string(), false),
+        escape(detail, false)
+    )]
+    CacheKey { path: PathBuf, detail: String },
 }
 
 impl RepoError {
@@ -150,12 +187,41 @@ impl RepoError {
                      finish."
                 }
                 RepoError::BeingMade { .. } => "Run the command again once it has finished.",
+                RepoError::BoltChanged { .. } => "Run the command again.",
                 RepoError::ImportUnfinished => "Run `bolt import` again to finish the import.",
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
                 }
+                // Removing the journal is no roll back: the files stay as the switch left them.
+                RepoError::JournalUnusable { .. } => {
+                    "Nothing was changed. Your files are as the stopped switch left them, and \
+                     `bolt status` shows how they differ from the save the project is on. To go \
+                     on without finishing the switch, delete .bolt/state/journal: a later `bolt save` \
+                     then records the folder as it is at that time."
+                }
+                RepoError::SwitchStopped { source, .. } => {
+                    let damage = if matches!(**source, RepoError::Damaged { .. }) {
+                        " Bolt's copy of it looks damaged: ask for help before trying to repair \
+                         the project."
+                    } else {
+                        ""
+                    };
+                    return Some(format!(
+                        "The switch isn't finished: what it already wrote stays, and the next \
+                         command that changes the project finishes it once that is fixed.{damage}"
+                    ));
+                }
+                RepoError::SwitchInUse { .. } => {
+                    "Close that program, then run the command again: Bolt finishes the switch \
+                     before anything else."
+                }
                 RepoError::Config(e) => return e.hint(),
+                RepoError::CacheKey { .. } => {
+                    "If that file is there, delete it: Bolt makes a new key, and rebuilds the \
+                     caches the old one sealed. If it isn't, check that Bolt can write to its \
+                     folder."
+                }
                 _ => return None,
             }
             .to_owned(),
@@ -202,7 +268,7 @@ impl From<PackError> for RepoError {
     }
 }
 
-fn damaged(detail: impl Into<String>) -> RepoError {
+pub(crate) fn damaged(detail: impl Into<String>) -> RepoError {
     RepoError::Damaged {
         detail: detail.into(),
     }
@@ -210,7 +276,7 @@ fn damaged(detail: impl Into<String>) -> RepoError {
 
 /// A `safe_fs` refusal (a link, special file or oversized file where `.bolt` must hold a real
 /// one) is damage; any other error stays an I/O error.
-fn refused(e: io::Error) -> RepoError {
+pub(crate) fn refused(e: io::Error) -> RepoError {
     match e.kind() {
         io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => damaged(e.to_string()),
         _ => e.into(),
@@ -247,6 +313,52 @@ fn holds_only_bolts_own(bolt: &Path) -> Result<bool, RepoError> {
     Ok(true)
 }
 
+/// `.bolt` and the fixed folders in it that commands read and write, held open from the moment
+/// its shape was checked: what Bolt reads and writes there goes through these, so a folder
+/// swapped for a link since is never followed (security.md T19).
+struct Held {
+    bolt: Dir,
+    state: Dir,
+    packs: Arc<Dir>,
+    tmp: Arc<Dir>,
+    cache: Dir,
+}
+
+impl Held {
+    /// The fixed folders of the `.bolt` folder `bolt`, each opened from the one above it.
+    fn open(bolt: &Path) -> Result<Held, RepoError> {
+        let top = Dir::open_top(bolt).map_err(|e| unreal(bolt, e))?;
+        let store = fixed(&top, bolt, "store")?;
+        Ok(Held {
+            state: fixed(&top, bolt, "state")?,
+            packs: Arc::new(fixed(&store, &bolt.join("store"), "packs")?),
+            tmp: Arc::new(fixed(&top, bolt, "tmp")?),
+            cache: fixed(&top, bolt, "cache")?,
+            bolt: top,
+        })
+    }
+}
+
+/// The folder `name` in `dir`, the folder at `path`. A link, junction or file there is damage, as
+/// `check_shape` finds it.
+fn fixed(dir: &Dir, path: &Path, name: &str) -> Result<Dir, RepoError> {
+    dir.open_dir(OsStr::new(name))
+        .map_err(|e| unreal(&path.join(name), e))
+}
+
+/// What opening the fixed folder at `path` found: a link, junction or file there is damage, as
+/// `check_shape` finds it.
+fn unreal(path: &Path, e: io::Error) -> RepoError {
+    if is_link_refusal(&e) || e.kind() == io::ErrorKind::NotADirectory {
+        damaged(format!(
+            "{} is not a real folder (it is a link, junction or file)",
+            path.display()
+        ))
+    } else {
+        e.into()
+    }
+}
+
 /// Refuses a `.bolt` whose fixed folders are links, junctions or files. A missing one passes:
 /// `begin` creates them, and `open` makes `tmp` and `cache` again and reports the others as damage.
 fn check_shape(bolt: &Path) -> Result<(), RepoError> {
@@ -260,19 +372,35 @@ fn check_shape(bolt: &Path) -> Result<(), RepoError> {
 }
 
 /// Refuses the project at `root` unless the folder and its `.bolt` are the user's, or the user
-/// listed `root` in safe-folders, as Git does (T23).
-fn check_owner(root: &Path) -> Result<(), RepoError> {
-    check_owner_with(root, &bolt_platform::owner_of, &config::safe_folders)
+/// listed `root` in safe-folders, as Git does (T23). `bolt_seen`: the caller just saw `.bolt`
+/// there, so it may not be missing now.
+fn check_owner(root: &Path, bolt_seen: bool) -> Result<(), RepoError> {
+    check_owner_with(
+        root,
+        bolt_seen,
+        &bolt_platform::owner_of,
+        &config::safe_folders,
+    )
 }
 
 /// `check_owner`, given how to learn who owns a path and how to read safe-folders.
 fn check_owner_with(
     root: &Path,
+    bolt_seen: bool,
     owner_of: &dyn Fn(&Path) -> io::Result<Owner>,
     safe_folders: &dyn Fn() -> Result<Vec<PathBuf>, ConfigError>,
 ) -> Result<(), RepoError> {
     let mut owners = vec![owner_of(root)];
-    match owner_of(&root.join(".bolt")) {
+    fsio::act_point("owner:asking");
+    let bolt_owner = owner_of(&root.join(".bolt"));
+    fsio::act_point("owner:asked");
+    match bolt_owner {
+        // Gone since it was seen: if it comes back, nobody asked who owns it.
+        Err(e) if e.kind() == io::ErrorKind::NotFound && bolt_seen => {
+            return Err(RepoError::BoltChanged {
+                root: root.to_owned(),
+            });
+        }
         // Before `bolt start` makes `.bolt`, the folder alone decides.
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         owner => owners.push(owner),
@@ -353,7 +481,7 @@ fn elevated_only_note_with(
 /// `Ok(false)`: no `.bolt`.
 fn check_bolt(
     root: &Path,
-    owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+    owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
 ) -> Result<bool, RepoError> {
     let bolt = root.join(".bolt");
     let is_there = || match safe_fs::check_real_dir(&bolt) {
@@ -362,7 +490,7 @@ fn check_bolt(
         Err(e) => Err(refused(e)),
     };
     let found = is_there()?;
-    owner_check(root)?;
+    owner_check(root, found)?;
     // Looked at again: it may have gone, or become a link, while its owner was asked.
     if !found || !is_there()? {
         return Ok(false);
@@ -432,9 +560,12 @@ fn parse_head(bytes: &[u8]) -> Result<Id, RepoError> {
         .ok_or_else(|| damaged("state/head is not a lowercase fingerprint and a newline"))
 }
 
-/// `state/head` of the `.bolt` folder `bolt`, or `None` before the first commit.
-fn read_head(bolt: &Path) -> Result<Option<Id>, RepoError> {
-    match safe_fs::read_capped(&bolt.join("state").join("head"), safe_fs::MAX_HEAD_BYTES) {
+/// `head` in `state`, the `state` folder of the `.bolt` folder `bolt`, or `None` before the first
+/// commit.
+fn read_head(state: &Dir, bolt: &Path) -> Result<Option<Id>, RepoError> {
+    let shown = bolt.join("state").join("head");
+    let max = safe_fs::MAX_HEAD_BYTES;
+    match safe_fs::read_capped_in(state, OsStr::new("head"), &shown, max) {
         Ok(bytes) => parse_head(&bytes).map(Some),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(refused(e)),
@@ -451,11 +582,37 @@ pub struct Repository {
     bolt: PathBuf,
     tmp: PathBuf,
     packs: PathBuf,
+    held: Held,
     format: FormatInfo,
     store: Store,
     /// The head read before the store was last loaded, so every object it reaches is
     /// registered. `None` when there was no head yet.
     head: Option<Id>,
+    /// What seals this handle's caches: one for this handle alone unless `set_cache_key` gave
+    /// the user's own.
+    cache_key: [u8; KEY_LEN],
+}
+
+/// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
+/// where the plain path leads to the same place, so the path reads as the user would type it.
+/// Every command resolves the folder it starts in, so a link to a project is judged by the folder
+/// it leads to. Some drives can't resolve a path (RAM disks, say): there `path` is kept, and a
+/// link on it is refused as before.
+#[must_use]
+pub fn resolved(path: &Path) -> PathBuf {
+    let Ok(full) = fs::canonicalize(path) else {
+        return path.to_owned();
+    };
+    let plain = full
+        .to_str()
+        .and_then(|s| match s.strip_prefix(r"\\?\UNC\") {
+            Some(share) => Some(format!(r"\\{share}")),
+            None => s.strip_prefix(r"\\?\").map(str::to_owned),
+        });
+    match plain {
+        Some(plain) if fs::canonicalize(&plain).is_ok_and(|again| again == full) => plain.into(),
+        _ => full,
+    }
 }
 
 /// The `.bolt/format` file of the project whose top folder is `root`.
@@ -468,14 +625,14 @@ fn format_path(root: &Path) -> PathBuf {
 /// `owner_check` allows it: a planted `.bolt` could point at another computer.
 fn has_project(
     folder: &Path,
-    owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+    owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
 ) -> Result<bool, RepoError> {
     let is_link = match fs::symlink_metadata(folder.join(".bolt")) {
         Ok(meta) if safe_fs::is_link(&meta) => true,
         Ok(meta) if meta.is_dir() => false,
         _ => return Ok(false),
     };
-    owner_check(folder)?;
+    owner_check(folder, true)?;
     // A link counts, so that `open` refuses it; a real `.bolt` needs a `format`.
     Ok(is_link || has_format(folder).unwrap_or(false))
 }
@@ -535,7 +692,13 @@ enum Diary {
 
 /// How far the diary of the `.bolt` folder `bolt`, whose shape was checked, got.
 fn diary_of(bolt: &Path) -> Result<Diary, RepoError> {
-    let head = read_head(bolt)?;
+    let state = bolt.join("state");
+    // A start can stop before it makes `state`.
+    let head = match Dir::open_top(&state) {
+        Ok(dir) => read_head(&dir, bolt)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(unreal(&state, e)),
+    };
     let packs = bolt.join("store").join("packs");
     // A start can stop before it makes the store.
     let no_store =
@@ -552,16 +715,7 @@ fn diary_of(bolt: &Path) -> Result<Diary, RepoError> {
         Some(head) => has_parent(&head)?,
         None if store.pack_count() == 0 => return Ok(Diary::Nothing),
         // Without a head, the entries of the saves it led to are still in the packs.
-        None => {
-            let mut saves = false;
-            for id in store.diary_entries() {
-                if has_parent(&id)? {
-                    saves = true;
-                    break;
-                }
-            }
-            saves
-        }
+        None => store.any_entry(ObjectKind::DiaryEntry, has_parent)?,
     };
     Ok(if saves { Diary::Saves } else { Diary::Begun })
 }
@@ -595,7 +749,7 @@ pub(crate) fn has_format(root: &Path) -> io::Result<bool> {
 /// past, so that a `.bolt` planted above the user's work can't stop them starting their own.
 fn enclosing_project<'a>(
     root: &'a Path,
-    owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+    owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
 ) -> Result<Option<&'a Path>, RepoError> {
     for outer in root.ancestors().skip(1) {
         match has_project(outer, owner_check) {
@@ -623,11 +777,11 @@ impl Repository {
     fn init_with(
         root: &Path,
         who: &Person,
-        owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+        owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
         let (mut repo, lock) = Repository::begin_with(root, owner_check)?;
         // A start stores no file, so files are an import's.
-        if repo.store.holds_content() {
+        if repo.store.holds_content()? {
             return Err(RepoError::ImportUnfinished);
         }
         let mut packs = repo.new_packs()?;
@@ -678,8 +832,9 @@ impl Repository {
     /// already, left by a start or import that didn't finish.
     fn check_new_with(
         root: &Path,
-        owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+        owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<bool, RepoError> {
+        let root = &resolved(root);
         // Before anything is made: a folder that isn't the user's is refused at once.
         let found = check_bolt(root, owner_check)?;
         if found && has_format(root)? {
@@ -714,8 +869,9 @@ impl Repository {
     /// `begin`, with the owner check given.
     fn begin_with(
         root: &Path,
-        owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+        owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<(Repository, ChangeLock), RepoError> {
+        let root = &resolved(root);
         let bolt = root.join(".bolt");
         let found = Repository::check_new_with(root, owner_check)?;
         if !found {
@@ -745,11 +901,13 @@ impl Repository {
         }
         check_shape(&bolt)?;
         bolt_platform::hide_path(&bolt)?;
+        let held = Held::open(&bolt)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
         let mut repo = Repository {
             root: root.to_owned(),
-            store: Store::open(&packs)?,
+            store: Store::open_in(Arc::clone(&held.packs), &packs)?,
+            held,
             bolt,
             tmp,
             packs,
@@ -757,6 +915,7 @@ impl Repository {
                 features: BTreeSet::new(),
             },
             head: None,
+            cache_key: keyed::run_key()?,
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
         // `start` too.
@@ -780,8 +939,11 @@ impl Repository {
         packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
-        let id = self.commit(lock, packs, entry)?;
-        write_atomic(&self.tmp, &format_path(&self.root), FORMAT_TEXT.as_bytes())?;
+        let id = self.move_head(lock, packs, entry)?;
+        let held = &self.held;
+        write_atomic(&held.tmp, &held.bolt, "format", FORMAT_TEXT.as_bytes())?;
+        // Only once it is a project, so a stopped merge never leaves it unfinished.
+        crate::merge::merge_after_commit(self, lock);
         Ok(id)
     }
 
@@ -789,6 +951,7 @@ impl Repository {
     /// A `.bolt` on the way that Bolt may not use is refused. With none, the nearest `.bolt` a
     /// start or import began is named, so that nobody is sent to `bolt start` over an import: one
     /// still being made, one that stopped, or one that lost only its `format`, which is damage.
+    /// `start` is resolved first, so a link to the project is judged by the folder it leads to.
     pub fn discover(start: &Path) -> Result<Repository, RepoError> {
         Repository::discover_with(start, &check_owner)
     }
@@ -796,8 +959,9 @@ impl Repository {
     /// `discover`, with the search's owner check given (a stand-in in tests).
     fn discover_with(
         start: &Path,
-        owner_check: &dyn Fn(&Path) -> Result<(), RepoError>,
+        owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
+        let start = resolved(start);
         let mut unfinished = None;
         for folder in start.ancestors() {
             if has_project(folder, owner_check)? {
@@ -816,14 +980,19 @@ impl Repository {
         if !check_bolt(root, &check_owner)? {
             return Err(RepoError::NotAProject);
         }
-
-        let text = match safe_fs::read_capped(&bolt.join("format"), safe_fs::MAX_FORMAT_BYTES) {
-            Ok(bytes) => {
-                String::from_utf8(bytes).map_err(|_| damaged("the format file is not text"))?
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RepoError::NotAProject),
-            Err(e) => return Err(refused(e)),
-        };
+        // Held from here on, so nothing below goes through a folder swapped since the check.
+        let top = Dir::open_top(&bolt).map_err(|e| unreal(&bolt, e))?;
+        let max = safe_fs::MAX_FORMAT_BYTES;
+        let text =
+            match safe_fs::read_capped_in(&top, OsStr::new("format"), &format_path(root), max) {
+                Ok(bytes) => {
+                    String::from_utf8(bytes).map_err(|_| damaged("the format file is not text"))?
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(RepoError::NotAProject);
+                }
+                Err(e) => return Err(refused(e)),
+            };
         let format = parse_format(&text)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
@@ -835,27 +1004,41 @@ impl Repository {
                 return Err(damaged(format!(".bolt/{name} is missing")));
             }
         }
+        let state = fixed(&top, &bolt, "state")?;
+        let packs_dir = Arc::new(fixed(
+            &fixed(&top, &bolt, "store")?,
+            &bolt.join("store"),
+            "packs",
+        )?);
         // The head first: its pack was in the store before the head pointed at it.
-        let head = read_head(&bolt)?;
-        let store = Store::open(&packs)?;
+        let head = read_head(&state, &bolt)?;
+        let store = Store::open_in(Arc::clone(&packs_dir), &packs)?;
         // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
         // project found damaged is left as it was.
-        for dir in [&tmp, &bolt.join("cache")] {
-            if let Err(e) = safe_fs::check_real_dir(dir)
-                && e.kind() == io::ErrorKind::NotFound
-            {
-                fsio::create_dir_durable(dir)?;
-                safe_fs::check_real_dir(dir).map_err(refused)?;
+        for name in ["tmp", "cache"] {
+            match top.create_dir(OsStr::new(name)) {
+                Ok(()) => top.sync()?,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
             }
         }
+        let held = Held {
+            tmp: Arc::new(fixed(&top, &bolt, "tmp")?),
+            cache: fixed(&top, &bolt, "cache")?,
+            bolt: top,
+            state,
+            packs: packs_dir,
+        };
         let repo = Repository {
             root: root.to_owned(),
             bolt,
             tmp,
             packs,
+            held,
             format,
             store,
             head,
+            cache_key: keyed::run_key()?,
         };
         repo.clean_tmp()?;
         Ok(repo)
@@ -871,21 +1054,22 @@ impl Repository {
         self.remove_temp_files(&ChangeLock { _file: file })
     }
 
-    /// Deletes the files in `tmp/`, under the lock, so none of them is being written.
+    /// Deletes what Bolt left in `tmp/`, under the lock, so none of it is being written: its files,
+    /// and the links it makes there on Windows before moving them into place, as links. Never a
+    /// folder or a name it doesn't make.
     fn remove_temp_files(&self, _lock: &ChangeLock) -> Result<(), RepoError> {
-        for entry in fs::read_dir(&self.tmp)? {
-            let path = entry?.path();
-            // Only Bolt's own temporary files: never a link, a folder or a name it doesn't make.
-            let ours = path.file_name().is_some_and(fsio::is_temp_name);
-            if ours && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-                fsio::remove_file(&path)?;
+        for entry in self.held.tmp.entries()? {
+            let left = matches!(entry.kind, EntryType::File | EntryType::Symlink);
+            if left && fsio::is_temp_name(&entry.name) {
+                fsio::remove_file(&self.held.tmp, &entry.name)?;
             }
         }
         Ok(())
     }
 
     fn open_lock_file(&self) -> Result<File, RepoError> {
-        fsio::open_lock_file(&self.bolt.join("state").join("lock")).map_err(refused)
+        let shown = self.bolt.join("state").join("lock");
+        fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown).map_err(refused)
     }
 
     #[must_use]
@@ -898,6 +1082,53 @@ impl Repository {
         &self.tmp
     }
 
+    /// How the project's drive compares names.
+    pub fn drive(&self) -> Result<crate::drive::Drive, RepoError> {
+        Ok(crate::drive::probe(self.tmp_folder())?)
+    }
+
+    /// `tmp/`, held open.
+    pub(crate) fn tmp_folder(&self) -> &Dir {
+        &self.held.tmp
+    }
+
+    /// `.bolt`, held open.
+    pub(crate) fn bolt_folder(&self) -> &Dir {
+        &self.held.bolt
+    }
+
+    /// The key that seals this project's caches for this handle.
+    #[must_use]
+    pub fn cache_key(&self) -> &[u8; KEY_LEN] {
+        &self.cache_key
+    }
+
+    /// Seals caches with `key` from now on: the user's own, which the command line reads, so
+    /// that they last from one command to the next.
+    pub fn set_cache_key(&mut self, key: [u8; KEY_LEN]) {
+        self.cache_key = key;
+    }
+
+    /// `state/`, held open.
+    pub(crate) fn state_folder(&self) -> &Dir {
+        &self.held.state
+    }
+
+    /// Where `state/` is, to name files in it.
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        self.bolt.join("state")
+    }
+
+    /// `cache/`, held open.
+    pub(crate) fn cache_folder(&self) -> &Dir {
+        &self.held.cache
+    }
+
+    /// Where `cache/` is, to name files in it.
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        self.bolt.join("cache")
+    }
+
     #[must_use]
     pub fn packs_dir(&self) -> &Path {
         &self.packs
@@ -908,6 +1139,15 @@ impl Repository {
         &self.store
     }
 
+    pub(crate) fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    /// `store/packs`, held open.
+    pub(crate) fn packs_folder(&self) -> &Arc<Dir> {
+        &self.held.packs
+    }
+
     #[must_use]
     pub fn signatures_allowed(&self) -> bool {
         self.format.features.contains("signatures")
@@ -916,13 +1156,15 @@ impl Repository {
     /// Build packs only while holding the `ChangeLock`: `open` cleans `tmp/` whenever the lock
     /// is free, which would delete a pack being built without it.
     pub fn new_packs(&self) -> Result<PackSet, RepoError> {
-        Ok(PackSet::new(&self.tmp, &self.packs)?)
+        Ok(PackSet::new(&self.held.tmp, &self.held.packs, &self.packs)?)
     }
 
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
     pub fn head(&self) -> Result<Id, RepoError> {
         let head = self.bolt.join("state").join("head");
-        parse_head(&safe_fs::read_capped(&head, safe_fs::MAX_HEAD_BYTES).map_err(refused)?)
+        let max = safe_fs::MAX_HEAD_BYTES;
+        let read = safe_fs::read_capped_in(&self.held.state, OsStr::new("head"), &head, max);
+        parse_head(&read.map_err(refused)?)
     }
 
     /// The newest diary entry this handle can see: the one when it was opened, or when it
@@ -965,16 +1207,16 @@ impl Repository {
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<ChangeLock, RepoError> {
         let file = self.open_lock_file()?;
-        let state = self.bolt.join("state");
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 // Best effort: the text is only for the message.
-                let info =
-                    safe_fs::read_capped(&state.join("lock-info"), safe_fs::MAX_LOCK_INFO_BYTES)
-                        .ok()
-                        .and_then(|bytes| String::from_utf8(bytes).ok())
-                        .unwrap_or_default();
+                let shown = self.bolt.join("state").join("lock-info");
+                let (name, max) = (OsStr::new("lock-info"), safe_fs::MAX_LOCK_INFO_BYTES);
+                let info = safe_fs::read_capped_in(&self.held.state, name, &shown, max)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_default();
                 on_wait(&info);
                 file.lock()?;
             }
@@ -987,10 +1229,11 @@ impl Repository {
             "pid {}\ncommand {command}\nstarted {started}\n",
             std::process::id()
         );
-        write_atomic(&self.tmp, &state.join("lock-info"), info.as_bytes())?;
+        let held = &self.held;
+        write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())?;
         // Another command may have committed since this handle was opened.
-        self.head = read_head(&self.bolt)?;
-        self.store.refresh(&self.packs)?;
+        self.head = read_head(&self.held.state, &self.bolt)?;
+        self.store.refresh()?;
         Ok(ChangeLock { _file: file })
     }
 
@@ -998,7 +1241,34 @@ impl Repository {
     /// them, then replaces `state/head`. The command has happened exactly when the head is
     /// replaced (decision 010), so an `Io` error from the final folder sync does not mean
     /// "nothing changed".
+    /// Then merges the small packs; problems doing so are only warnings, kept with the store's.
     pub fn commit(
+        &mut self,
+        lock: &ChangeLock,
+        packs: PackSet,
+        entry: &DiaryEntry,
+    ) -> Result<Id, RepoError> {
+        let id = self.move_head(lock, packs, entry)?;
+        crate::merge::merge_after_commit(self, lock);
+        Ok(id)
+    }
+
+    /// `commit`, without the merge.
+    fn move_head(
+        &mut self,
+        lock: &ChangeLock,
+        packs: PackSet,
+        entry: &DiaryEntry,
+    ) -> Result<Id, RepoError> {
+        let id = self.store_entry(lock, packs, entry)?;
+        fault_point("commit:before-head")?;
+        self.move_head_to(lock, id)?;
+        Ok(id)
+    }
+
+    /// Stores `entry` in the last of `packs` and moves them all into the store, leaving
+    /// `state/head` as it is: a switch stores its entry before it changes the folder.
+    pub fn store_entry(
         &mut self,
         _lock: &ChangeLock,
         mut packs: PackSet,
@@ -1009,17 +1279,19 @@ impl Repository {
         DiaryEntry::decode(&bytes)?;
         let id = packs.add_record(ObjectKind::DiaryEntry, &bytes)?;
         for path in packs.finish()? {
-            self.store.register(&path)?;
+            self.store.register(&path);
         }
-        fault_point("commit:before-head")?;
-        let head = format!("{id}\n");
-        write_atomic(
-            &self.tmp,
-            &self.bolt.join("state").join("head"),
-            head.as_bytes(),
-        )?;
-        self.head = Some(id);
         Ok(id)
+    }
+
+    /// Points `state/head` at `id`, a diary entry already stored: how a switch between saves
+    /// takes effect.
+    pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
+        let head = format!("{id}\n");
+        let held = &self.held;
+        write_atomic(&held.tmp, &held.state, "head", head.as_bytes())?;
+        self.head = Some(id);
+        Ok(())
     }
 }
 
@@ -1075,7 +1347,7 @@ mod tests {
 
     /// A project made by hand: the folder layout and the `format` file, nothing committed.
     fn project() -> (tempfile::TempDir, Repository) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let bolt = dir.path().join(".bolt");
         for sub in ["store/packs", "state", "cache", "tmp"] {
             std::fs::create_dir_all(bolt.join(sub)).unwrap();
@@ -1119,11 +1391,58 @@ mod tests {
         }
     }
 
+    /// A junk pack is passed over, with a warning, and only a lookup that finds nothing fails.
+    /// `00.pack` is searched first on a cold store, `zz.pack` last.
+    #[test]
+    fn a_junk_pack_is_damage_only_where_a_lookup_reaches_it() {
+        for junk_name in ["00.pack", "zz.pack"] {
+            let (dir, mut repo) = project();
+            let head = commit(&mut repo, &entry(1)).unwrap();
+            drop(repo);
+            let bolt = dir.path().join(".bolt");
+            // Over 1 MiB, so reading it searches every pack.
+            let big = vec![5u8; 2 << 20];
+            let mut w = crate::pack::PackWriter::create(&bolt.join("tmp")).unwrap();
+            let big_id = w.add_content(&big).unwrap();
+            w.finish(&bolt.join("store/packs")).unwrap();
+            let junk = bolt.join("store/packs").join(junk_name);
+            std::fs::write(&junk, b"not what Bolt wrote").unwrap();
+
+            let repo = Repository::open(dir.path()).unwrap();
+            let found = repo.store().read_record(&head, ObjectKind::DiaryEntry);
+            assert!(found.is_ok(), "{junk_name}: {found:?}");
+            let mut out = Vec::new();
+            let read = repo.store().copy_content(&big_id, &mut out);
+            assert!(read.is_ok() && out == big, "{junk_name}: {read:?}");
+            let warnings = repo.store().warnings();
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.kind == "damaged_pack" && w.message.contains(junk_name)),
+                "{junk_name}: {warnings:?}"
+            );
+            let missing = repo
+                .store()
+                .read_record(&Id([0x11; 32]), ObjectKind::Save)
+                .map_err(RepoError::from);
+            assert!(
+                matches!(missing, Err(RepoError::Damaged { .. })),
+                "{junk_name}: {missing:?}"
+            );
+            assert_eq!(std::fs::read(&junk).unwrap(), b"not what Bolt wrote");
+            for name in ["tmp", "cache"] {
+                assert!(safe_fs::check_real_dir(&bolt.join(name)).is_ok(), "{name}");
+            }
+        }
+    }
+
     /// The hint for damage says nothing was changed, so a missing `tmp` or `cache` isn't made
     /// before the project is found damaged.
     #[test]
     fn a_damaged_project_is_left_as_found() {
-        for spoil in ["state/head", "store/packs/00.pack"] {
+        // Not a damaged pack: packs are opened only when first searched, so opening the project
+        // doesn't find one.
+        for spoil in ["state/head"] {
             let (dir, repo) = project();
             drop(repo);
             let bolt = dir.path().join(".bolt");
@@ -1174,7 +1493,7 @@ mod tests {
 
     #[test]
     fn init_then_discover_from_a_subfolder() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let who = entry(0).who;
         let repo = Repository::init(dir.path(), &who).unwrap();
         let (_, first) = repo.current().unwrap();
@@ -1191,7 +1510,7 @@ mod tests {
         let sub = dir.path().join("a").join("b");
         std::fs::create_dir_all(&sub).unwrap();
         assert_eq!(Repository::discover(&sub).unwrap().root(), dir.path());
-        let outside = tempfile::tempdir().unwrap();
+        let outside = tempdir();
         assert!(matches!(
             Repository::discover(outside.path()),
             Err(RepoError::NotAProject)
@@ -1200,7 +1519,7 @@ mod tests {
 
     #[test]
     fn start_writes_neither_record() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let repo = Repository::init(dir.path(), &entry(0).who).unwrap();
         let state = repo.current().unwrap().1.state;
         assert!(state.tags.is_none() && state.server_lines.is_none());
@@ -1209,7 +1528,7 @@ mod tests {
         for pack in std::fs::read_dir(repo.packs_dir()).unwrap() {
             for e in PackReader::open(&pack.unwrap().path()).unwrap().entries() {
                 assert!(!matches!(
-                    e.kind,
+                    e.unwrap().kind,
                     ObjectKind::TagList | ObjectKind::ServerLines
                 ));
             }
@@ -1218,7 +1537,7 @@ mod tests {
 
     #[test]
     fn the_records_a_state_points_to_are_read_back() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &entry(0).who).unwrap();
         let (tags, servers) = sample_records();
         let (t, r) = commit_records(&mut repo, &tags, &servers);
@@ -1233,7 +1552,7 @@ mod tests {
 
     #[test]
     fn a_pointer_that_leads_nowhere_good_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &entry(0).who).unwrap();
         let (tags, servers) = sample_records();
         let (t, r) = commit_records(&mut repo, &tags, &servers);
@@ -1354,7 +1673,7 @@ mod tests {
     fn an_unfinished_project_is_named_and_kept_for_the_import_that_began_it() {
         let who = entry(0).who;
         let begun = |content: bool| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let (repo, lock) = Repository::begin(dir.path()).unwrap();
             let mut packs = repo.new_packs().unwrap();
             if content {
@@ -1398,7 +1717,7 @@ mod tests {
         Repository::init(dir.path(), &who).unwrap();
 
         // Only a folder that holds nothing is offered for deleting.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         drop(Repository::begin(dir.path()).unwrap());
         match Repository::discover(dir.path()) {
             Err(e @ RepoError::Unfinished { stored: false, .. }) => {
@@ -1408,7 +1727,7 @@ mod tests {
         }
 
         // Nor once its one entry is written, which holds all the import made.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let (mut repo, lock) = Repository::begin(dir.path()).unwrap();
         let mut packs = repo.new_packs().unwrap();
         packs.add_content(b"a file an import stored").unwrap();
@@ -1427,7 +1746,7 @@ mod tests {
     /// damaged, never one to delete.
     #[test]
     fn a_project_being_made_or_missing_its_format_is_not_called_unfinished() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let (repo, lock) = Repository::begin(dir.path()).unwrap();
         match Repository::discover(dir.path()) {
             Err(e @ RepoError::BeingMade { .. }) => {
@@ -1442,7 +1761,7 @@ mod tests {
         ));
 
         let who = entry(0).who;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &who).unwrap();
         let format = dir.path().join(".bolt/format");
         // Only its first entry: a start that stopped as it wrote `format` looks the same.
@@ -1487,12 +1806,14 @@ mod tests {
     /// where the link leads to a lock some command holds.
     #[test]
     fn a_linked_state_is_damage_before_its_lock_is_probed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let bolt = dir.path().join(".bolt");
         std::fs::create_dir_all(bolt.join("store/packs")).unwrap();
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
-        let held = fsio::open_lock_file(&elsewhere.join("lock")).unwrap();
+        let outside = Dir::open_top(&elsewhere).unwrap();
+        let lock = elsewhere.join("lock");
+        let held = fsio::open_lock_file(&outside, OsStr::new("lock"), &lock).unwrap();
         held.lock().unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&elsewhere, bolt.join("state")).unwrap();
@@ -1510,7 +1831,7 @@ mod tests {
     /// A run that finishes an interrupted one starts without the half-written pack it left.
     #[test]
     fn begin_clears_what_an_interrupted_run_left_in_tmp() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         drop(Repository::begin(dir.path()).unwrap());
         let tmp = dir.path().join(".bolt/tmp");
         let litter = tmp.join("tmp-0123456789abcdef");
@@ -1524,7 +1845,7 @@ mod tests {
 
     #[test]
     fn open_needs_a_format_file_and_cleans_tmp() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         assert!(matches!(
             Repository::open(dir.path()),
             Err(RepoError::NotAProject)
@@ -1552,13 +1873,13 @@ mod tests {
             ".bolt/tmp",
         ];
         for folder in folders {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             Repository::init(dir.path(), &who).unwrap();
             let link = folder
                 .split('/')
                 .fold(dir.path().to_owned(), |path, name| path.join(name));
             // The real folder moves outside, so the project would still work through the link.
-            let outside = tempfile::tempdir().unwrap();
+            let outside = tempdir();
             let target = outside.path().join("moved");
             std::fs::rename(&link, &target).unwrap();
             let bait = target.join("tmp-0123456789abcdef");
@@ -1581,11 +1902,53 @@ mod tests {
         }
     }
 
+    /// A fixed folder swapped for a link once the project is open is never written through: the
+    /// command goes on in the folder it checked, and the next one refuses the link.
+    #[test]
+    fn store_packs_swapped_for_a_link_after_the_shape_check_is_refused() {
+        let (dir, mut repo) = project();
+        let store = dir.path().join(".bolt").join("store");
+        let outside = tempdir();
+        std::fs::rename(store.join("packs"), store.join("checked")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), store.join("packs")).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&store.join("packs"), outside.path());
+        let id = commit(&mut repo, &entry(1)).unwrap();
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(store.join("checked")).unwrap().count(), 1);
+        assert_eq!(repo.head().unwrap(), id);
+        match Repository::open(dir.path()) {
+            Err(RepoError::Damaged { detail }) => assert!(detail.contains("packs"), "{detail}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    /// The change lock is taken through the held `state` folder: one swapped for a link once the
+    /// project is open gets no lock where the link points, so no command can take a lock there
+    /// while another holds the real one.
+    #[test]
+    fn state_swapped_for_a_link_after_the_shape_check_gets_no_lock_outside() {
+        let (dir, mut repo) = project();
+        let bolt = dir.path().join(".bolt");
+        let outside = tempdir();
+        std::fs::rename(bolt.join("state"), bolt.join("checked")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), bolt.join("state")).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&bolt.join("state"), outside.path());
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(bolt.join("checked").join("lock").is_file());
+        drop(lock);
+    }
+
     #[test]
     fn clean_tmp_removes_only_bolts_own_names() {
         let (dir, _repo) = project();
         let tmp = dir.path().join(".bolt").join("tmp");
-        let (_, made) = fsio::create_temp(&tmp).unwrap();
+        let (_, made) = fsio::create_temp(&Dir::open_top(&tmp).unwrap()).unwrap();
+        let made = tmp.join(made);
         for name in [
             "tmp-0123456789abcdef",
             "notes.txt",
@@ -1613,9 +1976,57 @@ mod tests {
         );
     }
 
+    /// Windows makes a link in `tmp/` before moving it into place, so a run that stops can leave
+    /// one: it goes as a link, file and folder links alike, and what it points to stays. A link
+    /// under another name stays too.
+    #[test]
+    fn leftover_temporary_links_go_and_what_they_point_to_stays() {
+        let (dir, repo) = project();
+        drop(repo);
+        let tmp = dir.path().join(".bolt").join("tmp");
+        let outside = tempdir();
+        let (file, folder) = (outside.path().join("file"), outside.path().join("folder"));
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        let temp = || tmp.join(bolt_platform::temp_name());
+        let mine = tmp.join("mine");
+        let mut links = Vec::new();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&folder, &mine).unwrap();
+            for target in [&file, &folder] {
+                let link = temp();
+                std::os::unix::fs::symlink(target, &link).unwrap();
+                links.push(link);
+            }
+        }
+        #[cfg(windows)]
+        {
+            crate::test_support::junction(&mine, &folder);
+            let junction = temp();
+            crate::test_support::junction(&junction, &folder);
+            links.push(junction);
+            let (file_link, folder_link) = (temp(), temp());
+            match std::os::windows::fs::symlink_file(&file, &file_link) {
+                Ok(()) => {
+                    std::os::windows::fs::symlink_dir(&folder, &folder_link).unwrap();
+                    links.extend([file_link, folder_link]);
+                }
+                Err(e) => crate::test_support::skip_without_link_right(e),
+            }
+        }
+        Repository::open(dir.path()).unwrap();
+        for link in &links {
+            let left = std::fs::symlink_metadata(link);
+            assert!(left.is_err(), "{} was kept", link.display());
+        }
+        assert!(std::fs::symlink_metadata(&mine).is_ok());
+        assert!(file.exists() && folder.exists());
+    }
+
     #[test]
     fn owner_rule() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let (root, sibling) = (dir.path().join("project"), dir.path().join("sibling"));
         for folder in [&root, &sibling] {
             std::fs::create_dir(folder).unwrap();
@@ -1668,13 +2079,14 @@ mod tests {
     /// to do about that.
     #[test]
     fn a_misplaced_safe_folders_line_is_what_the_user_is_told() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let misplaced = || -> Result<Vec<PathBuf>, ConfigError> {
             Err(ConfigError::SafeFoldersNotAtTop {
                 path: PathBuf::from("config.toml"),
             })
         };
-        let told = check_owner_with(dir.path(), &|_| Ok(Owner::Other), &misplaced).unwrap_err();
+        let told =
+            check_owner_with(dir.path(), false, &|_| Ok(Owner::Other), &misplaced).unwrap_err();
         assert_eq!(
             told.to_string(),
             "safe-folders must be at the top of config.toml, before any [section]"
@@ -1684,7 +2096,7 @@ mod tests {
 
     #[test]
     fn administrators_count_only_when_elevated() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path();
         let elevated = Owner::Administrators { elevated: true };
         let normal = Owner::Administrators { elevated: false };
@@ -1712,14 +2124,14 @@ mod tests {
     /// needs safe-folders has to read them.
     #[test]
     fn an_elevated_administrators_project_needs_no_settings() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let broken = || -> Result<Vec<PathBuf>, ConfigError> {
             Err(ConfigError::Invalid {
                 path: PathBuf::from("config.toml"),
                 detail: "broken".into(),
             })
         };
-        let owned_by = |owner: Owner| check_owner_with(dir.path(), &|_| Ok(owner), &broken);
+        let owned_by = |owner: Owner| check_owner_with(dir.path(), false, &|_| Ok(owner), &broken);
         assert!(owned_by(Owner::User).is_ok());
         assert!(owned_by(Owner::Administrators { elevated: true }).is_ok());
         let normal = owned_by(Owner::Administrators { elevated: false });
@@ -1760,7 +2172,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn look_alike_folders_are_different_folders() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         for (a, b) in [("Kit", "\u{212A}it"), ("\u{C5}ngstrom", "\u{212B}ngstrom")] {
             let (a, b) = (dir.path().join(a), dir.path().join(b));
             for folder in [&a, &b] {
@@ -1776,15 +2188,20 @@ mod tests {
         }
     }
 
+    /// A temporary folder named as `discover` names it: on macOS `/var` is a link to `/private/var`.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(resolved(&std::env::temp_dir())).unwrap()
+    }
+
     /// The real owner check, with the answers no test machine can give: `owner(path)` owns each
     /// path that exists, and the user's safe-folders are `safe`.
     fn checked_by(
         owner: impl Fn(&Path) -> Owner,
         safe: &[PathBuf],
-    ) -> impl Fn(&Path) -> Result<(), RepoError> {
-        move |root| {
+    ) -> impl Fn(&Path, bool) -> Result<(), RepoError> {
+        move |root, bolt_seen| {
             let owner_of = |path: &Path| std::fs::symlink_metadata(path).map(|_| owner(path));
-            check_owner_with(root, &owner_of, &|| Ok(safe.to_vec()))
+            check_owner_with(root, bolt_seen, &owner_of, &|| Ok(safe.to_vec()))
         }
     }
 
@@ -1797,7 +2214,7 @@ mod tests {
     }
 
     /// The owner check where `owner` owns everything, and nothing is listed.
-    fn all_owned_by(owner: Owner) -> impl Fn(&Path) -> Result<(), RepoError> {
+    fn all_owned_by(owner: Owner) -> impl Fn(&Path, bool) -> Result<(), RepoError> {
         checked_by(move |_| owner, &[])
     }
 
@@ -1806,7 +2223,7 @@ mod tests {
     #[test]
     fn start_looks_past_an_enclosing_project_it_may_not_use() {
         for drive_says in [Owner::Other, Owner::Unknown] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let top = dir.path().join("top");
             let mid = top.join("mid");
             let root = mid.join("root");
@@ -1846,7 +2263,7 @@ mod tests {
             Owner::Other,
             Owner::Administrators { elevated: false },
         ] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let root = dir.path();
             let owner = |path: &Path| {
                 if path == root {
@@ -1890,7 +2307,7 @@ mod tests {
 
     #[test]
     fn what_counts_as_a_project_in_the_search() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let folder = dir.path();
         let bolt = folder.join(".bolt");
         let (mine, theirs) = (all_owned_by(Owner::User), all_owned_by(Owner::Other));
@@ -1917,7 +2334,7 @@ mod tests {
     fn commands_refuse_a_foreign_bolt_above_even_an_empty_one() {
         for drive_says in [Owner::Other, Owner::Unknown] {
             for link in [false, true] {
-                let dir = tempfile::tempdir().unwrap();
+                let dir = tempdir();
                 let outer = dir.path().join("outer");
                 let root = outer.join("root");
                 std::fs::create_dir_all(&root).unwrap();
@@ -1950,7 +2367,7 @@ mod tests {
     /// looked at.
     #[test]
     fn the_owner_of_bolt_is_asked_before_anything_inside_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().join("root");
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir_all(root.join(".bolt")).unwrap();
@@ -1979,7 +2396,7 @@ mod tests {
     #[test]
     fn a_bolt_of_the_users_in_a_folder_that_isnt_theirs_is_refused() {
         for drive_says in [Owner::Other, Owner::Unknown] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let system = dir.path().join("system");
             let work = system.join("work");
             std::fs::create_dir_all(&work).unwrap();
@@ -2019,7 +2436,7 @@ mod tests {
     #[test]
     fn start_refuses_a_folder_that_isnt_the_users_before_making_anything() {
         for drive_says in [Owner::Other, Owner::Unknown] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let root = dir.path().join("root");
             std::fs::create_dir(&root).unwrap();
             let owner = |path: &Path| {
@@ -2050,7 +2467,7 @@ mod tests {
     /// Fails closed rather than make the project in a `.bolt` nobody checked.
     #[test]
     fn start_stops_if_the_bolt_it_made_vanishes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let bolt = root.join(".bolt");
@@ -2064,12 +2481,12 @@ mod tests {
             },
             &[],
         );
-        let check = |folder: &Path| {
+        let check = |folder: &Path, seen| {
             // Someone removes the new `.bolt` while its owner is asked.
             if folder == root && bolt.is_dir() {
                 std::fs::remove_dir(&bolt).unwrap();
             }
-            rule(folder)
+            rule(folder, seen)
         };
         let started = Repository::init_with(&root, &entry(0).who, &check);
         assert!(started.is_err(), "{:?}", started.map(|_| ()));
@@ -2079,7 +2496,7 @@ mod tests {
     /// A link that appears where `bolt start` is about to make `.bolt` is never followed.
     #[test]
     fn start_refuses_a_bolt_link_that_appears_while_it_starts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let (bolt, target) = (root.join(".bolt"), dir.path().join("target"));
@@ -2093,14 +2510,14 @@ mod tests {
             },
             &[],
         );
-        let check = |folder: &Path| {
+        let check = |folder: &Path, seen| {
             if folder == root && std::fs::symlink_metadata(&bolt).is_err() {
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(&target, &bolt).unwrap();
                 #[cfg(windows)]
                 crate::test_support::junction(&bolt, &target);
             }
-            rule(folder)
+            rule(folder, seen)
         };
         let started = Repository::init_with(&root, &entry(0).who, &check);
         assert!(
@@ -2118,7 +2535,7 @@ mod tests {
     fn a_foreign_bolt_is_never_looked_inside() {
         use std::cell::RefCell;
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let outer = dir.path().join("outer");
         let root = outer.join("root");
         std::fs::create_dir_all(&root).unwrap();
@@ -2145,9 +2562,9 @@ mod tests {
             },
             &[],
         );
-        let theirs = |folder: &Path| {
+        let theirs = |folder: &Path, seen| {
             asked.borrow_mut().push(folder.to_owned());
-            rule(folder)
+            rule(folder, seen)
         };
         let found = Repository::discover_with(&root, &theirs).map(|_| ());
         let opened = check_bolt(&outer, &theirs).map(|_| ());
@@ -2164,7 +2581,7 @@ mod tests {
     /// computer.
     #[test]
     fn start_never_follows_a_format_link() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let root = dir.path();
         std::fs::create_dir(root.join(".bolt")).unwrap();
         // A link to nothing: followed, it would look like no `format` at all.
@@ -2191,7 +2608,7 @@ mod tests {
     #[test]
     fn a_bolt_link_above_is_found_but_never_followed() {
         for with_format in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempdir();
             let target = dir.path().join("target");
             std::fs::create_dir(&target).unwrap();
             if with_format {
@@ -2233,11 +2650,126 @@ mod tests {
         }
     }
 
+    /// A link to the project is judged by the folder it leads to, the one `.bolt` is in.
+    #[test]
+    fn the_owner_check_judges_the_resolved_folder() {
+        let dir = tempdir();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        Repository::init(&real, &entry(0).who).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&link, &real);
+        // Another account's link to the user's own project.
+        let check = checked_by(
+            |path| {
+                if path == link {
+                    Owner::Other
+                } else {
+                    Owner::User
+                }
+            },
+            &[],
+        );
+        let opened = Repository::discover_with(&link, &check).unwrap();
+        assert!(
+            config::same_folder(opened.root(), &real),
+            "{:?}",
+            opened.root()
+        );
+        // Shown as the user would type it, not as `\\?\C:\...`.
+        let shown = opened.root().display().to_string();
+        assert!(!shown.starts_with(r"\\?\"), "{shown}");
+        assert!(Repository::discover(&link).is_ok());
+    }
+
+    /// The user's own link into another account's folder: `bolt start` judges the folder, and
+    /// makes nothing there.
+    #[test]
+    fn start_through_a_link_judges_the_folder_it_leads_to() {
+        let dir = tempdir();
+        let theirs = dir.path().join("theirs");
+        std::fs::create_dir(&theirs).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&theirs, &link).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&link, &theirs);
+        let owner = |path: &Path| {
+            if path.starts_with(&theirs) {
+                Owner::Other
+            } else {
+                Owner::User
+            }
+        };
+        let started = start_where(&link, owner, &[]);
+        assert!(
+            matches!(&started, Err(RepoError::NotYours { path }) if *path == theirs),
+            "{:?}",
+            started.map(|_| ())
+        );
+        let checked = Repository::check_new_with(&link, &checked_by(owner, &[]));
+        assert!(
+            matches!(checked, Err(RepoError::NotYours { .. })),
+            "{checked:?}"
+        );
+        assert!(!theirs.join(".bolt").exists());
+    }
+
+    /// A `.bolt` that is gone while its owner is asked, then back, was never checked.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_bolt_that_vanishes_during_the_owner_check_is_refused() {
+        let dir = tempdir();
+        Repository::init(dir.path(), &entry(0).who).unwrap();
+        let bolt = dir.path().join(".bolt");
+        let away = dir.path().join("away");
+        fsio::fault::act_at("owner:asking", move || {
+            std::fs::rename(&bolt, &away).unwrap();
+            fsio::fault::act_at("owner:asked", move || {
+                std::fs::rename(&away, &bolt).unwrap()
+            });
+        });
+        match Repository::discover(dir.path()) {
+            Err(e @ RepoError::BoltChanged { .. }) => {
+                assert_eq!(e.hint().as_deref(), Some("Run the command again."));
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert!(format_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_resolved_path_reads_as_the_user_would_type_it() {
+        let dir = tempdir();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // `..` and the like are resolved; no `\\?\` is added.
+        assert_eq!(resolved(&sub.join("..").join("sub")), sub);
+        // Kept as given where it can't be resolved.
+        let missing = dir.path().join("missing");
+        assert_eq!(resolved(&missing), missing);
+    }
+
+    /// `C:\...\a.` would lead to `a`, so a folder named `a.` keeps its `\\?\`.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_that_means_something_else_plain_stays_verbatim() {
+        let dir = tempdir();
+        let verbatim = PathBuf::from(format!(r"\\?\{}", dir.path().display())).join("a.");
+        std::fs::create_dir(&verbatim).unwrap();
+        assert_eq!(resolved(&verbatim), verbatim);
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        assert_eq!(resolved(&verbatim), verbatim);
+    }
+
     /// Reading through the link would never end.
     #[cfg(unix)]
     #[test]
     fn a_format_link_to_dev_zero_is_refused_without_hanging() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         let outer = dir.path().to_owned();
         std::fs::create_dir(outer.join(".bolt")).unwrap();
         std::os::unix::fs::symlink("/dev/zero", format_path(&outer)).unwrap();
@@ -2263,7 +2795,7 @@ mod tests {
 
     #[test]
     fn hidden_bolt_folder_is_a_real_folder() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir();
         Repository::init(dir.path(), &entry(0).who).unwrap();
         let bolt = dir.path().join(".bolt");
         assert!(bolt_platform::is_hidden(&bolt).unwrap());
@@ -2380,7 +2912,7 @@ mod tests {
         let stopped = |refusal| RepoError::StartStopped {
             refusal: Box::new(refusal),
         };
-        let folder = tempfile::tempdir().unwrap();
+        let folder = tempdir();
         let open_to_all = crate::test_support::open_to_all(folder.path());
         for refusal in refusals(Path::new("/srv/work")) {
             let hint = stopped(refusal).hint().unwrap();
@@ -2551,13 +3083,13 @@ mod tests {
         let mut holders = Vec::new();
         for pack in std::fs::read_dir(repo.packs_dir()).unwrap() {
             let reader = PackReader::open(&pack.unwrap().path()).unwrap();
-            if reader.find(&entry_id).is_some() {
+            if reader.find(&entry_id).unwrap().is_some() {
                 holders.push(reader);
             }
         }
         assert_eq!(holders.len(), 1);
         // The last pack holds what came last: the seventh object and the entry.
-        let held: BTreeSet<Id> = holders[0].entries().iter().map(|e| e.id).collect();
+        let held: BTreeSet<Id> = holders[0].entries().map(|e| e.unwrap().id).collect();
         assert_eq!(held, BTreeSet::from([ids[6], entry_id]));
     }
 

@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use bolt_platform::Owner;
 
 use crate::config::ConfigError;
-use crate::names::MAX_NAME_BYTES;
+use crate::names::MAX_NEW_NAME_BYTES;
 use crate::repo::{self, RepoError};
 use crate::safe_fs;
 use crate::text::escape;
@@ -293,10 +293,11 @@ fn unimportable(what: impl Into<String>) -> GitError {
     GitError::Unimportable { what: what.into() }
 }
 
-/// Bytes from a repository for a message, cut to a name's worth so a hostile one can't flood
-/// it. Git allows nearly any bytes in names; the error escapes them when it is shown.
+/// Bytes from a repository for a message, cut to the 255 bytes of a name every system holds, so a
+/// hostile one can't flood it. Git allows nearly any bytes in names; the error escapes them when
+/// it is shown.
 pub(crate) fn shown(bytes: &[u8]) -> String {
-    match bytes.get(..MAX_NAME_BYTES) {
+    match bytes.get(..MAX_NEW_NAME_BYTES) {
         Some(start) if start.len() < bytes.len() => {
             format!("{}...", String::from_utf8_lossy(start))
         }

@@ -100,6 +100,24 @@ pub fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
+/// Makes `link` a junction to the folder `target`, which needs no rights on Windows.
+#[cfg(windows)]
+pub fn junction(link: &Path, target: &Path) {
+    let made = Command::new("cmd")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        made.success(),
+        "mklink /J {} {} failed",
+        link.display(),
+        target.display()
+    );
+}
+
 pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -200,15 +218,20 @@ pub fn bolt_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> 
         ))
         .arg(assert_cmd::cargo::cargo_bin("bolt"))
         .args(args)
-        .current_dir(dir)
-        .env_remove("BOLT_FAULT_AT")
-        .env("BOLT_USER_NAME", "Test")
+        .current_dir(dir);
+    as_test_user(&mut cmd, config);
+    cmd
+}
+
+/// Runs `cmd` as the test user, with no fault point and its own settings folder `config`.
+fn as_test_user(cmd: &mut Command, config: &Path) {
+    cmd.env("BOLT_USER_NAME", "Test")
         .env("BOLT_USER_EMAIL", "test@example.com")
+        .env_remove("BOLT_FAULT_AT")
         .env("BOLT_CONFIG_DIR", config)
         // Git's own settings and ignore list are found from here (decision 047).
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config);
-    cmd
 }
 
 /// `bolt_capped_at`, with about 1.5 GB.
@@ -313,20 +336,24 @@ impl Env {
 
     /// `bolt`, run in `dir` as the test user.
     pub fn bolt_in(&self, dir: &Path) -> Bolt {
-        let mut cmd = Bolt::cargo_bin("bolt").unwrap();
-        cmd.current_dir(dir)
-            .env("BOLT_USER_NAME", "Test")
-            .env("BOLT_USER_EMAIL", "test@example.com")
-            .env_remove("BOLT_FAULT_AT")
-            .env("BOLT_CONFIG_DIR", self.config.path())
-            // Git's own settings and ignore list are found from here (decision 047).
-            .env("HOME", self.config.path())
-            .env("XDG_CONFIG_HOME", self.config.path());
+        Bolt::from_std(self.bolt_process_in(dir))
+    }
+
+    /// `bolt_in` as a process of the standard library, for a test that spawns it.
+    pub fn bolt_process_in(&self, dir: &Path) -> Command {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("bolt"));
+        cmd.current_dir(dir);
+        as_test_user(&mut cmd, self.config.path());
         cmd
     }
 
     pub fn bolt(&self) -> Bolt {
         self.bolt_in(self.root())
+    }
+
+    /// The user's own settings folder.
+    pub fn config(&self) -> &Path {
+        self.config.path()
     }
 
     /// Runs Git in the repository and returns what it printed, trimmed.

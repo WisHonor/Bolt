@@ -2,7 +2,7 @@
 
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
-use crate::names::{MAX_NAME_BYTES, validate_name};
+use crate::names::{MAX_NAME_BYTES, MAX_PATH_BYTES, validate_name};
 
 /// Most entries one listing may hold.
 pub const MAX_ENTRIES: u64 = 1_000_000;
@@ -19,24 +19,44 @@ pub const MAX_SAVE_ENTRIES: u64 = 10_000_000;
 pub struct SaveLimits {
     max_depth: usize,
     max_entries: u64,
+    max_path: usize,
     entries: u64,
 }
 
 impl Default for SaveLimits {
-    /// The limits of the format: `MAX_SAVE_DEPTH` and `MAX_SAVE_ENTRIES`.
+    /// The limits of the format: `MAX_SAVE_DEPTH`, `MAX_SAVE_ENTRIES` and `MAX_PATH_BYTES`.
     fn default() -> SaveLimits {
         SaveLimits::new(MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES)
     }
 }
 
 impl SaveLimits {
-    /// Limits of other sizes than the format's; tests use small ones.
+    /// Limits of other sizes than the format's, paths aside; tests use small ones.
     pub(crate) fn new(max_depth: usize, max_entries: u64) -> SaveLimits {
         SaveLimits {
             max_depth,
             max_entries,
+            max_path: MAX_PATH_BYTES,
             entries: 0,
         }
+    }
+
+    /// These limits with paths of at most `max_path` bytes.
+    #[cfg(test)]
+    pub(crate) fn with_max_path(self, max_path: usize) -> SaveLimits {
+        SaveLimits { max_path, ..self }
+    }
+
+    /// Says what is wrong if a path `len` bytes long, counted from the root with `/` between
+    /// names, is longer than the limit.
+    pub fn check_path(&self, len: usize) -> Result<(), String> {
+        if len > self.max_path {
+            return Err(format!(
+                "a path in it is longer than {} bytes",
+                self.max_path
+            ));
+        }
+        Ok(())
     }
 
     /// Says what is wrong if a folder `depth` levels below the root of the save (the root's own
@@ -268,6 +288,33 @@ mod tests {
             Err(DecodeError::LimitExceeded { .. })
         )); // 1,000,001 entries
         assert!(Listing::decode(&unhex("0100ff")).is_err()); // trailing byte
+    }
+
+    #[test]
+    fn names_of_up_to_765_bytes_decode() {
+        let one = |name: &str| {
+            let mut w = Writer::new();
+            w.u8(1);
+            w.varint(1);
+            w.string(name);
+            w.u8(EntryKind::File as u8);
+            w.id(&Id([0; 32]));
+            w.varint(0);
+            w.into_bytes()
+        };
+        // Windows' 255 UTF-16 units, in characters of three bytes.
+        let longest = "語".repeat(255);
+        let decoded = Listing::decode(&one(&longest)).unwrap();
+        assert_eq!(decoded.entries()[0].name, longest);
+        assert!(Listing::decode(&one(&"a".repeat(766))).is_err());
+    }
+
+    #[test]
+    fn a_path_is_held_to_the_limit() {
+        let limits = SaveLimits::default();
+        assert!(limits.check_path(4096).is_ok());
+        let why = limits.check_path(4097).unwrap_err();
+        assert_eq!(why, "a path in it is longer than 4096 bytes");
     }
 
     #[test]
