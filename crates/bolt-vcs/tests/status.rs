@@ -186,12 +186,17 @@ fn status_does_not_open_unchanged_files() {
 fn status_full_reads_everything() {
     let env = project(&[("a.txt", "aaa"), ("b.txt", "b")]);
     assert!(changes(&status_json(&env, &[])).is_empty());
-    // Same size, same time: only reading the file tells.
+    // Same size, same time, written over in place: its change time tells (decision 069).
     let a = env.root().join("a.txt");
     let time = fs::metadata(&a).unwrap().modified().unwrap();
     fs::write(&a, "bbb").unwrap();
     set_time(&a, time);
-    assert!(changes(&status_json(&env, &[])).is_empty());
+    let doc = status_json(&env, &[]);
+    assert_eq!(
+        changes(&doc),
+        [change("a.txt", "modified", "file")],
+        "{doc}"
+    );
     let doc = status_json(&env, &["--full"]);
     assert_eq!(
         changes(&doc),

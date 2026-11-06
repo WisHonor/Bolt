@@ -213,6 +213,7 @@ fn meta(stat: &Stat) -> EntryMeta {
         kind: kind_of(FileType::from_raw_mode(stat.st_mode)),
         size: stat.st_size as u64,
         modified_ns: stat.st_mtime as i128 * 1_000_000_000 + stat.st_mtime_nsec as i128,
+        changed_ns: stat.st_ctime as i128 * 1_000_000_000 + stat.st_ctime_nsec as i128,
         executable: Some(stat.st_mode & 0o111 != 0),
         file_id: (stat.st_dev as u64, stat.st_ino as u128),
     }

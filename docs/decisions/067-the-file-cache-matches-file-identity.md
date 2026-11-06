@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3, its red-team session, RT5-1)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 053](053-file-state-cache.md) (what the cache records and when an entry is trusted)
+- **Refined by:** [decision 069](069-the-file-cache-matches-the-change-time.md) (option B taken: the change time is matched too)
 
 ## Context
 

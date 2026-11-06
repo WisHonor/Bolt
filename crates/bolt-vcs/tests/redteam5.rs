@@ -240,7 +240,6 @@ fn rt5_4_goto_never_changes_a_file_outside_through_a_hard_link() {
 }
 
 #[test]
-#[ignore = "RT5-5: the file cache trusts a file overwritten in place with its time kept (cp -p, unzip -o)"]
 fn rt5_5_a_file_copied_over_a_saved_one_keeping_its_time_is_seen_and_never_lost() {
     let env = project();
     write_at(

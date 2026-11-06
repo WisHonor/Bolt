@@ -6,7 +6,7 @@ is in `crates/bolt-vcs-platform/src/`:
 - `dir.rs`: the shared `Dir` API and its tests. No `unsafe`.
 - `dir/unix.rs`: macOS and Linux, on the `rustix` crate. No `unsafe`.
 - `dir/windows.rs`: Windows. Every `unsafe` block below is in this file: 13 blocks, plus one
-  `unsafe fn` (`target_of`) and one `unsafe trait` with two `unsafe impl`s.
+  `unsafe fn` (`target_of`) and one `unsafe trait` with three `unsafe impl`s (the third, for the change time, is block 4b).
 
 ## In plain words
 
@@ -121,6 +121,7 @@ Microsoft's pages for the function and its flags.
 | 1, 2 | `create_file` | `NtCreateFile`, then `OwnedHandle::from_raw_handle` |
 | 3 | `nt_error` | `RtlNtStatusToDosError` |
 | 4 | `info`, with the `Plain` trait | `GetFileInformationByHandleEx` |
+| 4b | the `Plain` promise for `FILE_BASIC_INFO`, used by `meta` | nothing: it lets block 4 read the change time |
 | 5 | `entries` | `GetFileInformationByHandleEx`, to list a folder |
 | 6 | `meta` | `GetFileInformationByHandle` |
 | 7 | `set_info`, used by `delete` | `SetFileInformationByHandle` |
@@ -288,6 +289,44 @@ Microsoft: [GetFileInformationByHandleEx][getfileinformationbyhandleex];
 [FILE_INFO_BY_HANDLE_CLASS][file_info_by_handle_class];
 [FILE_ATTRIBUTE_TAG_INFO][file_attribute_tag_info]; [FILE_ID_INFO][file_id_info]. Rust:
 [unsafe traits][unsafe_traits].
+
+### Block 4b: the change time (`unsafe impl Plain for FILE_BASIC_INFO`)
+
+Added after the second red-team session (RT5-5, [decision 069](../decisions/069-the-file-cache-matches-the-change-time.md)).
+
+```rust
+// SAFETY: four i64s and a u32 (padded to 40 bytes, as in C).
+unsafe impl Plain for FILE_BASIC_INFO {}
+```
+
+and its one use, in `meta`, through block 4 unchanged:
+
+```rust
+let changed = info::<FILE_BASIC_INFO>(handle, FileBasicInfo)?.ChangeTime;
+```
+
+**In plain words:** "the change-time structure is only numbers, so block 4 may ask Windows to fill
+it." Windows moves a file's `ChangeTime` whenever its contents or details change, setting its
+last-write time included, so a file written over in place with its old time put back still shows.
+The file-state cache matches it, as Git's index matches `ctime` on Unix.
+
+**Why `FILE_BASIC_INFO` is plain data.** In windows-sys 0.61.2 (`Win32/Storage/FileSystem`) it is
+`#[repr(C)] #[derive(Clone, Copy, Default)]` with the fields `CreationTime: i64`,
+`LastAccessTime: i64`, `LastWriteTime: i64`, `ChangeTime: i64` and `FileAttributes: u32`. Every bit
+pattern is a valid `i64` or `u32`, and there are no pointers, references, `bool`s, enums or
+`char`s, so any bytes Windows writes make a valid value: the promise `Plain` asks for. `Default`
+(all zeros), which block 4 starts from, comes with the type.
+
+**Why the size and alignment block 4 relies on hold.** Block 4 passes `size_of::<T>()` and a pointer
+to a `T` on the stack. `#[repr(C)]` lays the fields out as C does: four 8-byte integers at offsets
+0, 8, 16 and 24, the `u32` at 32, then 4 bytes of padding, so the size is 40 and the alignment 8.
+That is exactly the C `FILE_BASIC_INFO` of Windows' headers (its `LARGE_INTEGER` fields are 8-byte
+aligned), which `GetFileInformationByHandleEx` expects for `FileBasicInfo`: Windows is told 40 bytes
+and writes at most 40, into memory aligned for the structure. The padding is never read as a field,
+so whatever Windows leaves there doesn't matter. Nothing else changes: block 4's call, its handle
+and its `SAFETY` comment are as they were, and no other `unsafe` was added.
+
+Microsoft: [FILE_BASIC_INFO][file_basic_info]; [FILE_INFO_BY_HANDLE_CLASS][file_info_by_handle_class].
 
 ### Block 5: listing a folder (`entries`)
 
@@ -737,6 +776,7 @@ removes the file it couldn't set (no such drive in CI).
 [file_info_by_handle_class]: https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ne-minwinbase-file_info_by_handle_class
 [file_attribute_tag_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_attribute_tag_info
 [file_id_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
+[file_basic_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_basic_info
 [unsafe_traits]: https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html#implementing-an-unsafe-trait
 [unsafe_functions]: https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html#calling-an-unsafe-function-or-method
 [file_id_both_dir_info]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_both_dir_info

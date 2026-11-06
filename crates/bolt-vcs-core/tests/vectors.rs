@@ -630,19 +630,24 @@ fn change_ids_match_their_vector() {
     }
 }
 
-/// `a.txt`, 3 bytes, at 1,700,000,000.123456789 s, file 9 on drive 0x0102030405060708, racy, with
-/// content 11…11; and `b`, an executable of 300 bytes, at -1.5 s (whole seconds round down, to
-/// -2), file 2^64 + 5 on drive 7 (a 128-bit file ID), with content 22…22.
+/// `a.txt`, 3 bytes, modified at 1,700,000,000.123456789 s, changed at 1,700,000,001.5 s, file 9
+/// on drive 0x0102030405060708, racy, with content 11…11; and `b`, an executable of 300 bytes,
+/// modified at -1.5 s (whole seconds round down, to -2), changed at -0.999999999 s, file 2^64 + 5
+/// on drive 7 (a 128-bit file ID), with content 22…22.
 fn file_cache_body() -> String {
     format!(
-        "424f4c5446494c45020205{}0103{}{}{}01{}016202ac02{}{}{}00{}",
+        "424f4c5446494c45030205{}0103{}{}{}{}{}01{}016202ac02{}{}{}{}{}00{}",
         hex(b"a.txt"),
         hex(&1_700_000_000i64.to_le_bytes()),
         hex(&123_456_789u32.to_le_bytes()),
+        hex(&1_700_000_001i64.to_le_bytes()),
+        hex(&500_000_000u32.to_le_bytes()),
         "0807060504030201".to_owned() + "0900000000000000" + "0000000000000000",
         "11".repeat(32),
         hex(&(-2i64).to_le_bytes()),
         hex(&500_000_000u32.to_le_bytes()),
+        hex(&(-1i64).to_le_bytes()),
+        hex(&1u32.to_le_bytes()),
         "0700000000000000".to_owned() + "0500000000000000" + "0100000000000000",
         "22".repeat(32)
     )
@@ -672,10 +677,11 @@ fn file_cache_matches_its_vector() {
     let vectors: Vec<SealedVector> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(vectors[0].body, file_cache_body());
-    let meta = |size, modified_ns, executable, file_id| EntryMeta {
+    let meta = |size, modified_ns, changed_ns, executable, file_id| EntryMeta {
         kind: EntryType::File,
         size,
         modified_ns,
+        changed_ns,
         executable,
         file_id,
     };
@@ -688,21 +694,26 @@ fn file_cache_matches_its_vector() {
         let cache = FileCache::decode(&body).unwrap();
         assert_eq!(cache.encode(), body);
         // Racy, so never trusted.
+        let a_id = (0x0102_0304_0506_0708, 9);
         let a = meta(
             3,
             1_700_000_000_123_456_789,
+            1_700_000_001_500_000_000,
             None,
-            (0x0102_0304_0506_0708, 9),
+            a_id,
         );
         assert!(cache.matches("a.txt", &a).is_none());
-        let b_id = (7, 1 << 64 | 5);
+        let (b_id, b_changed) = ((7, 1 << 64 | 5), -999_999_999);
         let b = cache
-            .matches("b", &meta(300, -1_500_000_000, Some(true), b_id))
+            .matches("b", &meta(300, -1_500_000_000, b_changed, Some(true), b_id))
             .unwrap();
         assert_eq!((b.kind, b.id), (EntryKind::Executable, Id([0x22; 32])));
         // Another file there, whose number differs only in its high bits, is not trusted.
-        let other = meta(300, -1_500_000_000, Some(true), (7, 5));
+        let other = meta(300, -1_500_000_000, b_changed, Some(true), (7, 5));
         assert!(cache.matches("b", &other).is_none());
+        // Nor the same file written over in place, which has a new change time.
+        let rewritten = meta(300, -1_500_000_000, b_changed + 1, Some(true), b_id);
+        assert!(cache.matches("b", &rewritten).is_none());
     }
 }
 

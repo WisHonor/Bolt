@@ -60,6 +60,9 @@ pub struct EntryMeta {
     pub size: u64,
     /// When it last changed, in nanoseconds since 1970-01-01 UTC.
     pub modified_ns: i128,
+    /// When its contents or details last changed, which no ordinary call sets back (`ctime` on
+    /// Unix, `ChangeTime` on Windows), in nanoseconds since 1970-01-01 UTC.
+    pub changed_ns: i128,
     /// Whether an executable bit is set; `None` on Windows, which has none.
     pub executable: Option<bool>,
     /// The drive's number and the file's number on it: two names with the same ID are one file.
@@ -582,6 +585,22 @@ mod tests {
             .unwrap();
         assert_eq!(file.modified_ns, since_1970(std_time));
         assert!((since_1970(SystemTime::now()) - file.modified_ns).abs() < 600 * 1_000_000_000);
+        assert!((since_1970(SystemTime::now()) - file.changed_ns).abs() < 600 * 1_000_000_000);
+        // Written over in place, with the old modified time set back: the change time moves.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let over = fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("file"))
+            .unwrap();
+        (&over).write_all(b"12345").unwrap();
+        over.set_modified(std_time).unwrap();
+        drop(over);
+        let rewritten = d.metadata(n("file")).unwrap();
+        assert_eq!(
+            (rewritten.file_id, rewritten.size, rewritten.modified_ns),
+            (file.file_id, file.size, file.modified_ns)
+        );
+        assert!(rewritten.changed_ns > file.changed_ns, "{rewritten:?}");
         #[cfg(unix)]
         {
             assert_eq!(file.executable, Some(false));

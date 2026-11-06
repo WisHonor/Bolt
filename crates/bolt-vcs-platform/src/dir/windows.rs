@@ -29,17 +29,18 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateSymbolicLinkW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS,
     FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileDispositionInfo,
-    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
-    SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileBasicInfo,
+    FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
+    FileIdBothDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE,
+    SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -547,12 +548,16 @@ fn meta(handle: BorrowedHandle<'_>) -> io::Result<EntryMeta> {
         ),
         Err(e) => return Err(e),
     };
+    // Moved by every change to the file, setting its times included, so a copy written over it
+    // in place shows.
+    let changed = info::<FILE_BASIC_INFO>(handle, FileBasicInfo)?.ChangeTime;
     let written = about.ftLastWriteTime;
     let ticks = u64::from(written.dwHighDateTime) << 32 | u64::from(written.dwLowDateTime);
     Ok(EntryMeta {
         kind,
         size: u64::from(about.nFileSizeHigh) << 32 | u64::from(about.nFileSizeLow),
         modified_ns: (i128::from(ticks) - TICKS_TO_1970) * 100,
+        changed_ns: (i128::from(changed) - TICKS_TO_1970) * 100,
         executable: None,
         file_id,
     })
@@ -569,6 +574,8 @@ unsafe trait Plain: Default {}
 unsafe impl Plain for FILE_ATTRIBUTE_TAG_INFO {}
 // SAFETY: a u64 and an array of 16 bytes.
 unsafe impl Plain for FILE_ID_INFO {}
+// SAFETY: four i64s and a u32 (padded to 40 bytes, as in C).
+unsafe impl Plain for FILE_BASIC_INFO {}
 
 /// The `class` information about the open `handle`; `T` must be the structure of that class.
 fn info<T: Plain>(handle: BorrowedHandle<'_>, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T> {
