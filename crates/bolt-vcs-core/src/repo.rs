@@ -1246,29 +1246,48 @@ mod tests {
         }
     }
 
+    /// A junk pack is passed over, with a warning, and only a lookup that finds nothing fails.
+    /// `00.pack` is searched first on a cold store, `zz.pack` last.
     #[test]
     fn a_junk_pack_is_damage_only_where_a_lookup_reaches_it() {
-        let (dir, mut repo) = project();
-        let head = commit(&mut repo, &entry(1)).unwrap();
-        drop(repo);
-        let bolt = dir.path().join(".bolt");
-        // Sorts after Bolt's own packs, so what they hold is found before it is opened.
-        let junk = bolt.join("store/packs/zz.pack");
-        std::fs::write(&junk, b"not what Bolt wrote").unwrap();
-        let repo = Repository::open(dir.path()).unwrap();
-        let found = repo.store().read_record(&head, ObjectKind::DiaryEntry);
-        assert!(found.is_ok(), "{found:?}");
-        let missing = repo
-            .store()
-            .read_record(&Id([0x11; 32]), ObjectKind::Save)
-            .map_err(RepoError::from);
-        assert!(
-            matches!(missing, Err(RepoError::Damaged { .. })),
-            "{missing:?}"
-        );
-        assert_eq!(std::fs::read(&junk).unwrap(), b"not what Bolt wrote");
-        for name in ["tmp", "cache"] {
-            assert!(safe_fs::check_real_dir(&bolt.join(name)).is_ok(), "{name}");
+        for junk_name in ["00.pack", "zz.pack"] {
+            let (dir, mut repo) = project();
+            let head = commit(&mut repo, &entry(1)).unwrap();
+            drop(repo);
+            let bolt = dir.path().join(".bolt");
+            // Over 1 MiB, so reading it searches every pack.
+            let big = vec![5u8; 2 << 20];
+            let mut w = crate::pack::PackWriter::create(&bolt.join("tmp")).unwrap();
+            let big_id = w.add_content(&big).unwrap();
+            w.finish(&bolt.join("store/packs")).unwrap();
+            let junk = bolt.join("store/packs").join(junk_name);
+            std::fs::write(&junk, b"not what Bolt wrote").unwrap();
+
+            let repo = Repository::open(dir.path()).unwrap();
+            let found = repo.store().read_record(&head, ObjectKind::DiaryEntry);
+            assert!(found.is_ok(), "{junk_name}: {found:?}");
+            let mut out = Vec::new();
+            let read = repo.store().copy_content(&big_id, &mut out);
+            assert!(read.is_ok() && out == big, "{junk_name}: {read:?}");
+            let warnings = repo.store().warnings();
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.kind == "damaged_pack" && w.message.contains(junk_name)),
+                "{junk_name}: {warnings:?}"
+            );
+            let missing = repo
+                .store()
+                .read_record(&Id([0x11; 32]), ObjectKind::Save)
+                .map_err(RepoError::from);
+            assert!(
+                matches!(missing, Err(RepoError::Damaged { .. })),
+                "{junk_name}: {missing:?}"
+            );
+            assert_eq!(std::fs::read(&junk).unwrap(), b"not what Bolt wrote");
+            for name in ["tmp", "cache"] {
+                assert!(safe_fs::check_real_dir(&bolt.join(name)).is_ok(), "{name}");
+            }
         }
     }
 

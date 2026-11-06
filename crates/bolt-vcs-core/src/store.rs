@@ -130,6 +130,15 @@ struct Tries {
 }
 
 impl Tries {
+    /// Keeps `e`, a failure that wasn't a copy's own.
+    fn note(&mut self, e: PackError) {
+        if is_damage(&e) {
+            self.damage.get_or_insert(e);
+        } else {
+            self.other.get_or_insert(e);
+        }
+    }
+
     fn error(self, id: &Id, kind: ObjectKind) -> StoreError {
         // A failure that says nothing about the copy comes first: calling it damage would mislead.
         match (self.other.or(self.damage), self.wrong_kind) {
@@ -202,7 +211,8 @@ impl Store {
         kind: ObjectKind,
         mut test: impl FnMut(&Id) -> Result<bool, E>,
     ) -> Result<bool, E> {
-        let found = self.each_pack(|_, pack| {
+        let mut skipped = None;
+        let found = self.each_pack(&mut skipped, |_, pack| {
             for e in pack.entries() {
                 let e = e.map_err(StoreError::from)?;
                 if e.kind == kind && test(&e.id)? {
@@ -211,7 +221,12 @@ impl Store {
             }
             Ok(ControlFlow::Continue(()))
         })?;
-        Ok(found.is_some())
+        match (found, skipped) {
+            (Some(()), _) => Ok(true),
+            // A pack that couldn't be read may hold one.
+            (None, Some(e)) => Err(StoreError::from(e).into()),
+            (None, None) => Ok(false),
+        }
     }
 
     /// Whether any pack holds a file's content, as its index lists it.
@@ -223,7 +238,8 @@ impl Store {
     /// skipped. A copy recording another `size` than the object's is damage, and is never read.
     pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {
         let mut tries = Tries::default();
-        let found = self.search(id, |c| {
+        let mut skipped = None;
+        let found = self.search(id, &mut skipped, |c| {
             if c.entry.kind == kind && c.entry.uncompressed_size != size {
                 let wrong = PackError::Corrupt {
                     path: self.pack_path(c.n),
@@ -238,7 +254,8 @@ impl Store {
             }
             ControlFlow::Continue(())
         })?;
-        match (found, tries.other) {
+        // A pack that couldn't be read may hold a good copy, so its error is the answer.
+        match (found, tries.other.or(skipped)) {
             (Some(()), _) => Ok(true),
             (None, Some(e)) => Err(e.into()),
             (None, None) => Ok(false),
@@ -290,15 +307,16 @@ impl Store {
     pub fn copy_content(&self, id: &Id, out: &mut dyn Write) -> Result<(), StoreError> {
         let content = ObjectKind::Content;
         let first = self.first_copy(id)?;
+        let mut tries = Tries::default();
         // Bytes can't be taken back out of `out`, so it gets one copy only.
+        let known_good = |c: &Copy| c.entry.kind == content && self.is_good(c);
         if let Some(c) = &first
-            && c.entry.kind == content
-            && !self.is_good(c)
+            && !known_good(c)
         {
             // A small first copy, and only that one, is read whole before anything goes out.
-            if c.entry.uncompressed_size <= NEAR {
+            if c.entry.kind == content && c.entry.uncompressed_size <= NEAR {
                 let mut bytes = Vec::new();
-                let read = self.attempt(c, content, &mut Tries::default(), |pack, entry| {
+                let read = self.attempt(c, content, &mut tries, |pack, entry| {
                     bytes.clear();
                     pack.copy_content(entry, &mut bytes)
                 });
@@ -307,11 +325,13 @@ impl Store {
                 }
             }
             // Otherwise it is streamed: when several packs hold it, a good copy is found first.
-            if self.all_copies(id)?.len() > 1 {
-                self.first_good_from(first.clone(), id, content, false, read_whole(content))?;
+            if self.all_copies(id)?.0.len() > 1 {
+                let check = read_whole(content);
+                let tried = std::mem::take(&mut tries);
+                self.first_good_from(first.clone(), tried, id, content, false, check)?;
             }
         }
-        self.first_good_from(first, id, content, true, |pack, entry| {
+        self.first_good_from(first, tries, id, content, true, |pack, entry| {
             pack.copy_content(entry, out)
         })
     }
@@ -340,19 +360,20 @@ impl Store {
         once: bool,
         read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
-        self.first_good_from(self.first_copy(id)?, id, kind, once, read)
+        let first = self.first_copy(id)?;
+        self.first_good_from(first, Tries::default(), id, kind, once, read)
     }
 
-    /// `first_good`, given the first copy found.
+    /// `first_good`, given the first copy found and what reading copies has come to so far.
     fn first_good_from<T>(
         &self,
         first: Option<Copy>,
+        mut tries: Tries,
         id: &Id,
         kind: ObjectKind,
         once: bool,
         mut read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
-        let mut tries = Tries::default();
         let Some(first) = first else {
             return Err(StoreError::Missing(*id));
         };
@@ -364,7 +385,10 @@ impl Store {
                 Err(_) => {}
             }
         }
-        let mut copies = self.all_copies(id)?;
+        let (mut copies, skipped) = self.all_copies(id)?;
+        if let Some(e) = skipped {
+            tries.note(e);
+        }
         if near {
             copies.retain(|c| c.n != first.n);
         }
@@ -439,39 +463,73 @@ impl Store {
 
     /// The first copy of `id` found: in the pack that held the last object read, else in the
     /// first pack by name that holds it.
+    /// A pack that couldn't be read may hold `id`, so without a copy its error is the answer.
     fn first_copy(&self, id: &Id) -> Result<Option<Copy>, StoreError> {
-        self.search(id, ControlFlow::Break)
+        let mut skipped = None;
+        match (self.search(id, &mut skipped, ControlFlow::Break)?, skipped) {
+            (None, Some(e)) => Err(e.into()),
+            (found, _) => Ok(found),
+        }
     }
 
-    fn all_copies(&self, id: &Id) -> Result<Vec<Copy>, StoreError> {
+    /// Every copy of `id` found, and the error of the first pack that couldn't be read.
+    fn all_copies(&self, id: &Id) -> Result<(Vec<Copy>, Option<PackError>), StoreError> {
         let mut copies = Vec::new();
-        self.search(id, |c| {
+        let mut skipped = None;
+        self.search(id, &mut skipped, |c| {
             copies.push(c);
             ControlFlow::<()>::Continue(())
         })?;
-        Ok(copies)
+        Ok((copies, skipped))
     }
 
-    /// Hands `visit` each copy of `id`, in the order `first_copy` finds them, until it breaks.
+    /// Hands `visit` each copy of `id`, in the order `first_copy` finds them, until it breaks. A
+    /// pack whose index can't be searched is passed over as `each_pack` passes one over.
     fn search<T>(
         &self,
         id: &Id,
+        skipped: &mut Option<PackError>,
         mut visit: impl FnMut(Copy) -> ControlFlow<T>,
     ) -> Result<Option<T>, StoreError> {
-        self.each_pack(|n, pack| {
-            let Some(entry) = pack.find(id)? else {
-                return Ok(ControlFlow::Continue(()));
+        let mut unsearched = Vec::new();
+        let found = self.each_pack(skipped, |n, pack| {
+            let entry = match pack.find(id) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return Ok(ControlFlow::Continue(())),
+                Err(e) => {
+                    unsearched.push((n, e));
+                    return Ok(ControlFlow::Continue(()));
+                }
             };
-            Ok(visit(Copy { n, entry }))
-        })
+            Ok::<_, StoreError>(visit(Copy { n, entry }))
+        })?;
+        for (n, e) in unsearched {
+            self.pass_over(n, e, skipped);
+        }
+        Ok(found)
+    }
+
+    /// Notes pack `n`, which couldn't be opened or searched, as damaged if `e` says so, and keeps
+    /// the first such error in `skipped`.
+    fn pass_over(&self, n: usize, e: PackError, skipped: &mut Option<PackError>) {
+        if let PackError::Corrupt { reason, .. } = &e {
+            let path = self.pack_path(n);
+            let reason = reason.clone();
+            self.checked().damaged.entry(path).or_insert(reason);
+        }
+        skipped.get_or_insert(e);
     }
 
     /// Hands `f` each pack, first the one that held the last object read, then the others open,
     /// then the closed ones by name, until it breaks. Open ones first, so a lookup that finds
-    /// nothing opens only the packs that don't fit among the open ones. A pack gone when it is opened (merged into another) sends the store to
-    /// list the packs again, once; a pack already handed out isn't handed out again.
+    /// nothing opens only the packs that don't fit among the open ones. A pack gone when it is
+    /// opened (merged into another) sends the store to list the packs again, once; a pack already
+    /// handed out isn't handed out again. A pack that can't be opened is passed over, noted as
+    /// damaged, and its error kept in `skipped`: a lookup can still find a good copy elsewhere,
+    /// but can't tell that the pack doesn't hold one.
     fn each_pack<T, E: From<StoreError>>(
         &self,
+        skipped: &mut Option<PackError>,
         mut f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
     ) -> Result<Option<T>, E> {
         let mut done = HashSet::new();
@@ -501,7 +559,10 @@ impl Store {
                         gone = true;
                         break;
                     }
-                    Err(e) => return Err(StoreError::from(e).into()),
+                    Err(e) => {
+                        self.pass_over(n, e, skipped);
+                        continue;
+                    }
                 };
                 if let ControlFlow::Break(value) = f(n, &pack)? {
                     return Ok(Some(value));
@@ -952,19 +1013,24 @@ mod tests {
     /// Writes a version 1 pack `name` holding a copy of `id` whose bytes are `data`, stored as
     /// they are, so the copy claims `data`'s size.
     fn plant_lying_copy(packs: &Path, name: &str, id: &Id, data: &[u8]) {
+        plant_lying(packs, name, ObjectKind::Content, id, data);
+    }
+
+    /// `plant_lying_copy`, of any kind.
+    fn plant_lying(packs: &Path, name: &str, kind: ObjectKind, id: &Id, data: &[u8]) {
         use crate::encoding::Writer;
         use crate::pack::{PACK_END_MAGIC, PACK_MAGIC};
         let len = data.len() as u64;
         let mut index = Writer::new();
         index.varint(1);
         index.id(id);
-        index.u8(ObjectKind::Content as u8);
+        index.u8(kind as u8);
         index.u64(16);
         index.varint(len);
         index.varint(len);
         let index = index.into_bytes();
         let mut out = Writer::new();
-        out.u8(ObjectKind::Content as u8);
+        out.u8(kind as u8);
         out.id(id);
         out.u64(len);
         out.u64(len);
@@ -1020,6 +1086,21 @@ mod tests {
             out.largest
         );
         assert_eq!(store.damaged_packs().len(), 1);
+    }
+
+    #[test]
+    fn a_first_copy_of_another_kind_doesnt_hide_the_good_copy() {
+        let (_root, tmp, packs) = dirs();
+        let good = b"the bytes the user saved".to_vec();
+        let id = hash_content(&good);
+        // Found first, of the wrong kind; then a small copy that lies; then the good one.
+        plant_lying(&packs, "00.pack", ObjectKind::Save, &id, b"a save");
+        plant_lying_copy(&packs, "01.pack", &id, b"tiny");
+        pack_of(&tmp, &packs, std::slice::from_ref(&good));
+        let store = Store::open(&packs).unwrap();
+        let mut out = Vec::new();
+        store.copy_content(&id, &mut out).unwrap();
+        assert_eq!(out, good);
     }
 
     #[test]
