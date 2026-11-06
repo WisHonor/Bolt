@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
+use std::io::Read;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 mod support;
 use support::{Env, text};
@@ -85,11 +88,80 @@ fn a_slow_diff_is_cut_at_its_deadline_and_said() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains("+x"), "{}", text(&out.stdout));
-    assert!(
-        text(&out.stderr).contains("warning: Bolt stopped comparing a.txt"),
-        "{}",
-        text(&out.stderr)
+    assert_eq!(
+        text(&out.stderr),
+        "warning: Bolt stopped comparing a.txt line by line after 2 seconds, so its changes \
+         show in bigger pieces than they could.\n"
     );
+}
+
+#[test]
+fn a_file_of_too_many_lines_shows_without_lines_quickly() {
+    let env = project(&[("a.txt", b"a\n")]);
+    // 60 MiB of empty lines: under the size limit, but split into lines it would take gigabytes.
+    fs::write(env.root().join("a.txt"), vec![b'\n'; 60 << 20]).unwrap();
+    let started = Instant::now();
+    let out = changes(&env, &[]);
+    assert!(
+        out.contains("a.txt") && out.contains("over 1,000,000 lines: no lines shown"),
+        "{out}"
+    );
+    assert!(!out.contains("@@"), "{out}");
+    assert!(started.elapsed() < Duration::from_secs(30));
+    // Under a cap of 512 MB, where the cap is enforced: the file held whole is 60 MiB.
+    #[cfg(unix)]
+    {
+        let cmd = support::bolt_capped_at(env.config(), env.root(), 512_000, &["changes"]);
+        let ended = support::run_limited(cmd, 60);
+        assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    }
+}
+
+#[test]
+fn nothing_matching_is_said_plainly() {
+    // The first save, of an empty folder, changed no files.
+    let env = project(&[]);
+    let short = |out: &str| out.split_whitespace().nth(1).unwrap().to_owned();
+    let first = env.state().1.lines["main"].to_hex();
+    let save = changes(&env, &["--save", &first]);
+    assert!(
+        save.starts_with("Save ") && save.ends_with(" changed no files.\n"),
+        "{save}"
+    );
+    env.overwrite("a.txt", "a\n");
+    env.bolt().args(["save", "A"]).assert().success();
+    assert!(changes(&env, &[]).starts_with("Nothing changed since "));
+    env.overwrite("a.txt", "b\n");
+    let none = changes(&env, &["nothere.txt"]);
+    assert!(
+        none.starts_with("Nothing changed in those paths since "),
+        "{none}"
+    );
+    let saved = changes(&env, &["--save", &first, "nothere.txt"]);
+    assert_eq!(
+        saved,
+        format!("Save {} changed no files in those paths.\n", short(&save))
+    );
+}
+
+#[test]
+fn a_reader_that_goes_away_ends_it_quietly() {
+    let env = project(&[("a.txt", numbered(1..=200_000).as_bytes())]);
+    env.overwrite("a.txt", &numbered(1..=200_000).replace("line ", "LINE "));
+    let mut child = env
+        .bolt_process_in(env.root())
+        .arg("changes")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0; 16];
+    stdout.read_exact(&mut first).unwrap();
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "");
 }
 
 #[test]
@@ -124,6 +196,12 @@ fn only_line_endings_changed_is_said() {
         out.contains("only line endings changed: CRLF to LF"),
         "{out}"
     );
+    // Both ways at once names no way.
+    env.overwrite("a.txt", "one\r\ntwo\n");
+    env.bolt().args(["save", "Mixed"]).assert().success();
+    env.overwrite("a.txt", "one\ntwo\r\n");
+    let out = changes(&env, &[]);
+    assert!(out.contains("(only line endings changed)\n"), "{out}");
 }
 
 #[test]

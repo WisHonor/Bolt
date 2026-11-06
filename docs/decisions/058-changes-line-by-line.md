@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 11)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 017](017-commands-and-output.md) (`changes`, Git's `diff`)
-- **Refined by:** [decision 063](063-changes-takes-the-save-with-a-flag.md) (the save is named with `--save`)
+- **Refined by:** [decision 063](063-changes-takes-the-save-with-a-flag.md) (the save is named with `--save`); [decision 064](064-changes-line-limit.md) (no lines for a file of more than 1,000,000 lines)
 
 ## Context
 

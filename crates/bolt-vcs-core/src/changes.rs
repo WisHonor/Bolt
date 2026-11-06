@@ -1,11 +1,12 @@
-//! `bolt changes`: what changed inside files, line by line (decision 058).
+//! `bolt changes`: what changed inside files, line by line (decisions 058 and 064).
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices_deadline, group_diff_ops};
+use similar::algorithms::{Capture, Replace, myers};
+use similar::{DiffOp, DiffTag, group_diff_ops};
 
 use crate::diff::{ChangeKind, for_each_change, for_each_change_in};
 use crate::history::tip_of;
@@ -15,11 +16,13 @@ use crate::repo::Repository;
 use crate::scope::Scope;
 use crate::snapshot::{SaveError, link_target, read_folder};
 use crate::status::PathChange;
-use crate::store::Store;
+use crate::store::{Store, StoreError};
 use crate::writeout::{self, Folders};
 
 /// A file bigger than this shows without lines, and isn't read.
 pub const MAX_LINES_SIZE: u64 = 64 << 20;
+/// A file with more lines than this on either side shows without them (decision 064).
+pub const MAX_LINES: usize = 1_000_000;
 /// A file with a zero byte this near its start is binary, as Git decides.
 const BINARY_CHECK: usize = 8000;
 /// How long one file's diff may take.
@@ -36,24 +39,26 @@ pub enum Tag {
 /// A run of changed lines with the lines around them, as in a unified diff. A start is the first
 /// line's number, from 1, or the line before for a side with no lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hunk {
+pub struct Hunk<'a> {
     pub old_start: u64,
     pub old_lines: u64,
     pub new_start: u64,
     pub new_lines: u64,
-    /// Each line with its ending (`\n`, `\r\n`, or none for a last line without one).
-    pub lines: Vec<(Tag, Vec<u8>)>,
+    /// Each line with its ending (`\n`, `\r\n`, or none for a last line without one), borrowed
+    /// from the file.
+    pub lines: Vec<(Tag, &'a [u8])>,
 }
 
 /// What changed inside one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Lines {
+pub enum Lines<'a> {
     Binary,
     TooBig,
+    TooManyLines,
     /// `timed_out` when the diff ran past its deadline, so its hunks are coarser than they could
     /// be.
     Hunks {
-        hunks: Vec<Hunk>,
+        hunks: Vec<Hunk<'a>>,
         timed_out: bool,
     },
 }
@@ -61,14 +66,30 @@ pub enum Lines {
 /// The changed lines between `old` and `new`, with 3 lines of context. Binary when either side
 /// has a zero byte in its first 8,000.
 #[must_use]
-pub fn file_lines(old: &[u8], new: &[u8], deadline: Duration) -> Lines {
+pub fn file_lines<'a>(old: &'a [u8], new: &'a [u8], deadline: Duration) -> Lines<'a> {
     if is_binary(old) || is_binary(new) {
         return Lines::Binary;
     }
+    // Counted before anything is held per line.
+    if line_count(old) > MAX_LINES || line_count(new) > MAX_LINES {
+        return Lines::TooManyLines;
+    }
     let (old, new) = (lines_of(old), lines_of(new));
     let start = Instant::now();
-    let ops =
-        capture_diff_slices_deadline(Algorithm::Myers, &old, &new, start.checked_add(deadline));
+    // Myers alone: the clean-up pass `similar` adds after it has no deadline.
+    let mut ops = Replace::new(Capture::new());
+    let diffed = myers::diff_deadline(
+        &mut ops,
+        &old[..],
+        0..old.len(),
+        &new[..],
+        0..new.len(),
+        start.checked_add(deadline),
+    );
+    let ops = match diffed {
+        Ok(()) => ops.into_inner().into_ops(),
+        Err(never) => match never {},
+    };
     // `similar` doesn't say whether it gave up: one that ran past its deadline did.
     let timed_out = start.elapsed() >= deadline;
     let hunks = group_diff_ops(ops, CONTEXT)
@@ -78,40 +99,69 @@ pub fn file_lines(old: &[u8], new: &[u8], deadline: Duration) -> Lines {
     Lines::Hunks { hunks, timed_out }
 }
 
-/// Whether each hunk only turns CRLF into LF, or LF into CRLF: what it removes is what it adds
-/// once each `\r\n` is read as `\n`.
+/// How line endings changed, when nothing else did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endings {
+    CrlfToLf,
+    LfToCrlf,
+    /// Some lines one way, some the other.
+    Both,
+}
+
+/// How line endings changed, if the hunks change nothing else: each line a hunk removes comes
+/// back as the line it adds in the same place, with `\r\n` for `\n` or the other way round.
 #[must_use]
-pub fn only_line_endings(hunks: &[Hunk]) -> bool {
-    let lf = |line: &[u8]| -> Vec<u8> {
-        match line.strip_suffix(b"\r\n") {
-            Some(body) => [body, b"\n"].concat(),
-            None => line.to_vec(),
+pub fn only_line_endings(hunks: &[Hunk<'_>]) -> Option<Endings> {
+    let mut found = None;
+    for h in hunks {
+        let side = |tag| {
+            h.lines
+                .iter()
+                .filter(move |(t, _)| *t == tag)
+                .map(|(_, l)| *l)
+        };
+        if side(Tag::Removed).count() != side(Tag::Added).count() {
+            return None;
         }
-    };
-    !hunks.is_empty()
-        && hunks.iter().all(|h| {
-            let side = |tag| {
-                h.lines
-                    .iter()
-                    .filter(move |(t, _)| *t == tag)
-                    .map(|(_, line)| lf(line))
+        for (old, new) in side(Tag::Removed).zip(side(Tag::Added)) {
+            let way = match (ending(old), ending(new)) {
+                ((a, b"\r\n"), (b, b"\n")) if a == b => Endings::CrlfToLf,
+                ((a, b"\n"), (b, b"\r\n")) if a == b => Endings::LfToCrlf,
+                _ => return None,
             };
-            side(Tag::Removed).eq(side(Tag::Added))
-        })
+            found = match found {
+                Some(seen) if seen != way => Some(Endings::Both),
+                _ => Some(way),
+            };
+        }
+    }
+    found
+}
+
+/// A line split into what it holds and its ending.
+fn ending(line: &[u8]) -> (&[u8], &[u8]) {
+    for end in [&b"\r\n"[..], b"\n"] {
+        if let Some(body) = line.strip_suffix(end) {
+            return (body, end);
+        }
+    }
+    (line, b"")
 }
 
 /// Hands `each` every unsaved change, as `status` finds them, with its lines: the folder against
 /// the save the project is on. Only `paths` and what is in them, if given. Nothing is stored;
-/// only the file-state cache is written. The folder walk's warnings go to the store's.
-pub fn unsaved_changes(
+/// only the file-state cache is written. The folder walk's warnings go to the store's. One file
+/// is held at a time.
+pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     repo: &Repository,
     paths: Option<&[String]>,
     git_excludes: Option<&Path>,
-    each: &mut dyn FnMut(&str, &PathChange, Lines) -> Result<(), SaveError>,
-) -> Result<(), SaveError> {
+    each: &mut dyn FnMut(&str, &PathChange, Lines<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     let store = repo.store();
-    let (_, entry) = repo.current()?;
-    let save = store.save(&tip_of(&entry)?, repo.signatures_allowed())?;
+    let (_, entry) = repo.current().map_err(SaveError::from)?;
+    let tip = tip_of(&entry).map_err(SaveError::from)?;
+    let save = store.save(&tip, repo.signatures_allowed())?;
     let now = read_folder(repo, save.root, false, git_excludes)?;
     for w in now
         .warnings
@@ -129,18 +179,19 @@ pub fn unsaved_changes(
         let c = PathChange::from(c);
         let old = stored(store, c.old_kind, c.old_id, c.old_size)?;
         let new = on_disk(&mut disk, &c)?;
-        each(&c.path, &c, lines(old, new))
+        each(&c.path, &c, lines(&old, &new))
     })
 }
 
 /// Hands `each` every file the save `save` changed, compared with its first parent (every file,
-/// for a save without one), with its lines. Only `paths` and what is in them, if given.
-pub fn save_changes(
+/// for a save without one), with its lines. Only `paths` and what is in them, if given. One file
+/// is held at a time.
+pub fn save_changes<E: From<SaveError> + From<StoreError>>(
     repo: &Repository,
     save: Id,
     paths: Option<&[String]>,
-    each: &mut dyn FnMut(&str, &PathChange, Lines) -> Result<(), SaveError>,
-) -> Result<(), SaveError> {
+    each: &mut dyn FnMut(&str, &PathChange, Lines<'_>) -> Result<(), E>,
+) -> Result<(), E> {
     let store = repo.store();
     let save = store.save(&save, repo.signatures_allowed())?;
     let old_root = match save.parents.first() {
@@ -155,7 +206,7 @@ pub fn save_changes(
         let c = PathChange::from(c);
         let old = stored(store, c.old_kind, c.old_id, c.old_size)?;
         let new = stored(store, Some(c.kind), c.new_id, c.new_size)?;
-        each(&c.path, &c, lines(old, new))
+        each(&c.path, &c, lines(&old, &new))
     })
 }
 
@@ -172,9 +223,9 @@ enum Side {
     TooBig,
 }
 
-fn lines(old: Side, new: Side) -> Lines {
+fn lines<'a>(old: &'a Side, new: &'a Side) -> Lines<'a> {
     match (old, new) {
-        (Side::Bytes(old), Side::Bytes(new)) => file_lines(&old, &new, deadline()),
+        (Side::Bytes(old), Side::Bytes(new)) => file_lines(old, new, deadline()),
         _ => Lines::TooBig,
     }
 }
@@ -288,17 +339,26 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK).any(|&b| b == 0)
 }
 
+/// How many lines `bytes` holds, a last one without `\n` included.
+fn line_count(bytes: &[u8]) -> usize {
+    let breaks = bytes.iter().filter(|&&b| b == b'\n').count();
+    breaks.saturating_add(usize::from(bytes.last().is_some_and(|&b| b != b'\n')))
+}
+
 /// Each line with its `\n`; a last line without one stays as it is.
 fn lines_of(bytes: &[u8]) -> Vec<&[u8]> {
     bytes.split_inclusive(|&b| b == b'\n').collect()
 }
 
-fn hunk(group: &[DiffOp], old: &[&[u8]], new: &[&[u8]]) -> Hunk {
+fn hunk<'a>(group: &[DiffOp], old: &[&'a [u8]], new: &[&'a [u8]]) -> Hunk<'a> {
     let mut lines = Vec::new();
-    let mut push = |tag, side: &[&[u8]], range: std::ops::Range<usize>| {
-        for line in side.get(range).unwrap_or_default() {
-            lines.push((tag, line.to_vec()));
-        }
+    let mut push = |tag, side: &[&'a [u8]], range: std::ops::Range<usize>| {
+        lines.extend(
+            side.get(range)
+                .unwrap_or_default()
+                .iter()
+                .map(|l| (tag, *l)),
+        );
     };
     for op in group {
         let (kind, o, n) = op.as_tag_tuple();
@@ -341,44 +401,32 @@ fn number(n: usize) -> u64 {
 mod tests {
     use super::*;
 
-    fn text(lines: &[(Tag, &str)]) -> Vec<(Tag, Vec<u8>)> {
-        lines
-            .iter()
-            .map(|(t, l)| (*t, l.as_bytes().to_vec()))
-            .collect()
+    fn hunks_of<'a>(old: &'a str, new: &'a str) -> Vec<Hunk<'a>> {
+        match file_lines(old.as_bytes(), new.as_bytes(), DEADLINE) {
+            Lines::Hunks { hunks, .. } => hunks,
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
     fn hunks_have_their_numbers_and_context() {
-        let old = "1\n2\n3\n4\n5\n6\n7\n8\n9\n";
-        let new = "1\n2\n3\n4\nfive\n6\n7\n8\n9\n";
-        let Lines::Hunks { hunks, timed_out } =
-            file_lines(old.as_bytes(), new.as_bytes(), DEADLINE)
-        else {
-            panic!("not lines");
-        };
-        assert!(!timed_out);
+        let hunks = hunks_of(
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n",
+            "1\n2\n3\n4\nfive\n6\n7\n8\n9\n",
+        );
         assert_eq!(hunks.len(), 1);
         let h = &hunks[0];
         assert_eq!(
             (h.old_start, h.old_lines, h.new_start, h.new_lines),
             (2, 7, 2, 7)
         );
-        assert_eq!(h.lines[3], (Tag::Removed, b"5\n".to_vec()));
-        assert_eq!(h.lines[4], (Tag::Added, b"five\n".to_vec()));
+        assert_eq!(h.lines[3], (Tag::Removed, &b"5\n"[..]));
+        assert_eq!(h.lines[4], (Tag::Added, &b"five\n"[..]));
         // A new file starts after line 0.
-        let Lines::Hunks { hunks, .. } = file_lines(b"", b"a", DEADLINE) else {
-            panic!("not lines");
-        };
+        let hunks = hunks_of("", "a");
         assert_eq!((hunks[0].old_start, hunks[0].old_lines), (0, 0));
-        assert_eq!(hunks[0].lines, text(&[(Tag::Added, "a")]));
-        assert_eq!(
-            file_lines(b"", b"", DEADLINE),
-            Lines::Hunks {
-                hunks: Vec::new(),
-                timed_out: false
-            }
-        );
+        assert_eq!(hunks[0].lines, [(Tag::Added, &b"a"[..])]);
+        assert!(hunks_of("", "").is_empty());
     }
 
     #[test]
@@ -394,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn more_than_a_million_lines_on_a_side_shows_none() {
+        let at_limit = vec![b'\n'; MAX_LINES];
+        assert!(matches!(
+            file_lines(b"", &at_limit, DEADLINE),
+            Lines::Hunks { .. }
+        ));
+        let mut over = at_limit;
+        over.push(b'x');
+        assert_eq!(file_lines(&over, b"", DEADLINE), Lines::TooManyLines);
+        assert_eq!(line_count(b"a\nb"), 2);
+        assert_eq!(line_count(b""), 0);
+    }
+
+    #[test]
     fn a_diff_past_its_deadline_says_so() {
         let old: String = (0..2000).map(|n| format!("{n}\n")).collect();
         let new: String = (0..2000).map(|n| format!("{}\n", n * 7 % 2000)).collect();
@@ -406,16 +468,41 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_that_would_take_long_stops_at_its_deadline() {
+        // No line in common: Myers' work grows with the square of the lines, minutes here.
+        let old: String = (0..60_000).map(|n| format!("a{n}\n")).collect();
+        let new: String = (0..60_000).map(|n| format!("b{n}\n")).collect();
+        let started = Instant::now();
+        let lines = file_lines(old.as_bytes(), new.as_bytes(), Duration::from_millis(100));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let Lines::Hunks { hunks, timed_out } = lines else {
+            panic!("not lines");
+        };
+        assert!(timed_out);
+        // Coarser, still whole: every line goes and comes.
+        let count = |tag| {
+            hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .filter(|(t, _)| *t == tag)
+                .count()
+        };
+        assert_eq!((count(Tag::Removed), count(Tag::Added)), (60_000, 60_000));
+    }
+
+    #[test]
     fn only_line_endings_is_told_apart() {
-        let lines =
-            |old: &str, new: &str| match file_lines(old.as_bytes(), new.as_bytes(), DEADLINE) {
-                Lines::Hunks { hunks, .. } => hunks,
-                other => panic!("{other:?}"),
-            };
-        assert!(only_line_endings(&lines("a\r\nb\r\n", "a\nb\n")));
-        assert!(only_line_endings(&lines("a\nb\n", "a\r\nb\n")));
-        assert!(!only_line_endings(&lines("a\r\n", "b\n")));
-        assert!(!only_line_endings(&lines("a", "a\n")));
+        let way = |old, new| only_line_endings(&hunks_of(old, new));
+        assert_eq!(way("a\r\nb\r\n", "a\nb\n"), Some(Endings::CrlfToLf));
+        assert_eq!(way("a\nb\n", "a\r\nb\n"), Some(Endings::LfToCrlf));
+        assert_eq!(way("a\r\nb\n", "a\nb\r\n"), Some(Endings::Both));
+        assert_eq!(way("a\r\n", "b\n"), None);
+        assert_eq!(way("a", "a\n"), None);
+        assert_eq!(way("a\n", "a\n"), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 ## 1. Rules for every document
 
-- **One document, on stdout, in one line.** Nothing else goes to stdout: warnings and progress lines go to stderr, as text. `history` and `show` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
+- **One document, on stdout, in one line.** Nothing else goes to stdout: warnings and progress lines go to stderr, as text. `history`, `show` and `changes` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
 - **`bolt_json` is the version of the format,** a number, `1` now. It is in every document.
 - **The versioning rule.** Within one `bolt_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A change that breaks the rule gets the next number. A field that can be `null` says so in its table, and says when: `start`'s `save`, for one, is `null` if the project was made but its first save couldn't be read back (a `first_save_not_read` warning says so). Check for `null` before you use such a field.
 - **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON.
@@ -119,14 +119,12 @@ Saving gives one of two documents, told apart by `result`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `lines` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; or `"too-big"`, when either side is over 64 MiB, which isn't read. Only `"text"` has hunks. A project link or a conflict counts as empty text. |
+| `lines` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too-big"`, when either side is over 64 MiB, which isn't read; or `"too-many-lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text. |
 | `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `lines` is `"text"`. |
 | `timed_out` | boolean | The diff took more than 2 seconds, so Bolt stopped it: the hunks are right, but in bigger pieces than they could be. A `diff_timed_out` warning says so too. |
-| `only_line_endings` | boolean | Each hunk only turns CRLF into LF, or LF into CRLF. |
+| `only_line_endings` | boolean | Each hunk only changes line endings: CRLF into LF, LF into CRLF, or some of each. |
 
-**A hunk:** `old_start`, `old_lines`, `new_start`, `new_lines` (numbers: the first line's number on each side, from 1, or the line before it for a side with no lines, and how many lines of that side the hunk covers), and `lines`, a list of `{"tag": …, "text": …}`: `tag` is `"same"`, `"removed"` or `"added"`, and `text` is the line with its ending (`"
-"`, `"
-"`, or none for a last line without one). Bytes that aren't UTF-8 show as U+FFFD.
+**A hunk:** `old_start`, `old_lines`, `new_start`, `new_lines` (numbers: the first line's number on each side, from 1, or the line before it for a side with no lines, and how many lines of that side the hunk covers), and `lines`, a list of `{"tag": …, "text": …}`: `tag` is `"same"`, `"removed"` or `"added"`, and `text` is the line with its ending (`"\n"`, `"\r\n"`, or none for a last line without one). Bytes that aren't UTF-8 show as U+FFFD.
 
 ### `bolt goto --json`
 

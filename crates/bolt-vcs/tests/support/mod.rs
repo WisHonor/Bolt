@@ -331,7 +331,12 @@ impl Env {
 
     /// `bolt`, run in `dir` as the test user.
     pub fn bolt_in(&self, dir: &Path) -> Bolt {
-        let mut cmd = Bolt::cargo_bin("bolt").unwrap();
+        Bolt::from_std(self.bolt_process_in(dir))
+    }
+
+    /// `bolt_in` as a process of the standard library, for a test that spawns it.
+    pub fn bolt_process_in(&self, dir: &Path) -> Command {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("bolt"));
         cmd.current_dir(dir)
             .env("BOLT_USER_NAME", "Test")
             .env("BOLT_USER_EMAIL", "test@example.com")
@@ -345,6 +350,11 @@ impl Env {
 
     pub fn bolt(&self) -> Bolt {
         self.bolt_in(self.root())
+    }
+
+    /// The user's own settings folder.
+    pub fn config(&self) -> &Path {
+        self.config.path()
     }
 
     /// Runs Git in the repository and returns what it printed, trimmed.

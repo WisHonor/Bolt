@@ -3,7 +3,8 @@
 mod import_output;
 mod output;
 
-use std::io::{BufRead, IsTerminal};
+use std::cell::{Cell, RefCell};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -609,6 +610,38 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     Ok(())
 }
 
+/// Why `bolt changes` stopped: a file couldn't be read, or what it shows couldn't be written.
+enum Stop {
+    Read(SaveError),
+    Write(Failure),
+}
+
+impl From<SaveError> for Stop {
+    fn from(e: SaveError) -> Stop {
+        Stop::Read(e)
+    }
+}
+
+impl From<StoreError> for Stop {
+    fn from(e: StoreError) -> Stop {
+        Stop::Read(e.into())
+    }
+}
+
+impl From<Stop> for Failure {
+    fn from(stop: Stop) -> Failure {
+        match stop {
+            // Only reading, so the hints never say that nothing was saved.
+            Stop::Read(e) => Failure {
+                hint: e.hint_when_reading(),
+                message: e.to_string(),
+                printed: false,
+            },
+            Stop::Write(failure) => failure,
+        }
+    }
+}
+
 fn changes_command(
     json: bool,
     save: Option<&str>,
@@ -627,14 +660,20 @@ fn changes_command(
         Some(t) => resolve(repo, t)?,
         None => current_save(repo)?,
     };
-    let color = !json
+    let saved = repo.store().save(&id, repo.signatures_allowed())?;
+    let git_excludes = match save {
+        Some(_) => None,
+        None => git_excludes_file(repo.root())?,
+    };
+    // The older Windows console shows colour codes as text until a console call turns them on,
+    // and that call is unsafe code for the platform crate: no colour on Windows for now.
+    let color = !cfg!(windows)
+        && !json
         && std::io::stdout().is_terminal()
         && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-    // shortcut: the JSON document is held whole; stream it if documents get big.
-    let mut files = Vec::new();
-    let mut shown = 0;
-    let mut timed_out = Vec::new();
-    let mut each = |path: &str, c: &PathChange, lines: Lines| {
+    let timed_out = RefCell::new(Vec::new());
+    let shown = Cell::new(0_usize);
+    let note = |path: &str, lines: &Lines| {
         if matches!(
             lines,
             Lines::Hunks {
@@ -642,64 +681,96 @@ fn changes_command(
                 ..
             }
         ) {
-            timed_out.push(path.to_owned());
+            timed_out.borrow_mut().push(path.to_owned());
         }
-        if json {
-            files.push(output::lines_json(&file_change(c), &lines));
-        } else {
-            if shown > 0 {
-                println!();
-            }
-            print!("{}", output::lines_text(&file_change(c), &lines, color));
-        }
-        shown += 1;
-        Ok(())
+        shown.set(shown.get() + 1);
     };
-    let walked = match save {
-        Some(_) => save_changes(repo, id, only, &mut each),
-        None => {
-            let git_excludes = git_excludes_file(repo.root())?;
-            unsaved_changes(repo, only, git_excludes.as_deref(), &mut each)
-        }
+    let walk = |each: &mut dyn FnMut(&str, &PathChange, Lines) -> Result<(), Stop>| {
+        let walked = match save {
+            Some(_) => save_changes(repo, id, only, each),
+            None => unsaved_changes(repo, only, git_excludes.as_deref(), each),
+        };
+        walked.map_err(Failure::from)
     };
-    // Only reading, so the hints never say that nothing was saved.
-    walked.map_err(|e| Failure {
-        hint: e.hint_when_reading(),
-        message: e.to_string(),
-        printed: false,
-    })?;
-    let mut warnings: Vec<Warning> = timed_out
-        .iter()
-        .map(|path| {
-            Warning::new(
-                warning::DIFF_TIMED_OUT,
-                format!(
-                    "Bolt stopped comparing {} line by line after 2 seconds, so its changes show                      in bigger pieces than they could.",
-                    escape(path, false)
-                ),
-            )
-        })
-        .collect();
-    let saved = repo.store().save(&id, repo.signatures_allowed())?;
-    let short = short_or_whole(repo, &id, &saved.change_id, &mut warnings);
-    warnings.extend(repo.store().warnings());
-    if json {
-        println!(
-            "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "save": output::save_json(&id, &saved, &short),
-                "changes": files,
-                "warnings": output::warnings_json(&warnings),
+    let warnings = || {
+        let mut warnings: Vec<Warning> = timed_out
+            .borrow()
+            .iter()
+            .map(|path| {
+                Warning::new(
+                    warning::DIFF_TIMED_OUT,
+                    format!(
+                        "Bolt stopped comparing {} line by line after 2 seconds, so its changes \
+                         show in bigger pieces than they could.",
+                        escape(path, false)
+                    ),
+                )
             })
-        );
-    } else if shown == 0 {
-        match save {
-            Some(_) => println!("Save {short} changed no files there."),
-            None => println!("Nothing changed since {short}."),
-        }
+            .collect();
+        let short = short_or_whole(repo, &id, &saved.change_id, &mut warnings);
+        warnings.extend(repo.store().warnings());
+        (warnings, short)
+    };
+    let wrote = |done: std::io::Result<()>| done.map_err(|e| Stop::Write(e.into()));
+    let mut out = output::Stdout::new();
+    let result = if json {
+        output::stream_document(
+            &mut out,
+            &format!("{{\"bolt_json\":{BOLT_JSON},\"changes\":["),
+            |item| {
+                walk(&mut |path, c, lines| {
+                    note(path, &lines);
+                    let file = output::LinesJson {
+                        change: &file_change(c),
+                        lines: &lines,
+                    };
+                    item(&file).map_err(Stop::Write)
+                })
+            },
+            || {
+                let (warnings, short) = warnings();
+                (
+                    json!({"save": output::save_json(&id, &saved, &short)}),
+                    warnings,
+                )
+            },
+        )
+    } else {
+        walk(&mut |path, c, lines| {
+            note(path, &lines);
+            if shown.get() > 1 {
+                wrote(writeln!(out))?;
+            }
+            wrote(output::write_lines(
+                &mut out,
+                &file_change(c),
+                &lines,
+                color,
+            ))
+        })
+        .and_then(|()| {
+            let (warnings, short) = warnings();
+            if shown.get() == 0 {
+                let said = match (save, only) {
+                    (Some(_), None) => writeln!(out, "Save {short} changed no files."),
+                    (Some(_), Some(_)) => {
+                        writeln!(out, "Save {short} changed no files in those paths.")
+                    }
+                    (None, None) => writeln!(out, "Nothing changed since {short}."),
+                    (None, Some(_)) => {
+                        writeln!(out, "Nothing changed in those paths since {short}.")
+                    }
+                };
+                said?;
+            }
+            Ok(warnings)
+        })
+    };
+    // Whoever read the output stopped reading (`bolt changes | head`): nothing more to say.
+    if out.closed {
+        return Ok(());
     }
-    output::print_warnings(&warnings);
+    output::print_warnings(&result?);
     Ok(())
 }
 
