@@ -63,6 +63,31 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
+/// A size for people, in powers of 1,000 as drives are sold: 950 bytes, 2.3 GB, 150 MB.
+#[must_use]
+pub fn bytes(n: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1_000_000_000_000, "TB"),
+        (1_000_000_000, "GB"),
+        (1_000_000, "MB"),
+        (1_000, "KB"),
+    ];
+    let Some(&(unit, name)) = UNITS.iter().find(|(unit, _)| n >= *unit) else {
+        return if n == 1 {
+            "1 byte".to_owned()
+        } else {
+            format!("{n} bytes")
+        };
+    };
+    // One decimal below 10 of a unit, rounded to the nearest.
+    let tenths = (u128::from(n) * 10 + u128::from(unit / 2)) / u128::from(unit);
+    if tenths < 100 {
+        format!("{}.{} {name}", tenths / 10, tenths % 10)
+    } else {
+        format!("{} {name}", thousands(n.saturating_add(unit / 2) / unit))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +106,36 @@ mod tests {
                 "123,456",
                 "1,234,567",
                 "18,446,744,073,709,551,615"
+            ]
+        );
+    }
+
+    #[test]
+    fn sizes_are_rounded_to_a_unit_people_read() {
+        let sizes = [
+            0,
+            1,
+            999,
+            1_000,
+            2_349_999_999,
+            9_960_000,
+            150_000_000,
+            100_000_001,
+            u64::MAX,
+        ]
+        .map(bytes);
+        assert_eq!(
+            sizes,
+            [
+                "0 bytes",
+                "1 byte",
+                "999 bytes",
+                "1.0 KB",
+                "2.3 GB",
+                "10 MB",
+                "150 MB",
+                "100 MB",
+                "18,446,744 TB"
             ]
         );
     }

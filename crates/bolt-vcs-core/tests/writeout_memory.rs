@@ -42,7 +42,7 @@ fn save(repo: &mut Repository) {
         new_line: None,
         only: None,
     };
-    save_folder(repo, &req, &mut |_| {}).unwrap();
+    save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap();
 }
 
 #[test]

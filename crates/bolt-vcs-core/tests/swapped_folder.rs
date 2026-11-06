@@ -45,7 +45,7 @@ fn a_folder_swapped_before_its_files_are_looked_at_is_refused() {
         new_line: None,
         only: None,
     };
-    match save_folder(&mut repo, &req, &mut |_| {}) {
+    match save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true) {
         Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "sub/a.txt"),
         Ok(SaveOutcome::Saved { save, .. }) => {
             let listing = repo.store().listing(&save.root).unwrap();

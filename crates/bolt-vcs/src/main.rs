@@ -21,7 +21,7 @@ use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
-use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
+use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
 use bolt_core::switch::{SwitchError, discard, goto};
@@ -64,6 +64,9 @@ enum Command {
         /// At a save rather than on a line, the name of the new line this save starts.
         #[arg(long, value_name = "NAME")]
         line: Option<String>,
+        /// Save without asking, however much the save adds.
+        #[arg(long)]
+        yes: bool,
     },
     /// Show what changed since your last save.
     Status {
@@ -327,12 +330,28 @@ fn ask_line_name() -> Result<Option<String>, Failure> {
     Ok(Some(answer.to_owned()))
 }
 
+/// Asks in the terminal whether to make a save that adds this much; `None` if there is no
+/// terminal to ask in. An answer that can't be read is a no.
+fn ask_large(large: &LargeSave) -> Option<bool> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    eprint!("{large} Save them? [y/N] ");
+    let mut answer = String::new();
+    if std::io::stdin().lock().read_line(&mut answer).is_err() {
+        return Some(false);
+    }
+    let answer = answer.trim();
+    Some(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+}
+
 fn save(
     json: bool,
     message: Option<String>,
     given: &[PathBuf],
     accept_crlf: bool,
     line: Option<String>,
+    yes: bool,
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let message = message.unwrap_or_default();
@@ -370,13 +389,33 @@ fn save(
         only: only.as_deref(),
     };
     let mut on_wait = |_: &str| eprintln!("Waiting for another Bolt command to finish...");
+    // With --json nothing is asked, so a large save stops and names --yes.
+    let mut said_no = false;
+    let mut confirm = |large: &LargeSave| {
+        if yes || json {
+            return yes;
+        }
+        let answer = ask_large(large);
+        said_no = answer == Some(false);
+        answer.unwrap_or(false)
+    };
     let asked;
-    let outcome = match save_folder(repo, &req, &mut on_wait) {
+    let saved = match save_folder(repo, &req, &mut on_wait, &mut confirm) {
         // Only now is it known that the save is at a save: a stopped switch may have moved it.
         Err(SaveError::NeedsLineName) if !json && let Some(name) = ask_line_name()? => {
             asked = name;
             req.new_line = Some(&asked);
-            save_folder(repo, &req, &mut on_wait)?
+            save_folder(repo, &req, &mut on_wait, &mut confirm)
+        }
+        done => done,
+    };
+    let outcome = match saved {
+        Err(SaveError::LargeSave(_)) if said_no => {
+            return Err(Failure {
+                message: "Nothing was saved: you answered no.".into(),
+                hint: None,
+                printed: false,
+            });
         }
         done => done?,
     };
@@ -867,7 +906,16 @@ fn main() -> ExitCode {
             paths,
             accept_crlf,
             line,
-        } => save(cli.json, message, &paths, accept_crlf, line, &mut opened),
+            yes,
+        } => save(
+            cli.json,
+            message,
+            &paths,
+            accept_crlf,
+            line,
+            yes,
+            &mut opened,
+        ),
         Command::Line => line_command(cli.json, &mut opened),
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::History => history(cli.json, &mut opened),

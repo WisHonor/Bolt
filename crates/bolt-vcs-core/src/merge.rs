@@ -336,7 +336,7 @@ mod tests {
                 new_line: None,
                 only: None,
             };
-            match save_folder(&mut repo, &req, &mut |_| {}).unwrap() {
+            match save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
                 SaveOutcome::Saved {
                     save_id, warnings, ..
                 } => {

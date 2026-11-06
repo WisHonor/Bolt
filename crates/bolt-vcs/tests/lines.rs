@@ -44,6 +44,17 @@ fn saving_at_a_save_without_a_terminal_names_the_flag() {
 }
 
 #[test]
+fn at_a_save_a_large_save_asks_for_the_line_name_first() {
+    let (env, _) = at_first_save();
+    let huge = std::fs::File::create(env.root().join("huge.bin")).unwrap();
+    huge.set_len(100_000_001).unwrap();
+    let err = refused_save(&env, &["C"]);
+    assert!(err.contains("bolt save --line <name>"), "{err}");
+    let err = refused_save(&env, &["--line", "art", "C"]);
+    assert!(err.contains("--yes"), "{err}");
+}
+
+#[test]
 fn save_with_line_makes_the_line_and_moves_onto_it() {
     let (env, first) = at_first_save();
     let main = env.state().1.lines["main"];

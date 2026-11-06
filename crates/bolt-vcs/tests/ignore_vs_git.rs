@@ -534,7 +534,7 @@ proptest! {
         let req = SaveRequest {
             message: "Save", who: &who, command: "save", accept_crlf: false, git_excludes: None, new_line: None, only: None,
         };
-        save_folder(&mut repo, &req, &mut |_| {}).unwrap();
+        save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
         let mut got: Vec<String> =
             saved_files(&repo).iter().map(|p| as_git_reads(p, drive)).collect();
         got.sort();
@@ -785,7 +785,7 @@ fn gits_personal_lists_keep_out_what_git_keeps_out() {
         new_line: None,
         only: None,
     };
-    save_folder(&mut repo, &req, &mut |_| {}).unwrap();
+    save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
     let mut got: Vec<String> = saved_files(&repo)
         .iter()
         .map(|p| as_git_reads(p, drive))

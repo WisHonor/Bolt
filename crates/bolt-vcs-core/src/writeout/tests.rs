@@ -863,7 +863,7 @@ fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveE
         new_line: None,
         only: None,
     };
-    crate::snapshot::save_folder(repo, &req, &mut |_| {})
+    crate::snapshot::save_folder(repo, &req, &mut |_| {}, &mut |_| true)
 }
 
 #[cfg(feature = "fault-injection")]

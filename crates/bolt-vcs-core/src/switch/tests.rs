@@ -29,7 +29,7 @@ fn save_now(repo: &mut Repository) -> SaveOutcome {
         new_line: None,
         only: None,
     };
-    save_folder(repo, &req, &mut |_| {}).unwrap()
+    save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap()
 }
 
 fn write_all(dir: &Path, files: &[(&str, &[u8])]) {

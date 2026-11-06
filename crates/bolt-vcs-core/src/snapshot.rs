@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -27,7 +27,7 @@ use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, Person, Save};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
-use crate::text::escape;
+use crate::text::{self, escape, thousands};
 use crate::warning::{self, Warning};
 use crate::writeout;
 
@@ -75,6 +75,46 @@ pub enum SaveOutcome {
         /// What the walk found wrong, such as a `.gitignore` it skipped.
         warnings: Vec<Warning>,
     },
+}
+
+/// A save asks first when it adds more than this many bytes or files that the save it builds on
+/// doesn't hold (decision 056).
+const ASK_OVER_BYTES: u64 = 100_000_000;
+const ASK_OVER_FILES: u64 = 10_000;
+
+/// What a save adds that the save it builds on doesn't hold, when that is unusually much.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargeSave {
+    pub new_files: u64,
+    pub new_bytes: u64,
+    /// The top-level folders holding the most new bytes, biggest first, at most three; `""` is
+    /// the top folder itself, for the files directly in it.
+    pub biggest_folders: Vec<(String, u64)>,
+}
+
+impl fmt::Display for LargeSave {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let files = if self.new_files == 1 { "file" } else { "files" };
+        let folders: Vec<String> = self
+            .biggest_folders
+            .iter()
+            .map(|(folder, size)| {
+                let name = if folder.is_empty() {
+                    "the top folder".to_owned()
+                } else {
+                    format!("{}/", escape(folder, false))
+                };
+                format!("{name} ({})", text::bytes(*size))
+            })
+            .collect();
+        write!(
+            f,
+            "This save adds {} in {} new {files}, most in: {}.",
+            text::bytes(self.new_bytes),
+            thousands(self.new_files),
+            folders.join(", ")
+        )
+    }
 }
 
 /// Why a save was refused. Names from the project folder are untrusted, so messages escape them.
@@ -168,6 +208,9 @@ pub enum SaveError {
         escape(path, false)
     )]
     NestedProject { path: String, at: String },
+    /// The save adds unusually much, and no one said to go on.
+    #[error("{0}")]
+    LargeSave(LargeSave),
 }
 
 // Through `RepoError`, so a damaged pack is reported as damage.
@@ -296,6 +339,9 @@ impl SaveError {
             // `.boltignore` that isn't a regular file.
             SaveError::Ignore { .. } => "Fix that ignore file and try again.".into(),
             SaveError::TooLarge { .. } => "List the deep or huge folder in .boltignore.".into(),
+            SaveError::LargeSave(_) => "To save them, run the save again with --yes; to leave \
+                                        some out, list them in .boltignore."
+                .into(),
         };
         Some(if saving {
             format!("Nothing was saved. {step}")
@@ -306,11 +352,13 @@ impl SaveError {
 }
 
 /// Saves the project folder on the current line. Nothing is written unless every file was read
-/// and every name passed its checks.
+/// and every name passed its checks. A save that adds unusually much goes on only if
+/// `confirm_large` says so; it is asked before anything new is read or stored.
 pub fn save_folder(
     repo: &mut Repository,
     req: &SaveRequest,
     on_wait: &mut dyn FnMut(&str),
+    confirm_large: &mut dyn FnMut(&LargeSave) -> bool,
 ) -> Result<SaveOutcome, SaveError> {
     let lock = repo.lock_for_change(req.command, on_wait)?;
     // A stopped switch is finished first, so the save is of the folder it left. What came of it
@@ -356,6 +404,16 @@ pub fn save_folder(
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
         endings::check(repo.store(), &mut handles, &folders, &old)?;
+    }
+    if let Some(large) = large_save(&folders, &old) {
+        // New files mean something to save, so a missing line name is asked for now: the
+        // question comes after it, and what is stored is stored once.
+        if line.is_none() {
+            return Err(SaveError::NeedsLineName);
+        }
+        if !confirm_large(&large) {
+            return Err(SaveError::LargeSave(large));
+        }
     }
     let mut packs = repo.new_packs()?;
     for listing in &rebuilt {
@@ -472,6 +530,44 @@ pub fn save_folder(
         changed_files,
         short_change_id,
         warnings,
+    })
+}
+
+/// What the save would add, from the walk's sizes, if it is more than a save adds without asking.
+/// A file is new where the base save holds no file; a changed one doesn't count.
+fn large_save(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Option<LargeSave> {
+    let (mut new_files, mut new_bytes) = (0u64, 0u64);
+    let mut by_top: HashMap<&str, u64> = HashMap::new();
+    for (rel, children) in folders {
+        let before = old.get(rel).and_then(Option::as_ref);
+        let top = rel.split('/').next().unwrap_or_default();
+        for c in children.iter().filter(|c| c.kind == Kind::File) {
+            let saved = before
+                .and_then(|l| l.get(&c.name))
+                .is_some_and(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable));
+            if saved {
+                continue;
+            }
+            let size = c.meta.as_ref().map_or(0, |m| m.size);
+            new_files = new_files.saturating_add(1);
+            new_bytes = new_bytes.saturating_add(size);
+            let held = by_top.entry(top).or_default();
+            *held = held.saturating_add(size);
+        }
+    }
+    if new_bytes <= ASK_OVER_BYTES && new_files <= ASK_OVER_FILES {
+        return None;
+    }
+    let mut biggest: Vec<(String, u64)> = by_top
+        .into_iter()
+        .map(|(top, size)| (top.to_owned(), size))
+        .collect();
+    biggest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    biggest.truncate(3);
+    Some(LargeSave {
+        new_files,
+        new_bytes,
+        biggest_folders: biggest,
     })
 }
 
@@ -1216,7 +1312,7 @@ mod tests {
             new_line: None,
             only: None,
         };
-        save_folder(repo, &req, &mut |_| {})
+        save_folder(repo, &req, &mut |_| {}, &mut |_| true)
     }
 
     /// A save of only `only`.
@@ -1234,7 +1330,7 @@ mod tests {
             new_line: None,
             only: Some(only),
         };
-        save_folder(repo, &req, &mut |_| {})
+        save_folder(repo, &req, &mut |_| {}, &mut |_| true)
     }
 
     /// The root listing of a save that must have happened.
@@ -2610,5 +2706,129 @@ mod tests {
                 "{named}: {err:?}"
             );
         }
+    }
+
+    /// A save whose question about adding much is answered `answer`, and what it asked, if it
+    /// asked; of only `only` when given.
+    fn save_answering(
+        repo: &mut Repository,
+        only: Option<&[Given]>,
+        answer: bool,
+    ) -> (Result<SaveOutcome, SaveError>, Option<LargeSave>) {
+        let who = who();
+        let req = SaveRequest {
+            message: "Add much",
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only,
+        };
+        let mut asked = None;
+        let result = save_folder(repo, &req, &mut |_| {}, &mut |large| {
+            asked = Some(large.clone());
+            answer
+        });
+        (result, asked)
+    }
+
+    /// A file of `size` zeros, made without writing them.
+    fn sized(root: &Path, rel: &str, size: u64) {
+        write(root, rel, b"");
+        File::options()
+            .write(true)
+            .open(root.join(rel))
+            .unwrap()
+            .set_len(size)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_save_adding_more_than_10000_files_asks() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        for i in 0..10_001 {
+            write(dir.path(), &format!("many/{}/{i}.txt", i % 10), b"x");
+        }
+        let (result, asked) = save_answering(&mut repo, None, false);
+        let large = asked.expect("asked");
+        assert_eq!((large.new_files, large.new_bytes), (10_001, 10_001));
+        assert_eq!(large.biggest_folders, [("many".to_owned(), 10_001)]);
+        assert!(
+            matches!(result, Err(SaveError::LargeSave(l)) if l == large),
+            "nothing was saved"
+        );
+    }
+
+    #[test]
+    fn a_save_adding_more_than_100_mb_asks() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        sized(dir.path(), "art/huge.bin", 100_000_001);
+        write(dir.path(), "docs/b.txt", b"12345");
+        write(dir.path(), "src/c.txt", b"123");
+        write(dir.path(), "top.txt", b"1234");
+        let (result, asked) = save_answering(&mut repo, None, false);
+        let large = asked.expect("asked");
+        assert_eq!((large.new_files, large.new_bytes), (4, 100_000_013));
+        let biggest = [("art", 100_000_001), ("docs", 5), ("", 4)];
+        assert_eq!(
+            large.biggest_folders,
+            biggest.map(|(f, n)| (f.to_owned(), n))
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "This save adds 100 MB in 4 new files, most in: art/ (100 MB), docs/ (5 bytes), the top folder (4 bytes)."
+        );
+        assert!(err.hint().unwrap().contains("--yes"), "{err:?}");
+        // A partial save counts only what it saves.
+        let (result, asked) = save_answering(&mut repo, Some(&[path("docs")]), false);
+        assert_eq!(asked, None);
+        result.unwrap();
+    }
+
+    #[test]
+    fn answering_no_stores_nothing() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        let (head, packs) = (
+            repo.head().unwrap(),
+            fs::read_dir(repo.packs_dir()).unwrap().count(),
+        );
+        sized(dir.path(), "art/huge.bin", 100_000_001);
+        let (result, asked) = save_answering(&mut repo, None, false);
+        assert!(asked.is_some());
+        assert!(matches!(result, Err(SaveError::LargeSave(_))), "{result:?}");
+        assert_eq!(repo.head().unwrap(), head);
+        assert_eq!(fs::read_dir(repo.packs_dir()).unwrap().count(), packs);
+    }
+
+    #[test]
+    fn answering_yes_saves() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        sized(dir.path(), "art/huge.bin", 100_000_001);
+        let (result, asked) = save_answering(&mut repo, None, true);
+        assert!(asked.is_some());
+        let tree = saved_tree(repo.store(), saved_root(result.unwrap()));
+        assert_eq!(tree["art/huge.bin"].1.len(), 100_000_001);
+    }
+
+    #[test]
+    fn changed_files_dont_count() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "art/huge.bin", b"1");
+        save_now(&mut repo).unwrap();
+        sized(dir.path(), "art/huge.bin", 100_000_001);
+        write(dir.path(), "b.txt", b"new");
+        let (result, asked) = save_answering(&mut repo, None, false);
+        assert_eq!(asked, None);
+        result.unwrap();
     }
 }

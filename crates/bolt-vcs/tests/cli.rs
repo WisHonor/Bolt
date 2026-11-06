@@ -715,6 +715,60 @@ fn save_then_nothing_to_save() {
     assert!(stdout.ends_with("  \"Change a\"  (1 file)\n"), "{stdout:?}");
 }
 
+/// A started project holding a new file of 100,000,001 zeros, made without writing them.
+fn project_adding_100_mb() -> Env {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::create_dir(env.root().join("art")).unwrap();
+    let huge = std::fs::File::create(env.root().join("art/huge.bin")).unwrap();
+    huge.set_len(100_000_001).unwrap();
+    env
+}
+
+#[test]
+fn without_a_terminal_it_stops_and_names_yes() {
+    let env = project_adding_100_mb();
+    let out = env.bolt().args(["save", "Add art"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("This save adds 100 MB in 1 new file, most in: art/ (100 MB)."),
+        "{err}"
+    );
+    assert!(
+        err.contains("Nothing was saved.") && err.contains("--yes"),
+        "{err}"
+    );
+    let out = env
+        .bolt()
+        .args(["save", "--json", "Add art"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        doc["error"]["hint"].as_str().unwrap().contains("--yes"),
+        "{doc}"
+    );
+    let out = env.bolt().arg("status").output().unwrap();
+    assert!(text(&out.stdout).contains("art/huge.bin"), "still unsaved");
+}
+
+#[test]
+fn yes_skips_the_question() {
+    let env = project_adding_100_mb();
+    let out = env
+        .bolt()
+        .args(["save", "--yes", "Add art"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).ends_with(
+        "  \"Add art\"  (1 file)
+"
+    ));
+}
+
 /// Microsoft's list of reserved names doesn't hold `COM0` and `LPT0`, and Windows makes them as
 /// ordinary files, so they save like any other name.
 #[cfg(windows)]
