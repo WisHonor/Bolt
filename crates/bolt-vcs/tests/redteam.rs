@@ -216,12 +216,33 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
     let env = Env::new();
     env.ok(&["start"]);
     mkfifo(&env.root().join(".bolt/store/packs/zz.pack"));
+    // History may never reach the FIFO, since packs are opened only when searched.
     let mut cmd = env.bolt();
     cmd.arg("history");
     let end = run_limited(cmd, 10);
     assert!(
-        end.code == Some(1),
+        !end.timed_out && matches!(end.code, Some(0 | 1)),
         "`bolt history` hung or crashed on a FIFO named *.pack: {end:?}"
+    );
+    // A save looks for its new file in every pack, so it reaches the FIFO and must refuse it.
+    std::fs::write(env.root().join("new.txt"), "new").unwrap();
+    let mut cmd = env.bolt();
+    cmd.args(["save", "add new"]);
+    let end = run_limited(cmd, 10);
+    assert!(
+        end.code == Some(1) && end.stderr.contains("zz.pack"),
+        "`bolt save` hung or didn't refuse a FIFO named *.pack: {end:?}"
+    );
+    // So does the check that reads every pack.
+    let packs = env.root().join(".bolt/store/packs");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(bolt_core::verify::verify_store(&packs).problems));
+    let problems = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("verify hung on a FIFO named *.pack");
+    assert!(
+        problems.iter().any(|p| p.starts_with("zz.pack: ")),
+        "{problems:?}"
     );
 }
 

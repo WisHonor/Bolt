@@ -44,10 +44,11 @@ pub enum StoreError {
 /// A copy of an object: (pack number, its id).
 type At = (usize, Id);
 
-/// A copy found in a pack.
+/// A copy found in pack `n`. It doesn't hold the pack open: however many packs hold an object,
+/// at most `MAX_OPEN` stay open.
+#[derive(Clone)]
 struct Copy {
     n: usize,
-    pack: Arc<PackReader>,
     entry: IndexEntry,
 }
 
@@ -225,10 +226,10 @@ impl Store {
         let found = self.search(id, |c| {
             if c.entry.kind == kind && c.entry.uncompressed_size != size {
                 let wrong = PackError::Corrupt {
-                    path: c.pack.path().to_owned(),
+                    path: self.pack_path(c.n),
                     reason: format!("its copy of {id} records the wrong size"),
                 };
-                self.note_damage(c.at(), &c.pack, &wrong);
+                self.note_damage(c.at(), self.pack_path(c.n), &wrong);
                 return ControlFlow::Continue(());
             }
             let good = c.entry.kind == kind && self.is_good(&c);
@@ -287,30 +288,30 @@ impl Store {
 
     /// Streams content into `out`; treat the output as untrusted until this returns `Ok`.
     pub fn copy_content(&self, id: &Id, out: &mut dyn Write) -> Result<(), StoreError> {
+        let content = ObjectKind::Content;
         let first = self.first_copy(id)?;
-        let good = first
-            .as_ref()
-            .is_some_and(|c| c.entry.kind == ObjectKind::Content && self.is_good(c));
-        if !good {
-            // Bytes can't be taken back out of `out`, so it gets one copy only. A small one is
-            // read whole first, so a copy that fails is passed over before anything goes out.
-            let small = first
-                .as_ref()
-                .is_some_and(|c| c.entry.uncompressed_size <= NEAR);
-            if small {
-                let bytes = self.first_good(id, ObjectKind::Content, false, |pack, entry| {
-                    let mut bytes = Vec::new();
-                    pack.copy_content(entry, &mut bytes).map(|()| bytes)
-                })?;
-                return Ok(out.write_all(&bytes).map_err(PackError::from)?);
+        // Bytes can't be taken back out of `out`, so it gets one copy only.
+        if let Some(c) = &first
+            && c.entry.kind == content
+            && !self.is_good(c)
+        {
+            // A small first copy, and only that one, is read whole before anything goes out.
+            if c.entry.uncompressed_size <= NEAR {
+                let mut bytes = Vec::new();
+                let read = self.attempt(c, content, &mut Tries::default(), |pack, entry| {
+                    bytes.clear();
+                    pack.copy_content(entry, &mut bytes)
+                });
+                if read.is_ok() {
+                    return Ok(out.write_all(&bytes).map_err(PackError::from)?);
+                }
             }
-            // A big one is streamed: when several packs hold it, a good copy is found first.
+            // Otherwise it is streamed: when several packs hold it, a good copy is found first.
             if self.all_copies(id)?.len() > 1 {
-                let content = ObjectKind::Content;
-                self.first_good(id, content, false, read_whole(content))?;
+                self.first_good_from(first.clone(), id, content, false, read_whole(content))?;
             }
         }
-        self.first_good(id, ObjectKind::Content, true, |pack, entry| {
+        self.first_good_from(first, id, content, true, |pack, entry| {
             pack.copy_content(entry, out)
         })
     }
@@ -337,10 +338,22 @@ impl Store {
         id: &Id,
         kind: ObjectKind,
         once: bool,
+        read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
+    ) -> Result<T, StoreError> {
+        self.first_good_from(self.first_copy(id)?, id, kind, once, read)
+    }
+
+    /// `first_good`, given the first copy found.
+    fn first_good_from<T>(
+        &self,
+        first: Option<Copy>,
+        id: &Id,
+        kind: ObjectKind,
+        once: bool,
         mut read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
         let mut tries = Tries::default();
-        let Some(first) = self.first_copy(id)? else {
+        let Some(first) = first else {
             return Err(StoreError::Missing(*id));
         };
         let near = first.entry.uncompressed_size <= NEAR || self.is_good(&first);
@@ -382,7 +395,7 @@ impl Store {
             tries.wrong_kind.get_or_insert(c.entry.kind);
             return Err(false);
         }
-        let path = || c.pack.path().to_owned();
+        let path = || self.pack_path(c.n);
         // A bad copy is never read again but still counts, so no good copy is damage every time.
         let known_bad = self.checked().bad.get(&c.at()).cloned();
         if let Some(reason) = known_bad {
@@ -392,7 +405,7 @@ impl Store {
             });
             return Err(false);
         }
-        match read(&c.pack, &c.entry) {
+        match self.pack(c.n).and_then(|pack| read(&pack, &c.entry)) {
             Ok(value) => {
                 self.packs().last = c.n;
                 let mut checked = self.checked();
@@ -404,7 +417,7 @@ impl Store {
                 Ok(value)
             }
             Err(e) if is_damage(&e) => {
-                let reason = self.note_damage(c.at(), &c.pack, &e);
+                let reason = self.note_damage(c.at(), path(), &e);
                 tries.damage.get_or_insert_with(|| PackError::Corrupt {
                     path: path(),
                     reason,
@@ -449,16 +462,13 @@ impl Store {
             let Some(entry) = pack.find(id)? else {
                 return Ok(ControlFlow::Continue(()));
             };
-            Ok(visit(Copy {
-                n,
-                pack: Arc::clone(pack),
-                entry,
-            }))
+            Ok(visit(Copy { n, entry }))
         })
     }
 
-    /// Hands `f` each pack, first the one that held the last object read, then the others by name,
-    /// until it breaks. A pack gone when it is opened (merged into another) sends the store to
+    /// Hands `f` each pack, first the one that held the last object read, then the others open,
+    /// then the closed ones by name, until it breaks. Open ones first, so a lookup that finds
+    /// nothing opens only the packs that don't fit among the open ones. A pack gone when it is opened (merged into another) sends the store to
     /// list the packs again, once; a pack already handed out isn't handed out again.
     fn each_pack<T, E: From<StoreError>>(
         &self,
@@ -469,8 +479,12 @@ impl Store {
         loop {
             let order: Vec<usize> = {
                 let packs = self.packs();
+                let open: Vec<usize> = packs.open.iter().map(|(n, _)| *n).collect();
                 let last = packs.by_name.contains(&packs.last).then_some(packs.last);
-                last.into_iter()
+                // The last one goes first only if open: opening it first would close an open
+                // pack this lookup hasn't searched yet. Packs handed out twice are skipped below.
+                let last_open = last.filter(|n| open.contains(n));
+                (last_open.into_iter().chain(open).chain(last))
                     .chain(packs.by_name.iter().copied())
                     .collect()
             };
@@ -512,6 +526,8 @@ impl Store {
                 packs.open.insert(0, open);
                 return Ok(pack);
             }
+            // Closed first, so no more than `MAX_OPEN` are open even for a moment.
+            packs.open.truncate(MAX_OPEN - 1);
             packs.names.get(n).cloned().flatten()
         };
         let name = name.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
@@ -523,13 +539,19 @@ impl Store {
         Ok(pack)
     }
 
+    /// Where pack `n` is, to name it.
+    fn pack_path(&self, n: usize) -> PathBuf {
+        let name = self.packs().names.get(n).cloned().flatten();
+        name.map_or_else(|| self.path.clone(), |name| self.path.join(name))
+    }
+
     #[cfg(test)]
     fn open_count(&self) -> usize {
         self.packs().open.len()
     }
 
     /// Marks a copy bad and its pack damaged, and returns the problem found.
-    fn note_damage(&self, at: At, pack: &PackReader, e: &PackError) -> String {
+    fn note_damage(&self, at: At, path: PathBuf, e: &PackError) -> String {
         let reason = match e {
             PackError::Corrupt { reason, .. } => reason.clone(),
             other => other.to_string(),
@@ -538,7 +560,7 @@ impl Store {
         checked.bad.insert(at, reason.clone());
         checked
             .damaged
-            .entry(pack.path().to_owned())
+            .entry(path)
             .or_insert_with(|| reason.clone());
         reason
     }
@@ -574,7 +596,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::id::hash_content;
-    use crate::pack::PackWriter;
+    use crate::pack::{PackWriter, open_files};
     use crate::repo::RepoError;
     use crate::test_support::plant_damaged_copies;
     use proptest::prelude::*;
@@ -925,6 +947,115 @@ mod tests {
             .unwrap();
         assert_eq!(out, b"moved");
         assert_eq!(store.pack_count(), 1);
+    }
+
+    /// Writes a version 1 pack `name` holding a copy of `id` whose bytes are `data`, stored as
+    /// they are, so the copy claims `data`'s size.
+    fn plant_lying_copy(packs: &Path, name: &str, id: &Id, data: &[u8]) {
+        use crate::encoding::Writer;
+        use crate::pack::{PACK_END_MAGIC, PACK_MAGIC};
+        let len = data.len() as u64;
+        let mut index = Writer::new();
+        index.varint(1);
+        index.id(id);
+        index.u8(ObjectKind::Content as u8);
+        index.u64(16);
+        index.varint(len);
+        index.varint(len);
+        let index = index.into_bytes();
+        let mut out = Writer::new();
+        out.u8(ObjectKind::Content as u8);
+        out.id(id);
+        out.u64(len);
+        out.u64(len);
+        out.u8(0);
+        let mut pack = PACK_MAGIC.to_vec();
+        pack.extend_from_slice(&1u32.to_le_bytes());
+        pack.extend_from_slice(&0u32.to_le_bytes());
+        pack.extend_from_slice(&out.into_bytes());
+        pack.extend_from_slice(data);
+        let at = pack.len() as u64;
+        pack.extend_from_slice(&index);
+        pack.extend_from_slice(&at.to_le_bytes());
+        pack.extend_from_slice(blake3::hash(&index).as_bytes());
+        pack.extend_from_slice(&PACK_END_MAGIC);
+        std::fs::write(packs.join(name), pack).unwrap();
+    }
+
+    /// Keeps what is written, and the largest single write.
+    #[derive(Default)]
+    struct Writes {
+        data: Vec<u8>,
+        largest: usize,
+    }
+
+    impl Write for Writes {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.largest = self.largest.max(buf.len());
+            self.data.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_small_bad_copy_found_first_doesnt_make_a_big_good_one_be_held_whole() {
+        let (_root, tmp, packs) = dirs();
+        let big = vec![7u8; 2 << 20];
+        let id = hash_content(&big);
+        // `00.pack` sorts first, and its copy claims four bytes.
+        plant_lying_copy(&packs, "00.pack", &id, b"tiny");
+        pack_of(&tmp, &packs, std::slice::from_ref(&big));
+        let store = Store::open(&packs).unwrap();
+        let mut out = Writes::default();
+        store.copy_content(&id, &mut out).unwrap();
+        assert!(out.data == big);
+        // Streamed a buffer at a time, never handed over whole.
+        assert!(
+            out.largest <= 64 << 10,
+            "{} bytes in one write",
+            out.largest
+        );
+        assert_eq!(store.damaged_packs().len(), 1);
+    }
+
+    #[test]
+    fn copies_in_many_packs_keep_at_most_16_open() {
+        let (_root, tmp, packs) = dirs();
+        let big = vec![9u8; 2 << 20];
+        for i in 0..40u8 {
+            pack_of(&tmp, &packs, &[big.clone(), vec![i; 3]]);
+        }
+        let store = Store::open(&packs).unwrap();
+        open_files::most_since_last();
+        let mut out = Vec::new();
+        store.copy_content(&hash_content(&big), &mut out).unwrap();
+        assert!(out == big);
+        let most = open_files::most_since_last();
+        assert!(most <= 16, "{most} packs open at once");
+    }
+
+    #[test]
+    fn a_miss_opens_only_the_packs_that_dont_stay_open() {
+        let (_root, tmp, packs) = dirs();
+        for i in 0..20u8 {
+            pack_of(&tmp, &packs, &[vec![i; 3]]);
+        }
+        let store = Store::open(&packs).unwrap();
+        let miss = |i: u8| {
+            let id = hash_content(&[i; 5]);
+            assert!(!store.has_good_copy(&id, ObjectKind::Content, 5).unwrap());
+        };
+        miss(0);
+        for i in 1..10 {
+            let before = open_files::total();
+            miss(i);
+            let opened = open_files::total() - before;
+            assert!(opened <= 4, "a miss opened {opened} packs");
+        }
     }
 
     #[test]

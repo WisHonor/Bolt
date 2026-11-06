@@ -675,6 +675,8 @@ impl PackReader {
                 max_objects,
             )?))
         };
+        #[cfg(test)]
+        open_files::opened();
         Ok(PackReader {
             file,
             path: path.to_path_buf(),
@@ -814,6 +816,45 @@ impl PackReader {
             return Err(self.corrupt(format!("{id} does not have its recorded size")));
         }
         Ok(())
+    }
+}
+
+/// How many packs this thread has opened, and how many it held open at once: tests of the store's
+/// limit on open files read them.
+#[cfg(test)]
+pub(crate) mod open_files {
+    use std::cell::Cell;
+
+    thread_local! {
+        static OPENED: Cell<usize> = const { Cell::new(0) };
+        static OPEN: Cell<usize> = const { Cell::new(0) };
+        static MOST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn opened() {
+        OPENED.set(OPENED.get() + 1);
+        OPEN.set(OPEN.get() + 1);
+        MOST.set(MOST.get().max(OPEN.get()));
+    }
+
+    pub(super) fn closed() {
+        OPEN.set(OPEN.get().saturating_sub(1));
+    }
+
+    pub(crate) fn total() -> usize {
+        OPENED.get()
+    }
+
+    /// The most held open at once since the last call.
+    pub(crate) fn most_since_last() -> usize {
+        MOST.replace(OPEN.get())
+    }
+}
+
+#[cfg(test)]
+impl Drop for PackReader {
+    fn drop(&mut self) {
+        open_files::closed();
     }
 }
 

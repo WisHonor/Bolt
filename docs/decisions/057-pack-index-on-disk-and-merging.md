@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 10; risk 17)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 009](009-storage-engine.md) (packs, merged later; a lookup index across packs) and [decision 028](028-red-team-m1-session-2-rulings.md) #2 (a pack's index read in bounded steps)
+- **Refined by:** [decision 061](061-pack-copy-order-and-lazy-opening.md) (which copy is read first, the order packs are searched in, and the 16-open bound for shared objects)
 
 ## Context
 

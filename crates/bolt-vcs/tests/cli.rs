@@ -1312,17 +1312,15 @@ fn history_json_stays_valid_when_a_save_is_unreadable() {
     }
 }
 
-/// Copies that were passed over are reported by the commands that only read, too.
+/// Copies that were passed over are reported by the commands that only read, too. The damaged
+/// copy is of the head's diary entry: the first object read, before any pack is open, so the pack
+/// that sorts first is searched first.
 #[test]
 fn history_and_show_json_carry_a_damaged_pack_warning() {
+    use bolt_core::repo::Repository;
     let env = project_with_two_saves();
-    let first = Id::from_hex(
-        json_of(&env, &["--json", "history"])["saves"][2]["id"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    plant_damaged_copy_of(env.root(), &first, ObjectKind::Save);
+    let head = Repository::open(env.root()).unwrap().head().unwrap();
+    plant_damaged_copy_of(env.root(), &head, ObjectKind::DiaryEntry);
     for command in ["history", "show"] {
         let out = env.bolt().args(["--json", command]).output().unwrap();
         let stderr = text(&out.stderr);

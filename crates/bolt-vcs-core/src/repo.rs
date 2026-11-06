@@ -1246,6 +1246,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_junk_pack_is_damage_only_where_a_lookup_reaches_it() {
+        let (dir, mut repo) = project();
+        let head = commit(&mut repo, &entry(1)).unwrap();
+        drop(repo);
+        let bolt = dir.path().join(".bolt");
+        // Sorts after Bolt's own packs, so what they hold is found before it is opened.
+        let junk = bolt.join("store/packs/zz.pack");
+        std::fs::write(&junk, b"not what Bolt wrote").unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let found = repo.store().read_record(&head, ObjectKind::DiaryEntry);
+        assert!(found.is_ok(), "{found:?}");
+        let missing = repo
+            .store()
+            .read_record(&Id([0x11; 32]), ObjectKind::Save)
+            .map_err(RepoError::from);
+        assert!(
+            matches!(missing, Err(RepoError::Damaged { .. })),
+            "{missing:?}"
+        );
+        assert_eq!(std::fs::read(&junk).unwrap(), b"not what Bolt wrote");
+        for name in ["tmp", "cache"] {
+            assert!(safe_fs::check_real_dir(&bolt.join(name)).is_ok(), "{name}");
+        }
+    }
+
     /// The hint for damage says nothing was changed, so a missing `tmp` or `cache` isn't made
     /// before the project is found damaged.
     #[test]

@@ -1,5 +1,6 @@
 //! Measures the process's peak memory, so this file holds a single test: any other test running
-//! beside it would add its own.
+//! beside it would add its own. Only Linux tells the peak (VmHWM).
+#![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use bolt_core::id::Id;
@@ -8,7 +9,6 @@ use bolt_core::store::{Store, StoreError};
 use std::io::{Seek, SeekFrom, Write};
 
 /// The process's peak resident memory so far, in bytes.
-#[cfg(target_os = "linux")]
 fn peak() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     let line = status.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
@@ -20,16 +20,7 @@ fn peak() -> u64 {
         * 1024
 }
 
-#[cfg(not(target_os = "linux"))]
-fn peak() -> u64 {
-    0
-}
-
 #[test]
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "VmHWM is Linux's, and a sparse file of 1 GB isn't cheap everywhere"
-)]
 fn a_planted_pack_claiming_2_pow_24_objects_costs_reads_not_memory() {
     const COUNT: u64 = 1 << 24;
     let root = tempfile::tempdir().unwrap();
