@@ -197,7 +197,8 @@ impl RepoError {
                 RepoError::JournalUnusable { .. } => {
                     "Nothing was changed. Your files are as the stopped switch left them, and \
                      `bolt status` shows how they differ from the save the project is on. To go \
-                     on without finishing the switch, delete .bolt/state/journal."
+                     on without finishing the switch, delete .bolt/state/journal: a later `bolt save` \
+                     then records the folder as it is at that time."
                 }
                 RepoError::SwitchStopped { source, .. } => {
                     let damage = if matches!(**source, RepoError::Damaged { .. }) {

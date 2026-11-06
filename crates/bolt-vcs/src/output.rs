@@ -196,6 +196,9 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
     if json {
         println!("{}", error_document(failure, warnings));
     } else {
+        for w in warnings.iter().filter(|w| warning::told_on_failure(w.kind)) {
+            eprintln!("warning: {}", w.message);
+        }
         // Escaped once more, so that a piece nobody thought of escaping still can't drive the
         // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
         eprintln!("error: {}", escape(&failure.message, true));

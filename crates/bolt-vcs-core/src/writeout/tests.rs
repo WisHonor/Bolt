@@ -880,33 +880,18 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         fault::disarm();
         drop(lock);
         drop(repo);
-        // Every file wholly old or wholly new, and nothing else in the folder.
-        for (path, _) in OLD.iter().chain(NEW) {
-            let now = held(dir.path(), path);
-            let old = OLD.iter().find(|(p, _)| p == path).map(|(_, b)| b.to_vec());
-            let new = NEW.iter().find(|(p, _)| p == path).map(|(_, b)| b.to_vec());
-            assert!(now == old || now == new, "fault {n}: {path} holds {now:?}");
-        }
-        for name in names_in(dir.path()) {
-            assert!(
-                ["a.txt", "b.txt", "dir", "gone", "gone.txt", "new"].contains(&name.as_str()),
-                "fault {n}: {name}"
-            );
-        }
+        assert_wholly_old_or_new(dir.path(), n);
 
         let mut repo = Repository::open(dir.path()).unwrap();
         let took_effect = repo.head().unwrap() == journal.target;
         let outcome = save_now(&mut repo).unwrap();
-        let SaveOutcome::NothingChanged { current, warnings } = outcome else {
+        let SaveOutcome::NothingChanged { current, .. } = outcome else {
             panic!("fault {n}: the save saved the folder before the switch finished");
         };
         assert_eq!(current, tip_of(&repo.current().unwrap().1).unwrap());
-        assert_eq!(repo.head().unwrap(), journal.target, "fault {n}");
-        assert_eq!(Journal::read(&repo).unwrap(), None, "fault {n}");
-        assert_holds(dir.path(), NEW);
-        assert_eq!(names_in(dir.path()), ["a.txt", "b.txt", "dir", "new"]);
+        assert_switched(&repo, dir.path(), &journal, n);
         // Said when the save had a switch to finish; only the journal's removal is silent.
-        let finished = kinds(&warnings).contains(&warning::SWITCH_FINISHED);
+        let finished = kinds(&repo.store().warnings()).contains(&warning::SWITCH_FINISHED);
         assert_eq!(finished, result.is_err() && !took_effect, "fault {n}");
         if result.is_err() && !took_effect {
             stops_before_head += 1;
@@ -917,6 +902,91 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
             assert!(stops_before_head >= 8, "only {stops_before_head} stops");
             assert!(n > stops_before_head + 1, "no stop after the head moved");
             break;
+        }
+    }
+}
+
+/// Every path below `dir`, `.bolt` aside, `/` between names.
+fn all_paths(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut folders = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = folders.pop() {
+        for e in fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if rel.is_empty() && name == ".bolt" {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                folders.push((e.path(), path.clone()));
+            }
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Every file of the switch wholly old or wholly new, and nothing else anywhere in the folder.
+fn assert_wholly_old_or_new(dir: &Path, n: u64) {
+    for (path, _) in OLD.iter().chain(NEW) {
+        let now = held(dir, path);
+        let old = OLD.iter().find(|(p, _)| p == path).map(|(_, b)| b.to_vec());
+        let new = NEW.iter().find(|(p, _)| p == path).map(|(_, b)| b.to_vec());
+        assert!(now == old || now == new, "fault {n}: {path} holds {now:?}");
+    }
+    let known: Vec<&str> = OLD
+        .iter()
+        .chain(NEW)
+        .flat_map(|(p, _)| [*p, parent(p)])
+        .collect();
+    for path in all_paths(dir) {
+        assert!(known.contains(&path.as_str()), "fault {n}: {path}");
+    }
+}
+
+/// The switch done: `head` on its entry, no journal, the folder exactly the new save.
+fn assert_switched(repo: &Repository, dir: &Path, journal: &Journal, n: u64) {
+    assert_eq!(repo.head().unwrap(), journal.target, "fault {n}");
+    assert_eq!(Journal::read(repo).unwrap(), None, "fault {n}");
+    assert_holds(dir, NEW);
+    let mut wanted: Vec<&str> = NEW.iter().flat_map(|(p, _)| [*p, parent(p)]).collect();
+    wanted.retain(|p| !p.is_empty());
+    wanted.sort_unstable();
+    wanted.dedup();
+    assert_eq!(all_paths(dir), wanted, "fault {n}");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_finish_stopped_in_turn_is_finished_by_the_command_after() {
+    use crate::fsio::fault;
+    for n in [1, 4, 9] {
+        for m in 1.. {
+            assert!(m < 60, "the save never got through");
+            let (dir, mut repo, journal) = stopped_switch();
+            let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
+            let drive = drive::probe(repo.tmp_folder()).unwrap();
+            fault::arm(n);
+            assert!(carry_out(&mut repo, &lock, &journal, drive).is_err());
+            fault::disarm();
+            drop(lock);
+            fault::arm(m);
+            let finishing = save_now(&mut repo);
+            fault::disarm();
+            drop(repo);
+            assert_wholly_old_or_new(dir.path(), m);
+            let mut repo = Repository::open(dir.path()).unwrap();
+            save_now(&mut repo).unwrap();
+            assert_switched(&repo, dir.path(), &journal, m);
+            if finishing.is_ok() {
+                break;
+            }
         }
     }
 }
@@ -1015,6 +1085,11 @@ fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
     let e = finish_interrupted(&mut repo, &lock).unwrap_err();
     assert!(matches!(e, RepoError::JournalUnusable { .. }), "{e:?}");
     assert_holds(dir.path(), OLD);
+    drop(lock);
+    // Read-only commands say the same, not that the next command finishes it.
+    let found = crate::status::status(&repo, false, None).unwrap();
+    let said = found.unfinished_switch.unwrap();
+    assert!(said.contains(".bolt/state/journal"), "{said}");
 }
 
 #[cfg(windows)]

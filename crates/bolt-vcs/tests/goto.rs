@@ -115,3 +115,28 @@ fn a_damaged_journal_stops_a_save_and_is_reported() {
     assert!(kinds.contains(&"switch_unfinished".to_owned()), "{doc}");
     assert!(journal.exists());
 }
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
+    for json in [false, true] {
+        let env = stopped_switch();
+        let mut cmd = env.bolt();
+        cmd.args(["save", "B"])
+            .env("BOLT_FAULT_FAIL", "save:walked");
+        if json {
+            cmd.arg("--json");
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        if json {
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(doc["warnings"][0]["kind"], "switch_finished", "{doc}");
+        } else {
+            let said = text(&out.stderr);
+            assert!(said.contains("warning: Finished a switch"), "{said}");
+            assert!(said.contains("error:"), "{said}");
+        }
+        assert!(!env.root().join(".bolt/state/journal").exists());
+    }
+}

@@ -57,6 +57,19 @@ pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 /// A command finished a switch between saves that was stopped, before doing its own work.
 pub const SWITCH_FINISHED: &str = "switch_finished";
 
+/// Whether people see a warning of `kind` when the command then fails: it tells of a switch
+/// the command finished first, which happened all the same. Others are only in `--json`.
+#[must_use]
+pub fn told_on_failure(kind: &str) -> bool {
+    [
+        SWITCH_FINISHED,
+        CHANGED_SINCE_PLAN,
+        PLACEHOLDERS_WRITTEN,
+        NOT_WRITTEN_HERE,
+    ]
+    .contains(&kind)
+}
+
 /// Something that went wrong without stopping a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Warning {

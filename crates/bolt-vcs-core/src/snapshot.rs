@@ -248,8 +248,13 @@ pub fn save_folder(
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<SaveOutcome, SaveError> {
     let lock = repo.lock_for_change(req.command, on_wait)?;
-    // A stopped switch is finished first, so the save is of the folder it left.
-    let finished = writeout::finish_interrupted(repo, &lock)?.map(|done| done.warnings);
+    // A stopped switch is finished first, so the save is of the folder it left. What came of it
+    // is kept with the store's warnings, so it is told even if the save then fails.
+    if let Some(done) = writeout::finish_interrupted(repo, &lock)? {
+        for w in done.warnings {
+            repo.store().note(w);
+        }
+    }
     let (head, entry) = repo.current()?;
     let Position::OnLine(line) = &entry.state.position else {
         return Err(SaveError::NotOnALine);
@@ -285,9 +290,6 @@ pub fn save_folder(
         req.git_excludes,
     )?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
-    if let Some(first) = finished {
-        warnings.splice(0..0, first);
-    }
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {

@@ -320,22 +320,7 @@ pub fn finish_interrupted(
         Journal::remove(repo, lock)?;
         return Ok(None);
     }
-    if head != journal.from {
-        return Err(journal::unusable(
-            "was made for another save than the one the project is on",
-        ));
-    }
-    // Its entry must read before anything is written for it.
-    let entry = repo
-        .store()
-        .read_record(&journal.target, ObjectKind::DiaryEntry)
-        .map_err(RepoError::from)
-        .and_then(|bytes| Ok(DiaryEntry::decode(&bytes)?));
-    if let Err(e) = entry {
-        return Err(journal::unusable(format!(
-            "names a diary entry that can't be read ({e})"
-        )));
-    }
+    let journal = usable(repo, journal, head)?;
     let drive = drive::probe(repo.tmp_folder())?;
     let mut done = carry_out(repo, lock, &journal, drive)?;
     if !done.in_use.is_empty() {
@@ -355,14 +340,44 @@ pub fn finish_interrupted(
     Ok(Some(done))
 }
 
+/// `journal` if it can be carried out on this project, whose `head` is `head`: made from that
+/// entry, to one that reads. Otherwise it is no switch of this folder to finish.
+fn usable(repo: &Repository, journal: Journal, head: Id) -> Result<Journal, RepoError> {
+    if head != journal.from {
+        return Err(journal::unusable(
+            "was made for another save than the one the project is on",
+        ));
+    }
+    let entry = repo
+        .store()
+        .read_record(&journal.target, ObjectKind::DiaryEntry)
+        .map_err(RepoError::from)
+        .and_then(|bytes| Ok(DiaryEntry::decode(&bytes)?));
+    match entry {
+        Ok(_) => Ok(journal),
+        Err(e) => Err(journal::unusable(format!(
+            "names a diary entry that can't be read ({e})"
+        ))),
+    }
+}
+
 /// For commands that only read: says a switch between saves is still to finish, or that its
 /// journal can't be used.
 #[must_use]
 pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
-    let message = match Journal::read(repo) {
+    let pending = Journal::read(repo).and_then(|found| match found {
+        None => Ok(None),
+        Some(j) => {
+            let head = repo.head()?;
+            // It took effect; the next change only removes the journal.
+            if head == j.target {
+                return Ok(None);
+            }
+            usable(repo, j, head).map(Some)
+        }
+    });
+    let message = match pending {
         Ok(None) => return None,
-        // It took effect; the next change only removes the journal.
-        Ok(Some(j)) if repo.head().ok() == Some(j.target) => return None,
         Ok(Some(_)) => "A switch between saves was stopped before it was done, so some files may \
                         still be as they were. Running `bolt goto` or `bolt discard` again, or any \
                         command that changes the project, finishes it first."
@@ -689,6 +704,7 @@ impl Run<'_> {
                 )));
             }
             file.sync_all()?;
+            fsio::fault_point("switch:written")?;
             Ok(())
         })();
         drop(file);
