@@ -2331,6 +2331,7 @@ mod tests {
         let (dir, mut repo) = project();
         write_old(dir.path(), "kept.txt", b"kept");
         save_now(&mut repo).unwrap();
+        #[cfg(windows)]
         let kept = dir.path().join("kept.txt");
         // Nothing can read it now, so a save that opened it would fail. Not by taking the right
         // to read it: that moves its change time, and the cache stops vouching for it.
