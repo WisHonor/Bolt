@@ -83,19 +83,19 @@ See [testing.md](testing.md) §3: fuzz targets for the decoders and parsers list
 - Milestone 1, session 2, on the fixes (2026-11-02): [findings](redteam/2026-11-02-milestone-1-session-2.md); proof tests in `crates/bolt-vcs/tests/redteam2.rs`.
 - Milestone 2, session 1 (2026-11-03): [findings](redteam/2026-11-03-milestone-2.md); proof tests in `crates/bolt-vcs/tests/redteam3.rs`.
 - Milestone 2, session 2, on the fixes (2026-11-03): [findings](redteam/2026-11-03-milestone-2-session-2.md); proof tests in `crates/bolt-vcs/tests/redteam4.rs`.
+- Milestone 3, both sessions (2026-11-06): [findings](redteam/2026-11-06-milestone-3.md); proof tests in `crates/bolt-vcs/tests/redteam5.rs`.
 
 **Windows name rules.** Checked on 2026-11-01 against Microsoft's "Naming Files, Paths, and Namespaces" page (dated 2024-08-28): Bolt refuses everything on that list, plus the console devices `CONIN$` and `CONOUT$`, while `COM0` and `LPT0`, which are not on it, stay ordinary names. Bolt also refuses `.bolt`'s short names (`bolt~1` to `bolt~4`) and its stream syntax (`.bolt::$INDEX_ALLOCATION`), because Windows treats both as `.bolt`.
 
-**GitHub settings** (turned on by the owner on 2026-11-01, while the repository was public; it has been private since 2026-11-05):
+**GitHub settings** (turned on by the owner on 2026-11-01; the repository was private for a time from 2026-11-05 and is public again, so all of these run; checked on 2026-11-06):
 - **On:**
   - dependency graph;
   - Dependabot alerts, malware alerts and grouped security updates;
   - Dependabot version updates, configured in `.github/dependabot.yml`;
+  - CodeQL code scanning (default setup: the Rust code, the workflows and the red-team Python scripts, on every pull request, every push to `main` and weekly) with Copilot Autofix suggestions; no open alerts;
+  - secret scanning with push protection (GitHub's own patterns; the generic ones and validity checks are off); no alerts;
+  - private vulnerability reporting;
   - AI scans of the repository and of pull requests.
-- **Not offered while the repository is private** (its plan has them only for public repositories), so they don't run now:
-  - CodeQL code scanning (default setup, which scanned the Rust code, the workflows and the red-team Python scripts) with Copilot Autofix suggestions;
-  - secret scanning with push protection;
-  - private vulnerability reporting.
 - **Off on purpose:**
   - agentic autofix: it spends AI credits and opens pull requests on its own;
   - automatic dependency submission: GitHub reads `Cargo.lock` directly.
@@ -103,7 +103,8 @@ See [testing.md](testing.md) §3: fuzz targets for the decoders and parsers list
 - **Branch protection** (on since 2026-11-02, the ruleset "Protect main"):
   - force pushes to `main` and its deletion are blocked;
   - every change needs a pull request;
-  - the CI checks (`test` on all three systems, and `deny`) must pass, and CodeQL did while the repository was public.
+  - the CI checks (`test` on all three systems, and `deny`) must pass;
+  - CodeQL must have scanned the change and found no error-level alert and no security alert of high severity or above.
 
   Nobody can bypass it, the owner included, so every change, an agent's too, reaches `main` only through a pull request whose checks are green.
 

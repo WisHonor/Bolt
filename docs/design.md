@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, its docs brought up to date the same day, with both its red-team sessions and its whole-branch review done, and only the owner's review of its `unsafe` code still to come before it is merged (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 69
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, with both its red-team sessions and its whole-branch review done, and merged and done the same day, once the owner had approved its `unsafe` code (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 69
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -452,7 +452,7 @@ Raised at kickoff. Each is either answered by a topic or tracked here until it i
 **Open**: every unchecked agenda topic above, plus:
 - **Test data:** real game projects for benchmarks and dedup measurements. Candidates, still to be checked: Unity's open-source "Open Project 1" (with Git LFS history), Godot's demo projects, and scripted series of versions of real assets (decision 019).
 - ~~**Objects per pack vs. one pack per command.**~~ *Decided while planning milestone 2* ([decision 041](decisions/041-several-packs-per-command.md)): a command's writer starts a new pack every 2^20 objects, well under the 2^24 a pack may hold, so a big command writes several.
-- ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the repository has been private since 2026-11-05, so Actions minutes count: the whole suite runs locally before a push, and pushes come at task boundaries ([testing.md](testing.md) §4).
+- ~~**CI**~~ *Done in milestone 1:* GitHub Actions on Windows, macOS and Linux, with a `.gitattributes` that turns off line-ending conversion; the whole suite runs locally before a push, and pushes come at task boundaries ([testing.md](testing.md) §4).
 - ~~**Known limitation: links Git wrote on Windows.**~~ *Decided while planning milestone 3* ([decision 045](decisions/045-link-targets-stored-with-slashes.md)): link targets are stored with `/`, as Git stores them, and written with `\` on Windows; milestone 3 builds it.
 
 **Deferred**: not needed for v0.1. The constraint to respect now is in brackets.
