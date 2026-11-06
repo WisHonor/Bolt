@@ -242,7 +242,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock` | Lock file for changing commands | Yes |
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
-| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): the file-state cache (a file's kind, size, modified time and content ID) and `change-ids`, each line's change IDs (below) | No |
+| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time and content ID, below), and `change-ids`, each line's change IDs (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
@@ -264,6 +264,25 @@ Further lines of the form `feature <name>` list features the repository uses (fo
 **`state/journal`** ([decision 049](decisions/049-writing-files-one-at-a-time.md); its exact bytes and test vectors come with milestone 3, before the code) is written (whole, through `tmp/` and a rename) before a command starts rewriting files in the folder, and removed after the command commits. It records the target diary entry, each planned file action (path, expected current ID, new ID) and the safety copies taken, followed by a BLAKE3 checksum of the bytes before it. If it exists when Bolt starts, Bolt finishes or rolls back the interrupted command (decision 010).
 
 **The cache key and the seal** ([decision 053](decisions/053-file-state-cache.md)). Every file in `cache/` is sealed: its body followed by 32 bytes, the keyed BLAKE3 hash of the body under the user's cache key. A file whose seal doesn't match (another account's, a copied project's from someone else, or edited) is ignored and rebuilt, never trusted and never an error. The key is the file `cache-key` in the folder of the user's own `config.toml` (`BOLT_CONFIG_DIR` if set): exactly 32 random bytes, nothing else. Bolt makes it on first use, writing a file of its own name there, readable only by the user on Unix (0600), and linking it in as `cache-key`, which never replaces a key already there, so two Bolts making it at once end with one key; only on a drive that has no hard links (the link fails with "not supported", or EPERM as Linux's FAT gives it) is it made in place, and any other failure counts as a key Bolt can't use. A key file that can't be read or isn't 32 bytes long is never replaced, since it is the user's own and replacing it silently could hide that someone changed it: the command goes on with a key for that run alone, so no cache is trusted or kept, and a `cache_key_unusable` warning names the file and says to delete it. It is the user's own, so a link there is followed. With no settings folder at all, a key for that run alone is used too, without a warning. Only the command line reads the key; the engine is handed it, and seals with a key for that handle alone when it isn't, so a program using the engine never touches the user's settings.
+
+**`cache/files`** (not normative) is the file-state cache: what each file in the folder was when Bolt last read it, so that a file whose kind, size and modified time still match needn't be read again. Sealed as above; read with a 256 MiB cap, seal included, and a bigger one is not written (the command warns instead).
+
+```text
+bytes[8] "BOLTFILE"
+u8       version = 1
+varint   file count (refused if more than the bytes left hold at 48 bytes each)
+files, sorted by project path in byte order, no path twice:
+  string   project path, `/` between names (at most 4,096 bytes)
+  u8       kind: 1 file, 2 executable, 3 symbolic link (§3's numbers; nothing else)
+  varint   size in bytes
+  i64      modified time: whole seconds since 1970-01-01 UTC, rounded down
+  u32      and nanoseconds past them (below 1,000,000,000)
+  bool     racy
+  id       content ID
+bytes[32] seal
+```
+
+An entry is trusted only if it isn't racy and the file's kind, size and modified time are the ones recorded; a file's ID on the drive (inode or file index) isn't kept. At the start of a scan Bolt writes a file in `tmp/`, takes its modified time as "now" and removes it, so the drive's own clock and resolution count. When the cache is written, an entry whose time isn't at least 2 seconds older than that "now" (FAT's resolution) is marked racy, and stays racy until the file is read again ([decision 053](decisions/053-file-state-cache.md)). The file is replaced whole, through `tmp/` and a rename.
 
 **`cache/change-ids`** (not normative) lists the change IDs of each line's saves, so that a save and `history` can shorten change IDs (§5) without reading the line. Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
 
@@ -400,6 +419,7 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `listing.json`: a fourth vector, `long-name`, a file whose name is 600 bytes (200 characters of three bytes each), past the 255 bytes names had until [decision 051](decisions/051-names-this-computer-cant-write-and-length-limits.md); its length is a two-byte varint. The first three vectors are byte for byte what milestone 1 wrote.
   - `pack_v2.json`: a version 2 pack (§11) of the same two objects as `pack.json`'s `two-objects`, which the writer must write byte for byte. `pack.json` stays as milestone 1 wrote it, in version 1, which readers must still read.
   - `change_ids.json`: a sealed `cache/change-ids` (§10) with two lines, its key, its body and the sealed bytes.
+  - `file_cache.json`: a sealed `cache/files` (§10) with two files, one racy and one from before 1970, its key, its body and the sealed bytes.
 
 ## 14. Open points
 

@@ -629,3 +629,67 @@ fn change_ids_match_their_vector() {
         );
     }
 }
+
+/// `a.txt`, 3 bytes, at 1,700,000,000.123456789 s, racy, with content 11…11; and `b`, an
+/// executable of 300 bytes, at -1.5 s (whole seconds round down, to -2), with content 22…22.
+fn file_cache_body() -> String {
+    format!(
+        "424f4c5446494c45010205{}0103{}{}01{}016202ac02{}{}00{}",
+        hex(b"a.txt"),
+        hex(&1_700_000_000i64.to_le_bytes()),
+        hex(&123_456_789u32.to_le_bytes()),
+        "11".repeat(32),
+        hex(&(-2i64).to_le_bytes()),
+        hex(&500_000_000u32.to_le_bytes()),
+        "22".repeat(32)
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/file_cache.json"]
+fn print_file_cache_vector() {
+    let key = [0x42; 32];
+    let body = file_cache_body();
+    println!(
+        "[\n  {{\"name\": \"two-files\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        hex(&key),
+        hex(&bolt_core::keyed::seal(&key, &unhex(&body)))
+    );
+}
+
+#[test]
+fn file_cache_matches_its_vector() {
+    use bolt_core::filecache::FileCache;
+    use bolt_core::keyed::{open_sealed, seal};
+    use bolt_platform::dir::{EntryMeta, EntryType};
+    let path = format!(
+        "{}/tests/vectors/file_cache.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<SealedVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors[0].body, file_cache_body());
+    let meta = |size, modified_ns, executable| EntryMeta {
+        kind: EntryType::File,
+        size,
+        modified_ns,
+        executable,
+        file_id: (0, 0),
+    };
+    for v in vectors {
+        let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
+        let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
+        assert_eq!(seal(&key, &body), sealed, "{}", v.name);
+        assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
+        assert_eq!(open_sealed(&[0; 32], &sealed), None);
+        let cache = FileCache::decode(&body).unwrap();
+        assert_eq!(cache.encode(), body);
+        // Racy, so never trusted.
+        let a = meta(3, 1_700_000_000_123_456_789, None);
+        assert!(cache.matches("a.txt", &a).is_none());
+        let b = cache
+            .matches("b", &meta(300, -1_500_000_000, Some(true)))
+            .unwrap();
+        assert_eq!((b.kind, b.id), (EntryKind::Executable, Id([0x22; 32])));
+    }
+}

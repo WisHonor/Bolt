@@ -127,3 +127,10 @@ path = "fuzz_targets/change_ids.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "file_cache"
+path = "fuzz_targets/file_cache.rs"
+test = false
+doc = false
+bench = false

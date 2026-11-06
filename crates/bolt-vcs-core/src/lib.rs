@@ -7,6 +7,7 @@ pub mod diary;
 pub mod diff;
 pub mod drive;
 pub mod encoding;
+pub mod filecache;
 pub mod fsio;
 pub mod git;
 pub mod history;
