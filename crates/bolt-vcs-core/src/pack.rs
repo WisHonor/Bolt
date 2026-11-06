@@ -239,6 +239,22 @@ impl PackWriter {
         Ok(entry.uncompressed_size)
     }
 
+    /// Copies an object from `pack` with its stored bytes as they are. Check the copy first.
+    pub(crate) fn add_stored(
+        &mut self,
+        pack: &PackReader,
+        entry: &IndexEntry,
+    ) -> Result<(), PackError> {
+        if self.contains(&entry.id) {
+            return Ok(());
+        }
+        self.add_entry(entry.kind, entry.id, |file| {
+            let compression = pack.copy_stored(entry, file)?;
+            Ok((entry.uncompressed_size, compression, entry.id))
+        })?;
+        Ok(())
+    }
+
     #[must_use]
     pub fn contains(&self, id: &Id) -> bool {
         self.index.contains_key(id)
@@ -474,6 +490,15 @@ impl PackSet {
         expected: Id,
     ) -> Result<u64, PackError> {
         self.add(|pack| pack.add_content_from(reader, expected))
+    }
+
+    /// Copies an object from `pack` with its stored bytes as they are. Check the copy first.
+    pub(crate) fn add_stored(
+        &mut self,
+        pack: &PackReader,
+        entry: &IndexEntry,
+    ) -> Result<(), PackError> {
+        self.add(|w| w.add_stored(pack, entry))
     }
 
     /// Whether the pack being built holds `id`. Packs already in the store aren't looked in.
@@ -761,9 +786,22 @@ impl PackReader {
         }
     }
 
-    /// Checks the entry's header against `entry`, then writes its uncompressed bytes to `out`,
-    /// never producing more than one byte beyond the recorded size.
-    fn decode_into(&self, entry: &IndexEntry, out: &mut dyn Write) -> Result<(), PackError> {
+    /// Copies the entry's stored bytes to `out` as they are, after checking its header, and
+    /// returns their compression. Nothing is checked against the ID: read the object first.
+    pub(crate) fn copy_stored(
+        &self,
+        entry: &IndexEntry,
+        out: &mut dyn Write,
+    ) -> Result<u8, PackError> {
+        let (compression, mut data) = self.stored(entry)?;
+        if io::copy(&mut data, out)? != entry.stored_size {
+            return Err(self.corrupt(format!("{} runs past the end of the file", entry.id)));
+        }
+        Ok(compression)
+    }
+
+    /// Checks the entry's header against `entry`, and returns its compression and stored bytes.
+    fn stored(&self, entry: &IndexEntry) -> Result<(u8, Section<'_>), PackError> {
         let header = read_vec(&self.file, entry.offset, ENTRY_HEADER_LEN)?;
         let mut r = Reader::new(&header);
         let fields = (r.u8(), r.id(), r.u64(), r.u64(), r.u8());
@@ -778,13 +816,22 @@ impl PackReader {
             return Err(self.corrupt(format!("the header of {id} does not match the index")));
         }
         let data_start = entry.offset + ENTRY_HEADER_LEN;
-        let mut data = Section {
+        let data = Section {
             file: &self.file,
             pos: data_start,
             end: data_start
                 .checked_add(stored)
                 .ok_or_else(|| self.corrupt("an entry runs past the end of the file"))?,
         };
+        Ok((compression, data))
+    }
+
+    /// Checks the entry's header against `entry`, then writes its uncompressed bytes to `out`,
+    /// never producing more than one byte beyond the recorded size.
+    fn decode_into(&self, entry: &IndexEntry, out: &mut dyn Write) -> Result<(), PackError> {
+        let (compression, mut data) = self.stored(entry)?;
+        let (id, size, stored) = (entry.id, entry.uncompressed_size, entry.stored_size);
+        let data_start = data.pos;
         let produced = match compression {
             NO_COMPRESSION if stored == size => io::copy(&mut data, out)?,
             ZSTD => {

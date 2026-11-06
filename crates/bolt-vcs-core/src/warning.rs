@@ -7,6 +7,8 @@ use crate::text::escape;
 pub const DAMAGED_PACK: &str = "damaged_pack";
 /// A stored copy couldn't be read for a reason other than damage, though another copy worked.
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
+/// Small packs were merged after a command, but one or more couldn't be: the command happened.
+pub const PACK_NOT_MERGED: &str = "pack_not_merged";
 /// A change ID is shown whole because the line couldn't be read to shorten it.
 pub const CHANGE_ID_NOT_SHORTENED: &str = "change_id_not_shortened";
 /// A save was made but its changed files couldn't be counted.

@@ -14,6 +14,7 @@ pub mod ignore;
 pub mod import;
 pub mod link;
 pub mod listing;
+pub mod merge;
 pub mod names;
 pub mod pack;
 pub mod repo;

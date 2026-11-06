@@ -117,6 +117,8 @@ struct Checked {
     /// Each pack with a copy that couldn't be read for a reason other than damage, though another
     /// copy of the same object could, with the first reason found.
     unreadable: BTreeMap<PathBuf, String>,
+    /// Warnings about the store from the command itself, such as a merge that didn't finish.
+    notes: Vec<Warning>,
 }
 
 /// What the copies of one object tried so far came to.
@@ -295,7 +297,18 @@ impl Store {
                 ),
             )
         }));
+        warnings.extend(checked.notes.iter().cloned());
         warnings
+    }
+
+    /// Keeps `warning` to come with the others.
+    pub(crate) fn note(&self, warning: Warning) {
+        self.checked().notes.push(warning);
+    }
+
+    /// Closes every pack kept open, so they can be removed; they are opened again when searched.
+    pub(crate) fn close_all(&self) {
+        self.packs().open.clear();
     }
 
     /// Reads a structured record of the given kind, fingerprint checked.
@@ -636,7 +649,9 @@ impl Store {
 }
 
 /// Reads a copy of `kind` whole, for its checks, and keeps nothing.
-fn read_whole(kind: ObjectKind) -> impl Fn(&PackReader, &IndexEntry) -> Result<(), PackError> {
+pub(crate) fn read_whole(
+    kind: ObjectKind,
+) -> impl Fn(&PackReader, &IndexEntry) -> Result<(), PackError> {
     move |pack, entry| match kind {
         ObjectKind::Content => pack.copy_content(entry, &mut io::sink()),
         _ => pack.read_record(entry).map(drop),
@@ -645,7 +660,7 @@ fn read_whole(kind: ObjectKind) -> impl Fn(&PackReader, &IndexEntry) -> Result<(
 
 /// A copy that fails its own checks is damage; an I/O error or a lack of memory says nothing
 /// about the copy.
-fn is_damage(e: &PackError) -> bool {
+pub(crate) fn is_damage(e: &PackError) -> bool {
     matches!(
         e,
         PackError::FingerprintMismatch { .. } | PackError::Corrupt { .. }

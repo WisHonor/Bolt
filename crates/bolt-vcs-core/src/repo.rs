@@ -1035,6 +1035,15 @@ impl Repository {
         &self.store
     }
 
+    pub(crate) fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    /// `store/packs`, held open.
+    pub(crate) fn packs_folder(&self) -> &Arc<Dir> {
+        &self.held.packs
+    }
+
     #[must_use]
     pub fn signatures_allowed(&self) -> bool {
         self.format.features.contains("signatures")
@@ -1130,7 +1139,7 @@ impl Repository {
     /// "nothing changed".
     pub fn commit(
         &mut self,
-        _lock: &ChangeLock,
+        lock: &ChangeLock,
         mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
@@ -1146,6 +1155,7 @@ impl Repository {
         let held = &self.held;
         write_atomic(&held.tmp, &held.state, "head", head.as_bytes())?;
         self.head = Some(id);
+        crate::merge::merge_after_commit(self, lock);
         Ok(id)
     }
 }
