@@ -1,5 +1,5 @@
 //! `bolt goto`: moving the project folder to another save, carrying unsaved work along unless
-//! it is in the way (decisions 049, 050 and 055).
+//! it is in the way, and `bolt discard`: throwing unsaved work away (decisions 049, 050 and 055).
 
 use std::path::Path;
 
@@ -7,12 +7,13 @@ use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::drive::{self, Drive};
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
-use crate::journal::Journal;
+use crate::journal::{Change, Journal};
 use crate::lines::Target;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
+use crate::text::escape;
 use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
@@ -30,6 +31,18 @@ pub struct GotoOutcome {
     pub carried: usize,
 }
 
+/// What `discard` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardOutcome {
+    /// Files and links put back as the save has them: changed or deleted ones.
+    pub restored: Vec<String>,
+    /// New files and links removed.
+    pub removed: Vec<String>,
+    /// What was written and removed, as `goto` gives it.
+    pub applied: Applied,
+    pub safety_copies: usize,
+}
+
 /// Why a switch didn't happen. Paths come from the folder, so messages escape them.
 #[derive(Debug, thiserror::Error)]
 pub enum SwitchError {
@@ -38,6 +51,17 @@ pub enum SwitchError {
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
     Collisions { paths: Vec<String> },
+    #[error(
+        "Files your ignore rules keep out are where discarded files would go back, so nothing \
+         was changed:{}",
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )]
+    IgnoredInTheWay { paths: Vec<String> },
+    #[error(
+        "Nothing in your last save or your unsaved changes is at {}, so nothing was changed.",
+        escape(path, false)
+    )]
+    NoMatch { path: String },
     #[error(transparent)]
     Resolve(#[from] ResolveError),
     #[error(transparent)]
@@ -63,6 +87,12 @@ impl SwitchError {
                  bolt goto again."
                     .to_owned(),
             ),
+            SwitchError::IgnoredInTheWay { .. } => {
+                Some("Move them somewhere else, then run bolt discard again.".to_owned())
+            }
+            SwitchError::NoMatch { .. } => {
+                Some("Check the path: bolt status lists your unsaved changes.".to_owned())
+            }
             SwitchError::Resolve(e) => e.hint(),
             SwitchError::Save(e) => e.hint_when_reading(),
             SwitchError::Repo(e) => e.hint(),
@@ -86,9 +116,40 @@ pub fn goto(
     git_excludes: Option<&Path>,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<GotoOutcome, SwitchError> {
+    locked(repo, command, on_wait, |repo, lock, earlier| {
+        go(repo, lock, target, who, command, git_excludes, earlier)
+    })
+}
+
+/// Makes `paths` (project paths, a folder standing for everything in it), or the whole folder
+/// without any, match the save the project is on: changed and deleted files put back, new ones
+/// removed, with a safety copy of what each changed or new one held (decision 050). The project
+/// stays on its save; a diary entry records the safety copies. Ignored files, project links,
+/// entries kept unwritten and nested projects are never touched. Files in use stop it as they
+/// stop `goto`. `git_excludes` is read as `goto` reads it.
+pub fn discard(
+    repo: &mut Repository,
+    paths: Option<&[String]>,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    on_wait: &mut dyn FnMut(&str),
+) -> Result<DiscardOutcome, SwitchError> {
+    locked(repo, command, on_wait, |repo, lock, earlier| {
+        throw_away(repo, lock, paths, who, command, git_excludes, earlier)
+    })
+}
+
+/// Runs `f` under the lock for changes, once a switch that was stopped is finished.
+fn locked<T>(
+    repo: &mut Repository,
+    command: &str,
+    on_wait: &mut dyn FnMut(&str),
+    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier) -> Result<T, SwitchError>,
+) -> Result<T, SwitchError> {
     let lock = repo.lock_for_change(command, on_wait)?;
     let mut earlier = Earlier::default();
-    // Kept with the store's warnings, so it is told even if the goto then fails.
+    // Kept with the store's warnings, so it is told even if the command then fails.
     if let Some(done) = writeout::finish_interrupted(repo, &lock)? {
         for w in done.warnings {
             if !LISTED.contains(&w.kind) {
@@ -100,20 +161,85 @@ pub fn goto(
             not_written: done.not_written,
         };
     }
-    let result = go(
-        repo,
-        &lock,
-        target,
-        who,
-        command,
-        git_excludes,
-        &mut earlier,
-    );
-    // What a goto that stopped early didn't take into its own warnings.
+    let result = f(repo, &lock, &mut earlier);
+    // What a command that stopped early didn't take into its own warnings.
     for w in earlier.warnings() {
         repo.store().note(w);
     }
     result
+}
+
+fn throw_away(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    paths: Option<&[String]>,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    earlier: &mut Earlier,
+) -> Result<DiscardOutcome, SwitchError> {
+    let (head, entry) = repo.current()?;
+    let from = tip_of(&entry)?;
+    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    // A switch to the save the folder is on that removes new files too.
+    let plan = writeout::plan(repo, from, from, paths, true, drive, git_excludes)?;
+    if !plan.collisions.is_empty() {
+        return Err(SwitchError::IgnoredInTheWay {
+            paths: plan.collisions,
+        });
+    }
+    for path in paths.unwrap_or_default() {
+        let reached = plan.actions.iter().any(|a| writeout::within(&a.path, path));
+        if !reached && !path.is_empty() && !writeout::holds(repo, from, path)? {
+            return Err(SwitchError::NoMatch { path: path.clone() });
+        }
+    }
+    let files = |removing: bool| -> Vec<String> {
+        let wanted = |c: Change| match c {
+            Change::RemoveFile => removing,
+            Change::File(_) | Change::Executable(_) | Change::Link(_) => !removing,
+            Change::MakeFolder | Change::RemoveFolder => false,
+        };
+        plan.actions
+            .iter()
+            .filter(|a| wanted(a.change))
+            .map(|a| a.path.clone())
+            .collect()
+    };
+    let (restored, removed) = (files(false), files(true));
+    if plan.actions.is_empty() {
+        return Ok(DiscardOutcome {
+            restored,
+            removed,
+            applied: switch_warnings(plan, Applied::default(), earlier),
+            safety_copies: 0,
+        });
+    }
+    let to_make = Switch {
+        head,
+        from,
+        state: entry.state.clone(),
+        plan,
+        drive,
+    };
+    let (applied, safety_copies) = switch(repo, lock, to_make, who, command, earlier)?;
+    // What had changed again since the plan stays as it is.
+    let done = |list: Vec<String>| -> Vec<String> {
+        list.into_iter()
+            .filter(|p| {
+                !applied
+                    .changed_since_plan
+                    .iter()
+                    .any(|left| writeout::within(p, left))
+            })
+            .collect()
+    };
+    Ok(DiscardOutcome {
+        restored: done(restored),
+        removed: done(removed),
+        applied,
+        safety_copies,
+    })
 }
 
 fn go(

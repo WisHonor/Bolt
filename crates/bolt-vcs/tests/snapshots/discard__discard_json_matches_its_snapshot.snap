@@ -1,0 +1,18 @@
+---
+source: crates/bolt-vcs/tests/discard.rs
+expression: "discard_json(&env, &[])"
+---
+{
+  "bolt_json": 1,
+  "files_in_use": [],
+  "not_written": [],
+  "placeholders": [],
+  "removed": [
+    "n.txt"
+  ],
+  "restored": [
+    "a.txt"
+  ],
+  "safety_copies": 2,
+  "warnings": []
+}

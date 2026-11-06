@@ -201,6 +201,21 @@ pub fn plan(
     Ok(plan)
 }
 
+/// Whether the save `save` holds an entry at `path`, spelled exactly so.
+pub fn holds(repo: &Repository, save: Id, path: &str) -> Result<bool, SaveError> {
+    let store = repo.store();
+    let root = store.save(&save, repo.signatures_allowed())?.root;
+    let stored = HashMap::new();
+    // Exact names only, so the drive's way of comparing them doesn't matter.
+    let drive = Drive {
+        ignores_case: false,
+        composes_unicode: false,
+    };
+    Ok(Tree::new(store, &stored, root, drive)
+        .entry(path)?
+        .is_some())
+}
+
 /// Stores in `packs` what carrying out `actions` would overwrite or remove that the save `from`
 /// doesn't hold at the same path, and lists it by path: the safety copies (decision 050). An
 /// entry that is no longer what the plan found is left by the switch, so it needs none.
@@ -1053,7 +1068,8 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
     path.match_indices('/').filter_map(|(at, _)| path.get(..at))
 }
 
-fn within(path: &str, top: &str) -> bool {
+/// Whether `path` is `top` or below it; `""` is the whole project.
+pub(crate) fn within(path: &str, top: &str) -> bool {
     top.is_empty()
         || path == top
         || path

@@ -3,6 +3,7 @@
 mod import_output;
 mod output;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bolt_core::config::{
@@ -16,12 +17,13 @@ use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, 
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
+use bolt_core::names::{GivenPathError, project_path};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
-use bolt_core::switch::{SwitchError, goto};
+use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
@@ -68,6 +70,12 @@ enum Command {
     Show { save: Option<String> },
     /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
     Goto { target: String },
+    /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
+    /// of each changed or new file is kept.
+    Discard {
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
 }
 
 impl From<RepoError> for Failure {
@@ -120,6 +128,18 @@ impl From<SwitchError> for Failure {
     fn from(e: SwitchError) -> Failure {
         Failure {
             hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<GivenPathError> for Failure {
+    fn from(e: GivenPathError) -> Failure {
+        Failure {
+            hint: Some(
+                "Name files and folders inside the project, from the folder you are in.".into(),
+            ),
             message: e.to_string(),
             printed: false,
         }
@@ -655,6 +675,68 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
     Ok(())
 }
 
+fn discard_command(
+    json: bool,
+    given: &[PathBuf],
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let paths = given
+        .iter()
+        .map(|p| project_path(repo.root(), &here, p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let done = discard(
+        repo,
+        (!paths.is_empty()).then_some(&paths[..]),
+        &who,
+        "discard",
+        git_excludes.as_deref(),
+        &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
+    )?;
+    let mut warnings = done.applied.warnings.clone();
+    warnings.extend(repo.store().warnings());
+    if json {
+        println!(
+            "{}",
+            json!({
+                "bolt_json": BOLT_JSON,
+                "restored": done.restored,
+                "removed": done.removed,
+                "not_written": done.applied.not_written,
+                "placeholders": done.applied.placeholders,
+                "files_in_use": done.applied.in_use,
+                "safety_copies": done.safety_copies,
+                "warnings": output::warnings_json(&warnings),
+            })
+        );
+    } else {
+        let n = done.restored.len() + done.removed.len();
+        let files = if n == 1 {
+            "1 file"
+        } else {
+            &format!("{n} files")
+        };
+        // A deleted file put back loses nothing, so it needs no copy.
+        let copies = match done.safety_copies {
+            0 => String::new(),
+            k if k == n && n == 1 => " (a safety copy of it was kept)".into(),
+            k if k == n => " (a safety copy of each was kept)".into(),
+            1 => " (a safety copy of the 1 that held unsaved work was kept)".into(),
+            k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
+        };
+        match (n, paths.is_empty()) {
+            (0, true) => println!("Nothing to discard: your files match your last save."),
+            (0, false) => println!("Nothing to discard there: it matches your last save."),
+            _ => println!("Threw away your unsaved changes in {files}{copies}."),
+        }
+    }
+    output::print_warnings(&warnings);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // The project a command opens is kept here, so that if the command fails, the error can list
@@ -671,6 +753,7 @@ fn main() -> ExitCode {
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
+        Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

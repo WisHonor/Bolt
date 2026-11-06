@@ -1,6 +1,6 @@
 # Bolt `--json` Formats
 
-> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05, `goto` 2026-11-06. It holds every document and every kind of warning these seven commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
+> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05, `goto` and `discard` 2026-11-06. It holds every document and every kind of warning these eight commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
 
 **In plain words.** Every Bolt command takes `--json`. Instead of text for people, it then prints one JSON document that a script, an editor plugin or the desktop app can read. This page says what is in each document, what each field means, and what `null` means where it can appear. The formats are a public interface: they are versioned, and the CLI tests keep them from changing by accident.
 
@@ -112,6 +112,21 @@ Saving gives one of two documents, told apart by `result`.
 | `placeholders` | list of string | The paths of links written as plain files holding their targets (see `placeholders_written` in §4). `[]` if none. |
 | `files_in_use` | list of string | Always `[]` here: when another program holds files the switch must write (Windows), `goto` writes the rest and then fails (exit code 1) with the files named in `error`, and the failure document's warnings include `files_in_use` (§4). The switch isn't finished then: `head` and `.bolt/state/journal` stay, `status` gives `switch_unfinished`, and the next command that changes the project finishes it. |
 | `safety_copies` | number | How many safety copies of unsaved work the switch kept. `goto` never overwrites unsaved work, so it is `0` for now. |
+| `warnings` | list | See §4. |
+
+### `bolt discard --json`
+
+`bolt discard [paths]` throws away unsaved changes: in those files and folders (a folder means everything in it; paths are taken from the folder the command runs in), or everywhere without any. Changed and deleted files are put back as the current save has them and new ones are removed, each changed or new one with a safety copy listed in the diary entry; the project stays on its save. Ignored files the save doesn't hold, entries this computer can't hold, project links and nested projects are never touched ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)). With nothing to throw away it records nothing and both lists are `[]`. A path outside the project, in `.bolt`, or matching nothing in the save or among the unsaved changes fails the command (exit code 1) before anything changes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `restored` | list of string | The paths of the files and links put back: changed or deleted ones. `[]` if none. |
+| `removed` | list of string | The paths of the new files and links removed. `[]` if none. |
+| `not_written` | list of string | As in `goto`. |
+| `placeholders` | list of string | As in `goto`. |
+| `files_in_use` | list of string | Always `[]` here: files another program holds fail the command as they fail `goto`, and the next command that changes the project finishes it. |
+| `safety_copies` | number | How many safety copies were kept: one for each changed or new file thrown away (a deleted file needs none). |
 | `warnings` | list | See §4. |
 
 ### `bolt history --json`

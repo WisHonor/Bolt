@@ -4,9 +4,11 @@
 //! [`is_git_alias`] and [`is_bolt_alias`] spot the spellings of `.git` and `.bolt`, [`own_folder`]
 //! the project's own ones, [`holdable_here`] says whether this system can hold a name,
 //! [`writable_here`] whether write-out may write one, and [`fold`] compares names as a drive does.
+//! [`project_path`] turns a path typed on the command line into a project path.
 //! The limits on names and paths are here too (decision 051).
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::drive::Drive;
@@ -381,9 +383,93 @@ pub fn folder_problems(names: &[&str]) -> Vec<PortabilityProblem> {
     out
 }
 
+/// Why a path given on the command line isn't one of the project's. Messages escape it.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GivenPathError {
+    #[error("{} is outside the project.", escape(.0, false))]
+    Outside(String),
+    #[error("{} is in .bolt, Bolt's own folder, which holds none of your files.", escape(.0, false))]
+    InBolt(String),
+    #[error("{} isn't a path Bolt can use: {}.", escape(.0, false), .1)]
+    Invalid(String, NameError),
+    #[error("{} isn't a path Bolt can use: it isn't valid Unicode.", escape(.0, false))]
+    NotUnicode(String),
+}
+
+/// The project path of `given`, a path typed in the folder `here`, for a project at `root`:
+/// `/` between names, `""` for the whole project. Both folders are as `repo::resolved` gives
+/// them. `..` is taken away by name, as a shell does, without following links.
+pub fn project_path(root: &Path, here: &Path, given: &Path) -> Result<String, GivenPathError> {
+    let shown = || given.to_string_lossy().into_owned();
+    let mut full = PathBuf::new();
+    for part in here.join(given).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                full.pop();
+            }
+            other => full.push(other),
+        }
+    }
+    // shortcut: compared as typed, so another spelling of the root (other letter case on
+    // Windows, say) reads as outside; fine while paths are typed relative to the folder.
+    let Ok(inside) = full.strip_prefix(root) else {
+        return Err(GivenPathError::Outside(shown()));
+    };
+    let mut names = Vec::new();
+    for part in inside.components() {
+        let name = part
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| GivenPathError::NotUnicode(shown()))?;
+        names.push(name);
+    }
+    if names.first().is_some_and(|top| is_bolt_alias(top)) {
+        return Err(GivenPathError::InBolt(shown()));
+    }
+    let path = names.join("/");
+    if !path.is_empty() {
+        validate_path(&path).map_err(|e| GivenPathError::Invalid(shown(), e))?;
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn given_paths_become_project_paths() {
+        let root = Path::new(if cfg!(windows) { r"C:\p" } else { "/p" });
+        let sub = root.join("dir");
+        let at = |here: &Path, given: &str| project_path(root, here, Path::new(given));
+        assert_eq!(at(root, "a.txt"), Ok("a.txt".into()));
+        assert_eq!(at(&sub, "c.txt"), Ok("dir/c.txt".into()));
+        assert_eq!(at(&sub, "../a.txt"), Ok("a.txt".into()));
+        assert_eq!(at(&sub, "./x/../y/"), Ok("dir/y".into()));
+        assert_eq!(at(&sub, ".."), Ok(String::new()));
+        assert_eq!(
+            at(root, &sub.join("c.txt").to_string_lossy()),
+            Ok("dir/c.txt".into())
+        );
+        assert!(matches!(at(root, "../x"), Err(GivenPathError::Outside(_))));
+        assert!(matches!(
+            at(&sub, "../../p2/x"),
+            Err(GivenPathError::Outside(_))
+        ));
+        assert!(matches!(
+            at(root, ".bolt/state"),
+            Err(GivenPathError::InBolt(_))
+        ));
+        assert!(matches!(
+            at(&sub, "../.BOLT"),
+            Err(GivenPathError::InBolt(_))
+        ));
+        assert!(matches!(
+            at(root, "a/.bolt"),
+            Err(GivenPathError::Invalid(..))
+        ));
+    }
 
     #[test]
     fn always_on_rules() {
