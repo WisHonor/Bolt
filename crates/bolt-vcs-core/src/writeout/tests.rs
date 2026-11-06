@@ -410,6 +410,10 @@ fn modes_are_exactly_0644_and_0755() {
     );
     // What the file had before doesn't count.
     fs::set_permissions(dir.path().join("plain"), fs::Permissions::from_mode(0o666)).unwrap();
+    // A mode change writes the file anew, so another name linked to it keeps its mode.
+    let outside = tempfile::tempdir().unwrap();
+    let linked = outside.path().join("flip");
+    fs::hard_link(dir.path().join("flip"), &linked).unwrap();
     let b = planted(
         &mut repo,
         &[
@@ -424,6 +428,8 @@ fn modes_are_exactly_0644_and_0755() {
         (mode("plain"), mode("tool"), mode("flip")),
         (0o644, 0o755, 0o755)
     );
+    let theirs = fs::metadata(&linked).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(theirs, 0o644);
 }
 
 #[test]

@@ -207,7 +207,6 @@ fn rt5_3_goto_by_the_change_id_history_shows_reaches_that_save() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "RT5-4: goto sets the executable bit through a hard link, on a file outside the project"]
 fn rt5_4_goto_never_changes_a_file_outside_through_a_hard_link() {
     use std::os::unix::fs::PermissionsExt;
     let outside = tempfile::tempdir().unwrap();

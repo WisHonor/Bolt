@@ -818,16 +818,12 @@ impl Run<'_> {
             && f.size == c.size
             && f.id == Some(c.id)
             && matches!(f.kind, Some(EntryKind::File | EntryKind::Executable))
+            && (f.kind == Some(kind) || cfg!(windows))
         {
-            if f.kind == Some(kind) || cfg!(windows) {
-                return Ok(Outcome::Nothing);
-            }
-            // Only the executable bit differs.
-            return match self.folders.here().set_executable(os, executable) {
-                Ok(()) => Ok(Outcome::Wrote),
-                Err(e) => classify(e),
-            };
+            return Ok(Outcome::Nothing);
         }
+        // Where only the executable bit differs the file is written anew too: changing its mode
+        // in place would change it for every other name a hard link gives it, outside included.
         let ours = |f: &Found| f.is(a.expected) || (renaming.is_some() && f.is_content(kind, c));
         match &found {
             None => {}
