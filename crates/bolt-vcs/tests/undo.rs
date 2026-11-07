@@ -105,6 +105,19 @@ fn undo_of_a_save_moves_the_line_back_and_keeps_the_files() {
 }
 
 #[test]
+fn undo_json_leaves_the_change_id_cache_as_it_was() {
+    let env = project(&[("a.txt", "a\n")]);
+    write(&env, "a.txt", "A\n");
+    ok(&env, &["save", "Change a"]);
+    let cache = env.root().join(".bolt/cache/change-ids");
+    let before = fs::read(&cache).unwrap();
+    // The cache knows main at the save undone, so naming that save, which the document never
+    // does, would read the line from where main went back to, and write it again.
+    ok(&env, &["undo", "--json"]);
+    assert_eq!(fs::read(&cache).unwrap(), before);
+}
+
+#[test]
 fn redo_of_a_save_moves_it_forward_again() {
     let env = project(&[("a.txt", "a\n")]);
     write(&env, "a.txt", "A\n");
@@ -376,6 +389,45 @@ fn an_undo_that_stops_part_way_says_why_and_what_it_took_when_stdout_fails() {
         );
         assert!(said.contains("Undid discard"), "{said}");
     }
+}
+
+/// `bolt undo 2` after a discard, which undoes the discard and then stops on a.txt, with every
+/// flush after a head move failing and `stdout` as its output: how it ended, and its stderr.
+#[cfg(feature = "fault-injection")]
+fn undo_two_unflushed(stdout: impl FnOnce(&Env) -> std::process::Stdio) -> (Option<i32>, String) {
+    let (env, _, _) = after_a_goto();
+    write(&env, "n.txt", "new\n");
+    ok(&env, &["discard"]);
+    write(&env, "a.txt", "mine\n");
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["undo", "2"])
+        .env("BOLT_FAULT_FAIL", "head:renamed")
+        .stdout(stdout(&env))
+        .output()
+        .unwrap();
+    (out.status.code(), text(&out.stderr))
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_undo_that_stops_part_way_warns_once_of_a_step_it_couldnt_flush_whatever_stdout_does() {
+    let warned_once = |(code, said): (Option<i32>, String)| {
+        assert_eq!(code, Some(1), "{said}");
+        let unflushed = "warning: The command happened, but Bolt couldn't flush .bolt/state";
+        assert_eq!(said.matches(unflushed).count(), 1, "{said}");
+    };
+    warned_once(undo_two_unflushed(|_| std::process::Stdio::piped()));
+    // Its reader gone, and a stdout every write to fails.
+    warned_once(undo_two_unflushed(|_| {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        writer.into()
+    }));
+    #[cfg(any(windows, target_os = "linux"))]
+    warned_once(undo_two_unflushed(|env| {
+        support::failing_stdout(env).into()
+    }));
 }
 
 #[test]

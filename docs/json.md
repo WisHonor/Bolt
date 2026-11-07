@@ -436,7 +436,7 @@ Stdout itself may not take what a command prints there, its document included: a
 
 1. Its own error, if it failed: `error:` with the message, then `hint:`. An `undo N` or `redo N` that stopped part way then gives the steps it took before stopping, as its text output says them.
 2. Its warnings, `warning:` with each message, each once: what it had found by then. A command that prints as it reads finds most of its warnings at the end, so one stopped early gives only those it had found, such as `history`'s `switch_unfinished`.
-3. Only when a write failed, not when the reader has gone: `error: Bolt couldn't write its output:` and why. A command that changed the project did its work all the same, and the hint says so.
+3. Only when a write failed, not when the reader has gone: `error: Bolt couldn't write its output:` and why. A command that finished and changed the project did its work all the same, and the hint says so.
 
 The exit code is the command's own: 0 when it succeeded and only the reader went, 1 when it failed or a write failed. A line stderr can't take is lost, and never stops Bolt: its reader may have gone too (`bolt status 2>&1 | true`).
 

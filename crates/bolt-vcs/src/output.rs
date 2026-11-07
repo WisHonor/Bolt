@@ -615,13 +615,14 @@ const DONE: &str = "The command did its work all the same: only what Bolt printe
 /// lists them there instead), and `failure` comes back for [`print_error`].
 ///
 /// When stdout couldn't take it (its reader went, or a write failed), stderr gets it as text, in
-/// this order: the command's own `failure`, with `taken`, what an `undo` or `redo` took before it
-/// stopped, as its text says it; then `warnings`, each once; then, only if a write failed, that
-/// it did, with `done`, what the command did all the same, as the hint. It all comes back told:
-/// the command's failure, or the write's; or nothing if it succeeded and only the reader went.
+/// this order: the command's own `failure`, with the text `taken` makes, only then, of what an
+/// `undo` or `redo` took before it stopped; then `warnings`, each once; then, only if a write
+/// failed, that it did, with `done`, what the command did all the same, as the hint. It all
+/// comes back told: the command's failure, or the write's; or nothing if it succeeded and only
+/// the reader went.
 pub fn ended(
     failure: Option<Failure>,
-    taken: &str,
+    taken: impl FnOnce() -> String,
     warnings: &[Warning],
     done: Option<&str>,
 ) -> Result<(), Failure> {
@@ -634,7 +635,7 @@ pub fn ended(
     if let Some(failure) = &failure {
         tell_failure(failure);
     }
-    let _ = write!(io::stderr().lock(), "{taken}");
+    let _ = write!(io::stderr().lock(), "{}", taken());
     print_warnings(warnings);
     let wrote = FAILED.get().map(|(_, why)| Failure {
         message: why.clone(),
@@ -656,25 +657,30 @@ pub fn ended(
 /// Prints `text` on stdout, then ends the command with `warnings` ([`ended`]).
 pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
     print_out(text);
-    ended(None, "", warnings, None)
+    ended(None, String::new, warnings, None)
 }
 
 /// [`print_quietly`], for a command that changed the project: if a write fails, the hint says the
 /// change stands.
 pub fn print_done(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
     print_out(text);
-    ended(None, "", warnings, Some(DONE))
+    ended(None, String::new, warnings, Some(DONE))
 }
 
 /// Ends a command that printed as it read ([`ended`]): `done` is how that went, with the warnings
-/// it found by the end; `found` gives those it had so far, for when stdout stopped it first.
+/// it found by the end; `found` gives those it had so far, for when stdout stopped it first. Once
+/// stdout is lost, a failure in `done` is stdout's own, unless it is `printed`: then it is the
+/// command's, in the document stdout lost.
 pub fn listed(
     done: Result<Vec<Warning>, Failure>,
     found: impl FnOnce() -> Vec<Warning>,
 ) -> Result<(), Failure> {
     match done {
-        Ok(warnings) => ended(None, "", &warnings, None),
-        Err(_) if lost() => ended(None, "", &found(), None),
+        Ok(warnings) => ended(None, String::new, &warnings, None),
+        Err(failure) if failure.printed && lost() => {
+            ended(Some(failure), String::new, &found(), None)
+        }
+        Err(_) if lost() => ended(None, String::new, &found(), None),
         Err(failure) => Err(failure),
     }
 }
@@ -760,30 +766,34 @@ fn document_end(more: Value, warnings: &[Warning], failure: Option<&Failure>) ->
 ///
 /// If `walk` fails before its first item, nothing is written and the failure comes back as it is,
 /// for the caller to print as a document of its own. If it fails later, the document is closed
-/// with the error in it instead of being cut off, and the failure comes back marked `printed`.
+/// with the error in it instead of being cut off, and the failure comes back marked `printed`,
+/// even when stdout loses that end: [`ended`] then tells it. If a write fails, the document stops
+/// there, and that failure comes back.
 pub fn stream_document<W: Write>(
     out: &mut W,
     opening: &str,
     walk: impl FnOnce(&mut dyn FnMut(&dyn fmt::Display) -> Result<(), Failure>) -> Result<(), Failure>,
     end: impl FnOnce() -> (Value, Vec<Warning>),
 ) -> Result<Vec<Warning>, Failure> {
-    let mut begun = false;
+    let (mut begun, mut cut) = (false, false);
     let mut item = |value: &dyn fmt::Display| -> Result<(), Failure> {
-        write!(out, "{}{value}", if begun { "," } else { opening })?;
+        let wrote = write!(out, "{}{value}", if begun { "," } else { opening });
+        cut |= wrote.is_err();
+        wrote?;
         begun = true;
         Ok(())
     };
     match walk(&mut item) {
-        Err(failure) if !begun => Err(failure),
+        Err(failure) if !begun || cut => Err(failure),
         walked => {
             let (more, warnings) = end();
             if !begun {
                 write!(out, "{opening}")?;
             }
             let closing = document_end(more, &warnings, walked.as_ref().err());
-            writeln!(out, "{closing}")?;
+            let closed = writeln!(out, "{closing}");
             match walked {
-                Ok(()) => Ok(warnings),
+                Ok(()) => closed.map(|()| warnings).map_err(Failure::from),
                 Err(failure) => Err(Failure {
                     printed: true,
                     ..failure
@@ -806,7 +816,7 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
             printed: true,
             ..failure.clone()
         };
-        let _ = ended(Some(in_document), "", warnings, None);
+        let _ = ended(Some(in_document), String::new, warnings, None);
         return;
     }
     let told: Vec<Warning> = warnings
@@ -1137,6 +1147,66 @@ mod tests {
         let failure = ended.unwrap_err();
         assert!(!failure.printed);
         assert_eq!(failure.message, "Can't read it.");
+    }
+
+    /// Takes `room` bytes, then refuses every write.
+    struct Full {
+        held: Vec<u8>,
+        room: usize,
+    }
+
+    impl Write for Full {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.held.len() + buf.len() > self.room {
+                return Err(io::Error::other("the disk is full"));
+            }
+            self.held.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const ONE: &str = r#"{"message":"one"}"#;
+
+    /// Streams a document whose walk fails into a writer with room for the opening and `ONE`
+    /// only: the failure that comes back.
+    fn stream_into_full(
+        walk: impl FnOnce(
+            &mut dyn FnMut(&dyn fmt::Display) -> Result<(), Failure>,
+        ) -> Result<(), Failure>,
+    ) -> Failure {
+        let mut out = Full {
+            held: Vec::new(),
+            room: SAVES.len() + ONE.len(),
+        };
+        stream_document(&mut out, SAVES, walk, || (json!({}), vec![damaged()])).unwrap_err()
+    }
+
+    #[test]
+    fn a_stream_that_cant_be_written_gives_back_its_own_failure_or_the_writes() {
+        // The walk failed after an item, and the end with its error couldn't be written: its
+        // failure, as in the document, for `ended` to tell.
+        let back = stream_into_full(|each| {
+            each(&ONE)?;
+            Err(failure())
+        });
+        assert_eq!(
+            (back.message.as_str(), back.printed),
+            ("Can't read it.", true)
+        );
+        // A write that fails stops it there: the write's failure.
+        let back = stream_into_full(|each| {
+            each(&ONE)?;
+            each(&ONE)?;
+            Err(failure())
+        });
+        assert_eq!(
+            (back.message.as_str(), back.printed),
+            ("the disk is full", false)
+        );
     }
 
     #[test]

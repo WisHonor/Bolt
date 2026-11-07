@@ -2162,6 +2162,44 @@ fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_s
 }
 
 #[test]
+fn a_json_listing_tells_the_error_it_ended_with_when_stdout_loses_the_end() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    env.overwrite("a.txt", "a\n");
+    env.overwrite("b.txt", "b\n");
+    env.bolt().args(["save", "Two files"]).assert().success();
+    let top = support::top_folder(env.root());
+    let b = top.entries().iter().find(|e| e.name == "b.txt").unwrap().id;
+    rot(env.root(), &b);
+    env.overwrite("a.txt", "A\n");
+    env.overwrite("b.txt", "B\n");
+    // a.txt is listed, then b.txt's saved copy can't be read, and the document ends with that.
+    let out = env.bolt().args(["changes", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["changes"].as_array().unwrap().len(), 1, "{doc}");
+    let error = format!("error: {}\n", doc["error"]["message"].as_str().unwrap());
+    // The items wait in stdout's buffer, so the document's end is the write that meets the gone
+    // reader, or fails.
+    let (code, said) = with_reader_gone(&env, &["changes", "--json"]);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(said.starts_with(&error), "{said}");
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let out = env
+            .bolt_process_in(env.root())
+            .args(["changes", "--json"])
+            .stdout(support::failing_stdout(&env))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let said = text(&out.stderr);
+        let lost = said.find("error: Bolt couldn't write its output: ");
+        assert!(said.starts_with(&error) && lost.is_some(), "{said}");
+    }
+}
+
+#[test]
 fn every_command_ends_quietly_when_its_reader_has_gone() {
     let mut loud = Vec::new();
     let mut quiet = |env: &support::Env, args: &[&str]| {

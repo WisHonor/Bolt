@@ -691,7 +691,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         }
         Ok(())
     })();
-    output::ended(None, "", &warnings, None)
+    output::ended(None, String::new, &warnings, None)
 }
 
 /// Why `bolt changes` stopped: a file couldn't be read, or what it shows couldn't be written.
@@ -1193,12 +1193,11 @@ fn undo_command(
     } else {
         ("Undid", "undone", "undo")
     };
-    // The text output; with --json, what stderr gets if stdout can't take the document. A
-    // document gives saves whole, so naming them here adds nothing to its warnings.
-    let mut text_only = Vec::new();
-    let mut text = String::new();
-    {
-        let into = if json { &mut text_only } else { &mut warnings };
+    let failed = failure.is_some();
+    let to = to.map(|to| escape(to, false));
+    // The text output; problems met naming its saves go to `into`.
+    let text_of = |into: &mut Vec<Warning>| {
+        let mut text = String::new();
         let mut named = |id: &Id| named_save(repo, id, into);
         for t in &taken {
             if head_lost {
@@ -1210,51 +1209,52 @@ fn undo_command(
             }
             text.push('\n');
         }
-    }
-    for (label, _) in &shelved {
-        let label = escape(label, false);
-        text += &format!("Set your unsaved changes in the way aside on shelf {label}.\n");
-    }
-    let to = to.map(|to| escape(to, false));
-    if finished {
-        let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
-        text += &match &to {
-            Some(to) => format!(
-                "Finished the {what} that was stopped, so nothing more was done. Running bolt \
-                 undo --to {to} again goes on from there.\n"
-            ),
-            None => format!(
-                "Finished the {what} that was stopped, so nothing more was {list}. Running bolt \
-                 {command} again takes one more step.\n"
-            ),
-        };
-    }
-    match (&failure, &to) {
-        (Some(_), Some(to)) if !taken.is_empty() => {
-            // On the way to an entry the steps are all undos, or all redos.
-            let verb = match taken.first().map(|t| &t.action) {
-                Some(Action::Redo(_)) => "Redid",
-                _ => "Undid",
+        for (label, _) in &shelved {
+            let label = escape(label, false);
+            text += &format!("Set your unsaved changes in the way aside on shelf {label}.\n");
+        }
+        if finished {
+            let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
+            text += &match &to {
+                Some(to) => format!(
+                    "Finished the {what} that was stopped, so nothing more was done. Running \
+                     bolt undo --to {to} again goes on from there.\n"
+                ),
+                None => format!(
+                    "Finished the {what} that was stopped, so nothing more was {list}. Running \
+                     bolt {command} again takes one more step.\n"
+                ),
             };
-            let k = taken.len();
-            let steps = if k == 1 { "step" } else { "steps" };
-            text += &format!("{verb} {k} {steps} on the way to entry {to} before one stopped.\n");
         }
-        (Some(_), None) if !taken.is_empty() => {
-            let (k, n) = (taken.len(), steps.n);
-            text += &format!("{verb} {k} of the {n} steps asked for.\n");
+        match (failed, &to) {
+            (true, Some(to)) if !taken.is_empty() => {
+                // On the way to an entry the steps are all undos, or all redos.
+                let verb = match taken.first().map(|t| &t.action) {
+                    Some(Action::Redo(_)) => "Redid",
+                    _ => "Undid",
+                };
+                let k = taken.len();
+                let steps = if k == 1 { "step" } else { "steps" };
+                text +=
+                    &format!("{verb} {k} {steps} on the way to entry {to} before one stopped.\n");
+            }
+            (true, None) if !taken.is_empty() => {
+                let (k, n) = (taken.len(), steps.n);
+                text += &format!("{verb} {k} of the {n} steps asked for.\n");
+            }
+            (false, Some(to)) if !finished && taken.is_empty() => {
+                text += &format!(
+                    "Nothing changed: things are already as they were right after entry {to}.\n"
+                );
+            }
+            (false, None) if !finished && taken.len() < req.n => {
+                let more = if taken.is_empty() { "" } else { " more" };
+                text += &format!("Nothing{more} to {command}.\n");
+            }
+            _ => {}
         }
-        (None, Some(to)) if !finished && taken.is_empty() => {
-            text += &format!(
-                "Nothing changed: things are already as they were right after entry {to}.\n"
-            );
-        }
-        (None, None) if !finished && taken.len() < req.n => {
-            let more = if taken.is_empty() { "" } else { " more" };
-            text += &format!("Nothing{more} to {command}.\n");
-        }
-        _ => {}
-    }
+        text
+    };
     if json {
         warnings.extend(repo.store().warnings());
         let warnings = told_once(warnings);
@@ -1285,8 +1285,12 @@ fn undo_command(
             printed: true,
             ..failure
         };
-        return output::ended(Some(in_document), &text, &warnings, None);
+        // Made only for stderr, if stdout lost the document. That gives saves whole, so naming them
+        // adds nothing to its warnings.
+        let text = || text_of(&mut Vec::new());
+        return output::ended(Some(in_document), text, &warnings, None);
     }
+    let text = text_of(&mut warnings);
     match failure {
         None => {
             warnings.extend(repo.store().warnings());
@@ -1294,7 +1298,10 @@ fn undo_command(
         }
         Some(failure) => {
             output::print_out(&text);
-            output::ended(Some(failure), &text, &told_once(warnings), None)
+            // Plus the store's warnings that a failure tells, such as a head move not flushed.
+            let kept = repo.store().warnings().into_iter();
+            warnings.extend(kept.filter(|w| warning::told_on_failure(w.kind)));
+            output::ended(Some(failure), || text, &told_once(warnings), None)
         }
     }
 }
