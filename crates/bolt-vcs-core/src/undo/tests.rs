@@ -8,7 +8,7 @@ use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
 use crate::switch::{discard, goto};
 use crate::test_support::{plant_save, symlink};
 use crate::warning;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
 fn who() -> Person {
@@ -315,6 +315,7 @@ fn the_steps_warnings_are_told_as_one_commands() {
         Taken {
             step: Id([1; 32]),
             entry: entry.clone(),
+            action: Action::Undo(Id([1; 32])),
             before: state.clone(),
             after: state.clone(),
             effects: vec![],
@@ -525,4 +526,50 @@ fn undo_writes_a_link_through_a_folder_only_the_save_it_writes_has() {
     let link = fs::symlink_metadata(root.join("l")).unwrap();
     assert!(link.file_type().is_symlink(), "written as a plain file");
     assert_eq!(fs::read(root.join("l")).unwrap(), b"x");
+}
+
+#[test]
+fn an_entry_is_named_by_digits_no_other_entry_starts_with() {
+    // Two entries whose IDs share their first 8 hex digits, the newer one after the older.
+    let older = Id([0xab; 32]);
+    let mut bytes = [0xab; 32];
+    bytes[4] = 0;
+    let newer = Id(bytes);
+    let entry = |parent| DiaryEntry {
+        parent,
+        action: Action::Command,
+        command: "save".into(),
+        who: who(),
+        bolt_version: String::new(),
+        state: State {
+            lines: BTreeMap::new(),
+            tags: None,
+            position: Position::AtSave(Id([0; 32])),
+            shelves: vec![],
+            server_lines: None,
+        },
+        folder_change: None,
+    };
+    let diary = HashMap::from([(newer, entry(Some(older))), (older, entry(None))]);
+    let mut read = |id: &Id| {
+        let found = diary.get(id).cloned();
+        found.ok_or_else(|| RepoError::Damaged {
+            detail: id.to_hex(),
+        })
+    };
+    match entry_named("abababab", newer, &mut read) {
+        Err(SwitchError::EntryAmbiguous { entries, .. }) => assert_eq!(entries, [newer, older]),
+        other => panic!("{other:?}"),
+    }
+    // One digit more tells them apart.
+    assert_eq!(
+        entry_named("ababababab", newer, &mut read).unwrap().0,
+        older
+    );
+    assert_eq!(
+        entry_named("abababab00", newer, &mut read).unwrap().0,
+        newer
+    );
+    let none = entry_named("abababac", newer, &mut read);
+    assert!(matches!(none, Err(SwitchError::NoEntry { .. })), "{none:?}");
 }

@@ -11,7 +11,6 @@ pub(crate) type Read<'a> = dyn FnMut(&Id) -> Result<DiaryEntry, RepoError> + 'a;
 
 /// Steps done and undone, each a command's entry with its ID.
 #[derive(Debug)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the undo list will use it"))]
 pub(crate) struct Steps {
     pub done: Vec<(Id, DiaryEntry)>,
     /// Whether more steps are done than `done` holds.
@@ -21,7 +20,6 @@ pub(crate) struct Steps {
 
 /// The steps at `head`: done, newest first (at most `limit`, and whether there are more), and
 /// undone, in the order redo brings them back.
-#[cfg_attr(not(test), expect(dead_code, reason = "the undo list will use it"))]
 pub(crate) fn steps(head: Id, read: &mut Read<'_>, limit: usize) -> Result<Steps, RepoError> {
     let undone = undone_steps(head, read)?;
     let mut seen = HashSet::new();

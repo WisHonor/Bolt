@@ -81,13 +81,31 @@ pub enum SwitchError {
         escape(path, false)
     )]
     NoMatch { path: String },
-    /// What is where an undo or redo would write; `shelve` when `--shelve` set aside what it could.
+    /// What is where an undo or redo would write; `shelve` when `--shelve` set aside what it could,
+    /// and `to` the entry `undo --to` was given.
     #[error("{}", in_the_way_of_step(paths, *redo, *shelve))]
     InTheWayOfStep {
         paths: Vec<String>,
         redo: bool,
         shelve: bool,
+        to: Option<String>,
     },
+    #[error(
+        "\"{}\" can't name a diary entry: that takes at least 8 hex digits of its ID.",
+        escape(text, false)
+    )]
+    NotAnEntry { text: String },
+    #[error(
+        "No diary entry from the current one back has an ID starting with {}.",
+        escape(text, false)
+    )]
+    NoEntry { text: String },
+    #[error(
+        "{} is the start of more than one diary entry's ID, so nothing was changed:{}",
+        escape(text, false),
+        listed(entries.iter().map(Id::to_hex).take(NAMED), entries.len() as u64)
+    )]
+    EntryAmbiguous { text: String, entries: Vec<Id> },
     /// The saves of a step can't be read: `tidy` removed them, or they were lost.
     #[error(
         "The step of diary entry {} can't be undone or redone: what it changed can't be read \
@@ -129,24 +147,43 @@ impl SwitchError {
             SwitchError::NoMatch { .. } => {
                 Some("Check the path: bolt status lists your unsaved changes.".to_owned())
             }
-            SwitchError::InTheWayOfStep { redo, shelve, .. } => {
-                let command = if *redo { "redo" } else { "undo" };
+            SwitchError::InTheWayOfStep {
+                redo, shelve, to, ..
+            } => {
+                let command = match to {
+                    Some(to) => format!("undo --to {}", escape(to, false)),
+                    None => (if *redo { "redo" } else { "undo" }).to_owned(),
+                };
                 if *shelve {
                     return Some(format!(
                         "Move them somewhere else, then run bolt {command} --shelve again."
                     ));
                 }
-                let why = if *redo {
-                    "each is a new step, and a new step clears what redo can bring back"
-                } else {
-                    "each is a step of its own, which the next undo would take back"
-                };
-                Some(format!(
+                let mut hint = format!(
                     "Run bolt {command} --shelve to set your changes there aside on a new shelf, \
-                     as part of the same step. Saving, shelving or discarding them first won't \
-                     help: {why}. Files Bolt ignores, and unsaved links that could come back only \
-                     as plain files, aren't set aside: move them somewhere else first."
-                ))
+                     as part of the same step."
+                );
+                // Whether saving first helps `undo --to` depends on where its entry is.
+                if to.is_none() {
+                    let why = if *redo {
+                        "each is a new step, and a new step clears what redo can bring back"
+                    } else {
+                        "each is a step of its own, which the next undo would take back"
+                    };
+                    hint +=
+                        &format!(" Saving, shelving or discarding them first won't help: {why}.");
+                }
+                hint += " Files Bolt ignores, and unsaved links that could come back only as plain \
+                         files, aren't set aside: move them somewhere else first.";
+                Some(hint)
+            }
+            SwitchError::NotAnEntry { .. } | SwitchError::NoEntry { .. } => Some(
+                "bolt undo --list shows the steps undo and redo can take with the start of each \
+                 entry's ID, and bolt undo --list --all shows every entry."
+                    .to_owned(),
+            ),
+            SwitchError::EntryAmbiguous { .. } => {
+                Some("Type more of the ID to pick one.".to_owned())
             }
             SwitchError::StepGone { .. } => Some(
                 "bolt tidy removes what steps older than the undo window changed, and a damaged \

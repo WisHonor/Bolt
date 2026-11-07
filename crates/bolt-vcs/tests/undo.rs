@@ -659,3 +659,329 @@ fn a_redo_that_fails_after_a_step_lists_that_step_in_its_document() {
     assert!(matches!(head(&env).1.action, Action::Redo(_)));
     assert_eq!(fs::read(env.root().join("b.txt")).unwrap(), b"mine\n");
 }
+
+/// Every diary entry from the newest back.
+fn diary(env: &Env) -> Vec<Id> {
+    let mut ids = Vec::new();
+    let mut at = Some(head(env).0);
+    while let Some(id) = at {
+        ids.push(id);
+        at = entry(env, id).parent;
+    }
+    ids
+}
+
+/// The first `digits` hex digits of `id`, as `bolt undo --to` takes them.
+fn start_of(id: Id, digits: usize) -> String {
+    id.to_hex()[..digits].to_owned()
+}
+
+#[test]
+fn the_list_shows_redo_steps_then_undo_steps_numbered_from_now() {
+    let env = project(&[("a.txt", "a\n")]);
+    let mut steps = diary(&env);
+    steps.reverse();
+    for name in ["b", "c", "d"] {
+        write(&env, &format!("{name}.txt"), "x\n");
+        ok(&env, &["save", &format!("Add {name}")]);
+        steps.push(head(&env).0);
+    }
+    ok(&env, &["undo", "2"]);
+    let said = ok(&env, &["undo", "--list"]);
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 5, "{said}");
+    // Newest first: the steps undone, numbered for redo N, then those undo can take.
+    let shown = [
+        ("undone 2", 4, "\"Add d\""),
+        ("undone 1", 3, "\"Add c\""),
+        ("1", 2, "\"Add b\""),
+        ("2", 1, "\"Files\""),
+    ];
+    for (line, (label, step, message)) in lines.iter().zip(shown) {
+        let rest = line.trim_start().strip_prefix(label).unwrap();
+        assert!(
+            rest.starts_with(&format!("  {}  ", steps[step].short_hex())),
+            "{said}"
+        );
+        assert!(rest.contains("  save: main moved to "), "{said}");
+        assert!(rest.ends_with(message), "{said}");
+    }
+    // The diary's first entry has no number: undo can't take it.
+    let first = lines[4].trim_start();
+    assert!(first.starts_with(&steps[0].short_hex()), "{said}");
+    assert!(
+        first.ends_with("  start: the diary's first entry, which can't be undone"),
+        "{said}"
+    );
+    // `bolt redo` brings back the step numbered undone 1, and `bolt undo` takes the one numbered 1.
+    assert!(ok(&env, &["redo"]).contains("\"Add c\""));
+    ok(&env, &["undo"]);
+    assert!(ok(&env, &["undo"]).contains("\"Add b\""));
+}
+
+#[test]
+fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
+    // The first entry and 19 saves: 20 steps, every one shown.
+    let env = project(&[("a.txt", "0\n")]);
+    for i in 1..19 {
+        write(&env, "a.txt", &format!("{i}\n"));
+        ok(&env, &["save", &format!("Save {i}")]);
+    }
+    let said = ok(&env, &["undo", "--list"]);
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 20, "{said}");
+    assert!(lines[18].trim_start().starts_with("19  "), "{said}");
+    assert!(lines[19].ends_with("can't be undone"), "{said}");
+    assert!(!said.contains("and more"), "{said}");
+    // One more: 20 are shown, and the list says there are more.
+    write(&env, "a.txt", "19\n");
+    ok(&env, &["save", "Save 19"]);
+    let said = ok(&env, &["undo", "--list"]);
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 21, "{said}");
+    assert!(lines[19].trim_start().starts_with("20  "), "{said}");
+    assert_eq!(
+        lines[20],
+        "and more: bolt undo --list --all shows the whole diary"
+    );
+    assert!(!said.contains("can't be undone"), "{said}");
+    let doc = json(&env, &["undo", "--list"]);
+    assert_eq!(doc["undo"].as_array().unwrap().len(), 20, "{doc}");
+    assert_eq!(doc["more"], true);
+}
+
+#[test]
+fn undo_to_a_step_on_the_list_undoes_one_at_a_time_and_redo_still_works() {
+    let env = project(&[("a.txt", "a\n")]);
+    let (files_step, files_save) = (head(&env).0, main_tip(&env));
+    let mut steps = Vec::new();
+    for name in ["b", "c"] {
+        write(&env, &format!("{name}.txt"), "x\n");
+        ok(&env, &["save", &format!("Add {name}")]);
+        steps.push(head(&env).0);
+    }
+    let said = ok(&env, &["undo", "--to", &start_of(files_step, 12)]);
+    assert_eq!(said.matches("Undid save").count(), 2, "{said}");
+    assert_eq!(main_tip(&env), files_save);
+    // An undo entry each, the newest step undone first.
+    let (_, newest) = head(&env);
+    assert_eq!(newest.action, Action::Undo(steps[0]));
+    let before = entry(&env, newest.parent.unwrap());
+    assert_eq!(before.action, Action::Undo(steps[1]));
+    assert_eq!(before.parent, Some(steps[1]));
+    // Redo brings them back as ever, and --to a step redo can bring back redoes up to it.
+    assert!(ok(&env, &["redo"]).contains("\"Add b\""));
+    let doc = json(&env, &["undo", "--to", &start_of(steps[1], 8)]);
+    let taken = doc["steps"].as_array().unwrap();
+    assert_eq!(taken.len(), 1, "{doc}");
+    assert_eq!(taken[0]["action"], "redo");
+    assert_eq!(taken[0]["entry"], steps[1].to_hex());
+    assert_eq!(doc["finished"], false);
+    assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
+    assert_eq!(head(&env).1.action, Action::Redo(steps[1]));
+    assert!(ok(&env, &["redo"]).contains("Nothing to redo"));
+}
+
+#[test]
+fn undo_to_a_cleared_step_is_one_new_step_that_undo_takes_back() {
+    let (env, one, goto) = after_a_goto();
+    let two = main_tip(&env);
+    ok(&env, &["undo"]);
+    // A new step clears the goto from what redo can bring back.
+    write(&env, "n.txt", "new\n");
+    ok(&env, &["save", "Three"]);
+    let three = main_tip(&env);
+    let (before, _) = head(&env);
+    let said = ok(&env, &["undo", "--to", &start_of(goto, 8)]);
+    let went = format!("Went back to entry {} (goto)", goto.short_hex());
+    assert!(said.contains(&went), "{said}");
+    // One new step, with the goto's lines and position, and its save's files.
+    let (jump, made) = head(&env);
+    assert_eq!(made.parent, Some(before));
+    assert_eq!(made.action, Action::Command);
+    assert_eq!(made.command, "undo");
+    assert_eq!(made.state.lines["main"], two);
+    assert_eq!(made.state.position, Position::AtSave(one));
+    assert_eq!(files(env.root()), holding(ONE));
+    assert!(changed(&env).is_empty());
+    // Undo takes it back.
+    let said = ok(&env, &["undo"]);
+    assert!(said.contains("Undid undo"), "{said}");
+    assert_eq!(head(&env).1.action, Action::Undo(jump));
+    assert_eq!(main_tip(&env), three);
+    assert_eq!(state(&env).position, Position::OnLine("main".into()));
+    let mut wanted = holding(TWO);
+    wanted.insert("n.txt".into(), b"new\n".to_vec());
+    assert_eq!(files(env.root()), wanted);
+}
+
+#[test]
+fn undo_to_a_cleared_step_keeps_the_shelves() {
+    let (env, _, goto) = after_a_goto();
+    write(&env, "a.txt", "mine\n");
+    ok(&env, &["undo", "--shelve"]);
+    let shelves = state(&env).shelves;
+    assert_eq!(shelves.len(), 1);
+    write(&env, "n.txt", "new\n");
+    ok(&env, &["save", "Three"]);
+    // Unsaved work where the step would write stops it, and --shelve sets it aside.
+    write(&env, "b.txt", "edit\n");
+    let to = start_of(goto, 8);
+    let standing = env.standing();
+    let (_, said) = refused(&env, &["undo", "--to", &to]);
+    assert!(said.contains("b.txt"), "{said}");
+    assert!(
+        said.contains(&format!("bolt undo --to {to} --shelve")),
+        "{said}"
+    );
+    assert_eq!(env.standing(), standing);
+    let doc = json(&env, &["undo", "--to", &to, "--shelve"]);
+    assert_eq!(doc["steps"][0]["action"], "jump", "{doc}");
+    assert_eq!(doc["steps"][0]["entry"], goto.to_hex());
+    assert_eq!(doc["shelved"][0]["label"], "2");
+    assert_eq!(files(env.root()), holding(ONE));
+    // The shelf there already stays, behind the one --shelve made.
+    let now = state(&env).shelves;
+    assert_eq!(now.len(), 2, "{now:?}");
+    assert_eq!(now[0].0, "2");
+    assert_eq!(now[1], shelves[0]);
+    assert_eq!(saved_files(&env, now[0].1)["b.txt"], b"edit\n");
+}
+
+#[test]
+fn undo_to_the_current_entry_changes_nothing() {
+    let (env, _, goto) = after_a_goto();
+    let standing = env.standing();
+    let said = ok(&env, &["undo", "--to", &goto.to_hex()]);
+    assert!(said.contains("Nothing changed"), "{said}");
+    assert_eq!(env.standing(), standing);
+    // After an undo, going to its own entry, or to the step undo would take next, changes nothing.
+    ok(&env, &["undo"]);
+    let standing = env.standing();
+    let saved = entry(&env, goto).parent.unwrap();
+    for to in [standing.0, saved] {
+        let said = ok(&env, &["undo", "--to", &start_of(to, 8)]);
+        assert!(said.contains("Nothing changed"), "{said}");
+    }
+    assert_eq!(env.standing(), standing);
+}
+
+#[test]
+fn undo_to_needs_at_least_8_hex_digits_and_exactly_one_match() {
+    let (env, _, goto) = after_a_goto();
+    let standing = env.standing();
+    let hex = goto.to_hex();
+    let hex = hex.as_str();
+    for text in [&hex[..7], "zzzzzzzz"] {
+        let (_, said) = refused(&env, &["undo", "--to", text]);
+        assert!(said.contains("at least 8 hex digits"), "{said}");
+    }
+    // Eight digits no entry starts with.
+    let ids: Vec<String> = diary(&env).iter().map(Id::to_hex).collect();
+    let none = (0..16)
+        .map(|d| format!("{d:x}{}", &hex[1..8]))
+        .find(|p| !ids.iter().any(|id| id.starts_with(p.as_str())))
+        .unwrap();
+    let (_, said) = refused(&env, &["undo", "--to", &none]);
+    assert!(said.contains("No diary entry"), "{said}");
+    // Either case will do.
+    let upper = hex[..8].to_uppercase();
+    assert!(ok(&env, &["undo", "--to", &upper]).contains("Nothing changed"));
+    assert_eq!(env.standing(), standing);
+    // --to and --list each go without N, and without the other.
+    for args in [
+        &["undo", "--to", hex, "2"][..],
+        &["undo", "--list", "--to", hex],
+        &["undo", "--list", "2"],
+        &["undo", "--list", "--shelve"],
+        &["undo", "--all"],
+        &["redo", "--to", hex],
+    ] {
+        let out = env.bolt().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn undo_list_all_shows_every_entry_with_undos_and_redos() {
+    let (env, _, goto) = after_a_goto();
+    ok(&env, &["undo"]);
+    ok(&env, &["redo"]);
+    let entries = diary(&env);
+    let said = ok(&env, &["undo", "--list", "--all"]);
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 6, "{said}");
+    for (line, id) in lines.iter().zip(&entries) {
+        assert!(line.starts_with(&id.short_hex()), "{said}");
+    }
+    let g = goto.short_hex();
+    assert!(
+        lines[0].contains(&format!("  redo of {g}: at save ")),
+        "{said}"
+    );
+    assert!(
+        lines[1].contains(&format!("  undo of {g}: on main at ")),
+        "{said}"
+    );
+    assert!(lines[2].contains("  goto: at save "), "{said}");
+    for line in &lines[..3] {
+        assert!(line.ends_with(", 3 files changed"), "{said}");
+    }
+    assert!(lines[3].contains("  save: main moved to "), "{said}");
+    assert!(lines[3].ends_with("\"Two\""), "{said}");
+    assert!(
+        lines[5].ends_with("  start: the diary's first entry, which can't be undone"),
+        "{said}"
+    );
+    // The list itself holds only the steps.
+    let listed = ok(&env, &["undo", "--list"]);
+    assert_eq!(listed.lines().count(), 4, "{listed}");
+}
+
+#[test]
+fn undo_list_json_has_both_lists() {
+    let env = project(&[("a.txt", "a\n")]);
+    let mut steps = diary(&env);
+    for name in ["b", "c"] {
+        write(&env, &format!("{name}.txt"), "x\n");
+        ok(&env, &["save", &format!("Add {name}")]);
+        steps.insert(0, head(&env).0);
+    }
+    ok(&env, &["undo"]);
+    let doc = json(&env, &["undo", "--list"]);
+    assert_eq!(doc["bolt_json"], 1);
+    assert_eq!(doc["more"], false);
+    assert_eq!(doc["warnings"], serde_json::json!([]));
+    let listed = |list: &serde_json::Value| -> Vec<String> {
+        let list = list.as_array().unwrap();
+        list.iter()
+            .map(|e| e["entry"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let hex = |ids: &[Id]| -> Vec<String> { ids.iter().map(Id::to_hex).collect() };
+    // Redo's next first, and undo's newest first.
+    assert_eq!(listed(&doc["redo"]), hex(&steps[..1]));
+    assert_eq!(listed(&doc["undo"]), hex(&steps[1..]));
+    let redo = &doc["redo"][0];
+    assert_eq!(redo["action"], "command");
+    assert_eq!(redo["target"], serde_json::Value::Null);
+    assert_eq!(redo["command"], "save");
+    assert_eq!(redo["first"], false);
+    assert!(redo["time_ms"].as_i64().unwrap() > 0);
+    let line = &redo["effects"][0];
+    assert_eq!(line["kind"], "line");
+    assert_eq!(line["name"], "main");
+    let made = entry(&env, steps[0]).state.lines["main"];
+    assert_eq!(line["to"], made.to_hex());
+    let first = &doc["undo"][2];
+    assert_eq!(first["first"], true);
+    assert_eq!(first["effects"], serde_json::json!([]));
+    // --all lists every entry, the undo included.
+    let doc = json(&env, &["undo", "--list", "--all"]);
+    let all = doc["entries"].as_array().unwrap();
+    assert_eq!(all.len(), 5, "{doc}");
+    assert_eq!(all[0]["action"], "undo");
+    assert_eq!(all[0]["target"], steps[0].to_hex());
+    assert_eq!(listed(&doc["entries"])[1..], hex(&steps)[..]);
+    assert_eq!(doc["warnings"], serde_json::json!([]));
+}

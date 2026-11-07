@@ -4,6 +4,7 @@ mod import_output;
 mod output;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,7 +14,7 @@ use bolt_core::config::{
     ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
     load_identity, now_person,
 };
-use bolt_core::diary::{Action, Position};
+use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{count_changes, for_each_change};
 use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
@@ -28,7 +29,7 @@ use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
 use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
-use bolt_core::undo::{self, StepRequest};
+use bolt_core::undo::{self, StepInfo, StepRequest};
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
 use clap::{Parser, Subcommand};
@@ -105,6 +106,16 @@ enum Command {
     Undo {
         #[command(flatten)]
         steps: Steps,
+        /// List the steps redo can bring back and undo can take, numbered for N.
+        #[arg(long, conflicts_with_all = ["n", "shelve", "to"])]
+        list: bool,
+        /// With --list: every entry of the diary, undos and redos included.
+        #[arg(long, requires = "list")]
+        all: bool,
+        /// Make things as they were right after this diary entry, named by at least 8 hex digits
+        /// of its ID, as bolt undo --list shows them.
+        #[arg(long, value_name = "ENTRY", conflicts_with = "n")]
+        to: Option<String>,
     },
     /// Bring back the step undone last, or the last N.
     Redo {
@@ -1128,11 +1139,12 @@ fn discard_command(
     Ok(())
 }
 
-/// `bolt undo` and `bolt redo`.
+/// `bolt undo`, `bolt redo`, and `bolt undo --to <entry>` (`to`).
 fn undo_command(
     json: bool,
     redo: bool,
     steps: &Steps,
+    to: Option<&str>,
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let repo = opened.insert(with_users_key(Repository::discover(
@@ -1147,10 +1159,10 @@ fn undo_command(
         git_excludes: git_excludes.as_deref(),
     };
     let on_wait = &mut |_: &str| eprintln!("Waiting for another Bolt command to finish...");
-    let done = if redo {
-        undo::redo(repo, &req, on_wait)
-    } else {
-        undo::undo(repo, &req, on_wait)
+    let done = match to {
+        Some(to) => undo::undo_to(repo, to, &req, on_wait),
+        None if redo => undo::redo(repo, &req, on_wait),
+        None => undo::undo(repo, &req, on_wait),
     };
     let (taken, shelved, finished, failure) = match done {
         Ok(done) => (done.taken, done.shelved, done.finished, None),
@@ -1170,7 +1182,8 @@ fn undo_command(
             .map(|(label, save)| json!({"label": label, "save": save.to_hex()}))
             .collect();
         let mut document = json!({ "shelved": shelves });
-        document[list] = taken.iter().map(output::step_json).collect();
+        let key = if to.is_some() { "steps" } else { list };
+        document[key] = taken.iter().map(output::step_json).collect();
         let Some(failure) = failure else {
             let position = match taken.last() {
                 Some(t) => Some(t.after.position.clone()),
@@ -1193,7 +1206,7 @@ fn undo_command(
     {
         let mut named = |id: &Id| named_save(repo, id, &mut warnings);
         for t in &taken {
-            text += &output::step_line(t, redo, &shelved, &mut named);
+            text += &output::step_line(t, &shelved, &mut named);
             text.push('\n');
         }
     }
@@ -1201,19 +1214,41 @@ fn undo_command(
         let label = escape(label, false);
         text += &format!("Set your unsaved changes in the way aside on shelf {label}.\n");
     }
+    let to = to.map(|to| escape(to, false));
     if finished {
         let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
-        text += &format!(
-            "Finished the {what} that was stopped, so nothing more was {list}. Running bolt \
-             {command} again takes one more step.\n"
-        );
+        text += &match &to {
+            Some(to) => format!(
+                "Finished the {what} that was stopped, so nothing more was done. Running bolt \
+                 undo --to {to} again goes on from there.\n"
+            ),
+            None => format!(
+                "Finished the {what} that was stopped, so nothing more was {list}. Running bolt \
+                 {command} again takes one more step.\n"
+            ),
+        };
     }
-    match &failure {
-        Some(_) if !taken.is_empty() => {
+    match (&failure, &to) {
+        (Some(_), Some(to)) if !taken.is_empty() => {
+            // On the way to an entry the steps are all undos, or all redos.
+            let verb = match taken.first().map(|t| &t.action) {
+                Some(Action::Redo(_)) => "Redid",
+                _ => "Undid",
+            };
+            let k = taken.len();
+            let steps = if k == 1 { "step" } else { "steps" };
+            text += &format!("{verb} {k} {steps} on the way to entry {to} before one stopped.\n");
+        }
+        (Some(_), None) if !taken.is_empty() => {
             let (k, n) = (taken.len(), steps.n);
             text += &format!("{verb} {k} of the {n} steps asked for.\n");
         }
-        None if !finished && taken.len() < req.n => {
+        (None, Some(to)) if !finished && taken.is_empty() => {
+            text += &format!(
+                "Nothing changed: things are already as they were right after entry {to}.\n"
+            );
+        }
+        (None, None) if !finished && taken.len() < req.n => {
             let more = if taken.is_empty() { "" } else { " more" };
             text += &format!("Nothing{more} to {command}.\n");
         }
@@ -1229,6 +1264,158 @@ fn undo_command(
             Err(failure)
         }
     }
+}
+
+/// How many of the steps undo can take `bolt undo --list` shows.
+const UNDO_LIST: usize = 20;
+
+/// `bolt undo --list`, and with `--all` (`all`) the whole diary.
+fn undo_list_command(
+    json: bool,
+    all: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    let mut out = output::Stdout::new();
+    let done = if all {
+        whole_diary_to(&mut out, repo, json, warnings)
+    } else {
+        undo_list_to(&mut out, repo, json, warnings)
+    };
+    // As in `history`: a reader that went away ends the command quietly.
+    if out.closed {
+        return Ok(());
+    }
+    output::print_warnings(&done?);
+    Ok(())
+}
+
+/// The steps redo can bring back, newest first and numbered for `bolt redo N`, then those undo
+/// can take, numbered for `bolt undo N`.
+fn undo_list_to(
+    out: &mut output::Stdout,
+    repo: &Repository,
+    json: bool,
+    mut warnings: Vec<Warning>,
+) -> Result<Vec<Warning>, Failure> {
+    let list = undo::undo_list(repo, UNDO_LIST)?;
+    if json {
+        let entries = |steps: &[StepInfo]| -> Vec<serde_json::Value> {
+            let json = |s: &StepInfo| output::entry_json(&s.entry, &s.diary, &s.effects);
+            steps.iter().map(json).collect()
+        };
+        warnings.extend(repo.store().warnings());
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "redo": entries(&list.redo),
+            "undo": entries(&list.undo),
+            "more": list.more,
+            "warnings": output::warnings_json(&warnings),
+        });
+        writeln!(out, "{document}")?;
+        return Ok(warnings);
+    }
+    let redo = list.redo.iter().enumerate().rev();
+    let redo = redo.map(|(i, s)| (format!("undone {}", i + 1), s));
+    // Undo can't take the diary's first entry, so it gets no number.
+    let undo = list
+        .undo
+        .iter()
+        .enumerate()
+        .map(|(i, s)| match s.diary.parent {
+            Some(_) => ((i + 1).to_string(), s),
+            None => (String::new(), s),
+        });
+    let shown: Vec<(String, &StepInfo)> = redo.chain(undo).collect();
+    let width = shown.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    let now = now_ms();
+    let mut named_warnings = Vec::new();
+    {
+        let mut named = names(repo, &mut named_warnings);
+        let files = &mut |from, to| files_between(repo, from, to);
+        for (n, s) in &shown {
+            let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
+            let (entry, when) = (s.entry.short_hex(), when(&s.diary, now));
+            writeln!(out, "{n:>width$}  {entry}  {when}  {what}")?;
+        }
+    }
+    if list.more {
+        writeln!(
+            out,
+            "and more: bolt undo --list --all shows the whole diary"
+        )?;
+    }
+    warnings.extend(named_warnings);
+    warnings.extend(repo.store().warnings());
+    Ok(warnings)
+}
+
+/// Every entry of the diary, newest first, printed as it is read.
+fn whole_diary_to(
+    out: &mut output::Stdout,
+    repo: &Repository,
+    json: bool,
+    mut warnings: Vec<Warning>,
+) -> Result<Vec<Warning>, Failure> {
+    if json {
+        // The document `json!` would make, in pieces and in alphabetical key order, as in
+        // `history`.
+        return output::stream_document(
+            out,
+            &format!("{{\"bolt_json\":{BOLT_JSON},\"entries\":["),
+            |each| {
+                undo::whole_diary(repo, |id, entry, effects| {
+                    each(&output::entry_json(&id, entry, effects))
+                })
+            },
+            || {
+                warnings.extend(repo.store().warnings());
+                (json!({}), warnings)
+            },
+        );
+    }
+    let now = now_ms();
+    let mut named_warnings = Vec::new();
+    {
+        let mut named = names(repo, &mut named_warnings);
+        let files = &mut |from, to| files_between(repo, from, to);
+        undo::whole_diary(repo, |id, entry, effects| {
+            let what = output::entry_line(entry, effects, &mut named, files);
+            writeln!(out, "{}  {}  {what}", id.short_hex(), when(entry, now))?;
+            Ok::<(), Failure>(())
+        })?;
+    }
+    warnings.extend(named_warnings);
+    warnings.extend(repo.store().warnings());
+    Ok(warnings)
+}
+
+/// Names saves as `named_save` does, each once: a list can name one save many times.
+fn names<'a>(
+    repo: &'a Repository,
+    warnings: &'a mut Vec<Warning>,
+) -> impl FnMut(&Id) -> (String, Option<String>) + 'a {
+    let mut known = HashMap::new();
+    move |id: &Id| {
+        let name = known.entry(*id);
+        name.or_insert_with(|| named_save(repo, id, warnings))
+            .clone()
+    }
+}
+
+/// How many files two saves differ in, if both can be read.
+fn files_between(repo: &Repository, from: Id, to: Id) -> Option<usize> {
+    let root = |id: &Id| repo.store().save(id, repo.signatures_allowed()).ok();
+    let (from, to) = (root(&from)?.root, root(&to)?.root);
+    count_changes(repo.store(), Some(from), to).ok()
+}
+
+/// When an entry's command ran, as lists say it.
+fn when(entry: &DiaryEntry, now: i64) -> String {
+    output::relative_time(entry.who.time_ms, entry.who.tz_offset_min, now)
 }
 
 /// `warnings` with each told once, in the order first met: naming several saves can meet the same
@@ -1301,8 +1488,13 @@ fn main() -> ExitCode {
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
         Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
-        Command::Undo { steps } => undo_command(cli.json, false, &steps, &mut opened),
-        Command::Redo { steps } => undo_command(cli.json, true, &steps, &mut opened),
+        Command::Undo {
+            list: true, all, ..
+        } => undo_list_command(cli.json, all, &mut opened),
+        Command::Undo { steps, to, .. } => {
+            undo_command(cli.json, false, &steps, to.as_deref(), &mut opened)
+        }
+        Command::Redo { steps } => undo_command(cli.json, true, &steps, None, &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

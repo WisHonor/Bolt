@@ -1,12 +1,12 @@
 # Bolt `--json` Formats
 
-> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05, `goto`, `discard`, `changes`, `undo` and `redo` 2026-11-06. It holds every document and every kind of warning these twelve commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
+> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05, `goto`, `discard`, `changes`, `undo` and `redo` 2026-11-06, `undo --to` and `undo --list` 2026-11-07. It holds every document and every kind of warning these twelve commands print (checked against the code on 2026-11-03). Each command that comes later adds its document here in the milestone that builds it.
 
 **In plain words.** Every Bolt command takes `--json`. Instead of text for people, it then prints one JSON document that a script, an editor plugin or the desktop app can read. This page says what is in each document, what each field means, and what `null` means where it can appear. The formats are a public interface: they are versioned, and the CLI tests keep them from changing by accident.
 
 ## 1. Rules for every document
 
-- **One document, on stdout, in one line.** Nothing else goes to stdout: warnings and progress lines go to stderr, as text. `history`, `show` and `changes` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
+- **One document, on stdout, in one line.** Nothing else goes to stdout: warnings and progress lines go to stderr, as text. `history`, `show`, `changes` and `undo --list --all` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
 - **`bolt_json` is the version of the format,** a number, `1` now. It is in every document.
 - **The versioning rule.** Within one `bolt_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A change that breaks the rule gets the next number. A field that can be `null` says so in its table, and says when: `start`'s `save`, for one, is `null` if the project was made but its first save couldn't be read back (a `first_save_not_read` warning says so). Check for `null` before you use such a field.
 - **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON.
@@ -176,10 +176,11 @@ Saving gives one of two documents, told apart by `result`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `entry` | string | The diary entry of the step undone or redone: 64 hex digits. |
+| `entry` | string | The diary entry of the step undone or redone, or of the entry `undo --to` went to: 64 hex digits. |
+| `action` | string | `"undo"` or `"redo"`: what the diary entry the step made records. `"jump"` for the one step `undo --to` takes to an entry neither undo nor redo can reach (below). |
 | `command` | string | The command that made the step, such as `save`, `goto` or `discard`. |
 | `time_ms` | integer | When that command ran: milliseconds since 1970-01-01 UTC. |
-| `effects` | list | What this undo or redo changed: lines first, then where the project is, shelves, tags, server lines and files. |
+| `effects` | list | What this undo, redo or jump changed: lines first, then where the project is, shelves, tags, server lines and files. |
 | `written` | number | Files and links written, links written as files included. |
 | `removed` | number | Files, links and folders removed. |
 
@@ -196,6 +197,53 @@ Saving gives one of two documents, told apart by `result`.
 | `files` | `from`, `to` | The folder was switched between two saves (each 64 hex digits): those of the step undone or redone, the other way round for an undo. They picture the folder before and after that step at every path it touched, whether it wrote there or the folder already held what it would write, and either can be a save made only for that step. |
 
 A step that stops the command fails it with exit code 1. Its document is the error document of §5 with `undone` or `redone` and `shelved` added, which list the steps taken, and the shelves made, before it stopped.
+
+### `bolt undo --to <entry> --json`
+
+`bolt undo --to <entry>` makes things as they were right after a diary entry ([decision 072](decisions/072-undo-list-and-undo-to.md)). The entry is named by the start of its ID, at least 8 hex digits in either case, as `bolt undo --list` shows them, and must match exactly one entry from the current one back: fewer digits, no match, or more than one fails the command (exit code 1) before anything changes, and `error.message` says which, naming the entries that matched. A step redo can bring back is reached by redoing the steps up to it, and a step undo can take by undoing the steps after it, one at a time, exactly as `bolt redo N` and `bolt undo N` would, so redo works afterwards. Any other entry (an undo or redo entry, or a step a new command cleared from what redo can bring back) is reached by one new step, a jump: it puts back that entry's lines, where the project was, its tags and its server lines, keeps the shelves as they are, and switches the folder from the save the project is on to that entry's save as `goto` does, carrying other unsaved work along. Its diary entry records the command `undo`, and `bolt undo` takes it back. The current entry changes nothing, and neither does an entry whose state is already the current one. Unsaved work, or a file Bolt ignores, where a step would write stops it as it stops `undo`, and `--shelve` sets that work aside the same way. After finishing a stopped switch it takes no step (`finished` is `true`); running it again goes on from there.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `steps` | list of step | The steps taken, in the order they were taken, as in `undo` (a step, above), each with its `action`. `[]` if none. |
+| `finished` | boolean | As in `undo`. |
+| `shelved` | list | As in `undo`. |
+| `position` | object or `null` | As in `undo`. |
+| `warnings` | list | See §4. |
+
+A step that stops it fails it with exit code 1, and its document is the error document of §5 with `steps` and `shelved` added.
+
+### `bolt undo --list --json`
+
+`bolt undo --list` lists the steps redo can bring back and the steps undo can take, numbered for `bolt redo N` and `bolt undo N` ([decision 072](decisions/072-undo-list-and-undo-to.md)). It changes nothing.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `redo` | list of entry | The steps redo can bring back, the next one first: `bolt redo N` brings back the first N. `[]` if none. |
+| `undo` | list of entry | The steps undo can take, newest first: `bolt undo N` takes the first N. At most 20. The diary's first entry, when it is listed, is last and can't be undone (its `first` is `true`). |
+| `more` | boolean | Undo can take more steps than `undo` lists. |
+| `warnings` | list | See §4. |
+
+`bolt undo --list --all --json` lists every entry of the diary instead, newest first, and prints its document as it reads (§1, §5):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `entries` | list of entry | Every entry from the current one back to the diary's first: steps, undo and redo entries, and steps a new command cleared. |
+| `warnings` | list | See §4. |
+
+**An entry:**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `entry` | string | The entry's ID: 64 hex digits. |
+| `action` | string | `"command"` for a step (an entry a command made, a jump of `undo --to` included), `"undo"` or `"redo"` for an entry that undid or redid one. |
+| `target` | string or `null` | The step an `"undo"` or `"redo"` entry undid or redid: 64 hex digits. `null` for a step. |
+| `command` | string | The command's name, as the diary records it: `undo` for a jump. |
+| `time_ms` | integer | When the command ran: milliseconds since 1970-01-01 UTC. |
+| `effects` | list | What the entry changed from the one before it, each an effect as in `undo` (above); a `files` effect gives the entry's own switch, from the save the folder was switched from to the one it was switched to. `[]` for the diary's first entry. |
+| `first` | boolean | The diary's first entry, made by `start` or `import`, which can't be undone. |
 
 ### `bolt line --json`
 
@@ -267,7 +315,7 @@ Folders are not listed; the files in them are.
 | `files_in_use` | `goto`, `discard`, `undo`, `redo`, and a command that finishes a switch a crash stopped | Another program (an editor or virus scanner, say) held files open on Windows for about a second, so Bolt left them as they were and wrote the rest. The switch isn't finished, so `goto`, `discard`, `undo` and `redo` fail, naming the files: closing the program and running the command again finishes it ([decision 049](decisions/049-writing-files-one-at-a-time.md)). The message names the first 5 by path and counts the rest. |
 | `changed_since_plan` | `goto`, `discard`, `undo`, `redo`, and a command that finishes a switch a crash stopped | Entries weren't what Bolt found when it planned the switch, a moment before (another program changed or made them, or put a link where a folder was), so Bolt left them as they are rather than lose that work. Nothing below such a folder is written either. The message names the first 5 by path and counts the rest. |
 | `links_left` | `discard` | Unsaved links (new, or changed) were left as they are rather than thrown away, with the folders that hold them, and nothing saved was put back in their place: an undo could bring them back only as plain files holding their targets ([decision 071](decisions/071-a-step-records-its-change-to-the-folder.md)). That is so when this computer can't make links (Windows without Developer Mode or an administrator), and when write-out would write a link as a placeholder in the save of what was thrown away, judged from that save alone: its target is longer than 4,096 bytes, is absolute, starts with a drive letter or `\\`, climbs past the top with `..`, goes through a name that isn't a folder of that save (another link, or a new folder the discard leaves out of it), or through a name Bolt never writes (a spelling of `.git` or `.bolt`, or a name this system can't hold); on Windows also when it holds a `\` or a `:`. Delete them by hand if they aren't wanted. The message names the first 5 by path and counts the rest. |
-| `switch_unfinished` | `status`, `changes`, `history`, `show`, `line` | A switch between saves was stopped (a crash, Ctrl+C, a file in use) before it was done, so some files may still be as they were. Running `goto` or `discard` again, or any command that changes the project, finishes it first; it is never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)). If the switch's journal, `.bolt/state/journal`, can't be used (it is damaged, was made for another save than the one the project is on, or names a diary entry that can't be read), the message says so instead, with the same words the refusal uses: commands that change the project refuse to run while it is there, since the folder may be half switched, and deleting it lets them go on with the files as they are (a later `save` records the folder as it is then). A journal whose switch already took effect is no warning. |
+| `switch_unfinished` | `status`, `changes`, `history`, `show`, `line`, `undo --list` | A switch between saves was stopped (a crash, Ctrl+C, a file in use) before it was done, so some files may still be as they were. Running `goto` or `discard` again, or any command that changes the project, finishes it first; it is never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)). If the switch's journal, `.bolt/state/journal`, can't be used (it is damaged, was made for another save than the one the project is on, or names a diary entry that can't be read), the message says so instead, with the same words the refusal uses: commands that change the project refuse to run while it is there, since the folder may be half switched, and deleting it lets them go on with the files as they are (a later `save` records the folder as it is then). A journal whose switch already took effect is no warning. |
 | `switch_finished` | `save`, `goto`, `discard`, `undo` and `redo` | Before doing its own work, the command finished a switch between saves that was stopped. The message counts the files it wrote and the entries it removed. It is given even when the command then fails, since the switch is done. When only the switch's journal was left, it is removed without a warning. |
 | `diff_timed_out` | `changes` | Comparing a file line by line took more than 2 seconds, so Bolt stopped and shows its changes in bigger pieces than they could be (its `timed_out` is `true`). One warning for each such file, naming it. |
 | `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
@@ -292,10 +340,10 @@ A command that fails before it has printed anything gives a document of just thi
 | `error.hint` | string or `null` | What to do next, if there is something to say. |
 | `warnings` | list | What the command had found before it failed, such as a damaged pack its store noted while reading: §4. `[]` if nothing. |
 
-`history` and `show` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added, with `save` too for `show`. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves` or `changes`.
+`history`, `show` and `undo --list --all` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added, with `save` too for `show`. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves`, `changes` or `entries`.
 
 ```text
 {"bolt_json":1,"line":"main","saves":[ …the saves read so far… ],"error":{"hint":null,"message":"…"},"warnings":[]}
 ```
 
-`undo` and `redo` can fail after taking some of the steps asked for. Their error document then also has `undone` or `redone`, and `shelved`, listing what was done before the failure.
+`undo` and `redo` can fail after taking some of the steps asked for, and `undo --to` after some of the steps on its way. Their error document then also has `undone`, `redone` or `steps`, and `shelved`, listing what was done before the failure.

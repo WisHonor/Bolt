@@ -43,6 +43,11 @@ impl fmt::Display for Id {
     }
 }
 
+/// Whether `text` can be the start of an ID as people type one: at least 8 hex digits.
+pub(crate) fn is_hex_start(text: &str) -> bool {
+    text.len() >= 8 && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Domain-separation flavor for record fingerprints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flavor {

@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use bolt_core::changes::{Endings, Lines, Tag, only_line_endings};
-use bolt_core::diary::Position;
+use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
@@ -66,8 +66,14 @@ pub fn change_json(c: &FileChange) -> Value {
 /// A step undone or redone as JSON (docs/json.md, `bolt undo --json`).
 pub fn step_json(t: &Taken) -> Value {
     let effects: Vec<Value> = t.effects.iter().map(effect_json).collect();
+    let action = match t.action {
+        Action::Undo(_) => "undo",
+        Action::Redo(_) => "redo",
+        Action::Command => "jump",
+    };
     json!({
         "entry": t.step.to_hex(),
+        "action": action,
         "command": t.entry.command,
         "time_ms": t.entry.who.time_ms,
         "effects": effects,
@@ -101,20 +107,28 @@ fn effect_json(e: &Effect) -> Value {
     }
 }
 
-/// What a step undone or redone did, in one line for people. `named` gives a save's short change
-/// ID, and its message's first line if it can be read. The shelves `--shelve` made (`shelved`)
-/// are told on lines of their own.
+/// What a step taken did, in one line for people: undone, redone, or gone to by `undo --to`.
+/// `named` gives a save's short change ID, and its message's first line if it can be read. The
+/// shelves `--shelve` made (`shelved`) are told on lines of their own.
 pub fn step_line(
     t: &Taken,
-    redo: bool,
     shelved: &[(String, Id)],
     named: &mut dyn FnMut(&Id) -> (String, Option<String>),
 ) -> String {
-    let verb = if redo { "Redid" } else { "Undid" };
-    let mut line = format!("{verb} {}", escape(&t.entry.command, false));
-    // The save a step made is the one a line moved to.
+    let command = escape(&t.entry.command, false);
+    let (redo, jump) = (
+        matches!(t.action, Action::Redo(_)),
+        t.action == Action::Command,
+    );
+    let mut line = match t.action {
+        Action::Undo(_) => format!("Undid {command}"),
+        Action::Redo(_) => format!("Redid {command}"),
+        Action::Command => format!("Went back to entry {} ({command})", t.step.short_hex()),
+    };
+    // The save a step made is the one a line moved to. `undo --to`, recorded as `undo`, makes
+    // none: it moves lines to saves that were there.
     let made = t.effects.iter().find_map(|e| match e {
-        Effect::Line { from, to, .. } => {
+        Effect::Line { from, to, .. } if !jump && t.entry.command != "undo" => {
             if redo {
                 *to
             } else {
@@ -131,12 +145,10 @@ pub fn step_line(
         }
     }
     let (mut parts, mut moved, mut files) = (Vec::new(), false, false);
-    let again = |what: String| {
-        if redo {
-            format!("{what} again")
-        } else {
-            format!("back {what}")
-        }
+    let again = |what: String| match t.action {
+        Action::Undo(_) => format!("back {what}"),
+        Action::Redo(_) => format!("{what} again"),
+        Action::Command => what,
     };
     for e in &t.effects {
         match e {
@@ -144,6 +156,7 @@ pub fn step_line(
                 moved = true;
                 let name = escape(name, false);
                 parts.push(match to {
+                    Some(to) if jump => format!("{name} is at {}", named(to).0),
                     Some(to) if redo => format!("{name} is at {} again", named(to).0),
                     Some(to) => format!("{name} is back at {}", named(to).0),
                     None => format!("line {name} is gone"),
@@ -184,7 +197,7 @@ pub fn step_line(
             (0, removed) => format!("{} removed", count(removed)),
             (written, removed) => {
                 // An undo that leaves the project where it was puts files back.
-                let written = if moved || redo {
+                let written = if moved || redo || jump {
                     format!("{} written", count(written))
                 } else {
                     format!("{} back", count(written))
@@ -201,11 +214,96 @@ pub fn step_line(
     }
     // A save undone leaves its files as they are.
     let saved = |e: &Effect| matches!(e, Effect::Line { from: Some(_), .. });
-    if !redo && !files && t.effects.iter().any(saved) {
+    if !redo && !jump && !files && t.effects.iter().any(saved) {
         line.push_str("; its changes show as unsaved");
     }
     line.push('.');
     line
+}
+
+/// A diary entry as `bolt undo --list --json` gives it (docs/json.md, "An entry").
+pub fn entry_json(id: &Id, entry: &DiaryEntry, effects: &[Effect]) -> Value {
+    let (action, target) = match &entry.action {
+        Action::Command => ("command", None),
+        Action::Undo(step) => ("undo", Some(step.to_hex())),
+        Action::Redo(step) => ("redo", Some(step.to_hex())),
+    };
+    let effects: Vec<Value> = effects.iter().map(effect_json).collect();
+    json!({
+        "entry": id.to_hex(),
+        "action": action,
+        "target": target,
+        "command": entry.command,
+        "time_ms": entry.who.time_ms,
+        "effects": effects,
+        "first": entry.parent.is_none(),
+    })
+}
+
+/// What a diary entry did, as `bolt undo --list` tells it: its command, and the step it undid or
+/// redid, then what changed. `named` names a save as for [`step_line`]; `files` counts the files
+/// two saves differ in, if it can read them.
+pub fn entry_line(
+    entry: &DiaryEntry,
+    effects: &[Effect],
+    named: &mut dyn FnMut(&Id) -> (String, Option<String>),
+    files: &mut dyn FnMut(Id, Id) -> Option<usize>,
+) -> String {
+    let mut line = escape(&entry.command, false);
+    if let Action::Undo(step) | Action::Redo(step) = &entry.action {
+        let _ = write!(line, " of {}", step.short_hex());
+    }
+    if entry.parent.is_none() {
+        line.push_str(": the diary's first entry, which can't be undone");
+        return line;
+    }
+    let mut parts = Vec::new();
+    for e in effects {
+        parts.push(match e {
+            Effect::Line {
+                name,
+                from: None,
+                to: Some(to),
+            } => format!("line {} made at {}", escape(name, false), titled(named, to)),
+            Effect::Line {
+                name, to: Some(to), ..
+            } => format!("{} moved to {}", escape(name, false), titled(named, to)),
+            Effect::Line { name, to: None, .. } => format!("line {} gone", escape(name, false)),
+            Effect::Position {
+                to: Position::OnLine(on),
+                ..
+            } => {
+                let tip = entry.state.lines.get(on).map(|s| named(s).0);
+                format!("on {} at {}", escape(on, false), tip.unwrap_or_default())
+            }
+            Effect::Position {
+                to: Position::AtSave(save),
+                ..
+            } => format!("at save {}", named(save).0),
+            Effect::ShelfAdded { label, .. } => format!("shelf {} added", escape(label, false)),
+            Effect::ShelfGone { label, .. } => format!("shelf {} gone", escape(label, false)),
+            Effect::Tags => "the tags changed".to_owned(),
+            Effect::ServerLines => "the server lines changed".to_owned(),
+            Effect::Files { from, to } => match files(*from, *to) {
+                Some(0) => "only folders changed".to_owned(),
+                Some(1) => "1 file changed".to_owned(),
+                Some(n) => format!("{n} files changed"),
+                None => "files changed".to_owned(),
+            },
+        });
+    }
+    if !parts.is_empty() {
+        let _ = write!(line, ": {}", parts.join(", "));
+    }
+    line
+}
+
+/// A save named, then its message's first line in quotes if it can be read.
+fn titled(named: &mut dyn FnMut(&Id) -> (String, Option<String>), save: &Id) -> String {
+    match named(save) {
+        (short, Some(message)) => format!("{short} \"{}\"", escape(&message, false)),
+        (short, None) => short,
+    }
 }
 
 /// The document of a command that failed after doing part of its work: `done` with the error

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::changeids::ChangeIds;
 use crate::diary::{DiaryEntry, Position};
-use crate::id::{ChangeId, Id};
+use crate::id::{ChangeId, Id, is_hex_start};
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
 use crate::text::escape;
@@ -356,7 +356,7 @@ fn by_id(
     if !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b)) {
         return by_change_prefix(repo, tip_of(entry)?, text);
     }
-    if text.len() >= 8 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if is_hex_start(text) {
         return by_fingerprint_prefix(repo, entry, text);
     }
     Ok(Vec::new())

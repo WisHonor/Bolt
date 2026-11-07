@@ -1,5 +1,6 @@
 //! `bolt undo` and `bolt redo`: stepping back and forth through the commands the diary records,
-//! with what each did to the folder written back or written again.
+//! with what each did to the folder written back or written again; the lists of those steps, and
+//! `bolt undo --to`, which goes to any entry.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -8,23 +9,26 @@ use std::path::Path;
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
 use crate::drive::Drive;
 use crate::history::tip_of;
-use crate::id::Id;
+use crate::id::{Id, is_hex_start};
 use crate::kept;
-use crate::repo::{ChangeLock, Repository};
+use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::store::{StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
 use crate::warning::Warning;
-use crate::writeout::{self, Applied};
+use crate::writeout::{self, Applied, Plan};
 
 /// What one step taken did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Taken {
-    /// The command entry undone or redone.
+    /// The command entry undone or redone, or the entry `undo --to` went to.
     pub step: Id,
-    /// That step's own entry.
+    /// That entry.
     pub entry: DiaryEntry,
+    /// What the step's own entry records: an undo or redo of `step`, or a command when
+    /// `undo --to` went to an entry neither undo nor redo could reach.
+    pub action: Action,
     pub before: State,
     pub after: State,
     /// What changed, for messages and lists.
@@ -109,11 +113,11 @@ pub fn effects(before: &State, after: &State, folder: Option<FolderChange>) -> V
     found
 }
 
-/// What `undo` or `redo` did.
+/// What `undo`, `redo` or `undo --to` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoOutcome {
     pub taken: Vec<Taken>,
-    /// How many steps were asked for.
+    /// How many steps it set out to take: none after finishing a stopped switch.
     pub asked: usize,
     /// A stopped switch was finished, so no step was taken.
     pub finished: bool,
@@ -121,7 +125,8 @@ pub struct UndoOutcome {
     pub shelved: Vec<(String, Id)>,
 }
 
-/// Why `undo` or `redo` stopped, with the steps taken, and shelves made, before it did.
+/// Why `undo`, `redo` or `undo --to` stopped, with the steps taken, and shelves made, before it
+/// did.
 #[derive(Debug)]
 pub struct UndoError {
     pub taken: Vec<Taken>,
@@ -203,31 +208,105 @@ fn take(
     on_wait: &mut dyn FnMut(&str),
     redo: bool,
 ) -> Result<UndoOutcome, UndoError> {
-    let (mut taken, mut shelved) = (Vec::new(), Vec::new());
-    let done = switch::locked(
+    stepping(
         repo,
-        command(redo),
         on_wait,
-        |repo, lock, earlier, finished| {
-            // Running the command again after a stop finishes it, and no more.
-            if finished {
-                return Ok(true);
-            }
-            for _ in 0..req.n {
-                let Some((step, shelf)) = take_one(repo, lock, req, redo, earlier)? else {
-                    break;
-                };
-                taken.push(step);
-                shelved.extend(shelf);
-            }
-            Ok(false)
+        command(redo),
+        |repo, lock, earlier, taken, shelved| {
+            take_steps(repo, lock, req, redo, earlier, taken, shelved)?;
+            Ok(req.n)
+        },
+    )
+}
+
+/// Makes the state the one right after the diary entry whose ID starts with `entry`: at least 8
+/// hex digits, matching exactly one entry from `head` back. A step redo can bring back is reached
+/// by redoing up to it, and one undo can take by undoing the steps after it, as [`redo`] and
+/// [`undo`] take them; any other entry by one new step that puts back its lines, position, tags
+/// and server lines, keeps the shelves, and switches the folder to its save as `goto` does.
+/// `req.n` is unused.
+pub fn undo_to(
+    repo: &mut Repository,
+    entry: &str,
+    req: &StepRequest,
+    on_wait: &mut dyn FnMut(&str),
+) -> Result<UndoOutcome, UndoError> {
+    let text = entry.to_ascii_lowercase();
+    // Before the lock, so that a mistyped entry finishes nothing and changes nothing.
+    if !is_hex_start(&text) {
+        return Err(UndoError {
+            taken: Vec::new(),
+            shelved: Vec::new(),
+            error: SwitchError::NotAnEntry {
+                text: entry.to_owned(),
+            },
+        });
+    }
+    let went = stepping(
+        repo,
+        on_wait,
+        "undo",
+        |repo, lock, earlier, taken, shelved| {
+            let (head, _) = repo.current()?;
+            let (to, steps) = {
+                let mut read = |id: &Id| repo.entry(id);
+                let to = entry_named(&text, head, &mut read)?;
+                if to.0 == head {
+                    return Ok(0);
+                }
+                (to, timeline::steps(head, &mut read, usize::MAX)?)
+            };
+            let on = |list: &[(Id, DiaryEntry)]| list.iter().position(|(id, _)| *id == to.0);
+            let (redo, n) = match (on(&steps.undone), on(&steps.done)) {
+                (Some(i), _) => (true, i + 1),
+                (None, Some(i)) => (false, i),
+                (None, None) => {
+                    if let Some((step, shelf)) = jump(repo, lock, req, earlier, to)? {
+                        taken.push(step);
+                        shelved.extend(shelf);
+                    }
+                    return Ok(1);
+                }
+            };
+            let req = StepRequest { n, ..*req };
+            take_steps(repo, lock, &req, redo, earlier, taken, shelved)?;
+            Ok(n)
         },
     );
+    went.map_err(|e| UndoError {
+        error: aimed(e.error, &text),
+        ..e
+    })
+}
+
+/// Runs `steps` under the lock for changes, unless the run finished a stopped switch first, with
+/// the steps it takes and the shelves `--shelve` makes collected as it goes. `steps` gives how
+/// many steps it set out to take.
+fn stepping(
+    repo: &mut Repository,
+    on_wait: &mut dyn FnMut(&str),
+    command: &str,
+    steps: impl FnOnce(
+        &mut Repository,
+        &ChangeLock,
+        &mut Earlier,
+        &mut Vec<Taken>,
+        &mut Vec<Shelf>,
+    ) -> Result<usize, SwitchError>,
+) -> Result<UndoOutcome, UndoError> {
+    let (mut taken, mut shelved) = (Vec::new(), Vec::new());
+    let done = switch::locked(repo, command, on_wait, |repo, lock, earlier, finished| {
+        // Running the command again after a stop finishes it, and no more.
+        if finished {
+            return Ok(None);
+        }
+        steps(repo, lock, earlier, &mut taken, &mut shelved).map(Some)
+    });
     match done {
-        Ok(finished) => Ok(UndoOutcome {
+        Ok(asked) => Ok(UndoOutcome {
             taken,
-            asked: req.n,
-            finished,
+            asked: asked.unwrap_or(0),
+            finished: asked.is_none(),
             shelved,
         }),
         Err(error) => Err(UndoError {
@@ -238,12 +317,225 @@ fn take(
     }
 }
 
+/// Takes up to `req.n` steps back, or forward for `redo`, one entry each.
+fn take_steps(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    req: &StepRequest,
+    redo: bool,
+    earlier: &mut Earlier,
+    taken: &mut Vec<Taken>,
+    shelved: &mut Vec<Shelf>,
+) -> Result<(), SwitchError> {
+    for _ in 0..req.n {
+        let Some((step, shelf)) = take_one(repo, lock, req, redo, earlier)? else {
+            break;
+        };
+        taken.push(step);
+        shelved.extend(shelf);
+    }
+    Ok(())
+}
+
+/// `error`, its hint naming `undo --to <text>` where it names a command to run again.
+fn aimed(error: SwitchError, text: &str) -> SwitchError {
+    match error {
+        SwitchError::InTheWayOfStep {
+            paths,
+            redo,
+            shelve,
+            ..
+        } => SwitchError::InTheWayOfStep {
+            paths,
+            redo,
+            shelve,
+            to: Some(text.to_owned()),
+        },
+        other => other,
+    }
+}
+
 fn command(redo: bool) -> &'static str {
     if redo { "redo" } else { "undo" }
 }
 
 /// A shelf: its label and its save.
 type Shelf = (String, Id);
+
+/// A step on the undo or redo list, and what it changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepInfo {
+    pub entry: Id,
+    pub diary: DiaryEntry,
+    /// What it changed from the entry before it; nothing for the diary's first entry.
+    pub effects: Vec<Effect>,
+}
+
+/// The steps redo can bring back and undo can take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoList {
+    /// The one `redo` brings back first.
+    pub redo: Vec<StepInfo>,
+    /// Newest first: the one `undo` takes first.
+    pub undo: Vec<StepInfo>,
+    /// Undo can take more steps than `undo` holds.
+    pub more: bool,
+}
+
+/// The steps redo can bring back, and the newest `limit` that undo can take.
+pub fn undo_list(repo: &Repository, limit: usize) -> Result<UndoList, RepoError> {
+    let (head, _) = repo.current()?;
+    let steps = timeline::steps(head, &mut |id| repo.entry(id), limit)?;
+    let info = |list: Vec<(Id, DiaryEntry)>| {
+        list.into_iter()
+            .map(|(entry, diary)| {
+                let before = diary.parent.map(|p| repo.entry(&p)).transpose()?;
+                let effects = did(before.as_ref(), &diary);
+                Ok(StepInfo {
+                    entry,
+                    diary,
+                    effects,
+                })
+            })
+            .collect::<Result<Vec<_>, RepoError>>()
+    };
+    Ok(UndoList {
+        redo: info(steps.undone)?,
+        undo: info(steps.done)?,
+        more: steps.more_done,
+    })
+}
+
+/// Calls `each` with every entry from `head` back, newest first, and what it changed.
+pub fn whole_diary<E: From<RepoError>>(
+    repo: &Repository,
+    each: impl FnMut(Id, &DiaryEntry, &[Effect]) -> Result<(), E>,
+) -> Result<(), E> {
+    let (head, _) = repo.current()?;
+    back_from(head, &mut |id| repo.entry(id), each)
+}
+
+/// [`whole_diary`] from `head`, with entries read by `read`. An entry's ID covers its parent's,
+/// and the store checks every entry against its ID, so the walk can't come round again.
+fn back_from<E: From<RepoError>>(
+    head: Id,
+    read: &mut timeline::Read<'_>,
+    mut each: impl FnMut(Id, &DiaryEntry, &[Effect]) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut at = Some((head, read(&head)?));
+    while let Some((id, entry)) = at {
+        at = match entry.parent {
+            Some(parent) => Some((parent, read(&parent)?)),
+            None => None,
+        };
+        each(id, &entry, &did(at.as_ref().map(|(_, e)| e), &entry))?;
+    }
+    Ok(())
+}
+
+/// What `entry` changed from `before`, the entry before it; nothing for the diary's first entry.
+fn did(before: Option<&DiaryEntry>, entry: &DiaryEntry) -> Vec<Effect> {
+    before.map_or_else(Vec::new, |b| {
+        effects(&b.state, &entry.state, entry.folder_change)
+    })
+}
+
+/// The one entry from `head` back whose ID starts with `text`, in lowercase hex digits.
+fn entry_named(
+    text: &str,
+    head: Id,
+    read: &mut timeline::Read<'_>,
+) -> Result<(Id, DiaryEntry), SwitchError> {
+    let mut found = Vec::new();
+    back_from(head, read, |id, entry, _| {
+        if id.to_hex().starts_with(text) {
+            found.push((id, entry.clone()));
+        }
+        Ok::<(), RepoError>(())
+    })?;
+    if found.len() > 1 {
+        let entries = found.into_iter().map(|(id, _)| id).collect();
+        return Err(SwitchError::EntryAmbiguous {
+            text: text.to_owned(),
+            entries,
+        });
+    }
+    found.pop().ok_or_else(|| SwitchError::NoEntry {
+        text: text.to_owned(),
+    })
+}
+
+/// Goes to the state right after `to`, an entry neither undo nor redo can reach, as one new step:
+/// its lines, position, tags and server lines with the shelves kept, and the folder switched from
+/// the current save to that state's save as `goto` switches it. `None` when things are that way
+/// already.
+fn jump(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    req: &StepRequest,
+    earlier: &mut Earlier,
+    (to, entry): (Id, DiaryEntry),
+) -> Result<Option<(Taken, Option<Shelf>)>, SwitchError> {
+    let (head, now) = repo.current()?;
+    let (current, target) = (tip_of(&now)?, tip_of(&entry)?);
+    let mut state = State {
+        shelves: now.state.shelves.clone(),
+        ..entry.state.clone()
+    };
+    let drive = repo.drive()?;
+    let mut plan = writeout::plan(repo, current, target, None, false, drive, req.git_excludes)?;
+    let (mut from, mut shelf) = (current, None);
+    if !plan.collisions.is_empty() && req.shelve {
+        let shelving = Shelving {
+            current,
+            from,
+            state: &now.state,
+            req,
+            redo: false,
+            drive,
+        };
+        let shelves = &mut state.shelves;
+        let (again, with_it, made) =
+            shelving.replan(repo, lock, &plan.collisions, target, shelves)?;
+        (plan, from, shelf) = (again, with_it, Some(made));
+    }
+    if !plan.collisions.is_empty() {
+        return Err(SwitchError::InTheWayOfStep {
+            paths: plan.collisions,
+            redo: false,
+            shelve: req.shelve,
+            to: None,
+        });
+    }
+    if state == now.state && plan.actions.is_empty() {
+        return Ok(None);
+    }
+    let kept = switch::kept_on(&now.state, current, "undo", &[], req.who);
+    let mut packs = repo.new_packs()?;
+    let (folder_change, _) =
+        kept::switch_saves(repo, &plan, from, target, &kept, drive, &mut packs)?;
+    let to_make = Switch {
+        head,
+        action: Action::Command,
+        state: state.clone(),
+        folder_change,
+        plan,
+        drive,
+        packs,
+    };
+    let applied = switch::switch(repo, lock, to_make, req.who, "undo", earlier)?;
+    let effects = effects(&now.state, &state, folder_change);
+    let taken = Taken {
+        step: to,
+        entry,
+        action: Action::Command,
+        before: now.state,
+        after: state,
+        effects,
+        applied,
+    };
+    Ok(Some((taken, shelf)))
+}
 
 /// Takes the next step, if there is one, as an entry of its own, with the shelf `--shelve` made
 /// for it.
@@ -309,10 +601,9 @@ fn take_one(
                 to: change.from,
             }
         };
-        let (mut from, to) = (switched.from, switched.to);
+        let (from, to) = (switched.from, switched.to);
         let drive = repo.drive()?;
-        let ignored = req.git_excludes;
-        let mut plan = writeout::plan(repo, from, to, None, false, drive, ignored)?;
+        let mut plan = writeout::plan(repo, from, to, None, false, drive, req.git_excludes)?;
         if !plan.collisions.is_empty() && req.shelve {
             let shelving = Shelving {
                 current: tip_of(&now)?,
@@ -322,18 +613,16 @@ fn take_one(
                 redo,
                 drive,
             };
-            let (made, from_with_it) = shelving.set_aside(repo, lock, &plan.collisions)?;
-            let label = free_label(&state.shelves);
-            state.shelves.insert(0, (label.clone(), made));
-            shelf = Some((label, made));
-            from = from_with_it;
-            plan = writeout::plan(repo, from, to, None, false, drive, ignored)?;
+            let shelves = &mut state.shelves;
+            let (again, _, made) = shelving.replan(repo, lock, &plan.collisions, to, shelves)?;
+            (plan, shelf) = (again, Some(made));
         }
         if !plan.collisions.is_empty() {
             return Err(SwitchError::InTheWayOfStep {
                 paths: plan.collisions,
                 redo,
                 shelve: req.shelve,
+                to: None,
             });
         }
         folder_change = Some(switched);
@@ -344,7 +633,7 @@ fn take_one(
         Some((plan, drive)) if !plan.actions.is_empty() => {
             let to_make = Switch {
                 head,
-                action,
+                action: action.clone(),
                 state: state.clone(),
                 folder_change,
                 plan,
@@ -358,7 +647,7 @@ fn take_one(
         planned => {
             let made = DiaryEntry {
                 parent: Some(head),
-                action,
+                action: action.clone(),
                 command: command.to_owned(),
                 who: req.who.clone(),
                 bolt_version: env!("CARGO_PKG_VERSION").into(),
@@ -376,6 +665,7 @@ fn take_one(
     let taken = Taken {
         step,
         entry,
+        action,
         before: now.state,
         after: state,
         effects,
@@ -397,6 +687,25 @@ struct Shelving<'a> {
 }
 
 impl Shelving<'_> {
+    /// Sets the unsaved work at `collisions` aside on a new shelf, put first in `shelves`, then
+    /// plans the step's switch to `to` again, from a save that holds that work too. Gives that
+    /// plan, the save it is planned from, and the shelf.
+    fn replan(
+        &self,
+        repo: &mut Repository,
+        lock: &ChangeLock,
+        collisions: &[String],
+        to: Id,
+        shelves: &mut Vec<Shelf>,
+    ) -> Result<(Plan, Id, Shelf), SwitchError> {
+        let (made, from) = self.set_aside(repo, lock, collisions)?;
+        let label = free_label(shelves);
+        shelves.insert(0, (label.clone(), made));
+        let ignored = self.req.git_excludes;
+        let plan = writeout::plan(repo, from, to, None, false, self.drive, ignored)?;
+        Ok((plan, from, (label, made)))
+    }
+
     /// Makes the shelf of the unsaved work at `collisions`, and the save to plan the step from
     /// instead, holding that work too so that the step overwrites it. Both are stored at once,
     /// for the planner to read, unless something in the way can't be set aside (a file Bolt
@@ -452,6 +761,7 @@ impl Shelving<'_> {
                 paths: left,
                 redo: self.redo,
                 shelve: true,
+                to: None,
             }),
         }
     }
