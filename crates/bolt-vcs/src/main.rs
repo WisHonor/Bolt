@@ -1211,9 +1211,21 @@ fn undo_command(
         None if redo => undo::redo(repo, &req, on_wait),
         None => undo::undo(repo, &req, on_wait),
     };
-    let (taken, shelved, finished, failure) = match done {
-        Ok(done) => (done.taken, done.shelved, done.finished, None),
-        Err(e) => (e.taken, e.shelved, false, Some(Failure::from(e.error))),
+    let (taken, shelved, finished, head_lost, failure) = match done {
+        Ok(done) => (
+            done.taken,
+            done.shelved,
+            done.finished,
+            done.head_lost,
+            None,
+        ),
+        Err(e) => (
+            e.taken,
+            e.shelved,
+            false,
+            false,
+            Some(Failure::from(e.error)),
+        ),
     };
     let (verb, list, command) = if redo {
         ("Redid", "redone", "redo")
@@ -1231,6 +1243,9 @@ fn undo_command(
         let mut document = json!({ "shelved": shelves });
         let key = if to.is_some() { "steps" } else { list };
         document[key] = taken.iter().map(output::step_json).collect();
+        if head_lost {
+            document["head_lost"] = true.into();
+        }
         let Some(failure) = failure else {
             let position = match taken.last() {
                 Some(t) => Some(t.after.position.clone()),
@@ -1253,9 +1268,13 @@ fn undo_command(
     {
         let mut named = |id: &Id| named_save(repo, id, &mut warnings);
         for t in &taken {
-            // A step `undo --to` took records only `undo`: say where it went.
-            let went = undo::went_to(repo, &t.entry).ok().flatten();
-            text += &output::step_line(t, went.as_ref(), &shelved, &mut named);
+            if head_lost {
+                text += &output::picked_up_line(t, &mut named);
+            } else {
+                // A step `undo --to` took records only `undo`: say where it went.
+                let went = undo::went_to(repo, &t.entry).ok().flatten();
+                text += &output::step_line(t, went.as_ref(), &shelved, &mut named);
+            }
             text.push('\n');
         }
     }
@@ -1517,7 +1536,10 @@ fn undo_list_command(
     )?));
     let warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
     let mut out = output::Stdout::new();
-    let done = if all {
+    // With `head` lost, either list gives where the diary may have stopped instead.
+    let done = if matches!(repo.current(), Err(RepoError::HeadLost { .. })) {
+        stopped_at_to(&mut out, repo, json, warnings)
+    } else if all {
         whole_diary_to(&mut out, repo, json, warnings)
     } else {
         undo_list_to(&mut out, repo, json, warnings)
@@ -1621,6 +1643,63 @@ fn whole_diary_to(
         writeln!(out, "{}  {}  {what}", id.short_hex(), when(entry, now))?;
         Ok::<(), Failure>(())
     })?;
+    warnings.extend(repo.store().warnings());
+    Ok(told_once(warnings))
+}
+
+/// The entries no other follows, newest first, for a lost `head`: where the diary may have
+/// stopped, for `bolt undo --to` to pick one from.
+fn stopped_at_to(
+    out: &mut output::Stdout,
+    repo: &Repository,
+    json: bool,
+    mut warnings: Vec<Warning>,
+) -> Result<Vec<Warning>, Failure> {
+    let ends = undo::stopped_at(repo)?;
+    if json {
+        let entry = |s: &StepInfo| output::entry_json(&s.entry, &s.diary, &s.effects);
+        let ends: Vec<serde_json::Value> = ends.iter().map(entry).collect();
+        warnings.extend(repo.store().warnings());
+        let warnings = told_once(warnings);
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "head_lost": true,
+            "ends": ends,
+            "warnings": output::warnings_json(&warnings),
+        });
+        writeln!(out, "{document}")?;
+        return Ok(warnings);
+    }
+    if ends.is_empty() {
+        writeln!(
+            out,
+            "The project's current diary entry is lost, and the store holds no diary entry to go \
+             on from. Ask for help before trying to repair it."
+        )?;
+    } else {
+        writeln!(
+            out,
+            "The project's current diary entry is lost. The diary may have stopped at any of \
+             these, newest first:"
+        )?;
+        let now = now_ms();
+        // There is no current line to shorten change IDs against.
+        let mut named = |id: &Id| named_by(repo, id, ChangeId::to_letters);
+        let files = &mut |from, to| files_between(repo, from, to);
+        for s in &ends {
+            let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
+            writeln!(
+                out,
+                "{}  {}  {what}",
+                s.entry.short_hex(),
+                when(&s.diary, now)
+            )?;
+        }
+        writeln!(
+            out,
+            "Run bolt undo --to <entry> to make one of them the current one; it changes no file."
+        )?;
+    }
     warnings.extend(repo.store().warnings());
     Ok(told_once(warnings))
 }

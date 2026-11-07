@@ -1050,7 +1050,7 @@ fn save_json_output() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-fn interrupted_save_changes_nothing() {
+fn interrupted_save_changes_nothing_until_its_head_moves() {
     use bolt_core::repo::Repository;
     let env = Env::new();
     env.bolt().arg("start").assert().success();
@@ -1064,16 +1064,22 @@ fn interrupted_save_changes_nothing() {
             .env("BOLT_FAULT_AT", n.to_string())
             .output()
             .unwrap();
-        if !text(&out.stderr).contains("injected crash") {
+        let said = text(&out.stderr);
+        if !said.contains("injected crash") {
             assert!(n > 1, "no fault point was reached");
-            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+            assert_eq!(out.status.code(), Some(0), "{said}");
             break;
         }
         let repo = Repository::open(env.root()).unwrap();
         let (_, entry) = repo.current().unwrap();
-        assert_eq!(entry.state, first.state, "fault {n}");
         let report = bolt_core::verify::verify_store(repo.packs_dir());
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
+        // Its last stop comes once the new head is in place: the save happened.
+        if said.contains("injected crash at head:renamed") {
+            assert_ne!(entry.state, first.state, "fault {n}");
+            break;
+        }
+        assert_eq!(entry.state, first.state, "fault {n}");
     }
     let out = env.bolt().args(["save", "Add a"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));

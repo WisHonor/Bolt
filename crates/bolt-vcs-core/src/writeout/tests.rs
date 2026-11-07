@@ -1006,6 +1006,8 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         fault::arm(n);
         let result = carry_out(&mut repo, &lock, &journal, drive);
         fault::disarm();
+        // A fault in flushing the moved head is only a warning, and the switch goes on.
+        let unflushed = kinds(&repo.store().warnings()).contains(&warning::HEAD_NOT_FLUSHED);
         drop(lock);
         drop(repo);
         assert_wholly_old_or_new(dir.path(), n);
@@ -1024,11 +1026,14 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         if result.is_err() && !took_effect {
             stops_before_head += 1;
         }
-        if let Ok(done) = result {
+        if let Ok(done) = result
+            && !unflushed
+        {
             assert!(done.in_use.is_empty());
-            // A stop after each change, before the head, and in removing the journal.
+            // A stop after each change, before the head, in flushing it, and in removing the
+            // journal.
             assert!(stops_before_head >= 8, "only {stops_before_head} stops");
-            assert!(n > stops_before_head + 1, "no stop after the head moved");
+            assert!(n > stops_before_head + 2, "no stop after the head moved");
             break;
         }
     }
@@ -1107,12 +1112,14 @@ fn a_finish_stopped_in_turn_is_finished_by_the_command_after() {
             fault::arm(m);
             let finishing = save_now(&mut repo);
             fault::disarm();
+            // A fault in flushing the moved head is only a warning, and the save goes on.
+            let unflushed = kinds(&repo.store().warnings()).contains(&warning::HEAD_NOT_FLUSHED);
             drop(repo);
             assert_wholly_old_or_new(dir.path(), m);
             let mut repo = Repository::open(dir.path()).unwrap();
             save_now(&mut repo).unwrap();
             assert_switched(&repo, dir.path(), &journal, m);
-            if finishing.is_ok() {
+            if finishing.is_ok() && !unflushed {
                 break;
             }
         }

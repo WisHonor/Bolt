@@ -473,10 +473,13 @@ fn an_undo_stopped_at_every_write_is_finished_by_the_next_command() {
             );
         }
         let unfinished = warned(&json(&env, &["status"]), "switch_unfinished");
+        // Stopped once its head moved, it left only its journal, which goes without a word.
+        let only_journal = journal_exists(&env) && head(&env).1.action == Action::Undo(goto);
         // The next command that changes the project finishes it, and then it is done.
         let next = json(&env, &["discard"]);
         assert_eq!(next["error"], serde_json::Value::Null, "fault {n}: {next}");
-        assert_eq!(warned(&next, "switch_finished"), unfinished, "fault {n}");
+        let finished = unfinished && !only_journal;
+        assert_eq!(warned(&next, "switch_finished"), finished, "fault {n}");
         assert!(!journal_exists(&env), "fault {n}");
         let (at, newest) = head(&env);
         if newest.action == Action::Undo(goto) {
@@ -487,7 +490,7 @@ fn an_undo_stopped_at_every_write_is_finished_by_the_next_command() {
             assert_eq!(newest.state.position, Position::AtSave(one), "fault {n}");
             assert_eq!(files(env.root()), old, "fault {n}");
         }
-        if unfinished {
+        if finished {
             finished_later += 1;
         }
         if !crashed {
@@ -535,10 +538,13 @@ fn an_undo_shelve_stopped_anywhere_is_finished_by_the_next_command() {
             assert!(known.contains(&true), "fault {n}: {path} is none of them");
         }
         let unfinished = warned(&json(&env, &["status"]), "switch_unfinished");
+        // Stopped once its head moved, it left only its journal, which goes without a word.
+        let only_journal = journal_exists(&env) && head(&env).1.action == Action::Undo(goto);
         // A command that changes nothing of its own finishes it.
         let next = json(&env, &["discard", "dir/c.txt"]);
         assert_eq!(next["error"], serde_json::Value::Null, "fault {n}: {next}");
-        assert_eq!(warned(&next, "switch_finished"), unfinished, "fault {n}");
+        let finished = unfinished && !only_journal;
+        assert_eq!(warned(&next, "switch_finished"), finished, "fault {n}");
         assert!(!journal_exists(&env), "fault {n}");
         let (at, newest) = head(&env);
         let shelves = &newest.state.shelves;
@@ -553,7 +559,7 @@ fn an_undo_shelve_stopped_anywhere_is_finished_by_the_next_command() {
             assert_eq!(files(env.root()), edited, "fault {n}");
             assert!(shelves.is_empty(), "fault {n}");
         }
-        if unfinished {
+        if finished {
             finished_later += 1;
         }
         if !crashed {

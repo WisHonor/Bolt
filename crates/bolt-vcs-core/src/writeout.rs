@@ -573,7 +573,7 @@ pub fn carry_out(
 /// anything (decision 049): never rolled back. `None` when there was none. When `head` already
 /// names its entry, only the journal was left: it is removed, and what was done is empty. A
 /// switch that still can't finish is an error, the journal kept, so no command builds on a
-/// half-switched folder.
+/// half-switched folder. A lost `head` leaves the journal as it is, for the command to stop at.
 pub fn finish_interrupted(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -581,7 +581,12 @@ pub fn finish_interrupted(
     let Some(journal) = Journal::read(repo)? else {
         return Ok(None);
     };
-    let head = repo.head()?;
+    let head = match repo.head() {
+        Ok(head) => head,
+        // Nothing can be judged against it; only `undo --to` goes on, and changes no file.
+        Err(RepoError::HeadLost { .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
     if head == journal.target {
         Journal::remove(repo, lock)?;
         return Ok(Some(Applied::default()));
@@ -627,26 +632,32 @@ fn usable(repo: &Repository, journal: Journal, head: Id) -> Result<Journal, Repo
     }
 }
 
-/// For commands that only read: says a switch between saves is still to finish, or that its
-/// journal can't be used.
+/// For commands that only read: says a switch between saves is still to finish, or stopped just
+/// after it was done, or that its journal can't be used.
 #[must_use]
 pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
+    // Whether the switch took effect, when there is one.
     let pending = Journal::read(repo).and_then(|found| match found {
         None => Ok(None),
         Some(j) => {
             let head = repo.head()?;
-            // It took effect; the next change only removes the journal.
-            if head == j.target {
-                return Ok(None);
+            let took_effect = head == j.target;
+            if !took_effect {
+                usable(repo, j, head)?;
             }
-            usable(repo, j, head).map(Some)
+            Ok(Some(took_effect))
         }
     });
     let message = match pending {
-        Ok(None) => return None,
-        Ok(Some(_)) => "A switch between saves was stopped before it was done, so some files may \
-                        still be as they were. Running `bolt goto` or `bolt discard` again, or any \
-                        command that changes the project, finishes it first."
+        // A lost head is what the command tells.
+        Ok(None) | Err(RepoError::HeadLost { .. }) => return None,
+        Ok(Some(true)) => "A switch between saves was stopped just after it was done: its files \
+                           are all written, and the next command that changes the project removes \
+                           its journal, .bolt/state/journal, first."
+            .to_owned(),
+        Ok(Some(false)) => "A switch between saves was stopped before it was done, so some files \
+                            may still be as they were. Running `bolt goto` or `bolt discard` \
+                            again, or any command that changes the project, finishes it first."
             .to_owned(),
         Err(e) => format!(
             "{e} Commands that change the project won't run until it is dealt with. {}",

@@ -9,6 +9,9 @@ pub const DAMAGED_PACK: &str = "damaged_pack";
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
 /// Small packs were merged after a command, but one or more couldn't be: the command happened.
 pub const PACK_NOT_MERGED: &str = "pack_not_merged";
+/// The command happened, but `state/` couldn't be flushed once its head moved, so a power cut
+/// soon after could undo it.
+pub const HEAD_NOT_FLUSHED: &str = "head_not_flushed";
 /// A change ID is shown whole because the line couldn't be read to shorten it.
 pub const CHANGE_ID_NOT_SHORTENED: &str = "change_id_not_shortened";
 /// The user's cache key can't be used, so the command went without its caches.

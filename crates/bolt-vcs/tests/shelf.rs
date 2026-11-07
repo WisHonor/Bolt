@@ -917,6 +917,8 @@ fn stopped_anywhere(
             assert!(known.contains(&true), "{command} {n}: {path} is neither");
         }
         let unfinished = warned(&json(&env, &["status"]), "switch_unfinished");
+        // Stopped once its head moved, it left only its journal, which goes without a word.
+        let only_journal = journal_exists(&env) && head(&env).1.command == command;
         // A command that changes nothing of its own finishes it.
         let next = json(&env, &["discard", "dir/c.txt"]);
         assert_eq!(
@@ -924,11 +926,8 @@ fn stopped_anywhere(
             serde_json::Value::Null,
             "{command} {n}: {next}"
         );
-        assert_eq!(
-            warned(&next, "switch_finished"),
-            unfinished,
-            "{command} {n}"
-        );
+        let finished = unfinished && !only_journal;
+        assert_eq!(warned(&next, "switch_finished"), finished, "{command} {n}");
         assert!(!journal_exists(&env), "{command} {n}");
         let (now, newest) = head(&env);
         if newest.command == command {
@@ -939,7 +938,7 @@ fn stopped_anywhere(
             assert_eq!(files(env.root()), *before, "{command} {n}");
             not_begun(&env, n);
         }
-        if unfinished {
+        if finished {
             finished_later += 1;
         }
         if !crashed {

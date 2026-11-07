@@ -15,15 +15,16 @@ use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 use crate::config::{self, ConfigError};
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
-use crate::fsio::{self, fault_point, write_atomic};
+use crate::fsio::{self, Renamed, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
 use crate::keyed::{self, KEY_LEN};
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, is_damage};
 use crate::text::escape;
+use crate::warning::{self, Warning};
 
 pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";
 
@@ -103,6 +104,13 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
+    /// `state/head` is missing, isn't an entry's ID, or names an entry the store can't give: no
+    /// command can tell which state is current, though every save is in the store.
+    #[error(
+        "Bolt can't tell which diary entry is the project's current one: .bolt/state/head {}.",
+        escape(detail, false)
+    )]
+    HeadLost { detail: String },
     /// `state/journal`, the record of a stopped switch between saves, can't be used. It is
     /// neither carried out nor passed over, since the folder may be half switched.
     #[error(
@@ -192,6 +200,11 @@ impl RepoError {
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
+                }
+                RepoError::HeadLost { .. } => {
+                    "Your saves are safe. `bolt undo --list` lists the entries where the diary may \
+                     have stopped, newest first, and `bolt undo --to <entry>` makes one of them \
+                     current, without changing any file."
                 }
                 // Removing the journal is no roll back: the files stay as the switch left them.
                 RepoError::JournalUnusable { .. } => {
@@ -552,23 +565,45 @@ pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
     })
 }
 
-fn parse_head(bytes: &[u8]) -> Result<Id, RepoError> {
-    std::str::from_utf8(bytes)
-        .ok()
-        .and_then(|t| t.strip_suffix('\n'))
-        .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h))
-        .ok_or_else(|| damaged("state/head is not a lowercase fingerprint and a newline"))
+/// What `state/head` holds.
+enum Head {
+    At(Id),
+    Missing,
+    /// Anything but an entry's ID, in lowercase hex, and a newline.
+    Garbled,
 }
 
-/// `head` in `state`, the `state` folder of the `.bolt` folder `bolt`, or `None` before the first
-/// commit.
-fn read_head(state: &Dir, bolt: &Path) -> Result<Option<Id>, RepoError> {
+impl Head {
+    fn id(&self) -> Option<Id> {
+        match self {
+            Head::At(id) => Some(*id),
+            Head::Missing | Head::Garbled => None,
+        }
+    }
+}
+
+/// `head` in `state`, the `state` folder of the `.bolt` folder `bolt`. A link or special file
+/// there is damage.
+fn read_head(state: &Dir, bolt: &Path) -> Result<Head, RepoError> {
     let shown = bolt.join("state").join("head");
     let max = safe_fs::MAX_HEAD_BYTES;
-    match safe_fs::read_capped_in(state, OsStr::new("head"), &shown, max) {
-        Ok(bytes) => parse_head(&bytes).map(Some),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(refused(e)),
+    let bytes = match safe_fs::read_capped_in(state, OsStr::new("head"), &shown, max) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Head::Missing),
+        // Longer than any head.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Ok(Head::Garbled),
+        Err(e) => return Err(refused(e)),
+    };
+    let id = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|t| t.strip_suffix('\n'))
+        .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h));
+    Ok(id.map_or(Head::Garbled, Head::At))
+}
+
+fn head_lost(detail: impl Into<String>) -> RepoError {
+    RepoError::HeadLost {
+        detail: detail.into(),
     }
 }
 
@@ -586,7 +621,7 @@ pub struct Repository {
     format: FormatInfo,
     store: Store,
     /// The head read before the store was last loaded, so every object it reaches is
-    /// registered. `None` when there was no head yet.
+    /// registered. `None` when there was no head yet, or none that is an entry's ID.
     head: Option<Id>,
     /// What seals this handle's caches: one for this handle alone unless `set_cache_key` gave
     /// the user's own.
@@ -695,7 +730,14 @@ fn diary_of(bolt: &Path) -> Result<Diary, RepoError> {
     let state = bolt.join("state");
     // A start can stop before it makes `state`.
     let head = match Dir::open_top(&state) {
-        Ok(dir) => read_head(&dir, bolt)?,
+        Ok(dir) => match read_head(&dir, bolt)? {
+            Head::Garbled => {
+                return Err(damaged(
+                    "state/head is not a lowercase fingerprint and a newline",
+                ));
+            }
+            head => head.id(),
+        },
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(unreal(&state, e)),
     };
@@ -1010,8 +1052,9 @@ impl Repository {
             &bolt.join("store"),
             "packs",
         )?);
-        // The head first: its pack was in the store before the head pointed at it.
-        let head = read_head(&state, &bolt)?;
+        // The head first: its pack was in the store before the head pointed at it. One that is
+        // lost is found by `current`, so that `undo --list` and `--to` can still open the project.
+        let head = read_head(&state, &bolt)?.id();
         let store = Store::open_in(Arc::clone(&packs_dir), &packs)?;
         // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
         // project found damaged is left as it was.
@@ -1160,22 +1203,37 @@ impl Repository {
     }
 
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
+    /// `HeadLost` when it is missing or isn't an entry's ID.
     pub fn head(&self) -> Result<Id, RepoError> {
-        let head = self.bolt.join("state").join("head");
-        let max = safe_fs::MAX_HEAD_BYTES;
-        let read = safe_fs::read_capped_in(&self.held.state, OsStr::new("head"), &head, max);
-        parse_head(&read.map_err(refused)?)
+        match read_head(&self.held.state, &self.bolt)? {
+            Head::At(id) => Ok(id),
+            Head::Missing => Err(head_lost("is missing")),
+            Head::Garbled => Err(head_lost("isn't a diary entry's ID and a newline")),
+        }
     }
 
     /// The newest diary entry this handle can see: the one when it was opened, or when it
-    /// last took the change lock or committed. Read from the store.
+    /// last took the change lock or committed. Read from the store. Every command reads it, so
+    /// every command stops at a lost head, `HeadLost`.
     pub fn current(&self) -> Result<(Id, DiaryEntry), RepoError> {
         let id = match self.head {
             Some(id) => id,
             None => self.head()?,
         };
-        let bytes = self.store.read_record(&id, ObjectKind::DiaryEntry)?;
-        Ok((id, DiaryEntry::decode(&bytes)?))
+        let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
+        let bytes = match self.store.read_record(&id, ObjectKind::DiaryEntry) {
+            Ok(bytes) => bytes,
+            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+                return Err(lost("which the store doesn't hold".to_owned()));
+            }
+            Err(StoreError::Pack(e)) if is_damage(&e) => {
+                return Err(lost(format!("which can't be read ({e})")));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let entry =
+            DiaryEntry::decode(&bytes).map_err(|e| lost(format!("which can't be read ({e})")))?;
+        Ok((id, entry))
     }
 
     /// The diary entry `id`. One the store lacks, or can't decode, is damage to the diary, named.
@@ -1244,16 +1302,16 @@ impl Repository {
         );
         let held = &self.held;
         write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())?;
-        // Another command may have committed since this handle was opened.
-        self.head = read_head(&self.held.state, &self.bolt)?;
+        // Another command may have committed since this handle was opened. A lost head stops
+        // the command at `current`, unless it is the `undo --to` that picks one up.
+        self.head = read_head(&self.held.state, &self.bolt)?.id();
         self.store.refresh()?;
         Ok(ChangeLock { _file: file })
     }
 
     /// Stores `entry` in the last of `packs`, moves that pack into the store, registers all of
     /// them, then replaces `state/head`. The command has happened exactly when the head is
-    /// replaced (decision 010), so an `Io` error from the final folder sync does not mean
-    /// "nothing changed".
+    /// replaced (decision 010), so nothing after that fails it.
     /// Then merges the small packs; problems doing so are only warnings, kept with the store's.
     pub fn commit(
         &mut self,
@@ -1308,13 +1366,22 @@ impl Repository {
         Ok(())
     }
 
-    /// Points `state/head` at `id`, a diary entry already stored: how a switch between saves
-    /// takes effect.
+    /// Points `state/head` at `id`, a diary entry already stored: how a command takes effect.
+    /// Once the new head is in place, a flush of `state/` that fails is only a warning.
     pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
         let head = format!("{id}\n");
-        let held = &self.held;
-        write_atomic(&held.tmp, &held.state, "head", head.as_bytes())?;
+        let renamed = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())?;
         self.head = Some(id);
+        if let Renamed::NotFlushed(e) = renamed {
+            self.store.note(Warning::new(
+                warning::HEAD_NOT_FLUSHED,
+                format!(
+                    "The command happened, but Bolt couldn't flush .bolt/state to the disk after \
+                     it ({}), so a power cut soon after could undo it.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            ));
+        }
         Ok(())
     }
 }
@@ -1465,8 +1532,9 @@ mod tests {
     #[test]
     fn a_damaged_project_is_left_as_found() {
         // Not a damaged pack: packs are opened only when first searched, so opening the project
-        // doesn't find one.
-        for spoil in ["state/head"] {
+        // doesn't find one. Nor a garbled head: that is a lost head, which the project is opened
+        // to pick up.
+        for spoil in ["format"] {
             let (dir, repo) = project();
             drop(repo);
             let bolt = dir.path().join(".bolt");
@@ -1685,7 +1753,7 @@ mod tests {
         for bad in ["xyz\n", upper.as_str(), no_newline.as_str(), ""] {
             std::fs::write(&head, bad).unwrap();
             assert!(
-                matches!(repo.head(), Err(RepoError::Damaged { .. })),
+                matches!(repo.head(), Err(RepoError::HeadLost { .. })),
                 "{bad:?}"
             );
         }

@@ -14,6 +14,7 @@ use bolt_core::pack::set_test_pack_limit;
 use bolt_core::repo::Repository;
 use bolt_core::save::Person;
 use bolt_core::verify::verify_store;
+use bolt_core::warning::HEAD_NOT_FLUSHED;
 
 /// A Git repository of three commits on `main`, each with a file and a folder of its own, an
 /// annotated tag of the first and a server branch at the second, so the import stores a tag list
@@ -87,8 +88,14 @@ fn an_interrupted_import_can_be_run_again() {
         fault::arm(n);
         let result = import(dir.path());
         fault::disarm();
-        let Err(stopped) = result else {
-            break;
+        let stopped = match result {
+            Err(stopped) => stopped,
+            // A fault in flushing the moved head is only a warning, and the import went on.
+            Ok(done) if done.warnings.iter().any(|w| w.kind == HEAD_NOT_FLUSHED) => {
+                assert_eq!(state(dir.path()), state(clean.path()), "fault {n}");
+                continue;
+            }
+            Ok(_) => break,
         };
         assert!(!dir.path().join(".bolt/format").exists(), "fault {n}");
         // Every fault point is met once `.bolt` is made, the first while `begin` takes the lock,

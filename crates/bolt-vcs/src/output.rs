@@ -226,6 +226,24 @@ pub fn step_line(
     line
 }
 
+/// What `undo --to` did for a lost `head`, in one line for people: the entry it made current, and
+/// where that leaves the project. `named` names a save as for [`step_line`].
+pub fn picked_up_line(t: &Taken, named: &mut dyn FnMut(&Id) -> (String, Option<String>)) -> String {
+    let at = match &t.after.position {
+        Position::OnLine(line) => {
+            let tip = t.after.lines.get(line).map(|s| titled(named, s));
+            format!("on {} at {}", escape(line, false), tip.unwrap_or_default())
+        }
+        Position::AtSave(save) => format!("at save {}", titled(named, save)),
+    };
+    format!(
+        "Made entry {} ({}) the current one: {at}. No file was changed: bolt status shows how \
+         your files differ from that save.",
+        t.step.short_hex(),
+        escape(&t.entry.command, false)
+    )
+}
+
 /// A diary entry as `bolt undo --list --json` gives it (docs/json.md, "An entry").
 pub fn entry_json(id: &Id, entry: &DiaryEntry, effects: &[Effect]) -> Value {
     let (action, target) = match &entry.action {

@@ -346,6 +346,9 @@ fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
         fault::arm(n);
         let result = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {});
         fault::disarm();
+        // A fault in flushing the moved head is only a warning, and the goto goes on.
+        let warnings = repo.store().warnings();
+        let unflushed = warnings.iter().any(|w| w.kind == warning::HEAD_NOT_FLUSHED);
         drop(repo);
         // The next command finishes what was started, so the folder is the save of the line
         // the project is on, whole.
@@ -367,7 +370,7 @@ fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
         if result.is_err() && wanted == NEW {
             finished_later += 1;
         }
-        if result.is_ok() {
+        if result.is_ok() && !unflushed {
             assert_eq!(wanted, NEW);
             // Stops after each write and in removing the journal, finished by the save.
             assert!(finished_later >= 3, "only {finished_later} finished later");

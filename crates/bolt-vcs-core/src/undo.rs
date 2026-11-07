@@ -1,8 +1,9 @@
 //! `bolt undo` and `bolt redo`: stepping back and forth through the commands the diary records,
 //! with what each did to the folder written back or written again; the lists of those steps, and
-//! `bolt undo --to`, which goes to any entry.
+//! `bolt undo --to`, which goes to any entry, and picks up a lost `head`.
 
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::path::Path;
 
@@ -11,6 +12,7 @@ use crate::drive::Drive;
 use crate::history::tip_of;
 use crate::id::{Id, is_hex_start};
 use crate::kept;
+use crate::pack::ObjectKind;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::shelf::{free_label, within_limit};
@@ -122,6 +124,8 @@ pub struct UndoOutcome {
     pub finished: bool,
     /// The shelves `--shelve` made, by label, oldest first: one for each step it was needed for.
     pub shelved: Vec<(String, Id)>,
+    /// `head` was lost, so `undo --to` made its entry current by one step that changed no file.
+    pub head_lost: bool,
 }
 
 /// Why `undo`, `redo` or `undo --to` stopped, with the steps taken, and shelves made, before it
@@ -222,6 +226,7 @@ fn take(
 /// by redoing up to it, and one undo can take by undoing the steps after it, as [`redo`] and
 /// [`undo`] take them; any other entry by one new step that puts back its lines, position, tags
 /// and server lines, keeps the shelves, and switches the folder to its save as `goto` does.
+/// With `head` lost, any entry the store holds is made current by one step that changes no file.
 /// `req.n` is unused.
 pub fn undo_to(
     repo: &mut Repository,
@@ -240,12 +245,21 @@ pub fn undo_to(
             },
         });
     }
+    let mut head_lost = false;
     let went = stepping(
         repo,
         on_wait,
         "undo",
         |repo, lock, earlier, taken, shelved| {
-            let (head, _) = repo.current()?;
+            let head = match repo.current() {
+                Ok((head, _)) => head,
+                Err(RepoError::HeadLost { .. }) => {
+                    head_lost = true;
+                    taken.push(pick_up(repo, lock, &text, req.who)?);
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
             let (to, way) = {
                 let mut read = |id: &Id| repo.entry(id);
                 let to = entry_named(&text, head, &mut read)?;
@@ -271,10 +285,104 @@ pub fn undo_to(
             take_steps(repo, lock, &req, redo, earlier, taken, shelved)
         },
     );
-    went.map_err(|e| UndoError {
-        error: aimed(e.error, &text),
-        ..e
+    match went {
+        Ok(done) => Ok(UndoOutcome { head_lost, ..done }),
+        Err(e) => Err(UndoError {
+            error: aimed(e.error, &text),
+            ..e
+        }),
+    }
+}
+
+/// Makes the entry the store holds whose ID starts with `text` current, for a lost `head`: one new
+/// step after it, holding its state. No file changes, so `status` then shows how the folder
+/// differs from that state's save.
+fn pick_up(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    text: &str,
+    who: &Person,
+) -> Result<Taken, SwitchError> {
+    let mut found: Vec<Id> = stored_entries(repo)?
+        .into_iter()
+        .filter(|id| id.to_hex().starts_with(text))
+        .collect();
+    found.sort_unstable();
+    let to = match found.as_slice() {
+        [to] => *to,
+        [] => {
+            return Err(SwitchError::NoEntry {
+                text: text.to_owned(),
+                anywhere: true,
+            });
+        }
+        _ => {
+            return Err(SwitchError::EntryAmbiguous {
+                text: text.to_owned(),
+                entries: found,
+            });
+        }
+    };
+    let entry = repo.entry(&to)?;
+    // A save that can't be read is no place to go on from.
+    repo.store()
+        .save(&tip_of(&entry)?, repo.signatures_allowed())?;
+    let made = DiaryEntry {
+        parent: Some(to),
+        action: Action::Command,
+        command: "undo".to_owned(),
+        who: who.clone(),
+        bolt_version: env!("CARGO_PKG_VERSION").into(),
+        state: entry.state.clone(),
+        folder_change: None,
+    };
+    let packs = repo.new_packs()?;
+    repo.commit(lock, packs, &made)?;
+    Ok(Taken {
+        step: to,
+        action: Action::Command,
+        // No state is known from before it, so nothing is told as changed.
+        before: entry.state.clone(),
+        after: entry.state.clone(),
+        effects: Vec::new(),
+        applied: Applied::default(),
+        entry,
     })
+}
+
+/// The ID of every diary entry the store holds, from the packs' indexes alone.
+fn stored_entries(repo: &Repository) -> Result<HashSet<Id>, RepoError> {
+    let mut ids = HashSet::new();
+    // No index line passes, so every pack's index is read to the end.
+    repo.store().any_entry(ObjectKind::DiaryEntry, |id| {
+        ids.insert(*id);
+        Ok::<_, RepoError>(false)
+    })?;
+    Ok(ids)
+}
+
+/// The diary entries in the store that no other entry has as its parent, newest first by `who`
+/// time: where the diary may have stopped, for a lost `head`. One that can't be read is left
+/// out, since it couldn't be made current either.
+pub fn diary_ends(repo: &Repository) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
+    let (mut followed, mut found) = (HashSet::new(), Vec::new());
+    for id in stored_entries(repo)? {
+        match repo.entry(&id) {
+            Ok(entry) => {
+                followed.extend(entry.parent);
+                found.push((Reverse(entry.who.time_ms), id));
+            }
+            Err(RepoError::Damaged { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    found.retain(|(_, id)| !followed.contains(id));
+    found.sort_unstable();
+    // Read again rather than held: a store can hold any number of entries.
+    found
+        .into_iter()
+        .map(|(_, id)| Ok((id, repo.entry(&id)?)))
+        .collect()
 }
 
 /// Runs `steps` under the lock for changes, unless the run finished a stopped switch first, with
@@ -304,6 +412,7 @@ fn stepping(
             taken,
             finished,
             shelved,
+            head_lost: false,
         }),
         Err(error) => Err(UndoError {
             taken,
@@ -358,7 +467,7 @@ fn command(redo: bool) -> &'static str {
 /// A shelf: its label and its save.
 type Shelf = (String, Id);
 
-/// A step on the undo or redo list, and what it changed.
+/// An entry on one of undo's lists, and what it changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInfo {
     pub entry: Id,
@@ -382,24 +491,31 @@ pub struct UndoList {
 pub fn undo_list(repo: &Repository, limit: usize) -> Result<UndoList, RepoError> {
     let (head, _) = repo.current()?;
     let steps = timeline::steps(head, &mut |id| repo.entry(id), limit)?;
-    let info = |list: Vec<(Id, DiaryEntry)>| {
-        list.into_iter()
-            .map(|(entry, diary)| {
-                let before = diary.parent.map(|p| repo.entry(&p)).transpose()?;
-                let effects = did(before.as_ref(), &diary);
-                Ok(StepInfo {
-                    entry,
-                    diary,
-                    effects,
-                })
-            })
-            .collect::<Result<Vec<_>, RepoError>>()
-    };
     Ok(UndoList {
-        redo: info(steps.undone)?,
-        undo: info(steps.done)?,
+        redo: infos(repo, steps.undone)?,
+        undo: infos(repo, steps.done)?,
         more: steps.more_done,
     })
+}
+
+/// Where the diary may have stopped, for a lost `head`: [`diary_ends`], each with what it changed.
+pub fn stopped_at(repo: &Repository) -> Result<Vec<StepInfo>, RepoError> {
+    infos(repo, diary_ends(repo)?)
+}
+
+/// The entries of `list`, each with what it changed from the one before it.
+fn infos(repo: &Repository, list: Vec<(Id, DiaryEntry)>) -> Result<Vec<StepInfo>, RepoError> {
+    list.into_iter()
+        .map(|(entry, diary)| {
+            let before = diary.parent.map(|p| repo.entry(&p)).transpose()?;
+            let effects = did(before.as_ref(), &diary);
+            Ok(StepInfo {
+                entry,
+                diary,
+                effects,
+            })
+        })
+        .collect()
 }
 
 /// Calls `each` with every entry from `head` back, newest first, and what it changed.
@@ -482,6 +598,7 @@ fn entry_named(
     }
     found.pop().ok_or_else(|| SwitchError::NoEntry {
         text: text.to_owned(),
+        anywhere: false,
     })
 }
 

@@ -27,16 +27,29 @@ pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
 /// Replaces `name` in the folder `to` with `bytes`, written in the folder `tmp` first, so that,
 /// even after a crash, it holds either the old or the new bytes, never a mix.
 pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    replace(tmp, to, name, bytes, true)
+    replace(tmp, to, name, bytes, true, rename_durable)
+}
+
+/// `write_atomic` for `head` in the folder `state`: once it is renamed into place the command has
+/// happened, so a flush that fails after that is told apart from an error.
+pub(crate) fn write_head(tmp: &Dir, state: &Dir, bytes: &[u8]) -> io::Result<Renamed> {
+    replace(tmp, state, "head", bytes, true, rename_reported)
 }
 
 /// `write_atomic` for a cache, which is no part of what a command did, so crash tests don't
 /// stop there.
 pub(crate) fn write_cache(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    replace(tmp, to, name, bytes, false)
+    replace(tmp, to, name, bytes, false, rename_durable)
 }
 
-fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::Result<()> {
+fn replace<T>(
+    tmp: &Dir,
+    to: &Dir,
+    name: &str,
+    bytes: &[u8],
+    faults: bool,
+    rename: fn(&Dir, &OsStr, &Dir, &OsStr) -> io::Result<T>,
+) -> io::Result<T> {
     let (mut file, temp) = create_temp(tmp)?;
     let result = (|| {
         file.write_all(bytes)?;
@@ -45,7 +58,7 @@ fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::R
         if faults {
             fault_point("write:before-rename")?;
         }
-        rename_durable(tmp, &temp, to, OsStr::new(name))
+        rename(tmp, &temp, to, OsStr::new(name))
     })();
     if result.is_err() {
         // The temp file is only litter now; failing to remove it changes nothing.
@@ -57,10 +70,40 @@ fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::R
 /// Moves `from` in the folder `from_dir` to `to` in the folder `to_dir`, replacing a file there,
 /// then flushes `to_dir` so the move survives a crash.
 pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+    rename(from_dir, from, to_dir, to)?;
+    to_dir.sync()
+}
+
+/// How a move `rename_reported` made went.
+#[derive(Debug)]
+pub(crate) enum Renamed {
+    Flushed,
+    /// The move happened, but flushing its folder afterwards failed.
+    NotFlushed(io::Error),
+}
+
+/// `rename_durable` for `state/head`, whose move is the moment a command happens: a flush that
+/// fails after it comes back as `NotFlushed`, not as an error.
+pub(crate) fn rename_reported(
+    from_dir: &Dir,
+    from: &OsStr,
+    to_dir: &Dir,
+    to: &OsStr,
+) -> io::Result<Renamed> {
+    rename(from_dir, from, to_dir, to)?;
+    Ok(
+        match fault_point("head:renamed").and_then(|()| to_dir.sync()) {
+            Ok(()) => Renamed::Flushed,
+            Err(e) => Renamed::NotFlushed(e),
+        },
+    )
+}
+
+fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
     let mut retries = 0;
     loop {
         match from_dir.rename_into(from, to_dir, to) {
-            Ok(()) => break,
+            Ok(()) => return Ok(()),
             // Virus scanners and indexers briefly hold files open on Windows.
             Err(e) if cfg!(windows) && retries < 10 && matches!(e.raw_os_error(), Some(5 | 32)) => {
                 retries += 1;
@@ -69,7 +112,6 @@ pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) ->
             Err(e) => return Err(e),
         }
     }
-    to_dir.sync()
 }
 
 /// Flushes the folder that holds `path`.

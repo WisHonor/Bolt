@@ -96,11 +96,13 @@ pub enum SwitchError {
         escape(text, false)
     )]
     NotAnEntry { text: String },
+    /// `anywhere`: every entry the store holds was looked at, since `head` is lost.
     #[error(
-        "No diary entry from the current one back has an ID starting with {}.",
+        "No diary entry {} has an ID starting with {}.",
+        if *anywhere { "in the store" } else { "from the current one back" },
         escape(text, false)
     )]
-    NoEntry { text: String },
+    NoEntry { text: String, anywhere: bool },
     #[error(
         "{} is the start of more than one diary entry's ID, so nothing was changed:{}",
         escape(text, false),
@@ -204,6 +206,11 @@ impl SwitchError {
                          files, aren't set aside: move them somewhere else first.";
                 Some(hint)
             }
+            SwitchError::NoEntry { anywhere: true, .. } => Some(
+                "bolt undo --list shows the entries where the diary may have stopped, with the \
+                 start of each one's ID."
+                    .to_owned(),
+            ),
             SwitchError::NotAnEntry { .. } | SwitchError::NoEntry { .. } => Some(
                 "bolt undo --list shows the steps undo and redo can take with the start of each \
                  entry's ID, and bolt undo --list --all shows every entry."
