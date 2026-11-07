@@ -72,37 +72,18 @@ pub(crate) fn switch_saves(
     let signed = repo.signatures_allowed();
     let base_root = store.save(&from.base, signed)?.root;
     let target_root = store.save(&target, signed)?.root;
-    let copies = writeout::keep_safety_copies(repo, actions, from.base, drive, packs)?;
-    let kept: HashSet<&str> = copies.iter().map(|c| c.path.as_str()).collect();
-    let renamed = writeout::renamed(actions, drive);
+    let (held, copies) = held(repo, actions, from.base, base_root, drive, packs)?;
     let unstored = HashMap::new();
-    let mut base = Tree::new(store, &unstored, base_root, EXACT);
     let mut wanted = Tree::new(store, &unstored, target_root, EXACT);
-    // Neither kept nor saved: it changed after the plan, so the switch leaves it, what is planned
-    // below it, and the folders above it, which it can't empty.
-    let mut lost = Vec::new();
-    for a in actions {
-        if let Some(e) = a.expected
-            && e.kind != EntryKind::Folder
-            && !kept.contains(a.path.as_str())
-            && !base
-                .entry(&a.path)?
-                .is_some_and(|s| s.kind == e.kind && s.id == e.id)
-        {
-            lost.push(a.path.as_str());
-        }
-    }
-    let lost = goes_with(lost, drive);
-    let (mut held, mut written) = (BTreeMap::new(), BTreeMap::new());
-    for a in actions.iter().filter(|a| !lost(&a.path)) {
-        held.insert(a.path.clone(), held_at(a, &renamed));
-        let put = wanted.entry(&a.path)?.map(|e| (e.kind, e.id, e.size));
-        written.insert(a.path.clone(), put);
+    let mut written = BTreeMap::new();
+    for path in held.keys() {
+        let put = wanted.entry(path)?.map(|e| (e.kind, e.id, e.size));
+        written.insert(path.clone(), put);
     }
     let from_root = overlay(store, base_root, &held, packs)?;
     let to_root = overlay(store, base_root, &written, packs)?;
     if from_root == to_root {
-        return Ok((None, copies.len()));
+        return Ok((None, copies));
     }
     let mut side = |root: Id| match root {
         r if r == base_root => Ok(from.base),
@@ -113,7 +94,75 @@ pub(crate) fn switch_saves(
         from: side(from_root)?,
         to: side(to_root)?,
     };
-    Ok((Some(change), copies.len()))
+    Ok((Some(change), copies))
+}
+
+/// What `--shelve` sets aside before a step, `actions` being a discard of the unsaved work in its
+/// way: the shelf, a kept save on `shelf.base` holding the folder's version at each path, and
+/// `onto.base` with the same entries, to plan the step from so that it overwrites them. `None`
+/// when nothing differs from `shelf.base`.
+pub(crate) fn set_aside(
+    repo: &Repository,
+    actions: &[Action],
+    shelf: &KeptFrom,
+    onto: &KeptFrom,
+    drive: Drive,
+    packs: &mut PackSet,
+) -> Result<Option<(Id, Id)>, SaveError> {
+    let store = repo.store();
+    let signed = repo.signatures_allowed();
+    let base_root = store.save(&shelf.base, signed)?.root;
+    let (held, _) = held(repo, actions, shelf.base, base_root, drive, packs)?;
+    let shelf_root = overlay(store, base_root, &held, packs)?;
+    if shelf_root == base_root {
+        return Ok(None);
+    }
+    let made = kept_save(shelf_root, shelf, packs)?;
+    let onto_root = store.save(&onto.base, signed)?.root;
+    let step_root = overlay(store, onto_root, &held, packs)?;
+    let step_from = match step_root {
+        r if r == onto_root => onto.base,
+        r => kept_save(r, onto, packs)?,
+    };
+    Ok(Some((made, step_from)))
+}
+
+/// What the folder held at each path `actions` write, as a save of it on `base` (whose top listing
+/// is `base_root`) holds it, with the safety copies that takes stored in `packs`, and how many
+/// there were. A held file or link that couldn't be kept, having changed since the plan, is left
+/// out, and so is what is planned below it and the folders above it, which can't be emptied.
+fn held(
+    repo: &Repository,
+    actions: &[Action],
+    base: Id,
+    base_root: Id,
+    drive: Drive,
+    packs: &mut PackSet,
+) -> Result<(BTreeMap<String, Option<Put>>, usize), SaveError> {
+    let copies = writeout::keep_safety_copies(repo, actions, base, drive, packs)?;
+    let kept: HashSet<&str> = copies.iter().map(|c| c.path.as_str()).collect();
+    let renamed = writeout::renamed(actions, drive);
+    let unstored = HashMap::new();
+    let mut saved = Tree::new(repo.store(), &unstored, base_root, EXACT);
+    let mut lost = Vec::new();
+    for a in actions {
+        if let Some(e) = a.expected
+            && e.kind != EntryKind::Folder
+            && !kept.contains(a.path.as_str())
+            && !saved
+                .entry(&a.path)?
+                .is_some_and(|s| s.kind == e.kind && s.id == e.id)
+        {
+            lost.push(a.path.as_str());
+        }
+    }
+    let lost = goes_with(lost, drive);
+    let held = actions
+        .iter()
+        .filter(|a| !lost(&a.path))
+        .map(|a| (a.path.clone(), held_at(a, &renamed)))
+        .collect();
+    Ok((held, copies.len()))
 }
 
 /// The tree of `base_root` with each path in `changes` set to that entry (`None`: removed), its

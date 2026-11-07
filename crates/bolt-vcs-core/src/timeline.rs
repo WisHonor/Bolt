@@ -11,6 +11,7 @@ pub(crate) type Read<'a> = dyn FnMut(&Id) -> Result<DiaryEntry, RepoError> + 'a;
 
 /// Steps done and undone, each a command's entry with its ID.
 #[derive(Debug)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the undo list will use it"))]
 pub(crate) struct Steps {
     pub done: Vec<(Id, DiaryEntry)>,
     /// Whether more steps are done than `done` holds.
@@ -19,9 +20,10 @@ pub(crate) struct Steps {
 }
 
 /// The steps at `head`: done, newest first (at most `limit`, and whether there are more), and
-/// undone, the one redo takes first first.
+/// undone, in the order redo brings them back.
+#[cfg_attr(not(test), expect(dead_code, reason = "the undo list will use it"))]
 pub(crate) fn steps(head: Id, read: &mut Read<'_>, limit: usize) -> Result<Steps, RepoError> {
-    let undone = undone(head, read)?;
+    let undone = undone_steps(head, read)?;
     let mut seen = HashSet::new();
     let mut done = Vec::new();
     let mut more_done = false;
@@ -66,24 +68,47 @@ fn newest_done_at(
     Ok(None)
 }
 
-fn undone(head: Id, read: &mut Read<'_>) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
+/// The steps redo can bring back, the next one first: collected back to the newest command, which
+/// cleared the rest.
+pub(crate) fn undone_steps(
+    head: Id,
+    read: &mut Read<'_>,
+) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
     let mut seen = HashSet::new();
     let mut undone = Vec::new();
-    // Each redo answers the newest undo before it that no other redo has.
-    let mut redos = 0usize;
-    let mut at = Some(head);
-    while let Some(id) = at {
-        let entry = move_to(id, read, &mut seen)?;
+    // Each redo answers the newest undo before it that no other redo has, and must redo what
+    // that undo undid. Held as (redo entry, its step), the last one met on top.
+    let mut redos: Vec<(Id, Id)> = Vec::new();
+    let mut at = head;
+    loop {
+        let entry = move_to(at, read, &mut seen)?;
         match entry.action {
-            // A command clears what redo could bring back.
-            Action::Command => break,
-            Action::Redo(_) => redos += 1,
-            Action::Undo(_) if redos > 0 => redos -= 1,
-            Action::Undo(step) => undone.push((step, read_step(id, step, read)?)),
+            Action::Command => {
+                return match redos.last() {
+                    Some((redo, _)) => Err(damaged(format!(
+                        "diary entry {redo} redoes a step no undo before it undid"
+                    ))),
+                    None => Ok(undone),
+                };
+            }
+            Action::Redo(step) => redos.push((at, step)),
+            Action::Undo(step) => match redos.pop() {
+                Some((redo, redone)) if redone != step => {
+                    return Err(damaged(format!(
+                        "diary entry {redo} redoes {redone}, but the undo it answers, {at}, \
+                         undid {step}"
+                    )));
+                }
+                Some(_) => {}
+                None => undone.push((step, read_step(at, step, read)?)),
+            },
         }
-        at = entry.parent;
+        at = entry.parent.ok_or_else(|| {
+            damaged(format!(
+                "the diary starts at entry {at}, which isn't a command's"
+            ))
+        })?;
     }
-    Ok(undone)
 }
 
 /// Reads the entry a walk moves to. Moves only ever go to older entries, so coming back to one
@@ -289,6 +314,44 @@ mod tests {
         let steps = diary.steps(0).unwrap();
         assert!(steps.done.is_empty());
         assert!(steps.more_done);
+    }
+
+    #[test]
+    fn a_redo_must_redo_what_the_undo_it_answers_undid() {
+        let mut diary = Diary::default();
+        let first = diary.add(Action::Command);
+        let second = diary.add(Action::Command);
+        let undo = diary.add(Action::Undo(second));
+        let redo = diary.add(Action::Redo(first));
+        assert_damaged(diary.steps(1000), redo);
+        assert_damaged(diary.steps(1000), undo);
+    }
+
+    #[test]
+    fn a_redo_with_no_undo_before_it_is_damage() {
+        let mut diary = Diary::default();
+        let first = diary.add(Action::Command);
+        let redo = diary.add(Action::Redo(first));
+        assert_damaged(diary.steps(1000), redo);
+    }
+
+    #[test]
+    fn a_diary_that_starts_without_a_command_is_damage() {
+        let mut diary = Diary::default();
+        let first = diary.add(Action::Command);
+        let undo = diary.add(Action::Undo(first));
+        diary.entries.get_mut(&undo).unwrap().parent = None;
+        assert_damaged(diary.steps(1000), undo);
+    }
+
+    #[test]
+    fn a_missing_entry_is_reported() {
+        let mut diary = Diary::default();
+        let first = diary.add(Action::Command);
+        diary.add(Action::Undo(first));
+        diary.entries.remove(&first);
+        assert_damaged(diary.steps(1000), first);
+        assert_damaged(diary.newest_done(), first);
     }
 
     #[test]

@@ -1270,7 +1270,7 @@ impl Repository {
     /// `state/head` as it is: a switch stores its entry before it changes the folder.
     pub fn store_entry(
         &mut self,
-        _lock: &ChangeLock,
+        lock: &ChangeLock,
         mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
@@ -1278,10 +1278,21 @@ impl Repository {
         // Refuse an entry that would not read back before storing it.
         DiaryEntry::decode(&bytes)?;
         let id = packs.add_record(ObjectKind::DiaryEntry, &bytes)?;
+        self.store_packs(lock, packs)?;
+        Ok(id)
+    }
+
+    /// Moves `packs` into the store, for what a command must read back before its diary entry is
+    /// ready. Nothing names what they hold until an entry does.
+    pub(crate) fn store_packs(
+        &mut self,
+        _lock: &ChangeLock,
+        packs: PackSet,
+    ) -> Result<(), RepoError> {
         for path in packs.finish()? {
             self.store.register(&path);
         }
-        Ok(id)
+        Ok(())
     }
 
     /// Points `state/head` at `id`, a diary entry already stored: how a switch between saves

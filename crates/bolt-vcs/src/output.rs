@@ -10,6 +10,7 @@ use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::text::{escape, thousands};
+use bolt_core::undo::{Effect, Taken};
 use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
 
@@ -60,6 +61,160 @@ pub fn change_json(c: &FileChange) -> Value {
         "old_size": c.old_size,
         "new_size": c.new_size,
     })
+}
+
+/// A step undone or redone as JSON (docs/json.md, `bolt undo --json`).
+pub fn step_json(t: &Taken) -> Value {
+    let effects: Vec<Value> = t.effects.iter().map(effect_json).collect();
+    json!({
+        "entry": t.step.to_hex(),
+        "command": t.entry.command,
+        "time_ms": t.entry.who.time_ms,
+        "effects": effects,
+        "written": t.applied.written,
+        "removed": t.applied.removed,
+    })
+}
+
+fn effect_json(e: &Effect) -> Value {
+    let hex = |id: &Option<Id>| id.map(|id| id.to_hex());
+    match e {
+        Effect::Line { name, from, to } => {
+            json!({"kind": "line", "name": name, "from": hex(from), "to": hex(to)})
+        }
+        Effect::Position { from, to } => json!({
+            "kind": "position",
+            "from": position_json(from),
+            "to": position_json(to),
+        }),
+        Effect::ShelfAdded { label, save } => {
+            json!({"kind": "shelf_added", "label": label, "save": save.to_hex()})
+        }
+        Effect::ShelfGone { label, save } => {
+            json!({"kind": "shelf_gone", "label": label, "save": save.to_hex()})
+        }
+        Effect::Tags => json!({"kind": "tags"}),
+        Effect::ServerLines => json!({"kind": "server_lines"}),
+        Effect::Files { from, to } => {
+            json!({"kind": "files", "from": from.to_hex(), "to": to.to_hex()})
+        }
+    }
+}
+
+/// What a step undone or redone did, in one line for people. `named` gives a save's short change
+/// ID, and its message's first line if it can be read. The shelves `--shelve` made (`shelved`)
+/// are told on lines of their own.
+pub fn step_line(
+    t: &Taken,
+    redo: bool,
+    shelved: &[(String, Id)],
+    named: &mut dyn FnMut(&Id) -> (String, Option<String>),
+) -> String {
+    let verb = if redo { "Redid" } else { "Undid" };
+    let mut line = format!("{verb} {}", escape(&t.entry.command, false));
+    // The save a step made is the one a line moved to.
+    let made = t.effects.iter().find_map(|e| match e {
+        Effect::Line { from, to, .. } => {
+            if redo {
+                *to
+            } else {
+                *from
+            }
+        }
+        _ => None,
+    });
+    if let Some(save) = made {
+        let (short, message) = named(&save);
+        let _ = write!(line, " {short}");
+        if let Some(message) = message {
+            let _ = write!(line, " \"{}\"", escape(&message, false));
+        }
+    }
+    let (mut parts, mut moved, mut files) = (Vec::new(), false, false);
+    let again = |what: String| {
+        if redo {
+            format!("{what} again")
+        } else {
+            format!("back {what}")
+        }
+    };
+    for e in &t.effects {
+        match e {
+            Effect::Line { name, to, .. } => {
+                moved = true;
+                let name = escape(name, false);
+                parts.push(match to {
+                    Some(to) if redo => format!("{name} is at {} again", named(to).0),
+                    Some(to) => format!("{name} is back at {}", named(to).0),
+                    None => format!("line {name} is gone"),
+                });
+            }
+            Effect::Position { to, .. } => {
+                moved = true;
+                parts.push(again(match to {
+                    Position::OnLine(line) => {
+                        let tip = t.after.lines.get(line).map(|s| named(s).0);
+                        format!("on {} at {}", escape(line, false), tip.unwrap_or_default())
+                    }
+                    Position::AtSave(save) => format!("at save {}", named(save).0),
+                }));
+            }
+            Effect::ShelfAdded { label, save } => {
+                if !shelved.iter().any(|(_, s)| s == save) {
+                    parts.push(format!("shelf {} is back", escape(label, false)));
+                }
+            }
+            Effect::ShelfGone { label, .. } => {
+                parts.push(format!("shelf {} is gone", escape(label, false)));
+            }
+            Effect::Tags if redo => parts.push("the tags changed again".to_owned()),
+            Effect::Tags => parts.push("the tags changed back".to_owned()),
+            Effect::ServerLines if redo => parts.push("the server lines changed again".to_owned()),
+            Effect::ServerLines => parts.push("the server lines changed back".to_owned()),
+            Effect::Files { .. } => files = true,
+        }
+    }
+    if files {
+        let count = |n: usize| match n {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        parts.push(match (t.applied.written, t.applied.removed) {
+            (0, 0) => "no file needed changing".to_owned(),
+            (0, removed) => format!("{} removed", count(removed)),
+            (written, removed) => {
+                // An undo that leaves the project where it was puts files back.
+                let written = if moved || redo {
+                    format!("{} written", count(written))
+                } else {
+                    format!("{} back", count(written))
+                };
+                match removed {
+                    0 => written,
+                    removed => format!("{written}, {removed} removed"),
+                }
+            }
+        });
+    }
+    if !parts.is_empty() {
+        let _ = write!(line, ": {}", parts.join(", "));
+    }
+    // A save undone leaves its files as they are.
+    let saved = |e: &Effect| matches!(e, Effect::Line { from: Some(_), .. });
+    if !redo && !files && t.effects.iter().any(saved) {
+        line.push_str("; its changes show as unsaved");
+    }
+    line.push('.');
+    line
+}
+
+/// The document of a command that failed after doing part of its work: `done` with the error
+/// and the warnings added.
+pub fn failed_document(mut done: Value, failure: &Failure, warnings: &[Warning]) -> Value {
+    done["bolt_json"] = BOLT_JSON.into();
+    done["error"] = error_json(failure);
+    done["warnings"] = warnings_json(warnings);
+    done
 }
 
 /// A file's change as people see it, its path escaped.

@@ -18,6 +18,7 @@ use crate::scope::within;
 use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
 use crate::text::escape;
+use crate::undo::short_entry;
 use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
@@ -81,6 +82,20 @@ pub enum SwitchError {
         escape(path, false)
     )]
     NoMatch { path: String },
+    #[error(
+        "Your unsaved changes, or files Bolt ignores, are where the {} would write, so it changed \
+         nothing:{}",
+        if *redo { "redo" } else { "undo" },
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )]
+    InTheWayOfStep { paths: Vec<String>, redo: bool },
+    /// The saves of a step can't be read: `tidy` removed them, or they were lost.
+    #[error(
+        "The step of diary entry {} can't be undone or redone: what it changed can't be read \
+         ({detail}).",
+        short_entry(step)
+    )]
+    StepGone { step: Id, detail: String },
     #[error(transparent)]
     Resolve(#[from] ResolveError),
     #[error(transparent)]
@@ -115,6 +130,30 @@ impl SwitchError {
             SwitchError::NoMatch { .. } => {
                 Some("Check the path: bolt status lists your unsaved changes.".to_owned())
             }
+            SwitchError::InTheWayOfStep { redo, .. } => {
+                let (command, why) = if *redo {
+                    (
+                        "redo",
+                        "each is a new step, and a new step clears what redo can bring back",
+                    )
+                } else {
+                    (
+                        "undo",
+                        "each is a step of its own, which the next undo would take back",
+                    )
+                };
+                Some(format!(
+                    "Run bolt {command} --shelve to set your changes there aside on a new shelf, \
+                     as part of the same step. Saving, shelving or discarding them first won't \
+                     help: {why}. Files Bolt ignores, and unsaved links that could come back only \
+                     as plain files, aren't set aside: move them somewhere else first."
+                ))
+            }
+            SwitchError::StepGone { .. } => Some(
+                "bolt tidy removes what steps older than the undo window changed, and a damaged \
+                 store can lose it too, so undo and redo can't take this step any more."
+                    .to_owned(),
+            ),
             SwitchError::Resolve(e) => e.hint(),
             SwitchError::Save(e) => e.hint_when_reading(),
             SwitchError::Repo(e) => e.hint(),
@@ -138,7 +177,7 @@ pub fn goto(
     git_excludes: Option<&Path>,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<GotoOutcome, SwitchError> {
-    locked(repo, command, on_wait, |repo, lock, earlier| {
+    locked(repo, command, on_wait, |repo, lock, earlier, _| {
         go(repo, lock, target, who, command, git_excludes, earlier)
     })
 }
@@ -158,20 +197,22 @@ pub fn discard(
     git_excludes: Option<&Path>,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<DiscardOutcome, SwitchError> {
-    locked(repo, command, on_wait, |repo, lock, earlier| {
+    locked(repo, command, on_wait, |repo, lock, earlier, _| {
         throw_away(repo, lock, paths, who, command, git_excludes, earlier)
     })
 }
 
-/// Runs `f` under the lock for changes, once a switch that was stopped is finished.
-fn locked<T>(
+/// Runs `f` under the lock for changes, once a switch that was stopped is finished; `f` is told
+/// whether there was one.
+pub(crate) fn locked<T>(
     repo: &mut Repository,
     command: &str,
     on_wait: &mut dyn FnMut(&str),
-    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier) -> Result<T, SwitchError>,
+    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier, bool) -> Result<T, SwitchError>,
 ) -> Result<T, SwitchError> {
     let lock = repo.lock_for_change(command, on_wait)?;
     let mut earlier = Earlier::default();
+    let mut finished = false;
     // Kept with the store's warnings, so it is told even if the command then fails.
     if let Some(done) = writeout::finish_interrupted(repo, &lock)? {
         for w in done.warnings {
@@ -183,8 +224,9 @@ fn locked<T>(
             placeholders: done.placeholders,
             not_written: done.not_written,
         };
+        finished = true;
     }
-    let result = f(repo, &lock, &mut earlier);
+    let result = f(repo, &lock, &mut earlier, finished);
     // What a command that stopped early didn't take into its own warnings.
     for w in earlier.warnings() {
         repo.store().note(w);
@@ -266,6 +308,7 @@ fn throw_away(
         kept::switch_saves(repo, &plan.actions, from, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
+        action: Action::Command,
         state: entry.state.clone(),
         folder_change,
         plan,
@@ -371,6 +414,7 @@ fn go(
         kept::switch_saves(repo, &plan.actions, to, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
+        action: Action::Command,
         state,
         folder_change,
         plan,
@@ -390,7 +434,7 @@ fn go(
 /// What finishing a stopped switch left unwritten or wrote as placeholders, told together with
 /// what the command itself does.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct Earlier {
+pub(crate) struct Earlier {
     placeholders: Vec<String>,
     not_written: Vec<String>,
 }
@@ -413,7 +457,7 @@ impl Earlier {
 
 /// Who makes the kept saves of a switch from `from`, the save the folder is on in `state`, and
 /// what they say.
-fn kept_on<'a>(
+pub(crate) fn kept_on<'a>(
     state: &'a State,
     from: Id,
     command: &str,
@@ -432,23 +476,25 @@ fn kept_on<'a>(
 }
 
 /// A switch planned, ready to be made.
-struct Switch {
+pub(crate) struct Switch {
     /// The diary entry `head` names.
-    head: Id,
+    pub head: Id,
+    /// What the switch's diary entry records: a command, an undo or a redo.
+    pub action: Action,
     /// The state the switch's diary entry records.
-    state: State,
-    folder_change: Option<FolderChange>,
-    plan: Plan,
-    drive: Drive,
+    pub state: State,
+    pub folder_change: Option<FolderChange>,
+    pub plan: Plan,
+    pub drive: Drive,
     /// What is stored with its diary entry.
-    packs: PackSet,
+    pub packs: PackSet,
 }
 
 /// Makes a planned switch in decision 049's order: its packs and diary entry are stored, then
 /// the journal written, the folder changed, `head` moved and the journal removed. A crash at any
 /// step leaves what the next changing command finishes, and so do files another program holds,
 /// which stop it with `SwitchInUse` after its warnings are noted. Gives what was done.
-fn switch(
+pub(crate) fn switch(
     repo: &mut Repository,
     lock: &ChangeLock,
     s: Switch,
@@ -458,7 +504,7 @@ fn switch(
 ) -> Result<Applied, SwitchError> {
     let entry = DiaryEntry {
         parent: Some(s.head),
-        action: Action::Command,
+        action: s.action,
         command: command.to_owned(),
         who: who.clone(),
         bolt_version: env!("CARGO_PKG_VERSION").into(),
@@ -493,7 +539,7 @@ fn switch(
 /// `applied` with the plan's warnings first, then one warning for every entry left unwritten
 /// and one for every link written as a file, wherever the list came from: `earlier`, the plan,
 /// or carrying it out.
-fn switch_warnings(plan: Plan, mut applied: Applied, earlier: &mut Earlier) -> Applied {
+pub(crate) fn switch_warnings(plan: Plan, mut applied: Applied, earlier: &mut Earlier) -> Applied {
     let merged = |mut a: Vec<String>, b: &mut Vec<String>, c: &mut Vec<String>| {
         a.append(b);
         a.append(c);

@@ -666,7 +666,7 @@ struct Run<'a> {
     repo: &'a Repository,
     folders: Folders,
     cache: FileCache,
-    /// The diary entry the switch commits, whose save says which links lead to folders.
+    /// The diary entry the switch commits, whose saves say which links lead to folders.
     target_entry: Id,
     stored: HashMap<Id, Listing>,
     target_root: Option<Id>,
@@ -1069,14 +1069,19 @@ impl Run<'_> {
         })
     }
 
-    /// The top listing of the save the journal's diary entry is on.
+    /// The top listing of the save the switch writes: the "to" side of its diary entry's folder
+    /// change (an undo ends on another save than it writes), or else the save the entry is on.
     fn target_root(&mut self) -> Result<Id, RepoError> {
         if let Some(root) = self.target_root {
             return Ok(root);
         }
         let store = self.repo.store();
         let bytes = store.read_record(&self.target_entry, ObjectKind::DiaryEntry)?;
-        let save = tip_of(&DiaryEntry::decode(&bytes)?)?;
+        let entry = DiaryEntry::decode(&bytes)?;
+        let save = match entry.folder_change {
+            Some(change) => change.to,
+            None => tip_of(&entry)?,
+        };
         let root = store.save(&save, self.repo.signatures_allowed())?.root;
         self.target_root = Some(root);
         Ok(root)

@@ -13,7 +13,7 @@ use bolt_core::config::{
     ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
     load_identity, now_person,
 };
-use bolt_core::diary::Position;
+use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{count_changes, for_each_change};
 use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
@@ -21,6 +21,7 @@ use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
+use bolt_core::pack::ObjectKind;
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
@@ -28,6 +29,7 @@ use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
 use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
+use bolt_core::undo::{self, StepRequest};
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
 use clap::{Parser, Subcommand};
@@ -99,6 +101,27 @@ enum Command {
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+    /// Take back the last step, or the last N, one at a time: the lines, where you are and what
+    /// the step did to your files go back as they were.
+    Undo {
+        #[command(flatten)]
+        steps: Steps,
+    },
+    /// Bring back the step undone last, or the last N.
+    Redo {
+        #[command(flatten)]
+        steps: Steps,
+    },
+}
+
+#[derive(clap::Args)]
+struct Steps {
+    /// How many steps.
+    #[arg(value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+    n: u64,
+    /// Set your unsaved changes in the way aside on a new shelf, as part of the same step.
+    #[arg(long)]
+    shelve: bool,
 }
 
 impl From<RepoError> for Failure {
@@ -1106,6 +1129,158 @@ fn discard_command(
     Ok(())
 }
 
+/// `bolt undo` and `bolt redo`.
+fn undo_command(
+    json: bool,
+    redo: bool,
+    steps: &Steps,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let req = StepRequest {
+        n: usize::try_from(steps.n).unwrap_or(usize::MAX),
+        shelve: steps.shelve,
+        who: &who,
+        git_excludes: git_excludes.as_deref(),
+    };
+    let on_wait = &mut |_: &str| eprintln!("Waiting for another Bolt command to finish...");
+    let done = if redo {
+        undo::redo(repo, &req, on_wait)
+    } else {
+        undo::undo(repo, &req, on_wait)
+    };
+    let (taken, shelved, finished, failure) = match done {
+        Ok(done) => (done.taken, done.shelved, done.finished, None),
+        Err(e) => (e.taken, e.shelved, false, Some(Failure::from(e.error))),
+    };
+    let (verb, list, command) = if redo {
+        ("Redid", "redone", "redo")
+    } else {
+        ("Undid", "undone", "undo")
+    };
+    let mut warnings: Vec<Warning> = taken
+        .iter()
+        .flat_map(|t| t.applied.warnings.iter().cloned())
+        .collect();
+    if json {
+        warnings.extend(repo.store().warnings());
+        let warnings = told_once(warnings);
+        let shelves: Vec<serde_json::Value> = shelved
+            .iter()
+            .map(|(label, save)| json!({"label": label, "save": save.to_hex()}))
+            .collect();
+        let mut document = json!({ "shelved": shelves });
+        document[list] = taken.iter().map(output::step_json).collect();
+        let Some(failure) = failure else {
+            let position = match taken.last() {
+                Some(t) => Some(t.after.position.clone()),
+                None => repo.current().ok().map(|(_, e)| e.state.position),
+            };
+            document["bolt_json"] = BOLT_JSON.into();
+            document["finished"] = finished.into();
+            document["position"] = position.map_or(json!(null), |p| output::position_json(&p));
+            document["warnings"] = output::warnings_json(&warnings);
+            return output::print_quietly(&format!("{document}\n"), &warnings);
+        };
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_quietly(&format!("{document}\n"), &[])?;
+        return Err(Failure {
+            printed: true,
+            ..failure
+        });
+    }
+    let mut text = String::new();
+    {
+        let mut named = |id: &Id| named_save(repo, id, &mut warnings);
+        for t in &taken {
+            text += &output::step_line(t, redo, &shelved, &mut named);
+            text.push('\n');
+        }
+    }
+    for (label, _) in &shelved {
+        let label = escape(label, false);
+        text += &format!("Set your unsaved changes in the way aside on shelf {label}.\n");
+    }
+    if finished {
+        let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
+        text += &format!(
+            "Finished the {what} that was stopped, so nothing more was {list}. Running bolt \
+             {command} again takes one more step.\n"
+        );
+    }
+    match &failure {
+        Some(_) if !taken.is_empty() => {
+            let (k, n) = (taken.len(), steps.n);
+            text += &format!("{verb} {k} of the {n} steps asked for.\n");
+        }
+        None if !finished && taken.len() < req.n => {
+            let more = if taken.is_empty() { "" } else { " more" };
+            text += &format!("Nothing{more} to {command}.\n");
+        }
+        _ => {}
+    }
+    match failure {
+        None => {
+            warnings.extend(repo.store().warnings());
+            output::print_quietly(&text, &told_once(warnings))
+        }
+        Some(failure) => {
+            output::print_quietly(&text, &told_once(warnings))?;
+            Err(failure)
+        }
+    }
+}
+
+/// `warnings` with each told once, in the order first met: every step reads the folder, so what
+/// is wrong there would otherwise be told once a step.
+fn told_once(warnings: Vec<Warning>) -> Vec<Warning> {
+    let mut told: Vec<Warning> = Vec::new();
+    for w in warnings {
+        if !told.contains(&w) {
+            told.push(w);
+        }
+    }
+    told
+}
+
+/// A save as messages name it: its change ID at its shortest, and the first line of its
+/// message; 12 hex digits of its fingerprint if it can't be read.
+fn named_save(repo: &Repository, id: &Id, warnings: &mut Vec<Warning>) -> (String, Option<String>) {
+    match repo.store().save(id, repo.signatures_allowed()) {
+        Ok(save) => {
+            let short = short_or_whole(repo, id, &save.change_id, warnings);
+            let first = save.message.lines().next().unwrap_or_default().to_owned();
+            (short, Some(first))
+        }
+        Err(_) => {
+            let mut hex = id.to_hex();
+            hex.truncate(12);
+            (hex, None)
+        }
+    }
+}
+
+/// What the switch a command finished was, from the diary entry it took to: "goto", say, or
+/// "undo of goto".
+fn finished_switch(repo: &Repository) -> Option<String> {
+    let (_, entry) = repo.current().ok()?;
+    let (what, step) = match entry.action {
+        Action::Command => return Some(escape(&entry.command, false)),
+        Action::Undo(step) => ("undo", step),
+        Action::Redo(step) => ("redo", step),
+    };
+    let bytes = repo
+        .store()
+        .read_record(&step, ObjectKind::DiaryEntry)
+        .ok()?;
+    let step = DiaryEntry::decode(&bytes).ok()?;
+    Some(format!("{what} of {}", escape(&step.command, false)))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // The project a command opens is kept here, so that if the command fails, the error can list
@@ -1138,6 +1313,8 @@ fn main() -> ExitCode {
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
         Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
+        Command::Undo { steps } => undo_command(cli.json, false, &steps, &mut opened),
+        Command::Redo { steps } => undo_command(cli.json, true, &steps, &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
