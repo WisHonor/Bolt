@@ -19,7 +19,7 @@ Decision 021 puts `save --amend` in v0.1: it replaces the last save with the cur
 ## Decision
 
 **A.**
-- **`bolt save --amend ["message"] [paths]`** makes a new save of the folder's changes on top of the newest save of your line (all changes, or only the paths and patterns named, as [decision 054](054-partial-saves.md) says for any save), with the new message, or the old one when none is given. It has the old save's parents, author, change ID and `line`; its saver is the user, now; it drops `git-commit`, `git-header` and `git-original-message`, which no longer describe it. The line then points at the new save; the old one leaves the line's history and stays stored for the undo window.
+- **`bolt save --amend ["message"] [paths]`** makes a new save of the folder's changes on top of the newest save of your line (all changes, or only the paths and patterns named, as [decision 054](054-partial-saves.md) says for any save), with the new message, or the old one when none is given or the message is empty (so `bolt save --amend "" <paths>` amends only those paths and keeps the message, since the message comes before them). It has the old save's parents, author, change ID and `line`; its saver is the user, now; it drops `git-commit`, `git-header` and `git-original-message`, which no longer describe it. The line then points at the new save; the old one leaves the line's history and stays stored for the undo window.
 - **Nothing to amend:** when the folder holds the save's files and the message is the same, it says so and makes no step.
 - **Refused, changing nothing:**
   - at a save rather than on a line: the hint says to go to a line;
