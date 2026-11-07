@@ -1030,7 +1030,11 @@ fn build_with(
 }
 
 /// Stores `listing` unless a good copy is held already, and returns its ID.
-fn store_listing(store: &Store, packs: &mut PackSet, listing: &Listing) -> Result<Id, SaveError> {
+pub(crate) fn store_listing(
+    store: &Store,
+    packs: &mut PackSet,
+    listing: &Listing,
+) -> Result<Id, SaveError> {
     let id = listing.id();
     let encoded = listing.encode();
     let len = encoded.len() as u64;

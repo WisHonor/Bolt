@@ -1252,11 +1252,7 @@ fn below_project_link<'a>(
 /// removes (`README.md` where `Readme.md` goes) is that entry, renamed: it is checked against
 /// what the removed one held.
 fn take_over_renamed(actions: &mut [Action], drive: Drive) {
-    let removed: HashMap<String, Option<Expected>> = actions
-        .iter()
-        .filter(|a| removes(a.change))
-        .map(|a| (fold_path(&a.path, drive), a.expected))
-        .collect();
+    let removed = removed_by_name(actions, drive);
     for a in actions.iter_mut() {
         if a.expected.is_none()
             && !removes(a.change)
@@ -1265,6 +1261,33 @@ fn take_over_renamed(actions: &mut [Action], drive: Drive) {
             a.expected = *expected;
         }
     }
+}
+
+/// The writes [`take_over_renamed`] checks against a removed entry: the folder held that entry,
+/// under the removed spelling, and nothing under theirs.
+pub(crate) fn renamed(actions: &[Action], drive: Drive) -> HashSet<&str> {
+    if !(drive.ignores_case || drive.composes_unicode) {
+        return HashSet::new();
+    }
+    let removed = removed_by_name(actions, drive);
+    actions
+        .iter()
+        .filter(|a| {
+            a.expected.is_some()
+                && !removes(a.change)
+                && removed.get(&fold_path(&a.path, drive)) == Some(&a.expected)
+        })
+        .map(|a| a.path.as_str())
+        .collect()
+}
+
+/// What each entry the switch removes held, by its path as `drive` compares names.
+fn removed_by_name(actions: &[Action], drive: Drive) -> HashMap<String, Option<Expected>> {
+    actions
+        .iter()
+        .filter(|a| removes(a.change))
+        .map(|a| (fold_path(&a.path, drive), a.expected))
+        .collect()
 }
 
 fn fold_path(path: &str, drive: Drive) -> String {
@@ -1372,40 +1395,18 @@ impl Write for Capped {
 }
 
 /// Whether the link at `path` with this stored target stays inside the project, judged from the
-/// save written alone, never from the disk (decision 052): `Some(true)` if it leads to a folder
-/// of that save, `Some(false)` otherwise; `None` for a link to write as a placeholder. A target
-/// leaves when it is absolute, starts with a drive letter or `\\`, or climbs past the top with
-/// `..`; on Windows also when it holds a `\` (decision 045) or a name Windows reads otherwise.
-/// So is a target whose names before the last aren't all folders of that save.
+/// save written alone, never from the disk: `Some(true)` if it leads to a folder of that save,
+/// `Some(false)` otherwise; `None` for a link to write as a placeholder: one that leads out
+/// ([`link_parts`]), or whose names before the last aren't all folders of that save.
 fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>, StoreError> {
-    let Ok(target) = std::str::from_utf8(target) else {
+    let Some(parts) = link_parts(path, target) else {
         return Ok(None);
     };
-    let bytes = target.as_bytes();
-    let drive_letter =
-        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
-    let windows_reads_otherwise = cfg!(windows) && target.contains(['\\', ':']);
-    if target.is_empty()
-        || target.starts_with(['/', '\\'])
-        || drive_letter
-        || windows_reads_otherwise
-    {
-        return Ok(None);
-    }
     let mut at: Vec<&str> = parent(path).split('/').filter(|n| !n.is_empty()).collect();
-    let parts: Vec<&str> = target
-        .split('/')
-        .filter(|p| !p.is_empty() && *p != ".")
-        .collect();
     for (i, part) in parts.iter().enumerate() {
         if *part == ".." {
-            if at.pop().is_none() {
-                return Ok(None);
-            }
+            at.pop();
             continue;
-        }
-        if !holdable_here(part) {
-            return Ok(None);
         }
         at.push(part);
         // `..` is taken on the drive after the name before it, so every name but the last must
@@ -1416,6 +1417,62 @@ fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>
         }
     }
     Ok(Some(tree.folder(&at.join("/"))?.is_some()))
+}
+
+/// The parts of a link's target in the order they are followed from the link's folder, or `None`
+/// if it leads out of the project: it is absolute, starts with a drive letter or `\\`, or climbs
+/// past the top with `..`; on Windows also when it holds a `\` or a name Windows reads otherwise.
+fn link_parts<'a>(path: &str, target: &'a [u8]) -> Option<Vec<&'a str>> {
+    let target = std::str::from_utf8(target).ok()?;
+    let bytes = target.as_bytes();
+    let drive_letter =
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+    let windows_reads_otherwise = cfg!(windows) && target.contains(['\\', ':']);
+    if target.is_empty()
+        || target.starts_with(['/', '\\'])
+        || drive_letter
+        || windows_reads_otherwise
+    {
+        return None;
+    }
+    let parts: Vec<&str> = target
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    let mut depth = parent(path).split('/').filter(|n| !n.is_empty()).count();
+    for part in &parts {
+        if *part == ".." {
+            depth = depth.checked_sub(1)?;
+        } else if holdable_here(part) {
+            depth += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(parts)
+}
+
+/// Whether a link with `target` at `path` would be written as a link here, not a placeholder: it
+/// stays inside the project, and this system can make links (tried in `.bolt/tmp`).
+pub(crate) fn writes_back_as_link(
+    repo: &Repository,
+    path: &str,
+    target: &[u8],
+) -> Result<bool, SaveError> {
+    if target.len() as u64 > MAX_LINK_TARGET || link_parts(path, target).is_none() {
+        return Ok(false);
+    }
+    let tmp = repo.tmp_folder();
+    let name = bolt_platform::temp_name();
+    match tmp.symlink(&name, OsStr::new("x"), false, tmp) {
+        Ok(()) => {
+            // Left behind it is only litter, which opening the project clears.
+            let _ = fsio::remove_file(tmp, &name);
+            Ok(true)
+        }
+        Err(e) if cant_link(&e) => Ok(false),
+        Err(e) => Err(RepoError::from(e).into()),
+    }
 }
 
 /// Whether making a link failed because this system or account can't make one here: Windows
@@ -1534,7 +1591,7 @@ impl Folders {
 
 /// One save's folders, read as needed: from the store, or from `unstored` for a folder read but
 /// not saved.
-struct Tree<'a> {
+pub(crate) struct Tree<'a> {
     store: &'a Store,
     unstored: &'a HashMap<Id, Listing>,
     root: Id,
@@ -1542,14 +1599,14 @@ struct Tree<'a> {
     folders: HashMap<String, Option<Folder>>,
 }
 
-struct Folder {
-    listing: Listing,
+pub(crate) struct Folder {
+    pub(crate) listing: Listing,
     /// Names that are one file with another of this folder's on the drive.
     twins: HashSet<String>,
 }
 
 impl<'a> Tree<'a> {
-    fn new(
+    pub(crate) fn new(
         store: &'a Store,
         unstored: &'a HashMap<Id, Listing>,
         root: Id,
@@ -1566,7 +1623,7 @@ impl<'a> Tree<'a> {
 
     /// The folder at `path` (`""` for the top), if the save has one there. Read down from the
     /// deepest folder already read on the way, a name at a time.
-    fn folder(&mut self, path: &str) -> Result<Option<&Folder>, StoreError> {
+    pub(crate) fn folder(&mut self, path: &str) -> Result<Option<&Folder>, StoreError> {
         if !self.folders.contains_key(path) {
             let mut known = path;
             while !known.is_empty() && !self.folders.contains_key(known) {
@@ -1603,7 +1660,7 @@ impl<'a> Tree<'a> {
         Ok(self.folders.get(path).and_then(Option::as_ref))
     }
 
-    fn entry(&mut self, path: &str) -> Result<Option<Entry>, StoreError> {
+    pub(crate) fn entry(&mut self, path: &str) -> Result<Option<Entry>, StoreError> {
         let (up, name) = split(path);
         Ok(self.folder(up)?.and_then(|f| f.listing.get(name)).cloned())
     }

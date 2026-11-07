@@ -141,6 +141,7 @@ fn a_switch_records_safety_copies_in_its_diary_entry() {
         state: entry.state.clone(),
         plan,
         drive,
+        packs: repo.new_packs().unwrap(),
     };
     let earlier = &mut Earlier::default();
     let (_, kept) = switch(&mut repo, &lock, s, &who(), "discard", earlier).unwrap();

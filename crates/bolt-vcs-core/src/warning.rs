@@ -52,6 +52,8 @@ pub const PLACEHOLDERS_WRITTEN: &str = "placeholders_written";
 pub const FILES_IN_USE: &str = "files_in_use";
 /// Entries that changed after a switch was planned were left as they were.
 pub const CHANGED_SINCE_PLAN: &str = "changed_since_plan";
+/// Unsaved links that could come back only as files weren't thrown away.
+pub const LINKS_LEFT: &str = "links_left";
 /// A switch between saves was stopped, and is still to finish.
 pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 /// A command finished a switch between saves that was stopped, before doing its own work.

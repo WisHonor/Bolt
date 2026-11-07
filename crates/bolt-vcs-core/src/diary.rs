@@ -83,6 +83,13 @@ pub struct SafetyCopy {
     pub size: u64,
 }
 
+/// What a command did to the project folder: a switch from one save to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderChange {
+    pub from: Id,
+    pub to: Id,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiaryEntry {
     pub parent: Option<Id>,

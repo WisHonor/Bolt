@@ -16,6 +16,7 @@ pub mod id;
 pub mod ignore;
 pub mod import;
 pub mod journal;
+pub(crate) mod kept;
 pub mod keyed;
 pub mod lines;
 pub mod link;

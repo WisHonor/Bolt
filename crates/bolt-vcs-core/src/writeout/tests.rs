@@ -784,6 +784,34 @@ fn a_link_through_a_name_that_isnt_a_folder_is_a_placeholder() {
     assert_eq!(plan.placeholders, ["through_a_file", "through_nothing"]);
 }
 
+#[test]
+fn a_link_comes_back_as_a_link_only_inside_the_project_and_where_links_can_be_made() {
+    let (_dir, mut repo) = project();
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let too_long = "a/".repeat(2100);
+    for (path, target) in [
+        ("out", "/tmp"),
+        ("unc", "//host/share"),
+        ("drive", "C:/x"),
+        ("up", "../x"),
+        ("d/up", "../../x"),
+        ("long", too_long.as_str()),
+    ] {
+        assert!(
+            !writes_back_as_link(&repo, path, target.as_bytes()).unwrap(),
+            "{path}"
+        );
+    }
+    let probe = tempfile::tempdir().unwrap();
+    let link = probe.path().join("l");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink("x", &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file("x", &link);
+    let inside = writes_back_as_link(&repo, "d/l", b"../a.txt").unwrap();
+    assert_eq!(inside, made.is_ok());
+}
+
 /// Makes `dir` keep letter case apart, as WSL folders do on a drive that otherwise ignores it.
 /// False, with a note, where Windows can't.
 #[cfg(windows)]

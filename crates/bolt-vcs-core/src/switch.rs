@@ -3,21 +3,23 @@
 
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, Position, State};
+use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
 use crate::drive::{self, Drive};
 use crate::history::{ResolveError, tip_of};
-use crate::id::Id;
+use crate::id::{Id, hash_content};
 use crate::journal::{Change, Journal};
+use crate::kept::{self, KeptFrom};
 use crate::lines::Target;
 use crate::listing::EntryKind;
+use crate::pack::PackSet;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::scope::within;
-use crate::snapshot::{NAMED, SaveError, listed};
+use crate::snapshot::{NAMED, SaveError, link_target, listed};
 use crate::store::StoreError;
 use crate::text::escape;
 use crate::warning::{self, Warning};
-use crate::writeout::{self, Applied, Plan};
+use crate::writeout::{self, Applied, Folders, Plan};
 
 /// What `goto` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +47,10 @@ pub struct DiscardOutcome {
     /// What was written and removed, as `goto` gives it.
     pub applied: Applied,
     pub safety_copies: usize,
+    /// From the save of what was thrown away to the save the project is on; `None` if nothing was.
+    pub folder_change: Option<FolderChange>,
+    /// Unsaved links left as they are, since they could come back only as files.
+    pub links_left: Vec<String>,
 }
 
 /// Why a switch didn't happen. Paths come from the folder, so messages escape them.
@@ -141,8 +147,9 @@ pub fn goto(
 /// without any, match the save the project is on: changed and deleted files put back, new ones
 /// removed, with a safety copy of what each changed or new one held (decision 050). The project
 /// stays on its save; a diary entry records the safety copies. Ignored files, project links,
-/// entries kept unwritten and nested projects are never touched. Files in use stop it as they
-/// stop `goto`. `git_excludes` is read as `goto` reads it.
+/// entries kept unwritten and nested projects are never touched, nor are unsaved links that could
+/// come back only as files. Files in use stop it as they stop `goto`. `git_excludes` is read as
+/// `goto` reads it.
 pub fn discard(
     repo: &mut Repository,
     paths: Option<&[String]>,
@@ -198,7 +205,7 @@ fn throw_away(
     let from = tip_of(&entry)?;
     let drive = repo.drive()?;
     // A switch to the save the folder is on that removes new files too.
-    let plan = writeout::plan(repo, from, from, paths, true, drive, git_excludes)?;
+    let mut plan = writeout::plan(repo, from, from, paths, true, drive, git_excludes)?;
     if !plan.collisions.is_empty() {
         return Err(SwitchError::InTheWay {
             paths: plan.collisions,
@@ -221,6 +228,10 @@ fn throw_away(
             return Err(SwitchError::NoMatch { path: path.clone() });
         }
     }
+    let links_left = leave_links(repo, &mut plan)?;
+    if !links_left.is_empty() {
+        plan.warnings.push(links_left_warning(&links_left));
+    }
     let (mut restored, mut removed, mut folders) = (Vec::new(), Vec::new(), 0);
     for a in &plan.actions {
         // A file or link the folder held at this path is thrown away, whatever replaces it.
@@ -241,15 +252,31 @@ fn throw_away(
             folders,
             applied: switch_warnings(plan, Applied::default(), earlier),
             safety_copies: 0,
+            folder_change: None,
+            links_left,
         });
     }
     crate::fsio::act_point("discard:planned");
+    let line = match &entry.state.position {
+        Position::OnLine(line) => Some(line.as_str()),
+        Position::AtSave(_) => None,
+    };
+    let kept_from = KeptFrom {
+        base: from,
+        message: kept::message(command, paths.unwrap_or_default()),
+        who,
+        line,
+    };
+    let mut packs = repo.new_packs()?;
+    let folder_change =
+        kept::switch_saves(repo, &plan.actions, from, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
         from,
         state: entry.state.clone(),
         plan,
         drive,
+        packs,
     };
     let (applied, safety_copies) = switch(repo, lock, to_make, who, command, earlier)?;
     // What had changed again since the plan stays as it is.
@@ -269,7 +296,58 @@ fn throw_away(
         folders,
         applied,
         safety_copies,
+        folder_change,
+        links_left,
     })
+}
+
+/// Takes out of `plan` each unsaved link it would throw away that couldn't be written back as a
+/// link, with what is planned above and below it, and gives their paths.
+fn leave_links(repo: &Repository, plan: &mut Plan) -> Result<Vec<String>, SwitchError> {
+    let mut disk = Folders::open(repo.root()).map_err(RepoError::from)?;
+    let mut left = Vec::new();
+    for a in &plan.actions {
+        let Some(e) = a.expected.filter(|e| e.kind == EntryKind::Symlink) else {
+            continue;
+        };
+        // A link that changed since the plan is left by the switch anyway.
+        let (up, name) = a.path.rsplit_once('/').unwrap_or(("", &a.path));
+        if disk.enter(up).is_err() {
+            continue;
+        }
+        let Ok(target) = link_target(disk.here(), name, &a.path) else {
+            continue;
+        };
+        if hash_content(target.as_bytes()) == e.id
+            && !writeout::writes_back_as_link(repo, &a.path, target.as_bytes())?
+        {
+            left.push(a.path.clone());
+        }
+    }
+    plan.actions.retain(|a| {
+        !left
+            .iter()
+            .any(|l| within(&a.path, l) || within(l, &a.path))
+    });
+    Ok(left)
+}
+
+/// Says unsaved links weren't thrown away.
+fn links_left_warning(paths: &[String]) -> Warning {
+    let links = match paths.len() {
+        1 => "1 unsaved link".to_owned(),
+        n => format!("{n} unsaved links"),
+    };
+    Warning::new(
+        warning::LINKS_LEFT,
+        format!(
+            "Didn't throw away {links}: an undo could bring them back only as plain files holding \
+             their targets, since they lead out of the project or this computer can't make links \
+             (on Windows that takes Developer Mode):{}\nDelete them yourself if you don't want \
+             them.",
+            listed(paths.iter().take(NAMED), paths.len() as u64)
+        ),
+    )
 }
 
 fn go(
@@ -328,6 +406,7 @@ fn go(
         state,
         plan,
         drive,
+        packs: repo.new_packs()?,
     };
     let (applied, safety_copies) = switch(repo, lock, to_make, who, command, earlier)?;
     Ok(GotoOutcome {
@@ -372,6 +451,8 @@ struct Switch {
     state: State,
     plan: Plan,
     drive: Drive,
+    /// What is stored with its diary entry.
+    packs: PackSet,
 }
 
 /// Makes a planned switch in decision 049's order: the safety copies and the diary entry are
@@ -387,7 +468,7 @@ fn switch(
     command: &str,
     earlier: &mut Earlier,
 ) -> Result<(Applied, usize), SwitchError> {
-    let mut packs = repo.new_packs()?;
+    let mut packs = s.packs;
     let safety_copies =
         writeout::keep_safety_copies(repo, &s.plan.actions, s.from, s.drive, &mut packs)?;
     let kept = safety_copies.len();
