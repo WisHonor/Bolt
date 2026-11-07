@@ -321,15 +321,8 @@ fn throw_away(
     crate::fsio::act_point("discard:planned");
     let kept_from = kept_on(&entry.state, from, command, paths.unwrap_or_default(), who);
     let mut packs = repo.new_packs()?;
-    let (folder_change, safety_copies) = kept::switch_saves(
-        repo,
-        &plan.actions,
-        from,
-        from,
-        &kept_from,
-        drive,
-        &mut packs,
-    )?;
+    let (folder_change, safety_copies) =
+        kept::switch_saves(repo, &plan, from, from, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
         action: Action::Command,
@@ -435,7 +428,7 @@ fn go(
     let mut packs = repo.new_packs()?;
     let kept_from = kept_on(&entry.state, from, command, &[], who);
     let (folder_change, safety_copies) =
-        kept::switch_saves(repo, &plan.actions, from, to, &kept_from, drive, &mut packs)?;
+        kept::switch_saves(repo, &plan, from, to, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
         action: Action::Command,

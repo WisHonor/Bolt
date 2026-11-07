@@ -12,7 +12,6 @@ use crate::id::Id;
 use crate::kept;
 use crate::repo::{ChangeLock, Repository};
 use crate::save::Person;
-use crate::scope::within;
 use crate::store::{StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
@@ -296,22 +295,27 @@ fn take_one(
         Action::Undo(step)
     };
     let command = command(redo);
-    let (mut shelf, mut planned, mut folder_change, mut packs) = (None, None, None, None);
+    let (mut shelf, mut planned, mut folder_change) = (None, None, None);
     if let Some(change) = entry.folder_change {
         saves_readable(repo, step, change)?;
-        // Undo switches from what the step wrote back to what the folder held, redo the other way.
-        let (mut from, to) = if redo {
-            (change.from, change.to)
+        // Undo switches from what the step wrote back to what the folder held, redo the other
+        // way, and each records that switch: the step's two saves picture the folder before and
+        // after it, at exactly its paths.
+        let switched = if redo {
+            change
         } else {
-            (change.to, change.from)
+            FolderChange {
+                from: change.to,
+                to: change.from,
+            }
         };
+        let (mut from, to) = (switched.from, switched.to);
         let drive = repo.drive()?;
-        let current = tip_of(&now)?;
         let ignored = req.git_excludes;
         let mut plan = writeout::plan(repo, from, to, None, false, drive, ignored)?;
         if !plan.collisions.is_empty() && req.shelve {
             let shelving = Shelving {
-                current,
+                current: tip_of(&now)?,
                 from,
                 state: &now.state,
                 req,
@@ -332,18 +336,10 @@ fn take_one(
                 shelve: req.shelve,
             });
         }
-        let mut made = repo.new_packs()?;
-        let kept_from = switch::kept_on(&now.state, current, command, &[], req.who);
-        let actions = &plan.actions;
-        folder_change =
-            kept::switch_saves(repo, actions, from, to, &kept_from, drive, &mut made)?.0;
-        packs = Some(made);
+        folder_change = Some(switched);
         planned = Some((plan, drive));
     }
-    let packs = match packs {
-        Some(packs) => packs,
-        None => repo.new_packs()?,
-    };
+    let packs = repo.new_packs()?;
     let applied = match planned {
         Some((plan, drive)) if !plan.actions.is_empty() => {
             let to_make = Switch {
@@ -434,14 +430,19 @@ impl Shelving<'_> {
         let onto = switch::kept_on(self.state, self.from, command, &[], who);
         let mut packs = repo.new_packs()?;
         let aside = kept::set_aside(repo, &work.actions, &shelf, &onto, drive, &mut packs)?;
-        // Something set aside at a collision, below it or above it takes it out of the way.
-        let paths = aside.as_ref().map_or(&[][..], |a| a.paths.as_slice());
-        let taken_out = |c: &str| paths.iter().any(|p| within(p, c) || within(c, p));
-        let left: Vec<String> = collisions
-            .iter()
-            .filter(|c| !taken_out(c))
-            .cloned()
-            .collect();
+        // A collision is out of the way when something was set aside at it, below it or above
+        // it, and no link left there is; paths compared as the drive compares names.
+        let left: Vec<String> = {
+            let paths = aside
+                .iter()
+                .flat_map(|a| a.paths.iter().map(String::as_str));
+            let taken_out = kept::goes_with(paths, drive);
+            collisions
+                .iter()
+                .filter(|c| !taken_out(c) || stays(c))
+                .cloned()
+                .collect()
+        };
         match aside {
             Some(aside) if left.is_empty() => {
                 repo.store_packs(lock, packs)?;

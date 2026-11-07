@@ -193,7 +193,7 @@ Saving gives one of two documents, told apart by `result`.
 | `shelf_gone` | `label`, `save` | A shelf left the list. |
 | `tags` | | The tags changed. |
 | `server_lines` | | The server lines changed. |
-| `files` | `from`, `to` | The folder was switched between two saves (each 64 hex digits): what it held before and what it holds after, at every path the step touched, whether it wrote there or the folder already held what it would write. Either can be a save made only for this. |
+| `files` | `from`, `to` | The folder was switched between two saves (each 64 hex digits): those of the step undone or redone, the other way round for an undo. They picture the folder before and after that step at every path it touched, whether it wrote there or the folder already held what it would write, and either can be a save made only for that step. |
 
 A step that stops the command fails it with exit code 1. Its document is the error document of §5 with `undone` or `redone` and `shelved` added, which list the steps taken, and the shelves made, before it stopped.
 

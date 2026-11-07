@@ -13,10 +13,10 @@ use crate::listing::{Entry, EntryKind, Listing};
 use crate::pack::{ObjectKind, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_LINE, Person, Save};
-use crate::scope::ancestors;
+use crate::scope::{ancestors, within};
 use crate::snapshot::{SaveError, store_listing};
 use crate::store::{Store, StoreError};
-use crate::writeout::{self, Folders, Tree};
+use crate::writeout::{self, Folders, Plan, Tree};
 
 /// The longest message a kept save gets, in bytes.
 const MAX_MESSAGE: usize = 1024;
@@ -54,18 +54,19 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
     message
 }
 
-/// The folder change of a switch planned from the save `from` to `target` as `actions`, on a
-/// folder on `kept.base`. The "to" save holds `target`'s version at every path where `from` and
-/// `target` differ, whether the actions write it or the folder already held it: the folder after
-/// the switch, wherever it touched. The "from" save is that with what the folder held at each
-/// path the actions write. Both are `kept.base` elsewhere. A held file or link the store lacks is
-/// stored first; one that couldn't be, having changed since the plan, is left as "to" has it,
-/// and so is what is planned below it and the folders above it. Each side is `kept.base`, `from`
-/// or `target` when its folders are exactly that save's, otherwise a kept save stored in `packs`.
-/// `None` when the two sides are the same. Also gives how many safety copies it kept.
+/// The folder change of `plan`, a switch from the save `from` to `target`, on a folder on
+/// `kept.base`. The "to" save holds `target`'s version at each path the plan writes and each it
+/// found the folder already holding (with everything below it): the folder after the switch,
+/// wherever it touched. The "from" save is that with what the folder held at each path the plan
+/// writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too. A held file or
+/// link the store lacks is stored first; one that couldn't be, having changed since the plan, is
+/// left out of both sides, and so is what is planned below it and the folders above it. Each side
+/// is `kept.base`, `from` or `target` when its folders are exactly that save's, otherwise a kept
+/// save stored in `packs`. `None` when the two sides are the same. Also gives how many safety
+/// copies it kept.
 pub(crate) fn switch_saves(
     repo: &Repository,
-    actions: &[Action],
+    plan: &Plan,
     from: Id,
     target: Id,
     kept: &KeptFrom,
@@ -77,19 +78,24 @@ pub(crate) fn switch_saves(
     let base_root = store.save(&kept.base, signed)?.root;
     let from_root = store.save(&from, signed)?.root;
     let target_root = store.save(&target, signed)?.root;
-    let (held, copies) = held(repo, actions, kept.base, base_root, drive, packs)?;
-    let mut after = BTreeMap::new();
+    let (held, copies) = held(repo, &plan.actions, kept.base, base_root, drive, packs)?;
     let unstored = HashMap::new();
-    for_each_entry_change_in(
-        store,
-        &unstored,
-        Some(from_root),
-        target_root,
-        |path, _, t| {
-            after.insert(path.to_owned(), t.map(|e| (e.kind, e.id, e.size)));
+    let put = |e: &Entry| (e.kind, e.id, e.size);
+    let mut wanted = Tree::new(store, &unstored, target_root, EXACT);
+    let mut after = BTreeMap::new();
+    for path in held.keys() {
+        after.insert(path.clone(), wanted.entry(path)?.as_ref().map(put));
+    }
+    if !plan.matched.is_empty() {
+        let matched = |path: &str| plan.matched.iter().any(|m| within(path, m));
+        let changes = |path: &str, _: Option<&Entry>, t: Option<&Entry>| {
+            if matched(path) {
+                after.insert(path.to_owned(), t.map(put));
+            }
             Ok::<(), SaveError>(())
-        },
-    )?;
+        };
+        for_each_entry_change_in(store, &unstored, Some(from_root), target_root, changes)?;
+    }
     let mut before = after.clone();
     before.extend(held);
     let before_root = overlay(store, base_root, &before, packs)?;
@@ -516,7 +522,7 @@ mod tests {
         };
         let mut packs = repo.new_packs().unwrap();
         let (change, _) =
-            switch_saves(repo, &plan.actions, left, target, &from, drive, &mut packs).unwrap();
+            switch_saves(repo, &plan, left, target, &from, drive, &mut packs).unwrap();
         let made = packs.finish().unwrap();
         for p in &made {
             repo.store_mut().register(p);
@@ -713,6 +719,16 @@ mod tests {
             ("gone/x.txt", FILE, b"x"),
         ]);
         assert_eq!(tree_of(&repo, change.from), want);
+    }
+
+    #[test]
+    fn what_a_goto_leaves_unwritten_stays_out_of_both_sides() {
+        let (_dir, mut repo, left) = saved(&[("a.txt", b"a")]);
+        let target = planted(&mut repo, &[("a.txt", b"A"), (".git/hooks/x", b"x")]);
+        let change = goto_saves(&mut repo, left, target).0.unwrap();
+        // `.git` is never written, so the folder after the goto doesn't hold it.
+        assert_eq!(change.from, left);
+        assert_eq!(tree_of(&repo, change.to), holding(&[("a.txt", FILE, b"A")]));
     }
 
     #[test]

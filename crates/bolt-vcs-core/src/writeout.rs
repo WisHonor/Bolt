@@ -21,9 +21,7 @@ use crate::id::{ContentHasher, Id, hash_content};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::names::{
-    MAX_PATH_BYTES, holdable_here, is_bolt_alias, is_git_alias, validate_path, writable_here,
-};
+use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, writable_here};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
@@ -43,6 +41,9 @@ pub struct Plan {
     pub placeholders: Vec<String>,
     /// Unsaved work the switch would overwrite or remove, which it leaves out.
     pub collisions: Vec<String>,
+    /// Where the target differs from `from` and the folder already holds the target's version,
+    /// all that is below included: nothing to write there. The top such paths only.
+    pub matched: Vec<String>,
     /// Unsaved changes the folder holds, which stay as they are unless they collide.
     pub carried: usize,
     /// What reading the folder found wrong.
@@ -131,12 +132,15 @@ pub fn plan(
         warnings: now.warnings,
         ..Plan::default()
     };
+    // Every path where the folder differs from the target.
+    let mut visited = BTreeSet::new();
     for_each_entry_change_in(
         store,
         &now.listings,
         Some(now.root),
         to_root,
         |path, n, t| {
+            visited.insert(path.to_owned());
             if !in_scope(path, only.as_ref(), t) {
                 return Ok(());
             }
@@ -202,6 +206,17 @@ pub fn plan(
             Ok::<(), SaveError>(())
         },
     )?;
+    // Where the target differs from `from` but not from the folder, at the path and below it.
+    let matched: BTreeSet<&str> = switched
+        .iter()
+        .filter(|p| !visited.contains(*p) && !any_below(p, &visited))
+        .map(String::as_str)
+        .collect();
+    plan.matched = matched
+        .iter()
+        .filter(|p| !ancestors(p).any(|up| matched.contains(up)))
+        .map(|p| (*p).to_owned())
+        .collect();
     plan.actions.sort_by(|a, b| a.path.cmp(&b.path));
     if drive.ignores_case || drive.composes_unicode {
         take_over_renamed(&mut plan.actions, drive);
@@ -1076,14 +1091,16 @@ impl Run<'_> {
         if let Some(root) = self.target_root {
             return Ok(root);
         }
-        let store = self.repo.store();
-        let bytes = store.read_record(&self.target_entry, ObjectKind::DiaryEntry)?;
-        let entry = DiaryEntry::decode(&bytes)?;
+        let entry = self.repo.entry(&self.target_entry)?;
         let save = match entry.folder_change {
             Some(change) => change.to,
             None => tip_of(&entry)?,
         };
-        let root = store.save(&save, self.repo.signatures_allowed())?.root;
+        let root = self
+            .repo
+            .store()
+            .save(&save, self.repo.signatures_allowed())?
+            .root;
         self.target_root = Some(root);
         Ok(root)
     }
@@ -1454,8 +1471,8 @@ impl Write for Capped {
 
 /// Whether the link at `path` with this stored target stays inside the project, judged from the
 /// save written alone, never from the disk: `Some(true)` if it leads to a folder of that save,
-/// `Some(false)` otherwise; `None` for a link to write as a placeholder: one that leads out
-/// ([`link_parts`]), or whose names before the last aren't all folders of that save.
+/// `Some(false)` otherwise; `None` for a link to write as a placeholder: one [`link_parts`]
+/// refuses, or whose names before the last aren't all folders of that save.
 fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>, StoreError> {
     let Some(parts) = link_parts(path, target) else {
         return Ok(None);
@@ -1480,6 +1497,8 @@ fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>
 /// The parts of a link's target in the order they are followed from the link's folder, or `None`
 /// if it leads out of the project: it is absolute, starts with a drive letter or `\\`, or climbs
 /// past the top with `..`; on Windows also when it holds a `\` or a name Windows reads otherwise.
+/// `None` too when it passes through a name write-out wouldn't write, such as a spelling of
+/// `.git` or `.bolt`: a link into the project's own `.git` could run what it finds there.
 fn link_parts<'a>(path: &str, target: &'a [u8]) -> Option<Vec<&'a str>> {
     let target = std::str::from_utf8(target).ok()?;
     let bytes = target.as_bytes();
@@ -1501,7 +1520,7 @@ fn link_parts<'a>(path: &str, target: &'a [u8]) -> Option<Vec<&'a str>> {
     for part in &parts {
         if *part == ".." {
             depth = depth.checked_sub(1)?;
-        } else if holdable_here(part) {
+        } else if writable_here(part, &[]).is_ok() {
             depth += 1;
         } else {
             return None;

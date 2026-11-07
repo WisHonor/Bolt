@@ -816,6 +816,37 @@ fn a_link_is_written_as_one_only_inside_the_project_through_folders_of_the_save(
 }
 
 #[test]
+fn a_link_through_a_name_write_out_wont_write_is_a_placeholder() {
+    let (_dir, mut repo) = project();
+    let tree_files = files(&[
+        (".git/hooks/pre-commit", b"run"),
+        ("git~1/hooks/x", b"run"),
+        ("d/f", b"f"),
+    ]);
+    let save = planted(&mut repo, &tree_files).0;
+    let root = repo.store().save(&save, false).unwrap().root;
+    let stored = HashMap::new();
+    let exact = Drive {
+        ignores_case: false,
+        composes_unicode: false,
+    };
+    let mut tree = Tree::new(repo.store(), &stored, root, exact);
+    // The save's own `.git` folder is never written, so a link into it can't be one either.
+    for (path, target) in [
+        ("hook", ".git/hooks/pre-commit"),
+        ("hooks", ".git/hooks"),
+        ("git", ".git"),
+        ("short", "git~1/hooks/x"),
+        ("bolt", ".bolt/x"),
+        ("d/up", "../.git/hooks"),
+    ] {
+        let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
+        assert!(!as_link, "{path}");
+    }
+    assert!(writes_as_link(&mut tree, "in", b"d/f").unwrap());
+}
+
+#[test]
 fn whether_links_can_be_made_is_tried_in_bolts_own_folder() {
     let (_dir, mut repo) = project();
     let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();

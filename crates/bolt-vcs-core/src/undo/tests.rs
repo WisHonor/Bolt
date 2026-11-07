@@ -1,10 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::journal::Journal;
+use crate::lines::Target;
+use crate::listing::EntryKind;
 use crate::repo::RepoError;
 use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
-use crate::switch::discard;
-use crate::test_support::symlink;
+use crate::switch::{discard, goto};
+use crate::test_support::{plant_save, symlink};
 use crate::warning;
 use std::collections::BTreeMap;
 use std::fs;
@@ -77,6 +79,32 @@ fn plant_with(
     change(&mut entry.state);
     let packs = repo.new_packs().unwrap();
     repo.commit(&lock, packs, &entry).unwrap()
+}
+
+/// A project on line `old`, its folder holding `files` as that line's save has them, and `main`
+/// moved on to a save of `entries`. Gives the two saves.
+fn on_old_line(
+    files: &[(&str, &[u8])],
+    entries: &[(&str, EntryKind, &[u8])],
+) -> (tempfile::TempDir, Repository, Id, Id) {
+    let (dir, mut repo) = saved(files);
+    let old = tip_of(&repo.current().unwrap().1).unwrap();
+    plant_save(&mut repo, entries);
+    let main = tip_of(&repo.current().unwrap().1).unwrap();
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (head, mut entry) = repo.current().unwrap();
+    entry.parent = Some(head);
+    entry.state.lines.insert("old".into(), old);
+    entry.state.position = Position::OnLine("old".into());
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
+    (dir, repo, old, main)
+}
+
+fn goto_main(repo: &mut Repository) {
+    let main = Target::Line("main".into());
+    goto(repo, &main, &who(), "goto", None, &mut |_| {}).unwrap();
 }
 
 fn shelf(label: &str, save: Id) -> (String, Id) {
@@ -299,6 +327,99 @@ fn the_steps_warnings_are_told_as_one_commands() {
         warnings(&[step("a"), step("b")]),
         [skipped.clone(), one_warning]
     );
+}
+
+#[test]
+fn undo_and_redo_record_their_steps_own_folder_change() {
+    const FILE: EntryKind = EntryKind::File;
+    let main_files = [("a.txt", FILE, b"A" as &[u8]), ("c.txt", FILE, b"c")];
+    let (dir, mut repo, _, _) = on_old_line(&[("a.txt", b"a")], &main_files);
+    let root = dir.path();
+    // Unsaved work that already matches main: the goto finds it there, and writes only a.txt.
+    write_all(root, &[("c.txt", b"c")]);
+    goto_main(&mut repo);
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    let backwards = FolderChange {
+        from: change.to,
+        to: change.from,
+    };
+    assert_eq!(repo.current().unwrap().1.folder_change, Some(backwards));
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"a");
+    assert_eq!(fs::read(root.join("c.txt")).unwrap(), b"c");
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(repo.current().unwrap().1.folder_change, Some(change));
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"A");
+}
+
+#[test]
+fn a_redo_writes_a_link_through_a_folder_the_folder_already_held() {
+    let entries = [
+        ("a.txt", EntryKind::File, b"a" as &[u8]),
+        ("d/x.txt", EntryKind::File, b"x"),
+        ("l", EntryKind::Symlink, b"d/x.txt"),
+    ];
+    let (dir, mut repo, _, main) = on_old_line(&[("a.txt", b"a")], &entries);
+    let root = dir.path();
+    if !symlink(Path::new("a.txt"), &root.join("probe")) {
+        return;
+    }
+    fs::remove_file(root.join("probe")).unwrap();
+    // The folder already holds main's d, so the goto writes only the link through it.
+    write_all(root, &[("d/x.txt", b"x")]);
+    goto_main(&mut repo);
+    let is_link = |root: &Path| {
+        let found = fs::symlink_metadata(root.join("l")).unwrap();
+        found.file_type().is_symlink()
+    };
+    assert!(is_link(root));
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    assert_eq!(change.to, main);
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(fs::symlink_metadata(root.join("l")).is_err());
+    assert_eq!(fs::read(root.join("d/x.txt")).unwrap(), b"x");
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(is_link(root), "written as a plain file");
+    assert_eq!(repo.current().unwrap().1.folder_change, Some(change));
+}
+
+#[test]
+fn shelve_stores_nothing_when_a_link_it_must_leave_is_in_the_way() {
+    let entries = [
+        ("a.txt", EntryKind::File, b"a" as &[u8]),
+        ("w/f.txt", EntryKind::File, b"f"),
+    ];
+    let (dir, mut repo, _, _) = on_old_line(&[("a.txt", b"a")], &entries);
+    let root = dir.path();
+    goto_main(&mut repo);
+    // New in w since: a file --shelve could set aside, and a link out of the project it can't.
+    write_all(root, &[("w/mine.txt", b"mine")]);
+    let out = Path::new("..").join("..").join("outside");
+    if !symlink(&out, &root.join("w").join("out")) {
+        return;
+    }
+    let (head, packs) = (repo.head().unwrap(), repo.store().pack_count());
+    let who = who();
+    let shelve = StepRequest {
+        shelve: true,
+        ..one_step(&who)
+    };
+    let failed = undo(&mut repo, &shelve, &mut |_| {}).unwrap_err();
+    match failed.error {
+        SwitchError::InTheWayOfStep {
+            paths,
+            shelve: true,
+            ..
+        } => assert_eq!(paths, ["w"]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        (repo.head().unwrap(), repo.store().pack_count()),
+        (head, packs)
+    );
+    assert_eq!(fs::read(root.join("w/mine.txt")).unwrap(), b"mine");
 }
 
 #[test]
