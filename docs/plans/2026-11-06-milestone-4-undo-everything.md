@@ -111,7 +111,7 @@ pub(crate) struct KeptFrom<'a> {
 /// (`keep_safety_copies`); a path whose content changed after the plan is left out of both. Each
 /// side is `from.base` or `target` when its folders are exactly that save's, otherwise a kept save
 /// stored in `packs`. `None` when the two sides are the same.
-pub(crate) fn switch_saves(repo: &Repository, actions: &[Action], target: Id, from: &KeptFrom, drive: Drive, packs: &mut PackSet) -> Result<Option<FolderChange>, SaveError>;
+pub(crate) fn switch_saves(repo: &Repository, actions: &[Action], target: Id, from: &KeptFrom, drive: Drive, packs: &mut PackSet) -> Result<(Option<FolderChange>, usize /* safety copies kept */), SaveError>;
 /// The tree of `base_root` with each path in `changes` set to that entry (`None`: removed), its
 /// new folder listings stored in `packs`; returns the new root listing's ID. A folder entry's
 /// listing is built from the changes below it, on the base's listing there if the base has a
