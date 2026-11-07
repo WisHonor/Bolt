@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
 use crate::drive::{self, Drive};
 use crate::history::{ResolveError, tip_of};
-use crate::id::{Id, hash_content};
+use crate::id::Id;
 use crate::journal::{Change, Journal};
 use crate::kept::{self, KeptFrom};
 use crate::lines::Target;
@@ -15,11 +15,11 @@ use crate::pack::PackSet;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
 use crate::scope::within;
-use crate::snapshot::{NAMED, SaveError, link_target, listed};
+use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
 use crate::text::escape;
 use crate::warning::{self, Warning};
-use crate::writeout::{self, Applied, Folders, Plan};
+use crate::writeout::{self, Applied, Plan};
 
 /// What `goto` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +228,10 @@ fn throw_away(
             return Err(SwitchError::NoMatch { path: path.clone() });
         }
     }
-    let links_left = leave_links(repo, &mut plan)?;
+    let links_left = kept::links_to_leave(repo, &plan.actions, from, drive)?;
     if !links_left.is_empty() {
+        let stays = kept::goes_with(links_left.iter().map(String::as_str));
+        plan.actions.retain(|a| !stays(&a.path));
         plan.warnings.push(links_left_warning(&links_left));
     }
     let (mut restored, mut removed, mut folders) = (Vec::new(), Vec::new(), 0);
@@ -301,53 +303,24 @@ fn throw_away(
     })
 }
 
-/// Takes out of `plan` each unsaved link it would throw away that couldn't be written back as a
-/// link, with what is planned above and below it, and gives their paths.
-fn leave_links(repo: &Repository, plan: &mut Plan) -> Result<Vec<String>, SwitchError> {
-    let mut disk = Folders::open(repo.root()).map_err(RepoError::from)?;
-    let mut left = Vec::new();
-    for a in &plan.actions {
-        let Some(e) = a.expected.filter(|e| e.kind == EntryKind::Symlink) else {
-            continue;
-        };
-        // A link that changed since the plan is left by the switch anyway.
-        let (up, name) = a.path.rsplit_once('/').unwrap_or(("", &a.path));
-        if disk.enter(up).is_err() {
-            continue;
-        }
-        let Ok(target) = link_target(disk.here(), name, &a.path) else {
-            continue;
-        };
-        if hash_content(target.as_bytes()) == e.id
-            && !writeout::writes_back_as_link(repo, &a.path, target.as_bytes())?
-        {
-            left.push(a.path.clone());
-        }
-    }
-    plan.actions.retain(|a| {
-        !left
-            .iter()
-            .any(|l| within(&a.path, l) || within(l, &a.path))
-    });
-    Ok(left)
-}
-
 /// Says unsaved links weren't thrown away.
 fn links_left_warning(paths: &[String]) -> Warning {
-    let links = match paths.len() {
-        1 => "1 unsaved link".to_owned(),
-        n => format!("{n} unsaved links"),
-    };
-    Warning::new(
-        warning::LINKS_LEFT,
-        format!(
-            "Didn't throw away {links}: an undo could bring them back only as plain files holding \
-             their targets, since they lead out of the project or this computer can't make links \
-             (on Windows that takes Developer Mode):{}\nDelete them yourself if you don't want \
-             them.",
-            listed(paths.iter().take(NAMED), paths.len() as u64)
+    let list = listed(paths.iter().take(NAMED), paths.len() as u64);
+    let message = match paths.len() {
+        1 => format!(
+            "Didn't throw away 1 unsaved link: an undo could bring it back only as a plain file \
+             holding its target, since it may lead out of the project or this computer can't \
+             make links (on Windows that takes Developer Mode):{list}\nDelete it yourself if you \
+             don't want it."
         ),
-    )
+        n => format!(
+            "Didn't throw away {n} unsaved links: an undo could bring them back only as plain \
+             files holding their targets, since they may lead out of the project or this \
+             computer can't make links (on Windows that takes Developer Mode):{list}\nDelete them \
+             yourself if you don't want them."
+        ),
+    };
+    Warning::new(warning::LINKS_LEFT, message)
 }
 
 fn go(

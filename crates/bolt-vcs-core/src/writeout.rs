@@ -366,24 +366,24 @@ fn copy_in(
         return Ok(false);
     }
     let dir = disk.here();
-    let os = OsStr::new(name);
-    // Gone, or no longer what it was: the switch leaves what is there.
-    let still = |kind: EntryType| dir.metadata(os).is_ok_and(|now| now.kind == kind);
     if e.kind == EntryKind::Symlink {
-        let target = match crate::snapshot::link_target(dir, name, path) {
-            Ok(target) => target,
-            Err(_) if !still(EntryType::Symlink) => return Ok(false),
-            Err(err) => return Err(err),
-        };
-        if hash_content(target.as_bytes()) != e.id {
+        let Some(target) = link_in(dir, name, path, e)? else {
             return Ok(false);
-        }
+        };
         packs.add_content(target.as_bytes())?;
         return Ok(true);
     }
+    let os = OsStr::new(name);
     let mut file = match dir.open_file(os) {
         Ok(file) => file,
-        Err(_) if !still(EntryType::File) => return Ok(false),
+        // Gone, or no longer what it was: the switch leaves what is there.
+        Err(_)
+            if !dir
+                .metadata(os)
+                .is_ok_and(|now| now.kind == EntryType::File) =>
+        {
+            return Ok(false);
+        }
         Err(err) => return Err(unreadable(path, err)),
     };
     match packs.add_content_from(&mut file, e.id) {
@@ -391,6 +391,48 @@ fn copy_in(
         Err(PackError::ContentChanged) => Ok(false),
         Err(err) => Err(err.into()),
     }
+}
+
+/// The target of the link at `path` if it is still the one the plan found (`e`); `None` if it is
+/// gone or changed since. Anything else that stops it being read is an error.
+pub(crate) fn planned_link(
+    disk: &mut Folders,
+    path: &str,
+    e: Expected,
+) -> Result<Option<String>, SaveError> {
+    let (up, name) = split(path);
+    match disk.enter(up) {
+        Ok(()) => {}
+        // Gone, a file now, or swapped for a link: the switch leaves what is there.
+        Err(err)
+            if is_link_refusal(&err)
+                || matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => return Err(unreadable(path, err)),
+    }
+    link_in(disk.here(), name, path, e)
+}
+
+/// The target of the link `name` in `dir`, at the project path `path`, if it is still the one
+/// the plan found (`e`); `None` if it is no longer a link or holds another target.
+fn link_in(dir: &Dir, name: &str, path: &str, e: Expected) -> Result<Option<String>, SaveError> {
+    let target = match crate::snapshot::link_target(dir, name, path) {
+        Ok(target) => target,
+        Err(_)
+            if !dir
+                .metadata(OsStr::new(name))
+                .is_ok_and(|now| now.kind == EntryType::Symlink) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
+    Ok((hash_content(target.as_bytes()) == e.id).then_some(target))
 }
 
 /// Carries out `journal`, made by [`plan`] or read back after a crash. Each change is checked
@@ -1452,16 +1494,19 @@ fn link_parts<'a>(path: &str, target: &'a [u8]) -> Option<Vec<&'a str>> {
     Some(parts)
 }
 
-/// Whether a link with `target` at `path` would be written as a link here, not a placeholder: it
-/// stays inside the project, and this system can make links (tried in `.bolt/tmp`).
-pub(crate) fn writes_back_as_link(
-    repo: &Repository,
+/// Whether write-out writes a link at `path` with `target` as a link, not a placeholder, where
+/// `tree` is the save it writes and links can be made: the target isn't too long, and
+/// [`link_shape`] keeps it inside the project.
+pub(crate) fn writes_as_link(
+    tree: &mut Tree,
     path: &str,
     target: &[u8],
-) -> Result<bool, SaveError> {
-    if target.len() as u64 > MAX_LINK_TARGET || link_parts(path, target).is_none() {
-        return Ok(false);
-    }
+) -> Result<bool, StoreError> {
+    Ok(target.len() as u64 <= MAX_LINK_TARGET && link_shape(tree, path, target)?.is_some())
+}
+
+/// Whether this system and account can make links: tried with a throwaway one in `.bolt/tmp`.
+pub(crate) fn can_make_links(repo: &Repository) -> Result<bool, SaveError> {
     let tmp = repo.tmp_folder();
     let name = bolt_platform::temp_name();
     match tmp.symlink(&name, OsStr::new("x"), false, tmp) {

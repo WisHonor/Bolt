@@ -1,7 +1,7 @@
 //! What a switch changes in the project folder, as two saves, and what `discard` throws away,
 //! kept as a save of its own.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 
 use crate::diary::FolderChange;
@@ -12,10 +12,10 @@ use crate::listing::{Entry, EntryKind, Listing};
 use crate::pack::{ObjectKind, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_LINE, Person, Save};
-use crate::scope::{ancestors, within};
+use crate::scope::ancestors;
 use crate::snapshot::{SaveError, store_listing};
 use crate::store::{Store, StoreError};
-use crate::writeout::{self, Tree};
+use crate::writeout::{self, Folders, Tree};
 
 /// The longest message a kept save gets, in bytes.
 const MAX_MESSAGE: usize = 1024;
@@ -55,10 +55,11 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 
 /// The folder change of a switch planned as `actions` on a folder on `from.base`: the save
 /// holding what the folder held at each path the actions write, and the one holding what they
-/// write there, both `from.base` elsewhere. Held contents the store lacks are stored first; a
-/// path whose content changed after the plan is left out of both. Each side is `from.base` or
-/// `target` when its folders are exactly that save's, otherwise a kept save stored in `packs`.
-/// `None` when the two sides are the same.
+/// write there, both `from.base` elsewhere. A held file or link the store lacks is stored first;
+/// one that couldn't be, having changed since the plan, is left out of both sides, with what is
+/// planned below it and the folders above it. Each side is `from.base` or `target` when its
+/// folders are exactly that save's, otherwise a kept save stored in `packs`. `None` when the two
+/// sides are the same.
 pub(crate) fn switch_saves(
     repo: &Repository,
     actions: &[Action],
@@ -91,15 +92,11 @@ pub(crate) fn switch_saves(
             lost.push(a.path.as_str());
         }
     }
+    let lost = goes_with(lost);
     let (mut held, mut written) = (BTreeMap::new(), BTreeMap::new());
-    for a in actions {
-        let path = a.path.as_str();
-        if lost.iter().any(|l| within(path, l) || within(l, path)) {
-            continue;
-        }
-        let was = a.expected.filter(|_| !renamed.contains(path));
-        held.insert(a.path.clone(), was.map(|e| (e.kind, e.id, e.size)));
-        let put = wanted.entry(path)?.map(|e| (e.kind, e.id, e.size));
+    for a in actions.iter().filter(|a| !lost(&a.path)) {
+        held.insert(a.path.clone(), held_at(a, &renamed));
+        let put = wanted.entry(&a.path)?.map(|e| (e.kind, e.id, e.size));
         written.insert(a.path.clone(), put);
     }
     let from_root = overlay(store, base_root, &held, packs)?;
@@ -128,6 +125,18 @@ pub(crate) fn overlay(
     base_root: Id,
     changes: &BTreeMap<String, Option<Put>>,
     packs: &mut PackSet,
+) -> Result<Id, SaveError> {
+    overlay_with(store, base_root, changes, &mut |listing| {
+        store_listing(store, packs, listing)
+    })
+}
+
+/// [`overlay`], with each listing it builds handed to `keep`, which gives its ID.
+fn overlay_with(
+    store: &Store,
+    base_root: Id,
+    changes: &BTreeMap<String, Option<Put>>,
+    keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
 ) -> Result<Id, SaveError> {
     let is_folder = |c: &Option<Put>| matches!(c, Some((EntryKind::Folder, ..)));
     // Each folder to build, with what changes right in it: an entry put there, or `None` removed.
@@ -169,7 +178,7 @@ pub(crate) fn overlay(
         if !had && listing.entries().is_empty() && !changes.contains_key(&path) {
             continue;
         }
-        let id = store_listing(store, packs, &listing)?;
+        let id = keep(&listing)?;
         let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
         let entry = Entry {
             name: name.to_owned(),
@@ -183,7 +192,111 @@ pub(crate) fn overlay(
     }
     let top = todo.remove("").unwrap_or_default();
     let listing = changed(base.folder("")?.map(|f| &f.listing), top)?;
-    store_listing(store, packs, &listing)
+    keep(&listing)
+}
+
+/// What the folder held at the path `a` writes, as the save of what it held has it. A write
+/// [`writeout::renamed`] names held nothing under its own spelling.
+fn held_at(a: &Action, renamed: &HashSet<&str>) -> Option<Put> {
+    a.expected
+        .filter(|_| !renamed.contains(a.path.as_str()))
+        .map(|e| (e.kind, e.id, e.size))
+}
+
+/// Whether a path goes with an entry left at one of `left`: the entry itself, what is planned
+/// below it, or a folder above it, which can't be emptied while it stays.
+pub(crate) fn goes_with<'a>(left: impl IntoIterator<Item = &'a str>) -> impl Fn(&str) -> bool + 'a {
+    let at: HashSet<&'a str> = left.into_iter().collect();
+    let above: HashSet<&'a str> = at.iter().flat_map(|&l| ancestors(l)).collect();
+    move |path: &str| {
+        at.contains(path) || above.contains(path) || ancestors(path).any(|up| at.contains(up))
+    }
+}
+
+/// The paths of the unsaved links `actions` would throw away that write-out could bring back
+/// only as plain files: judged by its own rule against the tree the kept save would have, which
+/// each link left changes. A link no longer as the plan found it is the switch's to leave.
+/// Whether links can be made is tried once.
+pub(crate) fn links_to_leave(
+    repo: &Repository,
+    actions: &[Action],
+    base: Id,
+    drive: Drive,
+) -> Result<Vec<String>, SaveError> {
+    let store = repo.store();
+    let base_root = store.save(&base, repo.signatures_allowed())?.root;
+    let unstored = HashMap::new();
+    let mut saved = Tree::new(store, &unstored, base_root, EXACT);
+    let mut disk = Folders::open(repo.root()).map_err(|source| SaveError::Unreadable {
+        path: "the project folder".to_owned(),
+        source,
+    })?;
+    let mut links = Vec::new();
+    for a in actions {
+        let Some(e) = a.expected.filter(|e| e.kind == EntryKind::Symlink) else {
+            continue;
+        };
+        if saved
+            .entry(&a.path)?
+            .is_some_and(|s| s.kind == e.kind && s.id == e.id)
+        {
+            continue;
+        }
+        if let Some(target) = writeout::planned_link(&mut disk, &a.path, e)? {
+            links.push((a.path.as_str(), target));
+        }
+    }
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !writeout::can_make_links(repo)? {
+        return Ok(links.into_iter().map(|(path, _)| path.to_owned()).collect());
+    }
+    let renamed = writeout::renamed(actions, drive);
+    let left = placeholders(store, base_root, actions, &renamed, &links)?;
+    Ok(left.into_iter().collect())
+}
+
+/// Of `links`, the unsaved links `actions` throw away with their targets, the ones write-out
+/// would write as plain files in the kept save. Each round judges them against the tree that save
+/// would have without the links already left, until a round leaves no more.
+fn placeholders(
+    store: &Store,
+    base_root: Id,
+    actions: &[Action],
+    renamed: &HashSet<&str>,
+    links: &[(&str, String)],
+) -> Result<BTreeSet<String>, SaveError> {
+    let mut left = BTreeSet::new();
+    loop {
+        let held: BTreeMap<String, Option<Put>> = {
+            let goes = goes_with(left.iter().map(String::as_str));
+            actions
+                .iter()
+                .filter(|a| !goes(&a.path))
+                .map(|a| (a.path.clone(), held_at(a, renamed)))
+                .collect()
+        };
+        let mut listings = HashMap::new();
+        let root = overlay_with(store, base_root, &held, &mut |listing| {
+            let id = listing.id();
+            listings.insert(id, listing.clone());
+            Ok(id)
+        })?;
+        let mut kept = Tree::new(store, &listings, root, EXACT);
+        let mut more = Vec::new();
+        for (path, target) in links {
+            if !left.contains(*path)
+                && !writeout::writes_as_link(&mut kept, path, target.as_bytes())?
+            {
+                more.push((*path).to_owned());
+            }
+        }
+        if more.is_empty() {
+            return Ok(left);
+        }
+        left.extend(more);
+    }
 }
 
 /// `listing`, or an empty folder without one, with each name set to its entry or removed.
@@ -236,10 +349,13 @@ mod tests {
     use super::*;
     use crate::drive;
     use crate::history::tip_of;
+    use crate::id::hash_content;
+    use crate::journal::{Change, Expected};
     use crate::pack::PackWriter;
+    use crate::scope::within;
     use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
     use crate::switch::{DiscardOutcome, discard};
-    use crate::test_support::plant_save;
+    use crate::test_support::{plant_save, symlink};
     use proptest::prelude::*;
     use std::fs;
     use std::path::Path;
@@ -559,6 +675,127 @@ mod tests {
             ("newdir/x.txt", FILE, b"x"),
         ]);
         assert_eq!(tree_of(&repo, change.from), want);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_leaves_a_link_whose_way_runs_through_what_the_kept_save_lacks() {
+        use std::os::unix::fs::symlink;
+        let (dir, mut repo, _) = saved(&[("a.txt", b"a")]);
+        let root = dir.path();
+        write_all(root, &[("bin/x", b"x"), ("lib/real.so", b"so")]);
+        symlink("/opt/node", root.join("node")).unwrap();
+        symlink("../node/bin/tool", root.join("bin/tool")).unwrap();
+        symlink("lib/real.so", root.join("current")).unwrap();
+        // Alone, current would come back without lib.
+        let done = discarded(&mut repo, Some(&["current".to_owned()]));
+        assert_eq!(done.links_left, ["current"]);
+        assert_eq!(done.folder_change, None);
+        assert!(fs::read_link(root.join("current")).is_ok());
+        // With everything, lib comes back with it; node leads out, and bin/tool goes through node.
+        let done = discarded(&mut repo, None);
+        assert_eq!(done.links_left, ["bin/tool", "node"]);
+        assert!(fs::read_link(root.join("bin/tool")).is_ok());
+        assert!(!root.join("bin/x").exists() && !root.join("lib").exists());
+        assert!(root.join("current").symlink_metadata().is_err());
+    }
+
+    /// A discard's removal of what the folder holds at `path`: a file or link holding `bytes`, or
+    /// a folder.
+    fn thrown(path: &str, kind: EntryKind, bytes: &[u8]) -> Action {
+        let (change, id, size) = if kind == FOLDER {
+            (Change::RemoveFolder, Id([0; 32]), 0)
+        } else {
+            (Change::RemoveFile, hash_content(bytes), bytes.len() as u64)
+        };
+        Action {
+            path: path.to_owned(),
+            change,
+            expected: Some(Expected { kind, id, size }),
+        }
+    }
+
+    #[test]
+    fn a_link_the_kept_save_would_write_as_a_file_is_left() {
+        let (_dir, repo, save) = saved(&[("a.txt", b"a")]);
+        let store = repo.store();
+        let base_root = store.save(&save, false).unwrap().root;
+        let left = |thrown_away: &[(&str, EntryKind, &[u8])]| -> Vec<String> {
+            let actions: Vec<Action> = thrown_away
+                .iter()
+                .map(|&(path, kind, bytes)| thrown(path, kind, bytes))
+                .collect();
+            let links: Vec<(&str, String)> = thrown_away
+                .iter()
+                .filter(|(_, kind, _)| *kind == EntryKind::Symlink)
+                .map(|&(path, _, bytes)| (path, String::from_utf8(bytes.to_vec()).unwrap()))
+                .collect();
+            let none = HashSet::new();
+            let left = placeholders(store, base_root, &actions, &none, &links).unwrap();
+            left.into_iter().collect()
+        };
+        const LINK: EntryKind = EntryKind::Symlink;
+        // node leads out, so it stays a link in the kept save, and bin/tool's way runs through it.
+        let node = left(&[
+            ("bin", FOLDER, b""),
+            ("bin/tool", LINK, b"../node/bin/tool"),
+            ("node", LINK, b"/opt/node"),
+        ]);
+        assert_eq!(node, ["bin/tool", "node"]);
+        // The kept save has lib only when lib is thrown away too.
+        assert_eq!(left(&[("current", LINK, b"lib/real.so")]), ["current"]);
+        let with_lib = left(&[
+            ("current", LINK, b"lib/real.so"),
+            ("lib", FOLDER, b""),
+            ("lib/real.so", FILE, b"so"),
+        ]);
+        assert!(with_lib.is_empty());
+        // Leaving lib/x keeps lib, which then holds nothing else thrown away: current goes too.
+        let only_a_link = left(&[
+            ("current", LINK, b"lib/x"),
+            ("lib", FOLDER, b""),
+            ("lib/x", LINK, b"/abs"),
+        ]);
+        assert_eq!(only_a_link, ["current", "lib/x"]);
+    }
+
+    /// The links a discard of `paths`, or of everything, would leave.
+    fn leaving(repo: &mut Repository, save: Id, paths: Option<&[String]>) -> Vec<String> {
+        let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        let plan = writeout::plan(repo, save, save, paths, true, drive, None).unwrap();
+        links_to_leave(repo, &plan.actions, save, drive).unwrap()
+    }
+
+    #[test]
+    fn links_to_leave_judges_the_links_in_the_folder() {
+        let (dir, mut repo, save) = saved(&[("a.txt", b"a")]);
+        let root = dir.path();
+        write_all(root, &[("bin/x", b"x"), ("lib/real.so", b"so")]);
+        if !symlink(&std::env::temp_dir(), &root.join("node")) {
+            return;
+        }
+        let tool = Path::new("..").join("node").join("bin").join("tool");
+        assert!(symlink(&tool, &root.join("bin/tool")));
+        assert!(symlink(
+            &Path::new("lib").join("real.so"),
+            &root.join("current")
+        ));
+        assert_eq!(leaving(&mut repo, save, None), ["bin/tool", "node"]);
+        let current = ["current".to_owned()];
+        assert_eq!(leaving(&mut repo, save, Some(&current)), ["current"]);
+    }
+
+    #[test]
+    fn a_kept_saves_message_is_cut_at_a_character_within_1_kib() {
+        let given = |paths: &[&str]| -> Vec<String> { paths.iter().map(|&p| p.into()).collect() };
+        let named = message("discard", &given(&["a.txt", "", "dir"]));
+        assert_eq!(named, "discard a.txt dir");
+        // "discard " and 1,015 bytes come to 1,023, so the two bytes of é straddle the limit.
+        let long = format!("{}\u{e9} and more", "x".repeat(1015));
+        let cut = message("discard", &given(&[&long]));
+        assert_eq!(cut, format!("discard {}", "x".repeat(1015)));
+        assert_eq!(cut.len(), 1023);
     }
 
     /// A folder as the overlay test sees it: its ID and size are zero.

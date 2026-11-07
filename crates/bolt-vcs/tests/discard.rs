@@ -474,6 +474,36 @@ fn discard_removes_a_new_link() {
 
 #[cfg(unix)]
 #[test]
+fn discard_says_nothing_was_discarded_when_it_leaves_the_only_link() {
+    let env = project(SAVED);
+    std::os::unix::fs::symlink("/tmp", env.root().join("out")).unwrap();
+    let out = env.bolt().arg("discard").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let (said, warned) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(
+        said.trim(),
+        "Nothing was discarded: the unsaved link stays as it is."
+    );
+    assert!(
+        warned.contains("Didn't throw away 1 unsaved link") && warned.contains("  out\n"),
+        "{warned}"
+    );
+    assert_eq!(
+        fs::read_link(env.root().join("out")).unwrap(),
+        Path::new("/tmp")
+    );
+    let doc = discard_json(&env, &[]);
+    let kinds: Vec<&str> = doc["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"links_left"), "{doc}");
+}
+
+#[cfg(unix)]
+#[test]
 fn discard_puts_back_an_executable_bit() {
     use std::os::unix::fs::PermissionsExt;
     let env = project(SAVED);

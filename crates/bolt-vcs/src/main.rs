@@ -1089,7 +1089,14 @@ fn discard_command(
             k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
         };
         let nothing = n == 0 && done.folders == 0;
+        // The warning that follows names the links left and says why.
         match (nothing, paths.is_empty()) {
+            (true, _) if done.links_left.len() == 1 => {
+                println!("Nothing was discarded: the unsaved link stays as it is.");
+            }
+            (true, _) if !done.links_left.is_empty() => {
+                println!("Nothing was discarded: the unsaved links stay as they are.");
+            }
             (true, true) => println!("Nothing to discard: your files match your last save."),
             (true, false) => println!("Nothing to discard there: it matches your last save."),
             _ => println!("Threw away your unsaved changes in {what}{copies}."),

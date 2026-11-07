@@ -297,3 +297,32 @@ fn a_file_edited_after_the_discard_planned_is_left_as_edited() {
     assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"edited");
     assert_eq!(fs::read(dir.path().join("b.txt")).unwrap(), b"b");
 }
+
+#[test]
+fn the_links_left_warning_reads_right_for_one_link_and_for_several() {
+    let one = links_left_warning(&["out".to_owned()]).message;
+    assert!(
+        one.starts_with(
+            "Didn't throw away 1 unsaved link: an undo could bring it back only as a plain file \
+             holding its target, since it may lead out"
+        ),
+        "{one}"
+    );
+    assert!(one.contains("\n  out\n"), "{one}");
+    assert!(
+        one.ends_with("Delete it yourself if you don't want it."),
+        "{one}"
+    );
+    let two = links_left_warning(&["a".to_owned(), "b".to_owned()]).message;
+    assert!(
+        two.starts_with(
+            "Didn't throw away 2 unsaved links: an undo could bring them back only as plain files \
+             holding their targets, since they may lead out"
+        ),
+        "{two}"
+    );
+    assert!(
+        two.ends_with("Delete them yourself if you don't want them."),
+        "{two}"
+    );
+}

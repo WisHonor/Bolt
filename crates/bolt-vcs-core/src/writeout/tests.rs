@@ -785,31 +785,47 @@ fn a_link_through_a_name_that_isnt_a_folder_is_a_placeholder() {
 }
 
 #[test]
-fn a_link_comes_back_as_a_link_only_inside_the_project_and_where_links_can_be_made() {
+fn a_link_is_written_as_one_only_inside_the_project_through_folders_of_the_save() {
     let (_dir, mut repo) = project();
-    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
-    let too_long = "a/".repeat(2100);
+    let save = planted(&mut repo, &files(&[("d/f", b"f")])).0;
+    let root = repo.store().save(&save, false).unwrap().root;
+    let stored = HashMap::new();
+    let exact = Drive {
+        ignores_case: false,
+        composes_unicode: false,
+    };
+    let mut tree = Tree::new(repo.store(), &stored, root, exact);
+    let too_long = format!("{}d/f", "./".repeat(2100));
     for (path, target) in [
         ("out", "/tmp"),
         ("unc", "//host/share"),
         ("drive", "C:/x"),
         ("up", "../x"),
         ("d/up", "../../x"),
+        ("through_a_file", "d/f/../f"),
+        ("through_nothing", "e/../d/f"),
         ("long", too_long.as_str()),
     ] {
-        assert!(
-            !writes_back_as_link(&repo, path, target.as_bytes()).unwrap(),
-            "{path}"
-        );
+        let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
+        assert!(!as_link, "{path}");
     }
+    for (path, target) in [("in", "d/f"), ("d/back", "../d"), ("dot", "./d")] {
+        let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
+        assert!(as_link, "{path}");
+    }
+}
+
+#[test]
+fn whether_links_can_be_made_is_tried_in_bolts_own_folder() {
+    let (_dir, mut repo) = project();
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
     let probe = tempfile::tempdir().unwrap();
     let link = probe.path().join("l");
     #[cfg(unix)]
     let made = std::os::unix::fs::symlink("x", &link);
     #[cfg(windows)]
     let made = std::os::windows::fs::symlink_file("x", &link);
-    let inside = writes_back_as_link(&repo, "d/l", b"../a.txt").unwrap();
-    assert_eq!(inside, made.is_ok());
+    assert_eq!(can_make_links(&repo).unwrap(), made.is_ok());
 }
 
 /// Makes `dir` keep letter case apart, as WSL folders do on a drive that otherwise ignores it.
