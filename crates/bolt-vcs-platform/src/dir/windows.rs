@@ -18,29 +18,30 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_OPEN, FILE_OPEN_IF,
     FILE_OPEN_REPARSE_POINT, FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, FILE_RENAME_INFORMATION,
     FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS, FILE_SYNCHRONOUS_IO_NONALERT,
-    FileRenameInformation, FileRenameInformationEx, NtCreateFile, NtSetInformationFile,
-    REPARSE_DATA_BUFFER, REPARSE_DATA_BUFFER_0_0, REPARSE_DATA_BUFFER_0_1, SYMLINK_FLAG_RELATIVE,
+    FILE_WRITE_THROUGH, FileRenameInformation, FileRenameInformationEx, NtCreateFile,
+    NtSetInformationFile, REPARSE_DATA_BUFFER, REPARSE_DATA_BUFFER_0_0, REPARSE_DATA_BUFFER_0_1,
+    SYMLINK_FLAG_RELATIVE,
 };
 use windows_sys::Win32::Foundation::{
-    ERROR_DELETE_PENDING, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
-    ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, HANDLE, NTSTATUS, OBJ_CASE_INSENSITIVE,
-    OBJ_DONT_REPARSE, RtlNtStatusToDosError, STATUS_DELETE_PENDING, STATUS_INVALID_PARAMETER,
-    STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
+    ERROR_ACCESS_DENIED, ERROR_DELETE_PENDING, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION,
+    ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, HANDLE, NTSTATUS,
+    OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, RtlNtStatusToDosError, STATUS_DELETE_PENDING,
+    STATUS_INVALID_PARAMETER, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateSymbolicLinkW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO,
-    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS,
-    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileBasicInfo,
-    FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
-    FileIdBothDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE,
-    SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO,
+    FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo,
+    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+    SYMBOLIC_LINK_FLAG_DIRECTORY, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
@@ -84,7 +85,7 @@ pub(super) fn open_top(path: &Path) -> io::Result<OwnedHandle> {
 }
 
 pub(super) fn open_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<OwnedHandle> {
-    let (handle, what) = open_entry(dir, name, FOLDER)?;
+    let (handle, what) = open_entry(dir, name, FOLDER, 0)?;
     as_folder(handle, &what)
 }
 
@@ -138,7 +139,7 @@ pub(super) fn file_meta(file: &File) -> io::Result<EntryMeta> {
 }
 
 pub(super) fn open_file(dir: &OwnedHandle, name: &OsStr) -> io::Result<File> {
-    let (handle, what) = open_entry(dir, name, FILE_GENERIC_READ)?;
+    let (handle, what) = open_entry(dir, name, FILE_GENERIC_READ, 0)?;
     match kind_of(what.FileAttributes, what.ReparseTag) {
         EntryType::File => Ok(File::from(handle)),
         EntryType::Dir => Err(is_a_folder()),
@@ -173,13 +174,13 @@ pub(super) fn rename_into(
     to: &OwnedHandle,
     to_name: &OsStr,
 ) -> io::Result<()> {
-    let (source, what) = open_entry(dir, from, DELETE)?;
+    let (source, what) = open_entry(dir, from, DELETE, FILE_WRITE_THROUGH)?;
     if what.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(link_refused());
     }
     // A link at the new name is refused, though the rename would replace it rather than follow
     // it, and so is a folder, as on Unix.
-    match open_entry(to, to_name, 0) {
+    match open_entry(to, to_name, 0, 0) {
         Ok((_, there)) if there.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
             return Err(link_refused());
         }
@@ -193,17 +194,23 @@ pub(super) fn rename_into(
     // A read-only file at the new name is replaced too, as on Unix. Windows before 10 (1809)
     // refuses that flag; drives without POSIX renames (FAT, say) refuse both, and get the plain
     // rename, still replacing.
-    let (source, to) = (source.as_handle(), to.as_raw_handle());
+    let (source, root) = (source.as_handle(), to.as_raw_handle());
     let replace = FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
     for flags in [replace | FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, replace] {
-        let rename = RenameInfo::new(to, to_name, flags)?;
+        #[cfg(test)]
+        if PLAIN_ONLY.get() {
+            break;
+        }
+        let rename = RenameInfo::new(root, to_name, flags)?;
         match set_rename(source, &rename, FileRenameInformationEx) {
             Err(e) if unsupported(&e) => {}
             result => return result,
         }
     }
-    let plain = RenameInfo::new(to, to_name, FILE_RENAME_REPLACE_IF_EXISTS)?;
-    set_rename(source, &plain, FileRenameInformation)
+    let plain = RenameInfo::new(root, to_name, FILE_RENAME_REPLACE_IF_EXISTS)?;
+    even_if_read_only(to.as_handle(), to_name, || {
+        set_rename(source, &plain, FileRenameInformation)
+    })
 }
 
 pub(super) fn create_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
@@ -213,13 +220,13 @@ pub(super) fn create_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
         name,
         access,
         FILE_CREATE,
-        FILE_DIRECTORY_FILE,
+        FILE_DIRECTORY_FILE | FILE_WRITE_THROUGH,
     )
     .map(drop)
 }
 
 pub(super) fn remove_file(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
-    let (handle, what) = open_entry(dir, name, DELETE)?;
+    let (handle, what) = open_entry(dir, name, DELETE, FILE_WRITE_THROUGH)?;
     // A link goes as itself, file and folder links alike; a folder that isn't a link stays.
     let link = kind_of(what.FileAttributes, what.ReparseTag) == EntryType::Symlink;
     if what.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 && !link {
@@ -229,7 +236,7 @@ pub(super) fn remove_file(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
 }
 
 pub(super) fn remove_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
-    let (handle, what) = open_entry(dir, name, DELETE)?;
+    let (handle, what) = open_entry(dir, name, DELETE, FILE_WRITE_THROUGH)?;
     let folder = as_folder(handle, &what)?;
     delete(folder.as_handle())
 }
@@ -280,7 +287,7 @@ pub(super) fn symlink(
              link, while it was made",
         )
     };
-    let (link, what) = match open_entry(scratch, &temp, DELETE) {
+    let (link, what) = match open_entry(scratch, &temp, DELETE, FILE_WRITE_THROUGH) {
         Ok(found) => found,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(elsewhere()),
         // Not opened, so it can't be removed by handle either: it stays in `scratch`.
@@ -360,9 +367,8 @@ pub(super) fn set_executable(
 }
 
 pub(super) fn sync(_dir: &OwnedHandle) -> io::Result<()> {
-    // shortcut: Windows flushes only handles open for writing, which a held folder isn't, so
-    // renames keep their order but can be lost on power failure, as with fsio::sync_dir; make
-    // them durable when renames on Windows are.
+    // Nothing left to flush: each rename, removal and new folder was written through to the disk
+    // (FILE_WRITE_THROUGH) as it was made.
     Ok(())
 }
 
@@ -371,6 +377,8 @@ thread_local! {
     /// What a test runs between reading a folder's path and making a link in it, to race them.
     pub(super) static BEFORE_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// Makes renames and deletes skip their POSIX forms, as a FAT drive refuses them.
+    pub(super) static PLAIN_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether this Windows takes OBJ_DONT_REPARSE; older ones refuse the flag.
@@ -472,18 +480,20 @@ fn nt_error(status: NTSTATUS) -> io::Error {
     }
 }
 
-/// Opens `name` in `dir` as itself, whatever it is, and says what it is.
+/// Opens `name` in `dir` as itself, whatever it is, and says what it is. `options` are
+/// NtCreateFile's, as in `nt_open`.
 fn open_entry(
     dir: &OwnedHandle,
     name: &OsStr,
     access: u32,
+    options: u32,
 ) -> io::Result<(OwnedHandle, FILE_ATTRIBUTE_TAG_INFO)> {
     let handle = nt_open(
         dir.as_handle(),
         name,
         access | FILE_READ_ATTRIBUTES,
         FILE_OPEN,
-        0,
+        options,
     )?;
     let what = info(handle.as_handle(), FileAttributeTagInfo)?;
     Ok((handle, what))
@@ -630,6 +640,10 @@ fn delete(handle: BorrowedHandle<'_>) -> io::Result<()> {
         posix | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
         posix,
     ] {
+        #[cfg(test)]
+        if PLAIN_ONLY.get() {
+            break;
+        }
         let info = FILE_DISPOSITION_INFO_EX { Flags: flags };
         match set_info(handle, FileDispositionInfoEx, &info) {
             Err(e) if unsupported(&e) => {}
@@ -637,7 +651,57 @@ fn delete(handle: BorrowedHandle<'_>) -> io::Result<()> {
         }
     }
     let plain = FILE_DISPOSITION_INFO { DeleteFile: true };
-    set_info(handle, FileDispositionInfo, &plain)
+    even_if_read_only(handle, OsStr::new(""), || {
+        set_info(handle, FileDispositionInfo, &plain)
+    })
+}
+
+/// Runs `change`: a plain rename over `name` in `dir`, or a plain delete of it (of `dir` itself
+/// when `name` is empty). Drives without POSIX renames and deletes refuse both for a read-only
+/// entry, so its flag is cleared for another try, and set again if that fails too.
+fn even_if_read_only(
+    dir: BorrowedHandle<'_>,
+    name: &OsStr,
+    change: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    match change() {
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            if !matches!(set_read_only(dir, name, false), Ok(true)) {
+                return Err(e);
+            }
+            let again = change();
+            if again.is_err() {
+                let _ = set_read_only(dir, name, true);
+            }
+            again
+        }
+        done => done,
+    }
+}
+
+/// Sets or clears the read-only flag of `name` in `dir` (of `dir` itself when `name` is empty),
+/// keeping its other attributes; says whether that changed it.
+fn set_read_only(dir: BorrowedHandle<'_>, name: &OsStr, on: bool) -> io::Result<bool> {
+    let access = FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+    let entry = nt_open(dir, name, access, FILE_OPEN, 0)?;
+    let what: FILE_ATTRIBUTE_TAG_INFO = info(entry.as_handle(), FileAttributeTagInfo)?;
+    let was = what.FileAttributes;
+    let now = if on {
+        was | FILE_ATTRIBUTE_READONLY
+    } else {
+        was & !FILE_ATTRIBUTE_READONLY
+    };
+    if now == was {
+        return Ok(false);
+    }
+    // No attributes at all would mean "leave them as they are".
+    let attributes = if now == 0 { FILE_ATTRIBUTE_NORMAL } else { now };
+    let basic = FILE_BASIC_INFO {
+        FileAttributes: attributes,
+        ..Default::default()
+    };
+    set_info(entry.as_handle(), FileBasicInfo, &basic)?;
+    Ok(true)
 }
 
 /// FILE_RENAME_INFORMATION with room for a name of up to MAX_NAME units and a NUL.

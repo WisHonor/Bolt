@@ -3,7 +3,7 @@
 //! held open, never by path.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -117,24 +117,6 @@ fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<
     }
 }
 
-/// Flushes the folder that holds `path`.
-fn sync_parent(path: &Path) -> io::Result<()> {
-    match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => sync_dir(p),
-        _ => sync_dir(Path::new(".")),
-    }
-}
-
-/// Creates the folder `dir` in its existing parent and flushes the parent so it survives a crash.
-/// Whatever is already at `dir`, a link included, is left alone for the caller to check.
-pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
-    match fs::create_dir(dir) {
-        Ok(()) => sync_parent(dir),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
 /// Deletes the file `name` in the folder `dir`, or the link itself if it is one. Not flushed: only
 /// used for leftovers, which may as well come back.
 pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
@@ -146,18 +128,6 @@ pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
 /// contents never matter, so it is never truncated.
 pub fn open_lock_file(state: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
     safe_fs::open_or_create_in(state, name, shown)
-}
-
-/// Flushes a folder's entries to disk. Windows has no such call: a rename there keeps its order
-/// with earlier writes but can be lost on power failure.
-pub fn sync_dir(dir: &Path) -> io::Result<()> {
-    if cfg!(unix) {
-        File::open(dir)?.sync_all()
-    } else {
-        // shortcut: renames are not durable on Windows; make them so in milestone 4.
-        let _ = dir;
-        Ok(())
-    }
 }
 
 /// A place where crash tests can inject a failure. Does nothing without `fault-injection`.
@@ -325,6 +295,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use std::ffi::OsStr;
+    use std::fs;
 
     #[test]
     fn write_atomic_replaces_the_file_whole() {
@@ -358,23 +329,6 @@ mod tests {
         ] {
             assert!(!is_temp_name(OsStr::new(&other)), "{other:?}");
         }
-    }
-
-    #[test]
-    fn create_dir_durable_never_follows_what_is_already_there() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("a");
-        create_dir_durable(&dir).unwrap();
-        create_dir_durable(&dir).unwrap();
-        assert!(dir.is_dir());
-        // A link already there, to nothing: following it would look in its target.
-        let (link, target) = (root.path().join("link"), root.path().join("target"));
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        #[cfg(windows)]
-        crate::test_support::junction(&link, &target);
-        create_dir_durable(&link).unwrap();
-        assert!(!target.exists());
     }
 
     #[cfg(feature = "fault-injection")]

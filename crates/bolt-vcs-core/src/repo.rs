@@ -339,15 +339,15 @@ struct Held {
 }
 
 impl Held {
-    /// The fixed folders of the `.bolt` folder `bolt`, each opened from the one above it.
-    fn open(bolt: &Path) -> Result<Held, RepoError> {
-        let top = Dir::open_top(bolt).map_err(|e| unreal(bolt, e))?;
-        let store = fixed(&top, bolt, "store")?;
+    /// The fixed folders of the `.bolt` folder `bolt`, held open as `top`, each made in the one
+    /// above it if missing, then opened from it.
+    fn make(top: Dir, bolt: &Path) -> Result<Held, RepoError> {
+        let store = make_fixed(&top, bolt, "store")?;
         Ok(Held {
-            state: fixed(&top, bolt, "state")?,
-            packs: Arc::new(fixed(&store, &bolt.join("store"), "packs")?),
-            tmp: Arc::new(fixed(&top, bolt, "tmp")?),
-            cache: fixed(&top, bolt, "cache")?,
+            state: make_fixed(&top, bolt, "state")?,
+            packs: Arc::new(make_fixed(&store, &bolt.join("store"), "packs")?),
+            tmp: Arc::new(make_fixed(&top, bolt, "tmp")?),
+            cache: make_fixed(&top, bolt, "cache")?,
             bolt: top,
         })
     }
@@ -358,6 +358,16 @@ impl Held {
 fn fixed(dir: &Dir, path: &Path, name: &str) -> Result<Dir, RepoError> {
     dir.open_dir(OsStr::new(name))
         .map_err(|e| unreal(&path.join(name), e))
+}
+
+/// `fixed`, made first if nothing has the name, with `dir` flushed after.
+fn make_fixed(dir: &Dir, path: &Path, name: &str) -> Result<Dir, RepoError> {
+    match dir.create_dir(OsStr::new(name)) {
+        Ok(()) => dir.sync()?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    fixed(dir, path, name)
 }
 
 /// What opening the fixed folder at `path` found: a link, junction or file there is damage, as
@@ -917,8 +927,14 @@ impl Repository {
         let root = &resolved(root);
         let bolt = root.join(".bolt");
         let found = Repository::check_new_with(root, owner_check)?;
+        let top = Dir::open_top(root)?;
         if !found {
-            fsio::create_dir_durable(&bolt)?;
+            match top.create_dir(OsStr::new(".bolt")) {
+                Ok(()) => top.sync()?,
+                // One made meanwhile, by another start say, is checked below as this one would be.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
             // Some drives give a new folder another owner, or none, and every later command
             // would refuse it.
             let made = check_bolt(root, owner_check).map_err(|e| {
@@ -938,13 +954,10 @@ impl Repository {
                 .into());
             }
         }
-        // Not `.bolt` itself: one gone since its check must not be made again unchecked.
-        for dir in fixed_folders(&bolt).iter().skip(1) {
-            fsio::create_dir_durable(dir)?;
-        }
-        check_shape(&bolt)?;
+        // Opened, never made: one gone since its check must not be made again unchecked. Each
+        // folder in it is made and opened through the one above, so none through a link.
+        let held = Held::make(fixed(&top, root, ".bolt")?, &bolt)?;
         bolt_platform::hide_path(&bolt)?;
-        let held = Held::open(&bolt)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
         let mut repo = Repository {
@@ -1059,16 +1072,9 @@ impl Repository {
         let store = Store::open_in(Arc::clone(&packs_dir), &packs)?;
         // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
         // project found damaged is left as it was.
-        for name in ["tmp", "cache"] {
-            match top.create_dir(OsStr::new(name)) {
-                Ok(()) => top.sync()?,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
         let held = Held {
-            tmp: Arc::new(fixed(&top, &bolt, "tmp")?),
-            cache: fixed(&top, &bolt, "cache")?,
+            tmp: Arc::new(make_fixed(&top, &bolt, "tmp")?),
+            cache: make_fixed(&top, &bolt, "cache")?,
             bolt: top,
             state,
             packs: packs_dir,
@@ -2681,6 +2687,39 @@ mod tests {
             started.map(|_| ())
         );
         assert!(!target.exists());
+    }
+
+    /// A link put in an unfinished `.bolt` once its shape was checked is refused, and nothing is
+    /// made where it points.
+    #[test]
+    fn start_never_makes_a_fixed_folder_through_a_link() {
+        for name in ["store", "state", "cache", "tmp"] {
+            let dir = tempdir();
+            let (root, target) = (dir.path().join("root"), dir.path().join("target"));
+            std::fs::create_dir_all(root.join(".bolt")).unwrap();
+            std::fs::create_dir(&target).unwrap();
+            // A `.bolt` above, with no `format`: the search for a project around this one asks
+            // its owner after this one was checked, and the link appears then.
+            std::fs::create_dir(dir.path().join(".bolt")).unwrap();
+            let link = root.join(".bolt").join(name);
+            let check = |folder: &Path, _seen: bool| {
+                if folder == dir.path() && std::fs::symlink_metadata(&link).is_err() {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&target, &link).unwrap();
+                    #[cfg(windows)]
+                    crate::test_support::junction(&link, &target);
+                }
+                Ok(())
+            };
+            let started = Repository::init_with(&root, &entry(0).who, &check);
+            assert!(
+                matches!(started, Err(RepoError::Damaged { .. })),
+                "{name}: {:?}",
+                started.map(|_| ())
+            );
+            let made: Vec<_> = std::fs::read_dir(&target).unwrap().collect();
+            assert!(made.is_empty(), "{name}: {made:?}");
+        }
     }
 
     /// With the inside unreadable, any look inside a `.bolt` the user may not use would fail and
