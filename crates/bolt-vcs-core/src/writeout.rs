@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
-use crate::diary::{DiaryEntry, SafetyCopy};
+use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
@@ -309,6 +309,15 @@ pub fn spellings(
         found = next;
     }
     Ok(found)
+}
+
+/// A file or link Bolt kept before overwriting or removing it, so the command can be undone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyCopy {
+    pub path: String,
+    pub kind: EntryKind,
+    pub id: Id,
+    pub size: u64,
 }
 
 /// Stores in `packs` what carrying out `actions` would overwrite or remove that the save `from`
@@ -1332,7 +1341,8 @@ fn removed_by_name(actions: &[Action], drive: Drive) -> HashMap<String, Option<E
         .collect()
 }
 
-fn fold_path(path: &str, drive: Drive) -> String {
+/// `path` as `drive` compares names: paths that come out the same are one entry there.
+pub(crate) fn fold_path(path: &str, drive: Drive) -> String {
     path.split('/')
         .map(|name| drive.compared(name))
         .collect::<Vec<_>>()

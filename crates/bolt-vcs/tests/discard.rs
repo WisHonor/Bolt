@@ -40,6 +40,30 @@ fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     found
 }
 
+/// Every file of the save `save`, by path, with what it holds.
+fn saved_files(repo: &Repository, save: bolt_core::id::Id) -> BTreeMap<String, Vec<u8>> {
+    let store = repo.store();
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = folders.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                folders.push((e.id, path));
+            } else {
+                let mut bytes = Vec::new();
+                store.copy_content(&e.id, &mut bytes).unwrap();
+                found.insert(path, bytes);
+            }
+        }
+    }
+    found
+}
+
 fn holding(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
     entries
         .iter()
@@ -211,19 +235,16 @@ fn discard_keeps_a_safety_copy_of_everything_it_throws_away() {
     assert_eq!(doc["safety_copies"], 3, "{doc}");
     assert_eq!(strings(&doc["restored"]), ["a.txt", "b.txt"], "{doc}");
     assert_eq!(strings(&doc["removed"]), ["deep/x.txt", "n.bin"], "{doc}");
+    // The entry records a switch from a save of what the folder held to the save it is on.
     let repo = Repository::open(env.root()).unwrap();
     let (_, entry) = repo.current().unwrap();
-    let paths: Vec<&str> = entry
-        .safety_copies
-        .iter()
-        .map(|c| c.path.as_str())
-        .collect();
-    assert_eq!(paths, ["a.txt", "deep/x.txt", "n.bin"]);
-    for (copy, (_, bytes)) in entry.safety_copies.iter().zip(mine) {
-        let mut out = Vec::new();
-        repo.store().copy_content(&copy.id, &mut out).unwrap();
-        assert_eq!(out, *bytes, "{}", copy.path);
+    let change = entry.folder_change.unwrap();
+    assert_eq!(change.to, entry.state.lines["main"]);
+    let mut held = holding(&[("dir/c.txt", "c\n")]);
+    for (path, bytes) in mine {
+        held.insert((*path).to_owned(), bytes.to_vec());
     }
+    assert_eq!(saved_files(&repo, change.from), held);
     assert_eq!(files(env.root()), holding(SAVED));
 }
 
@@ -415,12 +436,11 @@ fn a_file_where_a_saved_empty_folder_was_is_reported_removed() {
     );
     assert!(env.root().join("e").is_dir());
     let repo = Repository::open(env.root()).unwrap();
-    let copies = repo.current().unwrap().1.safety_copies;
-    assert_eq!(copies.len(), 1);
-    assert_eq!(copies[0].path, "e");
-    let mut out = Vec::new();
-    repo.store().copy_content(&copies[0].id, &mut out).unwrap();
-    assert_eq!(out, b"mine");
+    let kept = repo.current().unwrap().1.folder_change.unwrap().from;
+    assert_eq!(
+        saved_files(&repo, kept),
+        holding(&[("a.txt", "a"), ("e", "mine")])
+    );
 }
 
 #[test]

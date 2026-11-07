@@ -423,7 +423,7 @@ mod tests {
             who: who(),
             bolt_version: "0.1.0".into(),
             state,
-            safety_copies: vec![],
+            folder_change: None,
         };
         repo.commit(&lock, packs, &diary).unwrap();
         id
@@ -551,7 +551,7 @@ mod tests {
             who: who(),
             bolt_version: "0.1.0".into(),
             state,
-            safety_copies: vec![],
+            folder_change: None,
         };
         let packs = repo.new_packs().unwrap();
         repo.commit(&lock, packs, &diary).unwrap();
@@ -749,7 +749,7 @@ mod tests {
             who: who(),
             bolt_version: "0.1.0".into(),
             state,
-            safety_copies: vec![],
+            folder_change: None,
         };
         let packs = repo.new_packs().unwrap();
         repo.commit(&lock, packs, &diary).unwrap();

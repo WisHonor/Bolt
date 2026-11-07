@@ -59,7 +59,7 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 /// one that couldn't be, having changed since the plan, is left out of both sides, with what is
 /// planned below it and the folders above it. Each side is `from.base` or `target` when its
 /// folders are exactly that save's, otherwise a kept save stored in `packs`. `None` when the two
-/// sides are the same.
+/// sides are the same. Also gives how many safety copies it kept.
 pub(crate) fn switch_saves(
     repo: &Repository,
     actions: &[Action],
@@ -67,7 +67,7 @@ pub(crate) fn switch_saves(
     from: &KeptFrom,
     drive: Drive,
     packs: &mut PackSet,
-) -> Result<Option<FolderChange>, SaveError> {
+) -> Result<(Option<FolderChange>, usize), SaveError> {
     let store = repo.store();
     let signed = repo.signatures_allowed();
     let base_root = store.save(&from.base, signed)?.root;
@@ -92,7 +92,7 @@ pub(crate) fn switch_saves(
             lost.push(a.path.as_str());
         }
     }
-    let lost = goes_with(lost);
+    let lost = goes_with(lost, drive);
     let (mut held, mut written) = (BTreeMap::new(), BTreeMap::new());
     for a in actions.iter().filter(|a| !lost(&a.path)) {
         held.insert(a.path.clone(), held_at(a, &renamed));
@@ -102,17 +102,18 @@ pub(crate) fn switch_saves(
     let from_root = overlay(store, base_root, &held, packs)?;
     let to_root = overlay(store, base_root, &written, packs)?;
     if from_root == to_root {
-        return Ok(None);
+        return Ok((None, copies.len()));
     }
     let mut side = |root: Id| match root {
         r if r == base_root => Ok(from.base),
         r if r == target_root => Ok(target),
         r => kept_save(r, from, packs),
     };
-    Ok(Some(FolderChange {
+    let change = FolderChange {
         from: side(from_root)?,
         to: side(to_root)?,
-    }))
+    };
+    Ok((Some(change), copies.len()))
 }
 
 /// The tree of `base_root` with each path in `changes` set to that entry (`None`: removed), its
@@ -204,12 +205,24 @@ fn held_at(a: &Action, renamed: &HashSet<&str>) -> Option<Put> {
 }
 
 /// Whether a path goes with an entry left at one of `left`: the entry itself, what is planned
-/// below it, or a folder above it, which can't be emptied while it stays.
-pub(crate) fn goes_with<'a>(left: impl IntoIterator<Item = &'a str>) -> impl Fn(&str) -> bool + 'a {
-    let at: HashSet<&'a str> = left.into_iter().collect();
-    let above: HashSet<&'a str> = at.iter().flat_map(|&l| ancestors(l)).collect();
+/// below it, or a folder above it, which can't be emptied while it stays. Paths are compared as
+/// `drive` compares names, since a write under another spelling of a left entry would replace it.
+pub(crate) fn goes_with<'a>(
+    left: impl IntoIterator<Item = &'a str>,
+    drive: Drive,
+) -> impl Fn(&str) -> bool {
+    let at: HashSet<String> = left
+        .into_iter()
+        .map(|l| writeout::fold_path(l, drive))
+        .collect();
+    let above: HashSet<String> = at
+        .iter()
+        .flat_map(|l| ancestors(l))
+        .map(str::to_owned)
+        .collect();
     move |path: &str| {
-        at.contains(path) || above.contains(path) || ancestors(path).any(|up| at.contains(up))
+        let path = writeout::fold_path(path, drive);
+        at.contains(&path) || above.contains(&path) || ancestors(&path).any(|up| at.contains(up))
     }
 }
 
@@ -253,7 +266,7 @@ pub(crate) fn links_to_leave(
         return Ok(links.into_iter().map(|(path, _)| path.to_owned()).collect());
     }
     let renamed = writeout::renamed(actions, drive);
-    let left = placeholders(store, base_root, actions, &renamed, &links)?;
+    let left = placeholders(store, base_root, actions, &renamed, &links, drive)?;
     Ok(left.into_iter().collect())
 }
 
@@ -266,11 +279,12 @@ fn placeholders(
     actions: &[Action],
     renamed: &HashSet<&str>,
     links: &[(&str, String)],
+    drive: Drive,
 ) -> Result<BTreeSet<String>, SaveError> {
     let mut left = BTreeSet::new();
     loop {
         let held: BTreeMap<String, Option<Put>> = {
-            let goes = goes_with(left.iter().map(String::as_str));
+            let goes = goes_with(left.iter().map(String::as_str), drive);
             actions
                 .iter()
                 .filter(|a| !goes(&a.path))
@@ -426,7 +440,8 @@ mod tests {
             line: Some("main"),
         };
         let mut packs = repo.new_packs().unwrap();
-        let change = switch_saves(repo, &plan.actions, target, &from, drive, &mut packs).unwrap();
+        let (change, _) =
+            switch_saves(repo, &plan.actions, target, &from, drive, &mut packs).unwrap();
         let made = packs.finish().unwrap();
         for p in &made {
             repo.store_mut().register(p);
@@ -731,7 +746,7 @@ mod tests {
                 .map(|&(path, _, bytes)| (path, String::from_utf8(bytes.to_vec()).unwrap()))
                 .collect();
             let none = HashSet::new();
-            let left = placeholders(store, base_root, &actions, &none, &links).unwrap();
+            let left = placeholders(store, base_root, &actions, &none, &links, EXACT).unwrap();
             left.into_iter().collect()
         };
         const LINK: EntryKind = EntryKind::Symlink;
@@ -757,6 +772,22 @@ mod tests {
             ("lib/x", LINK, b"/abs"),
         ]);
         assert_eq!(only_a_link, ["current", "lib/x"]);
+    }
+
+    #[test]
+    fn what_goes_with_a_left_entry_is_found_as_the_drive_compares_names() {
+        let folds = Drive {
+            ignores_case: true,
+            composes_unicode: false,
+        };
+        let goes = goes_with(["Dir/Node"], folds);
+        for path in ["Dir/Node", "dir/node", "DIR", "dir/NODE/x"] {
+            assert!(goes(path), "{path}");
+        }
+        for path in ["dir/other", "Node", "Dir/Nodes"] {
+            assert!(!goes(path), "{path}");
+        }
+        assert!(!goes_with(["Dir/Node"], EXACT)("dir/node"));
     }
 
     /// The links a discard of `paths`, or of everything, would leave.

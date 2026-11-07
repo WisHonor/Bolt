@@ -146,10 +146,10 @@ pub fn goto(
 /// Makes `paths` (project paths, a folder standing for everything in it), or the whole folder
 /// without any, match the save the project is on: changed and deleted files put back, new ones
 /// removed, with a safety copy of what each changed or new one held (decision 050). The project
-/// stays on its save; a diary entry records the safety copies. Ignored files, project links,
-/// entries kept unwritten and nested projects are never touched, nor are unsaved links that could
-/// come back only as files. Files in use stop it as they stop `goto`. `git_excludes` is read as
-/// `goto` reads it.
+/// stays on its save; its diary entry records the switch from a save of what was thrown away.
+/// Ignored files, project links, entries kept unwritten and nested projects are never touched,
+/// nor are unsaved links that could come back only as files. Files in use stop it as they stop
+/// `goto`. `git_excludes` is read as `goto` reads it.
 pub fn discard(
     repo: &mut Repository,
     paths: Option<&[String]>,
@@ -230,8 +230,9 @@ fn throw_away(
     }
     let links_left = kept::links_to_leave(repo, &plan.actions, from, drive)?;
     if !links_left.is_empty() {
-        let stays = kept::goes_with(links_left.iter().map(String::as_str));
+        let stays = kept::goes_with(links_left.iter().map(String::as_str), drive);
         plan.actions.retain(|a| !stays(&a.path));
+        plan.placeholders.retain(|p| !stays(p));
         plan.warnings.push(links_left_warning(&links_left));
     }
     let (mut restored, mut removed, mut folders) = (Vec::new(), Vec::new(), 0);
@@ -259,28 +260,19 @@ fn throw_away(
         });
     }
     crate::fsio::act_point("discard:planned");
-    let line = match &entry.state.position {
-        Position::OnLine(line) => Some(line.as_str()),
-        Position::AtSave(_) => None,
-    };
-    let kept_from = KeptFrom {
-        base: from,
-        message: kept::message(command, paths.unwrap_or_default()),
-        who,
-        line,
-    };
+    let kept_from = kept_on(&entry.state, from, command, paths.unwrap_or_default(), who);
     let mut packs = repo.new_packs()?;
-    let folder_change =
+    let (folder_change, safety_copies) =
         kept::switch_saves(repo, &plan.actions, from, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
-        from,
         state: entry.state.clone(),
+        folder_change,
         plan,
         drive,
         packs,
     };
-    let (applied, safety_copies) = switch(repo, lock, to_make, who, command, earlier)?;
+    let applied = switch(repo, lock, to_make, who, command, earlier)?;
     // What had changed again since the plan stays as it is.
     let done = |list: Vec<String>| -> Vec<String> {
         list.into_iter()
@@ -373,15 +365,19 @@ fn go(
         });
     }
     let carried = plan.carried;
+    let mut packs = repo.new_packs()?;
+    let kept_from = kept_on(&entry.state, from, command, &[], who);
+    let (folder_change, safety_copies) =
+        kept::switch_saves(repo, &plan.actions, to, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
-        from,
         state,
+        folder_change,
         plan,
         drive,
-        packs: repo.new_packs()?,
+        packs,
     };
-    let (applied, safety_copies) = switch(repo, lock, to_make, who, command, earlier)?;
+    let applied = switch(repo, lock, to_make, who, command, earlier)?;
     Ok(GotoOutcome {
         position,
         save: to,
@@ -415,24 +411,43 @@ impl Earlier {
     }
 }
 
+/// Who makes the kept saves of a switch from `from`, the save the folder is on in `state`, and
+/// what they say.
+fn kept_on<'a>(
+    state: &'a State,
+    from: Id,
+    command: &str,
+    paths: &[String],
+    who: &'a Person,
+) -> KeptFrom<'a> {
+    KeptFrom {
+        base: from,
+        message: kept::message(command, paths),
+        who,
+        line: match &state.position {
+            Position::OnLine(line) => Some(line.as_str()),
+            Position::AtSave(_) => None,
+        },
+    }
+}
+
 /// A switch planned, ready to be made.
 struct Switch {
-    /// The diary entry `head` names, and the save the folder is on.
+    /// The diary entry `head` names.
     head: Id,
-    from: Id,
     /// The state the switch's diary entry records.
     state: State,
+    folder_change: Option<FolderChange>,
     plan: Plan,
     drive: Drive,
     /// What is stored with its diary entry.
     packs: PackSet,
 }
 
-/// Makes a planned switch in decision 049's order: the safety copies and the diary entry are
-/// stored, then the journal written, the folder changed, `head` moved and the journal removed.
-/// A crash at any step leaves what the next changing command finishes, and so do files another
-/// program holds, which stop it with `SwitchInUse` after its warnings are noted. Gives what was
-/// done and how many safety copies were kept.
+/// Makes a planned switch in decision 049's order: its packs and diary entry are stored, then
+/// the journal written, the folder changed, `head` moved and the journal removed. A crash at any
+/// step leaves what the next changing command finishes, and so do files another program holds,
+/// which stop it with `SwitchInUse` after its warnings are noted. Gives what was done.
 fn switch(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -440,11 +455,7 @@ fn switch(
     who: &Person,
     command: &str,
     earlier: &mut Earlier,
-) -> Result<(Applied, usize), SwitchError> {
-    let mut packs = s.packs;
-    let safety_copies =
-        writeout::keep_safety_copies(repo, &s.plan.actions, s.from, s.drive, &mut packs)?;
-    let kept = safety_copies.len();
+) -> Result<Applied, SwitchError> {
     let entry = DiaryEntry {
         parent: Some(s.head),
         action: Action::Command,
@@ -452,9 +463,9 @@ fn switch(
         who: who.clone(),
         bolt_version: env!("CARGO_PKG_VERSION").into(),
         state: s.state,
-        safety_copies,
+        folder_change: s.folder_change,
     };
-    let target = repo.store_entry(lock, packs, &entry)?;
+    let target = repo.store_entry(lock, s.packs, &entry)?;
     let journal = Journal {
         target,
         from: s.head,
@@ -476,7 +487,7 @@ fn switch(
         }
         return Err(RepoError::SwitchInUse { detail }.into());
     }
-    Ok((applied, kept))
+    Ok(applied)
 }
 
 /// `applied` with the plan's warnings first, then one warning for every entry left unwritten

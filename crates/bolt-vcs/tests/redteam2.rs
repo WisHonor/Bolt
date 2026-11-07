@@ -82,7 +82,7 @@ fn plant_chain(root: &Path, n: usize, lines: usize, shape: impl FnOnce(&mut Save
         who: save.author.clone(),
         bolt_version: "0.1.0".into(),
         state,
-        safety_copies: vec![],
+        folder_change: None,
     };
     repo.commit(&lock, pack, &diary).unwrap();
 }

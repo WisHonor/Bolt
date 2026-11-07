@@ -146,7 +146,7 @@ fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use bolt_core::diary::{Action, DiaryEntry, Position};
+use bolt_core::diary::{Action, DiaryEntry, FolderChange, Position};
 use bolt_core::id::ChangeId;
 use bolt_core::pack::ObjectKind;
 use bolt_core::save::Save;
@@ -359,6 +359,7 @@ fn plant_with_change_id(root: &Path, change_id: ChangeId) {
         parent: Some(head),
         command: "save".into(),
         state,
+        folder_change: None,
         ..entry
     };
     repo.commit(&lock, pack, &diary).unwrap();
@@ -383,9 +384,11 @@ fn an_ambiguous_target_lists_the_saves() {
 }
 
 #[test]
-fn goto_records_safety_copies_in_its_diary_entry() {
+fn goto_records_its_switch_in_its_diary_entry() {
     let env = two_lines();
-    let before = Repository::open(env.root()).unwrap().head().unwrap();
+    let (repo, state) = env.state();
+    let before = repo.head().unwrap();
+    drop(repo);
     env.overwrite("a.txt", "mine\n");
     let doc = goto_json(&env, "feature");
     let repo = Repository::open(env.root()).unwrap();
@@ -394,8 +397,13 @@ fn goto_records_safety_copies_in_its_diary_entry() {
     assert_eq!(entry.action, Action::Command);
     assert_eq!(entry.command, "goto");
     assert_eq!(entry.state.position, Position::OnLine("feature".into()));
+    // The unsaved a.txt is the same in both saves, so the switch leaves it out.
+    let switched = FolderChange {
+        from: state.lines["main"],
+        to: state.lines["feature"],
+    };
+    assert_eq!(entry.folder_change, Some(switched));
     // Goto never overwrites unsaved work, so what it carries along needs no copy.
-    assert_eq!(entry.safety_copies, []);
     assert_eq!(doc["safety_copies"], 0, "{doc}");
     assert_eq!(std::fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
 }

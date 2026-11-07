@@ -504,7 +504,7 @@ pub fn save_folder(
         who: req.who.clone(),
         bolt_version: env!("CARGO_PKG_VERSION").into(),
         state,
-        safety_copies: vec![],
+        folder_change: None,
     };
     repo.commit(&lock, packs, &diary)?;
     cache.add(line, parent_id, save_id, save.change_id);

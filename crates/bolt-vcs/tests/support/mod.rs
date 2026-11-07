@@ -199,7 +199,7 @@ pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
         who: parent.author.clone(),
         bolt_version: "0.1.0".into(),
         state,
-        safety_copies: vec![],
+        folder_change: None,
     };
     repo.commit(&lock, pack, &diary).unwrap();
 }

@@ -49,6 +49,7 @@ pub(crate) fn commit_records(
         .expect("store the server lines");
     entry.parent = Some(head);
     entry.command = "tag".into();
+    entry.folder_change = None;
     entry.state.tags = Some(tags);
     entry.state.server_lines = Some(servers);
     repo.commit(&lock, packs, &entry).expect("commit");
@@ -152,6 +153,7 @@ pub(crate) fn plant_root(repo: &mut Repository, build: impl FnOnce(&mut PackSet)
         .expect("store the save");
     diary.parent = Some(head);
     diary.command = "save".into();
+    diary.folder_change = None;
     diary.state.lines.insert(line, save_id);
     repo.commit(&lock, packs, &diary).expect("commit");
 }

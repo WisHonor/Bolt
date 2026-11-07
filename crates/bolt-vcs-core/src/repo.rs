@@ -814,7 +814,7 @@ impl Repository {
                 shelves: vec![],
                 server_lines: None,
             },
-            safety_copies: vec![],
+            folder_change: None,
         };
         repo.commit_first(&lock, packs, &entry)?;
         Ok(repo)
@@ -1481,7 +1481,7 @@ mod tests {
                 shelves: vec![],
                 server_lines: None,
             },
-            safety_copies: vec![],
+            folder_change: None,
         }
     }
 

@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use bolt_core::diary::{
-    Action, DiaryEntry, Position, SafetyCopy, ServerLines, State, Tag, TagList,
+    Action, DiaryEntry, FolderChange, Position, ServerLines, State, Tag, TagList,
 };
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::link::ProjectLink;
@@ -200,7 +200,7 @@ fn minimal_diary_entry() -> DiaryEntry {
             shelves: vec![],
             server_lines: None,
         },
-        safety_copies: vec![],
+        folder_change: None,
     }
 }
 
@@ -274,20 +274,10 @@ fn full_diary_entry() -> DiaryEntry {
             ],
             server_lines: Some(vector_server_lines().id()),
         },
-        safety_copies: vec![
-            SafetyCopy {
-                path: "Assets/é.png".into(),
-                kind: EntryKind::File,
-                id: Id([0xe1; 32]),
-                size: 1000,
-            },
-            SafetyCopy {
-                path: "run.sh".into(),
-                kind: EntryKind::Executable,
-                id: Id([0xe2; 32]),
-                size: 12,
-            },
-        ],
+        folder_change: Some(FolderChange {
+            from: Id([0x5a; 32]),
+            to: Id([0x6b; 32]),
+        }),
     }
 }
 
@@ -325,6 +315,22 @@ fn diary_vectors_hold() {
         assert_eq!(hex(&e.encode()), v.hex, "{}", v.name);
         assert_eq!(e.id().to_hex(), v.id, "{}", v.name);
     }
+}
+
+#[test]
+fn an_entry_without_a_folder_change_has_milestone_1s_bytes() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/diary.json"
+    ))
+    .unwrap();
+    let vectors: Vec<Vector> = serde_json::from_str(&text).unwrap();
+    let minimal = vectors.iter().find(|v| v.name == "minimal").unwrap();
+    let e = minimal_diary_entry();
+    assert_eq!(hex(&e.encode()), minimal.hex);
+    // The ID milestone 1 gave it, which pins every byte.
+    let milestone_1 = "e8a8c4124cea6f96ae6e108873a3d80e96af68bde8a7aef919c1419062cd97c8";
+    assert_eq!(e.id().to_hex(), milestone_1);
 }
 
 #[test]
