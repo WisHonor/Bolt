@@ -118,13 +118,14 @@ pub(crate) fn switch_saves(repo: &Repository, actions: &[Action], target: Id, fr
 /// folder there. Loops, never recursion per level.
 pub(crate) fn overlay(store: &Store, base_root: Id, changes: &BTreeMap<String, Option<(EntryKind, Id, u64)>>, packs: &mut PackSet) -> Result<Id, SaveError>;
 // writeout.rs
-/// Whether a link with `target` at `path` would be written as a link here, not a placeholder:
-/// it stays inside the project, and this system can make links (probed once in `.bolt/tmp`).
-pub(crate) fn writes_back_as_link(repo: &Repository, path: &str, target: &[u8]) -> Result<bool, SaveError>;
+/// The paths of the unsaved links `actions` would throw away that write-out could only bring
+/// back as placeholders: judged with `link_shape` against the tree the kept save would have,
+/// again until no more are left; whether links can be made here is probed once in `.bolt/tmp`.
+pub(crate) fn links_to_leave(repo: &Repository, actions: &[Action], base: Id, drive: Drive) -> Result<Vec<String>, SaveError>;
 // switch.rs
 pub struct DiscardOutcome { /* as today */ pub folder_change: Option<FolderChange>, pub links_left: Vec<String> }
 ```
-- `discard` drops from its plan every action that would throw away an unsaved link `writes_back_as_link` refuses, and the removal of each folder above one; a warning `links_left` names them (add the kind to `warning.rs` and json.md §4).
+- `discard` drops from its plan every action that would throw away a link `links_to_leave` names, and the removal of each folder above one; a warning `links_left` names them (add the kind to `warning.rs` and json.md §4).
 
 - [ ] **Step 1: Write the failing tests** (in `kept.rs`; projects made with `Repository::init` in a temp folder, discards through `switch::discard`, gotos through `switch::goto`):
 ```rust
@@ -153,7 +154,7 @@ proptest! { #[test] fn overlay_sets_exactly_the_paths_given(base in tree(), chan
 } }
 ```
 - [ ] **Step 2:** Run `cargo test -p bolt-vcs-core kept -j 2 -- --test-threads=2`. Expected: compile errors (`kept` doesn't exist).
-- [ ] **Step 3:** Implement `overlay`, `switch_saves` and `writes_back_as_link`; in `switch::throw_away`, after planning, drop the links that can't come back, then call `switch_saves` (target = the current save; `KeptFrom` message per the values table, `line` from the position) with the same `packs`, before the entry is stored. A folder's `Expected` has a zero ID: its listing comes from the changes below it.
+- [ ] **Step 3:** Implement `overlay`, `switch_saves` and `links_to_leave`; in `switch::throw_away`, after planning, drop the links that can't come back, then call `switch_saves` (target = the current save; `KeptFrom` message per the values table, `line` from the position) with the same `packs`, before the entry is stored. A folder's `Expected` has a zero ID: its listing comes from the changes below it.
 - [ ] **Step 4:** Run the tests above and `cargo test -p bolt-vcs-core switch -j 2 -- --test-threads=2`. Expected: PASS.
 - [ ] **Step 5:** `cargo fmt`, `cargo clippy --workspace --all-targets --all-features -j 2 -- -D warnings`. Commit: `Work out what a switch changes as two saves, and keep what discard throws away`.
 
@@ -272,7 +273,7 @@ pub enum SwitchError { /* ... */
 pub(crate) fn locked<T>(repo: &mut Repository, command: &str, on_wait: &mut dyn FnMut(&str), f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier, bool /* finished */) -> Result<T, SwitchError>) -> Result<T, SwitchError>;
 ```
 - **Taking one step**, under the lock (once for all N): if the lock's run finished a stopped switch, take none: `finished: true` (decision 075). Else take `newest_done` (undo) or the first undone (redo). The new entry's lines, position, tags and server lines are the step's parent's (undo) or the step's own (redo); its shelves are the current ones, except that a step that added a shelf (compare its state's shelves with its parent's, by save) has it taken off on undo and put back on redo, and a step that removed one the opposite; a shelf put back keeps its label unless taken, else the smallest free number. With a folder change `{from, to}`, undo plans `writeout::plan(repo, to, from, None, false, …)` and redo `plan(repo, from, to, …)`; collisions are `InTheWayOfStep`. The entry (`Action::Undo(step)` or `Redo(step)`, command `undo` or `redo`, its folder change from `switch_saves` of the plan) goes through `switch`. Without a folder change, the entry is committed with `repo.commit`. A step with no parent (the first entry) ends the undo: `taken` holds what was taken, and that is success.
-- **`--shelve`:** the collisions that are unsaved work (not ignored files, not links `writes_back_as_link` refuses: those still stop it) are set aside first, in the same step: a kept save on the current save holding the folder's version of those paths (`switch_saves` of `plan(repo, current, current, Some(paths), true, …)`'s actions, its `from` side) becomes a new shelf, first, with the smallest free number and the message "Set aside by undo" (or redo). The step's switch is then planned again from `overlay(from-side, the folder's entries at those paths)`, stored as a kept save, so those paths are overwritten; one entry, one journal.
+- **`--shelve`:** the collisions that are unsaved work (not ignored files, not links `links_to_leave` names: those still stop it) are set aside first, in the same step: a kept save on the current save holding the folder's version of those paths (`switch_saves` of `plan(repo, current, current, Some(paths), true, …)`'s actions, its `from` side) becomes a new shelf, first, with the smallest free number and the message "Set aside by undo" (or redo). The step's switch is then planned again from `overlay(from-side, the folder's entries at those paths)`, stored as a kept save, so those paths are overwritten; one entry, one journal.
 - CLI: `bolt undo [N] [--shelve]` and `bolt redo [N] [--shelve]` (`N` from 1, clap's range). Text: one line per step taken, from its effects ("Undid save kxqm "Add double jump": main is back at ptvz; its changes show as unsaved"; "Undid goto: back on main at ptvz, 3 files written"; "Undid discard: 2 files back, 1 removed"), the shelf `--shelve` made, then "Nothing (more) to undo/redo" where it ran out; after finishing a stopped switch, what was finished and that running it again takes one more. Exit 0 unless a step failed. JSON (json.md): `{bolt_json, undone|redone: [step], finished, shelved, position, warnings}` with `step = {entry, command, time_ms, effects, written, removed}`; a failure is an error document that still lists `undone`/`redone`.
 
 - [ ] **Step 1: Write the failing tests** (`crates/bolt-vcs/tests/undo.rs`, through the `bolt` binary with `support::Env`):
@@ -352,7 +353,7 @@ Decision 073.
 - Modify: `switch.rs` (discard's kept-save path shared with shelf; `SwitchError::Collisions`' hint names `bolt shelf`), `lib.rs`, `main.rs`, `output.rs`, `docs/json.md`.
 
 **Interfaces:**
-- Consumes: `kept::switch_saves`, `writeout::{plan, writes_back_as_link}`, `switch::locked` and `switch` (Task 4), `diff::count_changes`.
+- Consumes: `kept::switch_saves`, `writeout::{plan, links_to_leave}`, `switch::locked` and `switch` (Task 4), `diff::count_changes`.
 - Produces:
 ```rust
 pub struct ShelfOutcome { pub label: String, pub save: Id, pub files: usize, pub applied: Applied, pub links_left: Vec<String> }
