@@ -1062,9 +1062,16 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
     )?;
     let mut warnings = done.applied.warnings.clone();
-    let save = repo.store().save(&done.save, repo.signatures_allowed())?;
-    let short = short_or_whole(repo, &done.save, &save.change_id, &mut warnings);
-    // The switch has happened, so this only leaves out a line of advice if it fails.
+    // The switch has happened, so a save that can't be read back only goes unnamed.
+    let save = repo
+        .store()
+        .save(&done.save, repo.signatures_allowed())
+        .ok();
+    let short = match &save {
+        Some(save) => short_or_whole(repo, &done.save, &save.change_id, &mut warnings),
+        None => done.save.short_hex(),
+    };
+    // Likewise, this only leaves out a line of advice if it fails.
     let lines = repo
         .current()
         .map(|(_, e)| e.state.lines)
@@ -1076,7 +1083,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             json!({
                 "bolt_json": BOLT_JSON,
                 "position": output::position_json(&done.position),
-                "save": output::save_json(&done.save, &save, &short),
+                "save": save.map(|s| output::save_json(&done.save, &s, &short)),
                 "written": done.applied.written,
                 "removed": done.applied.removed,
                 "not_written": done.applied.not_written,
@@ -1673,8 +1680,8 @@ fn stopped_at_to(
     if ends.is_empty() {
         writeln!(
             out,
-            "The project's current diary entry is lost, and the store holds no diary entry to go \
-             on from. Ask for help before trying to repair it."
+            "The project's current diary entry is lost, and no diary entry in the store can be \
+             read to go on from. Ask for help before trying to repair it."
         )?;
     } else {
         writeln!(

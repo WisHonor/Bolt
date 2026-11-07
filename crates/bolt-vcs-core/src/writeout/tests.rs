@@ -997,6 +997,7 @@ fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveE
 fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
     use crate::fsio::fault;
     use crate::snapshot::SaveOutcome;
+    use crate::test_support::after_head;
     let mut stops_before_head = 0;
     for n in 1.. {
         assert!(n < 100, "the switch never finished");
@@ -1006,8 +1007,7 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         fault::arm(n);
         let result = carry_out(&mut repo, &lock, &journal, drive);
         fault::disarm();
-        // A fault in flushing the moved head is only a warning, and the switch goes on.
-        let unflushed = kinds(&repo.store().warnings()).contains(&warning::HEAD_NOT_FLUSHED);
+        let went_on = after_head(&repo);
         drop(lock);
         drop(repo);
         assert_wholly_old_or_new(dir.path(), n);
@@ -1026,14 +1026,21 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         if result.is_err() && !took_effect {
             stops_before_head += 1;
         }
+        assert!(
+            result.is_ok() || !took_effect,
+            "fault {n}: failed once its head moved"
+        );
         if let Ok(done) = result
-            && !unflushed
+            && !went_on
         {
             assert!(done.in_use.is_empty());
-            // A stop after each change, before the head, in flushing it, and in removing the
-            // journal.
+            // A stop after each change and before the head, then three after it: in flushing
+            // the head, in removing the journal and in flushing that.
             assert!(stops_before_head >= 8, "only {stops_before_head} stops");
-            assert!(n > stops_before_head + 2, "no stop after the head moved");
+            assert!(
+                n > stops_before_head + 3,
+                "too few stops after the head moved"
+            );
             break;
         }
     }
@@ -1099,6 +1106,7 @@ fn assert_switched(repo: &Repository, dir: &Path, journal: &Journal, n: u64) {
 #[test]
 fn a_finish_stopped_in_turn_is_finished_by_the_command_after() {
     use crate::fsio::fault;
+    use crate::test_support::after_head;
     for n in [1, 4, 9] {
         for m in 1.. {
             assert!(m < 60, "the save never got through");
@@ -1112,14 +1120,13 @@ fn a_finish_stopped_in_turn_is_finished_by_the_command_after() {
             fault::arm(m);
             let finishing = save_now(&mut repo);
             fault::disarm();
-            // A fault in flushing the moved head is only a warning, and the save goes on.
-            let unflushed = kinds(&repo.store().warnings()).contains(&warning::HEAD_NOT_FLUSHED);
+            let went_on = after_head(&repo);
             drop(repo);
             assert_wholly_old_or_new(dir.path(), m);
             let mut repo = Repository::open(dir.path()).unwrap();
             save_now(&mut repo).unwrap();
             assert_switched(&repo, dir.path(), &journal, m);
-            if finishing.is_ok() && !unflushed {
+            if finishing.is_ok() && !went_on {
                 break;
             }
         }

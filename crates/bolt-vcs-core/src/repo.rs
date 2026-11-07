@@ -15,7 +15,7 @@ use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 use crate::config::{self, ConfigError};
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
-use crate::fsio::{self, Renamed, fault_point, write_atomic};
+use crate::fsio::{self, Done, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
 use crate::keyed::{self, KEY_LEN};
 use crate::listing::Listing;
@@ -1370,20 +1370,25 @@ impl Repository {
     /// Once the new head is in place, a flush of `state/` that fails is only a warning.
     pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
         let head = format!("{id}\n");
-        let renamed = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())?;
+        let done = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())?;
         self.head = Some(id);
-        if let Renamed::NotFlushed(e) = renamed {
-            self.store.note(Warning::new(
-                warning::HEAD_NOT_FLUSHED,
-                format!(
-                    "The command happened, but Bolt couldn't flush .bolt/state to the disk after \
-                     it ({}), so a power cut soon after could undo it.",
-                    e.to_string().trim_end_matches('.')
-                ),
-            ));
+        if let Done::NotFlushed(e) = done {
+            self.store.note(not_flushed(&e));
         }
         Ok(())
     }
+}
+
+/// What a command whose head has moved says of a flush of `state/` that failed after that.
+pub(crate) fn not_flushed(e: &io::Error) -> Warning {
+    Warning::new(
+        warning::HEAD_NOT_FLUSHED,
+        format!(
+            "The command happened, but Bolt couldn't flush .bolt/state to the disk after it ({}), \
+             so a power cut soon after could undo it.",
+            e.to_string().trim_end_matches('.')
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -1756,6 +1761,62 @@ mod tests {
                 matches!(repo.head(), Err(RepoError::HeadLost { .. })),
                 "{bad:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_head_naming_a_damaged_or_undecodable_entry_is_lost() {
+        let (dir, mut repo) = project();
+        // The only copy of an entry, failing its check.
+        let bytes = entry(1).encode();
+        let flavor = ObjectKind::DiaryEntry.flavor().unwrap();
+        let damaged = crate::id::hash_record(flavor, &bytes);
+        let planted = [(ObjectKind::DiaryEntry, bytes.as_slice())];
+        crate::test_support::plant_damaged_copies(repo.packs_dir(), &planted);
+        // A record that checks out but isn't an entry.
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let undecodable = packs
+            .add_record(ObjectKind::DiaryEntry, b"not an entry")
+            .unwrap();
+        repo.store_packs(&lock, packs).unwrap();
+        drop((lock, repo));
+        for id in [damaged, undecodable] {
+            std::fs::write(dir.path().join(".bolt/state/head"), format!("{id}\n")).unwrap();
+            let read = Repository::open(dir.path()).unwrap().current();
+            match read {
+                Err(e @ RepoError::HeadLost { .. }) => {
+                    let why = format!(
+                        "names diary entry {}, which can't be read (",
+                        id.short_hex()
+                    );
+                    assert!(e.to_string().contains(&why), "{e}");
+                    assert!(e.hint().unwrap().starts_with("Your saves are safe"), "{e}");
+                }
+                other => panic!("{id}: {other:?}"),
+            }
+        }
+    }
+
+    /// A `.bolt` without `format` is a start or import that stopped, judged as before: a head
+    /// there that isn't an entry's ID is damage, not a lost head.
+    #[test]
+    fn a_garbled_head_without_format_is_still_damage() {
+        let who = entry(0).who;
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &who).unwrap());
+        std::fs::remove_file(dir.path().join(".bolt/format")).unwrap();
+        std::fs::write(dir.path().join(".bolt/state/head"), b"not an ID\n").unwrap();
+        let found = Repository::discover(dir.path()).map(drop);
+        let started = Repository::init(dir.path(), &who).map(drop);
+        for refused in [found, started] {
+            match refused {
+                Err(e @ RepoError::Damaged { .. }) => {
+                    let why = "state/head is not a lowercase fingerprint and a newline";
+                    assert!(e.to_string().contains(why), "{e}");
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 

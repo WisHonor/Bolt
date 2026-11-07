@@ -15,7 +15,7 @@ use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
-use crate::fsio;
+use crate::fsio::{self, Done};
 use crate::history::tip_of;
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
@@ -23,7 +23,7 @@ use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, writable_here};
 use crate::pack::{ObjectKind, PackError, PackSet};
-use crate::repo::{ChangeLock, RepoError, Repository, damaged};
+use crate::repo::{ChangeLock, RepoError, Repository, damaged, not_flushed};
 use crate::scope::{Scope, ancestors};
 use crate::snapshot::{NAMED, SaveError, listed, read_folder};
 use crate::store::{Store, StoreError};
@@ -553,8 +553,9 @@ pub fn apply(
 }
 
 /// Carries out `journal`, then, unless another program held a file open, moves `head` to its
-/// entry and removes it: the switch has then happened. With files in use the journal stays and
-/// `head` doesn't move, so the next command finishes the rest.
+/// entry and removes it: the switch has then happened, and what goes wrong after that is only a
+/// warning. With files in use the journal stays and `head` doesn't move, so the next command
+/// finishes the rest.
 pub fn carry_out(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -564,7 +565,19 @@ pub fn carry_out(
     let done = apply(repo, lock, journal, drive)?;
     if done.in_use.is_empty() {
         repo.move_head_to(lock, journal.target)?;
-        Journal::remove(repo, lock)?;
+        match Journal::remove(repo, lock) {
+            Ok(Done::Flushed) => {}
+            Ok(Done::NotFlushed(e)) => repo.store().note(not_flushed(&e)),
+            Err(e) => repo.store().note(Warning::new(
+                warning::SWITCH_UNFINISHED,
+                format!(
+                    "The switch between saves is done, but Bolt couldn't remove its journal, \
+                     .bolt/state/journal ({}): the next command that changes the project removes \
+                     it first.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            )),
+        }
     }
     Ok(done)
 }
@@ -581,14 +594,17 @@ pub fn finish_interrupted(
     let Some(journal) = Journal::read(repo)? else {
         return Ok(None);
     };
-    let head = match repo.head() {
-        Ok(head) => head,
+    let head = match repo.current() {
+        Ok((head, _)) => head,
         // Nothing can be judged against it; only `undo --to` goes on, and changes no file.
         Err(RepoError::HeadLost { .. }) => return Ok(None),
         Err(e) => return Err(e),
     };
     if head == journal.target {
-        Journal::remove(repo, lock)?;
+        // This command hasn't moved its own head yet, so it can still stop here.
+        if let Done::NotFlushed(e) = Journal::remove(repo, lock)? {
+            return Err(e.into());
+        }
         return Ok(Some(Applied::default()));
     }
     let journal = usable(repo, journal, head)?;
@@ -640,7 +656,7 @@ pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
     let pending = Journal::read(repo).and_then(|found| match found {
         None => Ok(None),
         Some(j) => {
-            let head = repo.head()?;
+            let (head, _) = repo.current()?;
             let took_effect = head == j.target;
             if !took_effect {
                 usable(repo, j, head)?;

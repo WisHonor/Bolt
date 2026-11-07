@@ -11,6 +11,18 @@ use crate::save::Save;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Whether `repo` noted a fault met once its head had moved, which is only a warning: the command
+/// went on to the end.
+#[cfg(feature = "fault-injection")]
+pub(crate) fn after_head(repo: &Repository) -> bool {
+    use crate::warning::{HEAD_NOT_FLUSHED, SWITCH_UNFINISHED};
+    let after = [HEAD_NOT_FLUSHED, SWITCH_UNFINISHED];
+    repo.store()
+        .warnings()
+        .iter()
+        .any(|w| after.contains(&w.kind))
+}
+
 /// One tag and one server line, both at a made-up save.
 pub(crate) fn sample_records() -> (TagList, ServerLines) {
     let save = Id([0x5a; 32]);

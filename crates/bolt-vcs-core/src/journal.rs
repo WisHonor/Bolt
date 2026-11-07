@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::io;
 
 use crate::encoding::{DecodeError, Reader, Writer};
-use crate::fsio;
+use crate::fsio::{self, Done};
 use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::names::{MAX_PATH_BYTES, validate_path};
@@ -226,16 +226,16 @@ impl Journal {
         }
     }
 
-    /// Removes `state/journal`, if it is there, for good.
-    pub fn remove(repo: &Repository, _lock: &ChangeLock) -> Result<(), RepoError> {
+    /// Removes `state/journal`, if it is there, for good. Once it is gone, a flush of `state/`
+    /// that fails comes back as `NotFlushed`.
+    pub(crate) fn remove(repo: &Repository, _lock: &ChangeLock) -> Result<Done, RepoError> {
         let state = repo.state_folder();
+        fsio::fault_point("journal:removing")?;
         match state.remove_file(OsStr::new(FILE)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
         }
-        fsio::fault_point("journal:removed")?;
-        state.sync()?;
-        Ok(())
+        Ok(fsio::flush_after(state, "journal:removed"))
     }
 }
 

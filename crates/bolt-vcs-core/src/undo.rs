@@ -324,9 +324,14 @@ fn pick_up(
         }
     };
     let entry = repo.entry(&to)?;
-    // A save that can't be read is no place to go on from.
-    repo.store()
-        .save(&tip_of(&entry)?, repo.signatures_allowed())?;
+    // Every save its state names must read, so that the pick never strands the project.
+    let unusable = |detail: String| SwitchError::EntryUnusable { entry: to, detail };
+    let tip = tip_of(&entry).map_err(|e| unusable(e.to_string()))?;
+    let shelved = entry.state.shelves.iter().map(|(_, save)| save);
+    for save in entry.state.lines.values().chain(shelved).chain([&tip]) {
+        let read = repo.store().save(save, repo.signatures_allowed());
+        read.map_err(|e| unusable(e.to_string()))?;
+    }
     let made = DiaryEntry {
         parent: Some(to),
         action: Action::Command,
@@ -498,9 +503,24 @@ pub fn undo_list(repo: &Repository, limit: usize) -> Result<UndoList, RepoError>
     })
 }
 
-/// Where the diary may have stopped, for a lost `head`: [`diary_ends`], each with what it changed.
+/// Where the diary may have stopped, for a lost `head`: [`diary_ends`], each with what it changed
+/// from its parent, or nothing when that can't be read.
 pub fn stopped_at(repo: &Repository) -> Result<Vec<StepInfo>, RepoError> {
-    infos(repo, diary_ends(repo)?)
+    let mut found = Vec::new();
+    for (entry, diary) in diary_ends(repo)? {
+        // An unreadable parent is often why this entry is an end at all.
+        let before = match diary.parent.map(|p| repo.entry(&p)).transpose() {
+            Err(RepoError::Damaged { .. }) => None,
+            read => read?,
+        };
+        let effects = did(before.as_ref(), &diary);
+        found.push(StepInfo {
+            entry,
+            diary,
+            effects,
+        });
+    }
+    Ok(found)
 }
 
 /// The entries of `list`, each with what it changed from the one before it.

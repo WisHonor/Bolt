@@ -338,6 +338,7 @@ fn a_saved_link_pointed_elsewhere_outside_is_left_and_no_placeholder_is_told() {
 #[test]
 fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
     use crate::fsio::fault;
+    use crate::test_support::after_head;
     let mut finished_later = 0;
     for n in 1.. {
         assert!(n < 100, "the goto never finished");
@@ -346,9 +347,7 @@ fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
         fault::arm(n);
         let result = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {});
         fault::disarm();
-        // A fault in flushing the moved head is only a warning, and the goto goes on.
-        let warnings = repo.store().warnings();
-        let unflushed = warnings.iter().any(|w| w.kind == warning::HEAD_NOT_FLUSHED);
+        let went_on = after_head(&repo);
         drop(repo);
         // The next command finishes what was started, so the folder is the save of the line
         // the project is on, whole.
@@ -370,9 +369,9 @@ fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
         if result.is_err() && wanted == NEW {
             finished_later += 1;
         }
-        if result.is_ok() && !unflushed {
+        if result.is_ok() && !went_on {
             assert_eq!(wanted, NEW);
-            // Stops after each write and in removing the journal, finished by the save.
+            // Stops after each write, finished by the save.
             assert!(finished_later >= 3, "only {finished_later} finished later");
             break;
         }

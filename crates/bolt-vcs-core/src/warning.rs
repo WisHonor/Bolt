@@ -66,7 +66,8 @@ pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 
 /// Whether people see a warning of `kind` when the command then fails: it tells of files
 /// already written, by a switch the command finished first or by the command itself before it
-/// stopped, which happened all the same. Others are only in `--json`.
+/// stopped, or of a step whose head had moved, which happened all the same. Others are only in
+/// `--json`.
 #[must_use]
 pub fn told_on_failure(kind: &str) -> bool {
     [
@@ -74,6 +75,7 @@ pub fn told_on_failure(kind: &str) -> bool {
         CHANGED_SINCE_PLAN,
         PLACEHOLDERS_WRITTEN,
         NOT_WRITTEN_HERE,
+        HEAD_NOT_FLUSHED,
     ]
     .contains(&kind)
 }

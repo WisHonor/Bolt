@@ -32,7 +32,7 @@ pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result
 
 /// `write_atomic` for `head` in the folder `state`: once it is renamed into place the command has
 /// happened, so a flush that fails after that is told apart from an error.
-pub(crate) fn write_head(tmp: &Dir, state: &Dir, bytes: &[u8]) -> io::Result<Renamed> {
+pub(crate) fn write_head(tmp: &Dir, state: &Dir, bytes: &[u8]) -> io::Result<Done> {
     replace(tmp, state, "head", bytes, true, rename_reported)
 }
 
@@ -74,11 +74,11 @@ pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) ->
     to_dir.sync()
 }
 
-/// How a move `rename_reported` made went.
+/// A change made in a folder: flushed to the disk after it, or not.
 #[derive(Debug)]
-pub(crate) enum Renamed {
+pub(crate) enum Done {
     Flushed,
-    /// The move happened, but flushing its folder afterwards failed.
+    /// The change happened, but flushing its folder afterwards failed.
     NotFlushed(io::Error),
 }
 
@@ -89,14 +89,17 @@ pub(crate) fn rename_reported(
     from: &OsStr,
     to_dir: &Dir,
     to: &OsStr,
-) -> io::Result<Renamed> {
+) -> io::Result<Done> {
     rename(from_dir, from, to_dir, to)?;
-    Ok(
-        match fault_point("head:renamed").and_then(|()| to_dir.sync()) {
-            Ok(()) => Renamed::Flushed,
-            Err(e) => Renamed::NotFlushed(e),
-        },
-    )
+    Ok(flush_after(to_dir, "head:renamed"))
+}
+
+/// Flushes `dir` after a change made in it, past the fault point `label`.
+pub(crate) fn flush_after(dir: &Dir, label: &'static str) -> Done {
+    match fault_point(label).and_then(|()| dir.sync()) {
+        Ok(()) => Done::Flushed,
+        Err(e) => Done::NotFlushed(e),
+    }
 }
 
 fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {

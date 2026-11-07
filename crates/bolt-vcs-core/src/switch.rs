@@ -109,6 +109,14 @@ pub enum SwitchError {
         listed(entries.iter().map(Id::to_hex).take(NAMED), entries.len() as u64)
     )]
     EntryAmbiguous { text: String, entries: Vec<Id> },
+    /// A lost `head` can't be picked up from `entry`: a save its state names can't be read.
+    #[error(
+        "Diary entry {} can't be made current: one of its saves can't be read ({}), so nothing \
+         was changed.",
+        entry.short_hex(),
+        escape(detail, false)
+    )]
+    EntryUnusable { entry: Id, detail: String },
     /// The saves of a step can't be read: `tidy` removed them, or they were lost.
     #[error(
         "The step of diary entry {} can't be undone or redone: what it changed can't be read \
@@ -219,6 +227,11 @@ impl SwitchError {
             SwitchError::EntryAmbiguous { .. } => {
                 Some("Type more of the ID to pick one.".to_owned())
             }
+            SwitchError::EntryUnusable { .. } => Some(
+                "Pick another: bolt undo --list shows the entries where the diary may have \
+                 stopped."
+                    .to_owned(),
+            ),
             SwitchError::StepGone { .. } => Some(
                 "bolt tidy removes what steps older than the undo window changed, and a damaged \
                  store can lose it too, so undo and redo can't go past this step. To get back to \
