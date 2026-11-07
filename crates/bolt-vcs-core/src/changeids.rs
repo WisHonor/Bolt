@@ -183,8 +183,9 @@ impl ChangeIds {
         self.changed = true;
     }
 
-    /// Records that `tip`, with the change ID of `old`, took the place of `old` as the newest save
-    /// of `name`. Nothing changes unless the cache knows the line at `old`.
+    /// Records that `tip`, which has the change ID and parents of `old`, took the place of `old`
+    /// as the newest save of `name`, so the line's change IDs stay as they are. Nothing changes
+    /// unless the cache knows the line at `old`.
     pub(crate) fn replace(&mut self, name: &str, old: Id, tip: Id) {
         let Some(line) = self.lines.get_mut(name).filter(|l| l.tip == old) else {
             return;

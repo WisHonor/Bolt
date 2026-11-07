@@ -21,6 +21,12 @@ pub const EXTRA_GIT_COMMIT: &str = "git-commit";
 pub const EXTRA_GIT_HEADER: &str = "git-header";
 /// A Git message's original bytes, kept when they aren't the save's message exactly.
 pub const EXTRA_GIT_ORIGINAL_MESSAGE: &str = "git-original-message";
+/// The fields that describe the Git commit a save came from, which an amended save drops.
+pub const GIT_FIELDS: [&str; 3] = [
+    EXTRA_GIT_COMMIT,
+    EXTRA_GIT_HEADER,
+    EXTRA_GIT_ORIGINAL_MESSAGE,
+];
 
 /// Who did something, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]

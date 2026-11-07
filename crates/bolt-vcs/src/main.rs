@@ -425,12 +425,9 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
     } = args;
     // A blank message is none: a save needs one, and an amend then keeps the one it has.
     let message = message.filter(|m| !m.trim().is_empty());
+    // Before the project is looked for, so it is said first.
     if message.is_none() && !amend {
-        return Err(Failure {
-            message: "A save needs a message.".into(),
-            hint: Some("Say what you changed: bolt save \"describe your change\"".into()),
-            printed: false,
-        });
+        return Err(SaveError::NeedsMessage.into());
     }
     let here = resolved(&std::env::current_dir()?);
     let repo = opened.insert(with_users_key(Repository::discover(&here)?));

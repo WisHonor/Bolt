@@ -866,6 +866,7 @@ mod tests {
         Save(&'static str),
         Back(usize),
         Side(&'static str),
+        Amend,
     }
 
     fn step() -> impl Strategy<Value = Step> {
@@ -874,13 +875,41 @@ mod tests {
             3 => start.clone().prop_map(Step::Save),
             1 => (0..4usize).prop_map(Step::Back),
             1 => start.prop_map(Step::Side),
+            1 => Just(Step::Amend),
         ]
+    }
+
+    /// Amends the newest save of `main` with a new message, through `save`.
+    fn amend(repo: &mut Repository, message: &str) -> (Id, ChangeId, String) {
+        let ada = who();
+        let req = crate::snapshot::SaveRequest {
+            message: Some(message),
+            who: &ada,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: None,
+            amend: true,
+        };
+        let done = crate::snapshot::save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap();
+        let crate::snapshot::SaveOutcome::Saved {
+            save_id,
+            save,
+            short_change_id,
+            ..
+        } = done
+        else {
+            panic!("nothing was amended");
+        };
+        (save_id, save.change_id, short_change_id)
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(24))]
-        // Saves the cache never saw, undos that move a line back, and saves off the line, with
-        // the cache read and rewritten in between: the short IDs are always the uncached ones.
+        // Saves the cache never saw, undos that move a line back, saves off the line, and amends
+        // that give a new save an old change ID, with the cache read and rewritten in between:
+        // the short IDs are always the uncached ones.
         #[test]
         fn short_ids_match_the_uncached_ones(steps in prop::collection::vec(step(), 1..10)) {
             let (_dir, mut repo, mut saves) = project_with(&[]);
@@ -897,6 +926,12 @@ mod tests {
                         }
                     }
                     Step::Side(start) => saves.push(plant(&mut repo, &[saves[0]], start, None)),
+                    // A message no save has yet, so there is always something to amend.
+                    Step::Amend => {
+                        let (id, change_id, short) = amend(&mut repo, &format!("{}", saves.len()));
+                        prop_assert_eq!(short, walk_short(&repo, id, &id, &change_id).unwrap());
+                        saves.push(id);
+                    }
                 }
                 prop_assert_eq!(cached_line(&repo), uncached_line(&repo));
                 let tip = current_save(&repo).unwrap();

@@ -24,9 +24,7 @@ use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
-use crate::save::{
-    EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, EXTRA_LINE, Person, Save,
-};
+use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, Person, Save};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
@@ -40,7 +38,7 @@ mod walk;
 use walk::{Base, Handles, Scan, walk};
 
 pub struct SaveRequest<'a> {
-    /// `None` keeps the message of the save an amend replaces.
+    /// `None` keeps the message of the save an amend replaces; any other save needs one.
     pub message: Option<&'a str>,
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
@@ -170,6 +168,8 @@ pub enum SaveError {
         count: u64,
         first: Vec<String>,
     },
+    #[error("A save needs a message.")]
+    NeedsMessage,
     #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
     NeedsLineName,
     // `reason` is Bolt's own wording.
@@ -255,7 +255,7 @@ fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     text
 }
 
-/// How many paths a message names; it counts the rest.
+/// How many paths, or lines, server lines and tags, a message names; it counts the rest.
 pub(crate) const NAMED: usize = 5;
 
 /// The paths `first` of `count`, escaped, one to a line, and how many more there are.
@@ -336,10 +336,13 @@ impl SaveError {
                 return Some(
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
                      run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git \
-                     reset --hard`, and save again. To save the files with CRLF anyway: bolt save \
-                     --accept-crlf \"message\""
+                     reset --hard`, and save again. To save the files with CRLF anyway, run the \
+                     same command again with --accept-crlf."
                         .to_owned(),
                 );
+            }
+            SaveError::NeedsMessage => {
+                "Say what you changed: bolt save \"describe your change\"".into()
             }
             SaveError::NeedsLineName => "Name it: bolt save --line <name> \"message\"".into(),
             SaveError::BadLineName { .. } | SaveError::LineTaken { .. } => {
@@ -401,6 +404,9 @@ pub fn save_folder(
     on_wait: &mut dyn FnMut(&str),
     confirm_large: &mut dyn FnMut(&LargeSave) -> bool,
 ) -> Result<SaveOutcome, SaveError> {
+    if req.message.is_none() && !req.amend {
+        return Err(SaveError::NeedsMessage);
+    }
     let lock = repo.lock_for_change(req.command, on_wait)?;
     // A stopped switch is finished first, so the save is of the folder it left. What came of it
     // is kept with the store's warnings, so it is told even if the save then fails.
@@ -422,7 +428,10 @@ pub fn save_folder(
         && let Some(line) = &line
     {
         let mut cache = ChangeIds::load(repo, &key);
-        let by = shown_elsewhere(repo, &mut cache, &entry.state, line, parent_id, &parent)?;
+        let by = shown_elsewhere(repo, &mut cache, &entry.state, line, parent_id, &parent);
+        // Kept however the amend ends: reading the other lines is what costs.
+        cache.store(repo, &key, &entry.state);
+        let by = by?;
         if !by.is_empty() {
             return Err(SaveError::AmendShared { by });
         }
@@ -502,11 +511,7 @@ pub fn save_folder(
     if !built.taken_back.is_empty() {
         warnings.push(gitignored_files_saved(built.taken_back));
     }
-    let message = req.message.unwrap_or(if req.amend {
-        parent.message.as_str()
-    } else {
-        ""
-    });
+    let message = req.message.unwrap_or(&parent.message);
     if root == parent.root && (!req.amend || message == parent.message) {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
         if !packs.is_empty() {
@@ -523,13 +528,8 @@ pub fn save_folder(
         return Err(SaveError::NeedsLineName);
     };
     let save = if req.amend {
-        // They describe the Git commit the old save came from, which the new one isn't.
         let mut extra = parent.extra.clone();
-        for field in [
-            EXTRA_GIT_COMMIT,
-            EXTRA_GIT_HEADER,
-            EXTRA_GIT_ORIGINAL_MESSAGE,
-        ] {
+        for field in GIT_FIELDS {
             extra.remove(field);
         }
         Save {
@@ -2254,6 +2254,94 @@ mod tests {
         let many = shown((1..=7).map(|n| format!("tag v{n}")).collect());
         let named = ": tag v1, tag v2, tag v3, tag v4, tag v5 and 2 more show it too,";
         assert!(many.contains(named), "{many}");
+    }
+
+    /// A save of the whole folder with `message`, or an amend.
+    fn save_as(
+        repo: &mut Repository,
+        message: Option<&str>,
+        amend: bool,
+    ) -> Result<SaveOutcome, SaveError> {
+        let who = who();
+        let req = SaveRequest {
+            message,
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: None,
+            amend,
+        };
+        save_folder(repo, &req, &mut |_| {}, &mut |_| true)
+    }
+
+    /// Commits the line `name` at a new save on `parent` that holds the same files.
+    fn plant_line(repo: &mut Repository, name: &str, parent: Id) {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut save = repo.store().save(&parent, false).unwrap();
+        save.parents = vec![parent];
+        save.change_id = ChangeId::random().unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
+        let mut state = entry.state.clone();
+        state.lines.insert(name.to_owned(), id);
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "save".into(),
+            who: who(),
+            bolt_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    #[test]
+    fn a_save_without_a_message_is_refused_unless_it_amends() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let head = repo.head().unwrap();
+        let refused = save_as(&mut repo, None, false);
+        assert!(
+            matches!(refused, Err(SaveError::NeedsMessage)),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
+        let Ok(SaveOutcome::Saved { save, .. }) = save_as(&mut repo, None, true) else {
+            panic!("nothing was amended");
+        };
+        assert_eq!(save.message, "Start project");
+    }
+
+    #[test]
+    fn an_amend_that_goes_no_further_keeps_what_it_read_of_the_other_lines() {
+        const KEY: [u8; 32] = [7; 32];
+        let (dir, mut repo) = project();
+        repo.set_cache_key(KEY);
+        let first = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        let SaveOutcome::Saved { save_id, .. } = save_now(&mut repo).unwrap() else {
+            panic!("nothing was saved");
+        };
+        let cached =
+            |repo: &Repository, line: &str| ChangeIds::load(repo, &KEY).get(line).is_some();
+        // A line from the first save, which doesn't hold this one: nothing to amend.
+        plant_line(&mut repo, "b", first);
+        let same = save_as(&mut repo, None, true);
+        assert!(
+            matches!(same, Ok(SaveOutcome::NothingChanged { .. })),
+            "{same:?}"
+        );
+        assert!(cached(&repo, "b"));
+        // A line from this save: refused.
+        plant_line(&mut repo, "c", save_id);
+        let refused = save_as(&mut repo, None, true);
+        let by_c = matches!(&refused, Err(SaveError::AmendShared { by }) if by == &["line c"]);
+        assert!(by_c, "{refused:?}");
+        assert!(cached(&repo, "c"));
     }
 
     #[test]

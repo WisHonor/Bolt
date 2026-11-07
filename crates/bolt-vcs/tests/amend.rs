@@ -8,7 +8,7 @@ use std::path::Path;
 use bolt_core::diary::DiaryEntry;
 use bolt_core::id::Id;
 use bolt_core::repo::Repository;
-use bolt_core::save::{EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, Save};
+use bolt_core::save::{GIT_FIELDS, Save};
 use serde_json::{Value, json};
 
 mod support;
@@ -318,6 +318,26 @@ fn amend_of_a_save_a_server_line_or_tag_names_is_refused() {
 }
 
 #[test]
+fn amend_stops_at_the_line_ending_check_after_an_import() {
+    let env = Env::new();
+    env.commit("a.txt", "one\ntwo\n", "First");
+    env.import();
+    // As Git for Windows writes it out.
+    env.overwrite("a.txt", "one\r\ntwo\r\n");
+    let err = refused(&env, &["save", "--amend"]);
+    assert!(err.contains("only in line endings"), "{err}");
+    let again = "run the same command again with --accept-crlf.";
+    assert!(err.contains(again), "{err}");
+    assert_eq!(changed(&env), ["a.txt"]);
+    let old = save_of(&env, main_tip(&env));
+    ok(&env, &["save", "--amend", "--accept-crlf"]);
+    let tip = main_tip(&env);
+    assert_eq!(save_of(&env, tip).change_id, old.change_id);
+    let crlf = holding(&[("a.txt", "one\r\ntwo\r\n")]);
+    assert_eq!(saved_files(&env, tip), crlf);
+}
+
+#[test]
 fn amend_drops_git_fields() {
     let env = Env::new();
     // A commit in Latin-1, as it says: the save keeps its Git header and message bytes too.
@@ -345,19 +365,14 @@ fn amend_drops_git_fields() {
     env.git(&["reset", "-q", "--hard"]);
     env.import();
     let old = save_of(&env, main_tip(&env));
-    let git = [
-        EXTRA_GIT_COMMIT,
-        EXTRA_GIT_HEADER,
-        EXTRA_GIT_ORIGINAL_MESSAGE,
-    ];
-    for field in git {
+    for field in GIT_FIELDS {
         assert!(old.extra.contains_key(field), "{field}: {:?}", old.extra);
     }
     write(&env, "a.txt", "A\n");
     ok(&env, &["save", "--amend"]);
     let new = save_of(&env, main_tip(&env));
     let mut kept = old.extra.clone();
-    kept.retain(|k, _| !git.contains(&k.as_str()));
+    kept.retain(|k, _| !GIT_FIELDS.contains(&k.as_str()));
     assert_eq!(new.extra, kept);
     assert_eq!(new.message, "Caf\u{e9}\n");
     assert_eq!(new.author, old.author);

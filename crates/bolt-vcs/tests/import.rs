@@ -675,7 +675,8 @@ fn import_json_output() {
 
 const CRLF_HINT: &str = "To keep history as Git stored it, commit or stash your changes in Git, \
     then run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git reset --hard`, \
-    and save again. To save the files with CRLF anyway: bolt save --accept-crlf \"message\"";
+    and save again. To save the files with CRLF anyway, run the same command again with \
+    --accept-crlf.";
 
 /// A repository as Git for Windows leaves it: stored with LF, written out with CRLF.
 fn converted_by_git() -> Env {
