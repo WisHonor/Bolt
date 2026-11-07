@@ -33,6 +33,8 @@ pub mod status;
 pub mod store;
 pub mod switch;
 pub mod text;
+#[cfg_attr(not(test), expect(dead_code, reason = "undo and redo will use it"))]
+pub(crate) mod timeline;
 pub mod verify;
 pub mod warning;
 pub mod writeout;
