@@ -353,6 +353,72 @@ fn undo_and_redo_record_their_steps_own_folder_change() {
     assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"A");
 }
 
+/// Every entry of a save by path: files and links with their IDs, folders without.
+fn tree_of(repo: &Repository, save: Id) -> BTreeMap<String, (EntryKind, Option<Id>)> {
+    let store = repo.store();
+    let mut found = BTreeMap::new();
+    let mut todo = vec![(String::new(), store.save(&save, false).unwrap().root)];
+    while let Some((at, listing)) = todo.pop() {
+        for e in store.listing(&listing).unwrap().entries() {
+            let path = if at.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{at}/{}", e.name)
+            };
+            let id = (e.kind != EntryKind::Folder).then_some(e.id);
+            if e.kind == EntryKind::Folder {
+                todo.push((path.clone(), e.id));
+            }
+            found.insert(path, (e.kind, id));
+        }
+    }
+    found
+}
+
+#[test]
+fn a_folder_the_user_removed_stays_removed_through_an_undo_and_a_redo() {
+    const FILE: EntryKind = EntryKind::File;
+    let old: &[(&str, &[u8])] = &[
+        ("a.txt", b"a"),
+        ("assets/a.png", b"A"),
+        ("assets/b.png", b"B"),
+    ];
+    let main = [
+        ("a.txt", FILE, b"a" as &[u8]),
+        ("assets/a.png", FILE, b"A"),
+        ("assets/b.png", FILE, b"B"),
+        ("assets/new.png", FILE, b"N"),
+    ];
+    let (dir, mut repo, _, _) = on_old_line(old, &main);
+    let root = dir.path();
+    let in_assets = || {
+        let mut names: Vec<String> = fs::read_dir(root.join("assets"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    // Removed without saving: the goto makes the folder again for new.png alone.
+    fs::remove_dir_all(root.join("assets")).unwrap();
+    goto_main(&mut repo);
+    assert_eq!(in_assets(), ["new.png"]);
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    let (from, to) = (tree_of(&repo, change.from), tree_of(&repo, change.to));
+    let differ: BTreeSet<&str> = from
+        .keys()
+        .chain(to.keys())
+        .filter(|p| from.get(*p) != to.get(*p))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(differ, BTreeSet::from(["assets", "assets/new.png"]));
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(!root.join("assets").exists());
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(in_assets(), ["new.png"]);
+}
+
 #[test]
 fn a_redo_writes_a_link_through_a_folder_the_folder_already_held() {
     let entries = [

@@ -361,15 +361,17 @@ fn links_left_warning(paths: &[String]) -> Warning {
     let message = match paths.len() {
         1 => format!(
             "Didn't throw away 1 unsaved link: an undo could bring it back only as a plain file \
-             holding its target, since it may lead out of the project or this computer can't \
-             make links (on Windows that takes Developer Mode):{list}\nDelete it yourself if you \
-             don't want it."
+             holding its target, since it may lead out of the project, or through a name Bolt \
+             never writes (a spelling of .git or .bolt, or a name this computer can't hold), or \
+             this computer can't make links (on Windows that takes Developer Mode):{list}\n\
+             Delete it yourself if you don't want it."
         ),
         n => format!(
             "Didn't throw away {n} unsaved links: an undo could bring them back only as plain \
-             files holding their targets, since they may lead out of the project or this \
-             computer can't make links (on Windows that takes Developer Mode):{list}\nDelete them \
-             yourself if you don't want them."
+             files holding their targets, since they may lead out of the project, or through a \
+             name Bolt never writes (a spelling of .git or .bolt, or a name this computer can't \
+             hold), or this computer can't make links (on Windows that takes Developer Mode):\
+             {list}\nDelete them yourself if you don't want them."
         ),
     };
     Warning::new(warning::LINKS_LEFT, message)

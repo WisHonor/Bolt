@@ -408,6 +408,7 @@ fn the_links_left_warning_reads_right_for_one_link_and_for_several() {
         "{one}"
     );
     assert!(one.contains("\n  out\n"), "{one}");
+    assert!(one.contains("through a name Bolt never writes"), "{one}");
     assert!(
         one.ends_with("Delete it yourself if you don't want it."),
         "{one}"
