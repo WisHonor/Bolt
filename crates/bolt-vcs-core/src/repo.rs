@@ -17,6 +17,7 @@ use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
 use crate::fsio::{self, Done, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
+use crate::journal::Journal;
 use crate::keyed::{self, KEY_LEN};
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackSet};
@@ -1324,13 +1325,19 @@ impl Repository {
         Ok(id)
     }
 
-    /// `commit`, without the merge.
+    /// `commit`, without the merge. A finished switch's journal, left when removing it failed, is
+    /// removed first: once `head` moves on, nothing could tell it was finished.
     fn move_head(
         &mut self,
         lock: &ChangeLock,
         packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
+        if let Some(journal) = Journal::read(self)?
+            && self.head == Some(journal.target)
+        {
+            Journal::remove_before_head(self, lock)?;
+        }
         let id = self.store_entry(lock, packs, entry)?;
         fault_point("commit:before-head")?;
         self.move_head_to(lock, id)?;
@@ -1373,22 +1380,17 @@ impl Repository {
         let done = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())?;
         self.head = Some(id);
         if let Done::NotFlushed(e) = done {
-            self.store.note(not_flushed(&e));
+            self.store.note(Warning::new(
+                warning::HEAD_NOT_FLUSHED,
+                format!(
+                    "The command happened, but Bolt couldn't flush .bolt/state to the disk after \
+                     it ({}), so a power cut soon after could undo it.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            ));
         }
         Ok(())
     }
-}
-
-/// What a command whose head has moved says of a flush of `state/` that failed after that.
-pub(crate) fn not_flushed(e: &io::Error) -> Warning {
-    Warning::new(
-        warning::HEAD_NOT_FLUSHED,
-        format!(
-            "The command happened, but Bolt couldn't flush .bolt/state to the disk after it ({}), \
-             so a power cut soon after could undo it.",
-            e.to_string().trim_end_matches('.')
-        ),
-    )
 }
 
 #[cfg(test)]

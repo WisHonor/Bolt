@@ -23,7 +23,7 @@ use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, writable_here};
 use crate::pack::{ObjectKind, PackError, PackSet};
-use crate::repo::{ChangeLock, RepoError, Repository, damaged, not_flushed};
+use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
 use crate::snapshot::{NAMED, SaveError, listed, read_folder};
 use crate::store::{Store, StoreError};
@@ -567,7 +567,16 @@ pub fn carry_out(
         repo.move_head_to(lock, journal.target)?;
         match Journal::remove(repo, lock) {
             Ok(Done::Flushed) => {}
-            Ok(Done::NotFlushed(e)) => repo.store().note(not_flushed(&e)),
+            // The head's own flush came first, so a power cut can only bring the journal back.
+            Ok(Done::NotFlushed(e)) => repo.store().note(Warning::new(
+                warning::HEAD_NOT_FLUSHED,
+                format!(
+                    "The switch between saves is done, but Bolt couldn't flush .bolt/state to the \
+                     disk after removing its journal ({}): after a power cut the journal may be \
+                     back, and the next command that changes the project removes it.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            )),
             Err(e) => repo.store().note(Warning::new(
                 warning::SWITCH_UNFINISHED,
                 format!(
@@ -601,10 +610,7 @@ pub fn finish_interrupted(
         Err(e) => return Err(e),
     };
     if head == journal.target {
-        // This command hasn't moved its own head yet, so it can still stop here.
-        if let Done::NotFlushed(e) = Journal::remove(repo, lock)? {
-            return Err(e.into());
-        }
+        Journal::remove_before_head(repo, lock)?;
         return Ok(Some(Applied::default()));
     }
     let journal = usable(repo, journal, head)?;

@@ -493,9 +493,12 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
         .iter()
         .find(|w| w["kind"] == "head_not_flushed");
     let message = flushed.unwrap()["message"].as_str().unwrap();
-    assert!(
-        message.contains("(injected fault at journal:removed)"),
-        "{doc}"
+    // The head's own flush came first, so only the journal could come back.
+    assert_eq!(
+        message,
+        "The switch between saves is done, but Bolt couldn't flush .bolt/state to the disk after \
+         removing its journal (injected fault at journal:removed): after a power cut the journal \
+         may be back, and the next command that changes the project removes it."
     );
     assert!(!journal.exists());
     assert_eq!(read(&env, "a.txt"), b"one\n");
@@ -620,4 +623,105 @@ fn an_undo_to_picking_up_a_lost_head_stopped_anywhere_leaves_it_lost_or_picked_u
             break;
         }
     }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_journal_a_finished_switch_left_never_outlives_its_head() {
+    let (env, _) = project();
+    let journal = env.root().join(".bolt/state/journal");
+    write(&env, "a.txt", "edited\n");
+    let out = env
+        .bolt()
+        .arg("discard")
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(journal.exists());
+    // The save finishes the discard but can't remove its journal; nor can it before moving its
+    // own head, so it stops there, having saved nothing.
+    write(&env, "b.txt", "b\n");
+    let out = env
+        .bolt()
+        .args(["save", "Three"])
+        .env("BOLT_FAULT_FAIL", "journal:removing")
+        .output()
+        .unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        said.contains("warning: Finished a switch between saves that was stopped"),
+        "{said}"
+    );
+    assert!(
+        said.contains("error: injected fault at journal:removing"),
+        "{said}"
+    );
+    assert_eq!(head(&env).1.command, "discard");
+    assert!(journal.exists());
+    // It still names the head, so it is only what the finished switch left.
+    let out = env.bolt().arg("status").output().unwrap();
+    let said = text(&out.stderr);
+    assert!(said.contains("stopped just after it was done"), "{said}");
+    assert!(!said.contains("made for another save"), "{said}");
+    // Run again, the save removes it, then saves.
+    ok(&env, &["save", "Three"]);
+    assert!(!journal.exists());
+    assert_eq!(head(&env).1.command, "save");
+    assert_eq!(read(&env, "a.txt"), b"two\n");
+    ok(&env, &["discard"]);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn undo_two_over_a_step_that_changes_files_then_one_that_doesnt_leaves_no_stale_journal() {
+    let (env, [_, one, two]) = project();
+    let save = entry(&env, one).state.lines["main"];
+    ok(&env, &["goto", &save.to_hex()]);
+    let (goto, _) = head(&env);
+    let journal = env.root().join(".bolt/state/journal");
+    // Undoing the goto writes files but can't remove its journal; the save before it changes no
+    // file, and stops, having changed nothing, when it can't remove that journal either.
+    let out = env
+        .bolt()
+        .args(["undo", "2"])
+        .env("BOLT_FAULT_FAIL", "journal:removing")
+        .output()
+        .unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("Undid 1 of the 2 steps asked for."),
+        "{shown}"
+    );
+    assert_eq!(head(&env).1.action, Action::Undo(goto));
+    assert_eq!(read(&env, "a.txt"), b"two\n");
+    assert!(journal.exists());
+    let out = env.bolt().arg("status").output().unwrap();
+    let said = text(&out.stderr);
+    assert!(said.contains("stopped just after it was done"), "{said}");
+    // The next undo only removes it, as after any stop, and the one after takes the save back.
+    let said = ok(&env, &["undo"]);
+    assert!(
+        said.contains("Finished the undo of goto that was stopped"),
+        "{said}"
+    );
+    assert!(!journal.exists());
+    assert!(ok(&env, &["undo"]).contains("Undid save"));
+    assert_eq!(head(&env).1.action, Action::Undo(two));
+}
+
+#[test]
+fn undo_list_with_a_lost_head_goes_on_past_a_parent_that_is_no_entry() {
+    let (env, [.., two]) = project();
+    let save = head(&env).1.state.lines["main"];
+    // A crashed command's entry whose parent names a save, not an entry.
+    let odd = plant_end(&env, two, |e| e.parent = Some(save));
+    fs::remove_file(head_file(&env)).unwrap();
+    let doc = json(&env, &["undo", "--list"]);
+    let ends = doc["ends"].as_array().unwrap();
+    let listed = ends.iter().find(|e| e["entry"] == odd.to_hex()).unwrap();
+    assert_eq!(listed["effects"], serde_json::json!([]), "{doc}");
 }

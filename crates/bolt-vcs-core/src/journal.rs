@@ -237,6 +237,18 @@ impl Journal {
         }
         Ok(fsio::flush_after(state, "journal:removed"))
     }
+
+    /// `remove`, by a command that hasn't moved its head yet and so can still stop: a flush that
+    /// fails is an error too.
+    pub(crate) fn remove_before_head(
+        repo: &Repository,
+        lock: &ChangeLock,
+    ) -> Result<(), RepoError> {
+        match Journal::remove(repo, lock)? {
+            Done::Flushed => Ok(()),
+            Done::NotFlushed(e) => Err(e.into()),
+        }
+    }
 }
 
 /// The journal can't be used: an error of its own, so the user hears which file it is.
