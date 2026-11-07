@@ -56,14 +56,14 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 
 /// The folder change of `plan`, a switch from the save `from` to `target`, on a folder on
 /// `kept.base`. The "to" save holds `target`'s version at each path the plan writes and each it
-/// found the folder already holding (with everything below it): the folder after the switch,
-/// wherever it touched. A folder the plan makes where the folder held nothing holds there only
-/// what the plan puts in it. The "from" save is that with what the folder held at each path the
-/// plan writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too. A held file or
-/// link the store lacks is stored first; one that couldn't be, having changed since the plan, is
-/// left out of both sides, and so is what is planned below it and the folders above it. Each side
-/// is `kept.base`, `from` or `target` when its folders are exactly that save's, otherwise a kept
-/// save stored in `packs`. `None` when the two sides are the same. Also gives how many safety
+/// found the folder already holding (with everything below it), and the "from" save what the
+/// folder held at each path the plan writes. Both are `kept.base` elsewhere, at what the plan
+/// leaves unwritten too, except inside a folder the plan makes where the folder held a file, a
+/// link or nothing: there "to" holds only what the plan writes or finds already there. A held file
+/// or link the store lacks is stored first; one that couldn't be, having changed since the plan,
+/// is left out of both sides, and so is what is planned below it and the folders above it. Each
+/// side is `kept.base`, `from` or `target` when its folders are exactly that save's, otherwise a
+/// kept save stored in `packs`. `None` when the two sides are the same. Also gives how many safety
 /// copies it kept.
 pub(crate) fn switch_saves(
     repo: &Repository,
@@ -97,10 +97,13 @@ pub(crate) fn switch_saves(
         };
         for_each_entry_change_in(store, &unstored, Some(from_root), target_root, changes)?;
     }
-    // The base's entries in such a folder are what the user had removed with it: they stay gone.
+    // The base's entries in such a folder went with it when the user removed or replaced it: they
+    // stay gone. Only a letter-case rename makes a folder over a folder.
     let mut base = Tree::new(store, &unstored, base_root, EXACT);
     let made = plan.actions.iter().filter(|a| {
-        a.change == Change::MakeFolder && a.expected.is_none() && held.contains_key(&a.path)
+        a.change == Change::MakeFolder
+            && !a.expected.is_some_and(|e| e.kind == EntryKind::Folder)
+            && held.contains_key(&a.path)
     });
     for a in made {
         if let Some(folder) = base.folder(&a.path)? {

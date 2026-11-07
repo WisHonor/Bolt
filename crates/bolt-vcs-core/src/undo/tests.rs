@@ -420,6 +420,27 @@ fn a_folder_the_user_removed_stays_removed_through_an_undo_and_a_redo() {
 }
 
 #[test]
+fn a_file_deleted_with_a_folder_stays_gone_when_a_discard_of_part_of_it_is_redone() {
+    let (dir, mut repo) = saved(&[("assets/a.png", b"A"), ("assets/b.png", b"B")]);
+    let root = dir.path();
+    // A file where the folder was: discarding a.png makes the folder again for a.png alone.
+    fs::remove_dir_all(root.join("assets")).unwrap();
+    fs::write(root.join("assets"), b"F").unwrap();
+    let who = who();
+    let only = ["assets/a.png".to_owned()];
+    discard(&mut repo, Some(&only), &who, "discard", None, &mut |_| {}).unwrap();
+    assert!(!root.join("assets/b.png").exists());
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("assets")).unwrap(), b"F");
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("assets/a.png")).unwrap(), b"A");
+    assert!(
+        !root.join("assets/b.png").exists(),
+        "the deleted b.png came back"
+    );
+}
+
+#[test]
 fn a_redo_writes_a_link_through_a_folder_the_folder_already_held() {
     let entries = [
         ("a.txt", EntryKind::File, b"a" as &[u8]),
