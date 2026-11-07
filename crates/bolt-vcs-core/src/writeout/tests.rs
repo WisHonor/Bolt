@@ -1092,7 +1092,9 @@ fn a_journal_whose_target_is_the_head_is_only_removed() {
     let (dir, mut repo, journal) = stopped_switch();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     repo.move_head_to(&lock, journal.target).unwrap();
-    assert_eq!(finish_interrupted(&mut repo, &lock).unwrap(), None);
+    // A stop finished all the same, with nothing left to write.
+    let done = finish_interrupted(&mut repo, &lock).unwrap();
+    assert_eq!(done, Some(Applied::default()));
     assert_eq!(Journal::read(&repo).unwrap(), None);
     // Nothing of it was carried out again.
     assert_holds(dir.path(), OLD);

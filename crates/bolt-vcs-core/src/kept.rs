@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 
 use crate::diary::FolderChange;
+use crate::diff::for_each_entry_change_in;
 use crate::drive::Drive;
 use crate::id::{ChangeId, Id};
 use crate::journal::Action;
@@ -53,54 +54,75 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
     message
 }
 
-/// The folder change of a switch planned as `actions` on a folder on `from.base`: the save
-/// holding what the folder held at each path the actions write, and the one holding what they
-/// write there, both `from.base` elsewhere. A held file or link the store lacks is stored first;
-/// one that couldn't be, having changed since the plan, is left out of both sides, with what is
-/// planned below it and the folders above it. Each side is `from.base` or `target` when its
-/// folders are exactly that save's, otherwise a kept save stored in `packs`. `None` when the two
-/// sides are the same. Also gives how many safety copies it kept.
+/// The folder change of a switch planned from the save `from` to `target` as `actions`, on a
+/// folder on `kept.base`. The "to" save holds `target`'s version at every path where `from` and
+/// `target` differ, whether the actions write it or the folder already held it: the folder after
+/// the switch, wherever it touched. The "from" save is that with what the folder held at each
+/// path the actions write. Both are `kept.base` elsewhere. A held file or link the store lacks is
+/// stored first; one that couldn't be, having changed since the plan, is left as "to" has it,
+/// and so is what is planned below it and the folders above it. Each side is `kept.base`, `from`
+/// or `target` when its folders are exactly that save's, otherwise a kept save stored in `packs`.
+/// `None` when the two sides are the same. Also gives how many safety copies it kept.
 pub(crate) fn switch_saves(
     repo: &Repository,
     actions: &[Action],
+    from: Id,
     target: Id,
-    from: &KeptFrom,
+    kept: &KeptFrom,
     drive: Drive,
     packs: &mut PackSet,
 ) -> Result<(Option<FolderChange>, usize), SaveError> {
     let store = repo.store();
     let signed = repo.signatures_allowed();
-    let base_root = store.save(&from.base, signed)?.root;
+    let base_root = store.save(&kept.base, signed)?.root;
+    let from_root = store.save(&from, signed)?.root;
     let target_root = store.save(&target, signed)?.root;
-    let (held, copies) = held(repo, actions, from.base, base_root, drive, packs)?;
+    let (held, copies) = held(repo, actions, kept.base, base_root, drive, packs)?;
+    let mut after = BTreeMap::new();
     let unstored = HashMap::new();
-    let mut wanted = Tree::new(store, &unstored, target_root, EXACT);
-    let mut written = BTreeMap::new();
-    for path in held.keys() {
-        let put = wanted.entry(path)?.map(|e| (e.kind, e.id, e.size));
-        written.insert(path.clone(), put);
-    }
-    let from_root = overlay(store, base_root, &held, packs)?;
-    let to_root = overlay(store, base_root, &written, packs)?;
-    if from_root == to_root {
+    for_each_entry_change_in(
+        store,
+        &unstored,
+        Some(from_root),
+        target_root,
+        |path, _, t| {
+            after.insert(path.to_owned(), t.map(|e| (e.kind, e.id, e.size)));
+            Ok::<(), SaveError>(())
+        },
+    )?;
+    let mut before = after.clone();
+    before.extend(held);
+    let before_root = overlay(store, base_root, &before, packs)?;
+    let after_root = overlay(store, base_root, &after, packs)?;
+    if before_root == after_root {
         return Ok((None, copies));
     }
     let mut side = |root: Id| match root {
-        r if r == base_root => Ok(from.base),
+        r if r == base_root => Ok(kept.base),
+        r if r == from_root => Ok(from),
         r if r == target_root => Ok(target),
-        r => kept_save(r, from, packs),
+        r => kept_save(r, kept, packs),
     };
     let change = FolderChange {
-        from: side(from_root)?,
-        to: side(to_root)?,
+        from: side(before_root)?,
+        to: side(after_root)?,
     };
     Ok((Some(change), copies))
 }
 
+/// What `--shelve` set aside before a step.
+pub(crate) struct Aside {
+    /// A kept save on the save the project is on, holding the folder's version at `paths`.
+    pub shelf: Id,
+    /// The save to plan the step from instead, holding the same there.
+    pub step_from: Id,
+    pub paths: Vec<String>,
+}
+
 /// What `--shelve` sets aside before a step, `actions` being a discard of the unsaved work in its
-/// way: the shelf, a kept save on `shelf.base` holding the folder's version at each path, and
-/// `onto.base` with the same entries, to plan the step from so that it overwrites them. `None`
-/// when nothing differs from `shelf.base`.
+/// way: the shelf, a kept save on `shelf.base`, and `onto.base` with the same entries, to plan
+/// the step from so that it overwrites them, both stored in `packs`. `None` when nothing differs
+/// from `shelf.base`.
 pub(crate) fn set_aside(
     repo: &Repository,
     actions: &[Action],
@@ -108,7 +130,7 @@ pub(crate) fn set_aside(
     onto: &KeptFrom,
     drive: Drive,
     packs: &mut PackSet,
-) -> Result<Option<(Id, Id)>, SaveError> {
+) -> Result<Option<Aside>, SaveError> {
     let store = repo.store();
     let signed = repo.signatures_allowed();
     let base_root = store.save(&shelf.base, signed)?.root;
@@ -124,7 +146,11 @@ pub(crate) fn set_aside(
         r if r == onto_root => onto.base,
         r => kept_save(r, onto, packs)?,
     };
-    Ok(Some((made, step_from)))
+    Ok(Some(Aside {
+        shelf: made,
+        step_from,
+        paths: held.into_keys().collect(),
+    }))
 }
 
 /// What the folder held at each path `actions` write, as a save of it on `base` (whose top listing
@@ -490,7 +516,7 @@ mod tests {
         };
         let mut packs = repo.new_packs().unwrap();
         let (change, _) =
-            switch_saves(repo, &plan.actions, target, &from, drive, &mut packs).unwrap();
+            switch_saves(repo, &plan.actions, left, target, &from, drive, &mut packs).unwrap();
         let made = packs.finish().unwrap();
         for p in &made {
             repo.store_mut().register(p);
@@ -670,21 +696,23 @@ mod tests {
     }
 
     #[test]
-    fn work_that_matched_the_target_is_left_out_of_the_switch() {
+    fn work_that_matched_the_target_is_kept_on_the_from_side() {
         let (dir, mut repo, left) = saved(&[("a.txt", b"a"), ("gone/x.txt", b"x")]);
         let target = planted(&mut repo, &[("a.txt", b"A"), ("new/b.txt", b"b")]);
         write_all(dir.path(), &[("a.txt", b"A")]);
         let change = goto_saves(&mut repo, left, target).0.unwrap();
-        assert_eq!(change.from, left);
-        assert_ne!(change.to, target);
-        let kept = repo.store().save(&change.to, false).unwrap();
+        // The folder after the goto is the target, the matched a.txt included; before it, it
+        // held that a.txt already, so an undo leaves it be.
+        assert_eq!(change.to, target);
+        assert_ne!(change.from, left);
+        let kept = repo.store().save(&change.from, false).unwrap();
         assert_eq!((kept.parents, kept.message.as_str()), (vec![left], "goto"));
         let want = holding(&[
-            ("a.txt", FILE, b"a"),
-            ("new", FOLDER, b""),
-            ("new/b.txt", FILE, b"b"),
+            ("a.txt", FILE, b"A"),
+            ("gone", FOLDER, b""),
+            ("gone/x.txt", FILE, b"x"),
         ]);
-        assert_eq!(tree_of(&repo, change.to), want);
+        assert_eq!(tree_of(&repo, change.from), want);
     }
 
     #[test]

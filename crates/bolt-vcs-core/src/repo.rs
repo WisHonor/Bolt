@@ -1178,6 +1178,19 @@ impl Repository {
         Ok((id, DiaryEntry::decode(&bytes)?))
     }
 
+    /// The diary entry `id`. One the store lacks, or can't decode, is damage to the diary, named.
+    pub fn entry(&self, id: &Id) -> Result<DiaryEntry, RepoError> {
+        let bytes = match self.store.read_record(id, ObjectKind::DiaryEntry) {
+            Ok(bytes) => bytes,
+            Err(StoreError::Missing(_)) => {
+                return Err(damaged(format!("the diary has no entry {id}")));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        DiaryEntry::decode(&bytes)
+            .map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
+    }
+
     /// The tags of `state`; empty if it has none.
     pub fn tag_list(&self, state: &State) -> Result<TagList, RepoError> {
         let Some(id) = state.tags else {

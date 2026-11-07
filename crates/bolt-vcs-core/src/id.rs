@@ -12,6 +12,14 @@ impl Id {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// The first 12 hex digits, as lists and messages show an ID.
+    #[must_use]
+    pub fn short_hex(&self) -> String {
+        let mut hex = self.to_hex();
+        hex.truncate(12);
+        hex
+    }
+
     /// Exactly 64 hex characters, either case.
     #[must_use]
     pub fn from_hex(s: &str) -> Option<Id> {

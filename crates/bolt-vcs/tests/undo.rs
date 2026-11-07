@@ -285,6 +285,8 @@ fn undo_of_a_discard_stops_when_the_file_was_edited_again() {
 fn undo_shelve_sets_the_work_in_the_way_aside_and_undoes_in_one_step() {
     let (env, one, goto) = after_a_goto();
     write(&env, "a.txt", "mine\n");
+    // Work out of the step's way stays where it is, and off the shelf.
+    write(&env, "n.txt", "new\n");
     let (_, said) = refused(&env, &["undo"]);
     assert!(said.contains("a.txt"), "{said}");
     let said = ok(&env, &["undo", "--shelve"]);
@@ -292,7 +294,13 @@ fn undo_shelve_sets_the_work_in_the_way_aside_and_undoes_in_one_step() {
     assert!(said.contains("shelf 1"), "{said}");
     // Back on the save left, the edit on a shelf of its own.
     assert_eq!(state(&env).position, Position::OnLine("main".into()));
-    assert_eq!(files(env.root()), holding(TWO));
+    let with_new = |files: &[(&str, &str)]| {
+        let mut wanted = holding(files);
+        wanted.insert("n.txt".into(), b"new\n".to_vec());
+        wanted
+    };
+    assert_eq!(files(env.root()), with_new(TWO));
+    assert_eq!(changed(&env), ["n.txt"]);
     let shelves = state(&env).shelves;
     assert_eq!(shelves.len(), 1);
     let (label, shelf) = shelves[0].clone();
@@ -310,8 +318,32 @@ fn undo_shelve_sets_the_work_in_the_way_aside_and_undoes_in_one_step() {
     assert_eq!(newest.parent, Some(goto));
     // Redo brings the goto back; the shelf stays.
     ok(&env, &["redo"]);
-    assert_eq!(files(env.root()), holding(ONE));
+    assert_eq!(files(env.root()), with_new(ONE));
     assert_eq!(state(&env).shelves, shelves);
+}
+
+#[test]
+fn undo_shelve_stops_at_an_ignored_file_in_the_way_and_stores_nothing() {
+    let env = project(&[("a.txt", "a1\n")]);
+    let one = main_tip(&env);
+    write(&env, "a.txt", "a2\n");
+    write(&env, "out.txt", "saved\n");
+    ok(&env, &["save", "Two"]);
+    ok(&env, &["goto", &one.to_hex()]);
+    // The undo would write out.txt back, where the folder now has a file Bolt ignores; a.txt,
+    // which it writes too, has an edit of its own.
+    write(&env, ".gitignore", "out.txt\n");
+    write(&env, "out.txt", "build output\n");
+    write(&env, "a.txt", "mine\n");
+    let folder = files(env.root());
+    let (at, packs) = env.standing();
+    let (_, said) = refused(&env, &["undo", "--shelve"]);
+    assert!(said.contains("out.txt"), "{said}");
+    assert!(said.contains("can't set them aside"), "{said}");
+    assert!(said.contains("then run bolt undo --shelve again"), "{said}");
+    assert_eq!(files(env.root()), folder);
+    assert_eq!(env.standing(), (at, packs));
+    assert!(state(&env).shelves.is_empty());
 }
 
 #[test]
@@ -396,6 +428,7 @@ fn undo_two_stops_at_the_first_it_cannot_take_and_says_how_many_were_taken() {
     assert!(out.contains("Undid discard"), "{out}");
     assert!(out.contains("Undid 1 of the 2 steps"), "{out}");
     assert!(said.contains("a.txt"), "{said}");
+    assert!(said.contains("so that step changed nothing"), "{said}");
     assert_eq!(fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
     assert_eq!(fs::read(env.root().join("n.txt")).unwrap(), b"new\n");
 }
@@ -438,10 +471,6 @@ fn an_undo_stopped_at_every_write_is_finished_by_the_next_command() {
                 "fault {n}: {path} is neither"
             );
         }
-        let warned = |doc: &serde_json::Value, kind: &str| {
-            let warnings = doc["warnings"].as_array().unwrap();
-            warnings.iter().any(|w| w["kind"] == kind)
-        };
         let unfinished = warned(&json(&env, &["status"]), "switch_unfinished");
         // The next command that changes the project finishes it, and then it is done.
         let next = json(&env, &["discard"]);
@@ -465,6 +494,71 @@ fn an_undo_stopped_at_every_write_is_finished_by_the_next_command() {
             assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
             assert_eq!(newest.action, Action::Undo(goto));
             // Stopped after each of the three writes, at least, and finished later.
+            assert!(finished_later >= 3, "only {finished_later} finished later");
+            break;
+        }
+    }
+}
+
+/// Whether the `--json` document `doc` has a warning of `kind`.
+#[cfg(feature = "fault-injection")]
+fn warned(doc: &serde_json::Value, kind: &str) -> bool {
+    let warnings = doc["warnings"].as_array().unwrap();
+    warnings.iter().any(|w| w["kind"] == kind)
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_undo_shelve_stopped_anywhere_is_finished_by_the_next_command() {
+    use support::copy_dir;
+    let (template, _, goto) = after_a_goto();
+    write(&template, "a.txt", "mine\n");
+    let (old, new) = (holding(ONE), holding(TWO));
+    let mut edited = old.clone();
+    edited.insert("a.txt".into(), b"mine\n".to_vec());
+    let mut finished_later = 0;
+    for n in 1.. {
+        assert!(n < 300, "the undo never finished");
+        let env = Env::empty();
+        copy_dir(template.root(), env.root());
+        let out = env
+            .bolt()
+            .args(["undo", "--shelve"])
+            .env("BOLT_FAULT_AT", n.to_string())
+            .output()
+            .unwrap();
+        let crashed = text(&out.stderr).contains("injected crash");
+        // Every file is wholly old or new, or the edit.
+        for (path, bytes) in files(env.root()) {
+            let known = [&old, &new, &edited].map(|f| f.get(&path) == Some(&bytes));
+            assert!(known.contains(&true), "fault {n}: {path} is none of them");
+        }
+        let unfinished = warned(&json(&env, &["status"]), "switch_unfinished");
+        // A command that changes nothing of its own finishes it.
+        let next = json(&env, &["discard", "dir/c.txt"]);
+        assert_eq!(next["error"], serde_json::Value::Null, "fault {n}: {next}");
+        assert_eq!(warned(&next, "switch_finished"), unfinished, "fault {n}");
+        assert!(!journal_exists(&env), "fault {n}");
+        let (at, newest) = head(&env);
+        let shelves = &newest.state.shelves;
+        if newest.action == Action::Undo(goto) {
+            // Undone, with the edit on its shelf.
+            assert_eq!(files(env.root()), new, "fault {n}");
+            assert_eq!(shelves.len(), 1, "fault {n}");
+            assert_eq!(saved_files(&env, shelves[0].1), edited, "fault {n}");
+        } else {
+            // Not begun: the edit is where it was, and no shelf was made.
+            assert_eq!(at, goto, "fault {n}");
+            assert_eq!(files(env.root()), edited, "fault {n}");
+            assert!(shelves.is_empty(), "fault {n}");
+        }
+        if unfinished {
+            finished_later += 1;
+        }
+        if !crashed {
+            assert!(n > 1, "no fault point was reached");
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+            assert_eq!(newest.action, Action::Undo(goto));
             assert!(finished_later >= 3, "only {finished_later} finished later");
             break;
         }
@@ -545,4 +639,23 @@ fn undo_json_lists_the_steps_taken() {
     assert_eq!(doc["redone"].as_array().unwrap().len(), 0, "{doc}");
     assert!(doc["error"]["message"].as_str().unwrap().contains("b.txt"));
     assert!(doc["error"]["hint"].as_str().unwrap().contains("--shelve"));
+}
+
+#[test]
+fn a_redo_that_fails_after_a_step_lists_that_step_in_its_document() {
+    let (env, _, _) = after_a_goto();
+    ok(&env, &["undo", "2"]);
+    write(&env, "b.txt", "mine\n");
+    // The save comes back; the goto after it would write over b.txt.
+    let out = env.bolt().args(["redo", "2", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let redone = doc["redone"].as_array().unwrap();
+    assert_eq!(redone.len(), 1, "{doc}");
+    assert_eq!(redone[0]["command"], "save");
+    assert_eq!(doc["shelved"], serde_json::json!([]));
+    assert!(doc["error"]["message"].as_str().unwrap().contains("b.txt"));
+    // The step taken stands.
+    assert!(matches!(head(&env).1.action, Action::Redo(_)));
+    assert_eq!(fs::read(env.root().join("b.txt")).unwrap(), b"mine\n");
 }

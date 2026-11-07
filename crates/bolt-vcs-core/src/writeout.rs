@@ -555,9 +555,10 @@ pub fn carry_out(
 }
 
 /// Finishes a switch that a crash or a stop left in `state/journal`, before a command changes
-/// anything (decision 049): never rolled back. `None` when there was none, or when `head`
-/// already names its entry and only the journal was left. A switch that still can't finish is
-/// an error, the journal kept, so no command builds on a half-switched folder.
+/// anything (decision 049): never rolled back. `None` when there was none. When `head` already
+/// names its entry, only the journal was left: it is removed, and what was done is empty. A
+/// switch that still can't finish is an error, the journal kept, so no command builds on a
+/// half-switched folder.
 pub fn finish_interrupted(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -568,7 +569,7 @@ pub fn finish_interrupted(
     let head = repo.head()?;
     if head == journal.target {
         Journal::remove(repo, lock)?;
-        return Ok(None);
+        return Ok(Some(Applied::default()));
     }
     let journal = usable(repo, journal, head)?;
     let drive = drive::probe(repo.tmp_folder())?;

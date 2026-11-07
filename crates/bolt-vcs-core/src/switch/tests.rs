@@ -140,6 +140,44 @@ fn goto_records_the_save_it_left_and_the_one_it_went_to() {
 }
 
 #[test]
+fn a_goto_writes_a_link_through_a_folder_the_folder_already_held() {
+    let (dir, mut repo) = saved(&[("a.txt", b"a")]);
+    let root = dir.path();
+    if !symlink(Path::new("a.txt"), &root.join("probe")) {
+        return;
+    }
+    fs::remove_file(root.join("probe")).unwrap();
+    let old = repo.current().unwrap().1.state.lines["main"];
+    plant_save(
+        &mut repo,
+        &[
+            ("a.txt", EntryKind::File, b"a"),
+            ("d/x.txt", EntryKind::File, b"x"),
+            ("l", EntryKind::Symlink, b"d/x.txt"),
+        ],
+    );
+    let main = repo.current().unwrap().1.state.lines["main"];
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (head, mut entry) = repo.current().unwrap();
+    entry.parent = Some(head);
+    entry.state.lines.insert("old".into(), old);
+    entry.state.position = Position::OnLine("old".into());
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
+    // The folder already holds the target's d, so the goto writes only the link through it.
+    write_all(root, &[("d/x.txt", b"x")]);
+    let target = Target::Line("main".into());
+    let done = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
+    assert!(done.applied.placeholders.is_empty(), "{done:?}");
+    let link = fs::symlink_metadata(root.join("l")).unwrap();
+    assert!(link.file_type().is_symlink(), "written as a plain file");
+    assert_eq!(fs::read(root.join("l")).unwrap(), b"x");
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    assert_eq!(change.to, main);
+}
+
+#[test]
 fn a_goto_that_writes_nothing_records_no_folder_change() {
     let (_dir, mut repo) = two_lines();
     let old = repo.current().unwrap().1.state.lines["old"];

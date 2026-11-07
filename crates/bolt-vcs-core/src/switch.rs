@@ -18,7 +18,6 @@ use crate::scope::within;
 use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
 use crate::text::escape;
-use crate::undo::short_entry;
 use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
@@ -82,18 +81,18 @@ pub enum SwitchError {
         escape(path, false)
     )]
     NoMatch { path: String },
-    #[error(
-        "Your unsaved changes, or files Bolt ignores, are where the {} would write, so it changed \
-         nothing:{}",
-        if *redo { "redo" } else { "undo" },
-        listed(paths.iter().take(NAMED), paths.len() as u64)
-    )]
-    InTheWayOfStep { paths: Vec<String>, redo: bool },
+    /// What is where an undo or redo would write; `shelve` when `--shelve` set aside what it could.
+    #[error("{}", in_the_way_of_step(paths, *redo, *shelve))]
+    InTheWayOfStep {
+        paths: Vec<String>,
+        redo: bool,
+        shelve: bool,
+    },
     /// The saves of a step can't be read: `tidy` removed them, or they were lost.
     #[error(
         "The step of diary entry {} can't be undone or redone: what it changed can't be read \
          ({detail}).",
-        short_entry(step)
+        step.short_hex()
     )]
     StepGone { step: Id, detail: String },
     #[error(transparent)]
@@ -130,17 +129,17 @@ impl SwitchError {
             SwitchError::NoMatch { .. } => {
                 Some("Check the path: bolt status lists your unsaved changes.".to_owned())
             }
-            SwitchError::InTheWayOfStep { redo, .. } => {
-                let (command, why) = if *redo {
-                    (
-                        "redo",
-                        "each is a new step, and a new step clears what redo can bring back",
-                    )
+            SwitchError::InTheWayOfStep { redo, shelve, .. } => {
+                let command = if *redo { "redo" } else { "undo" };
+                if *shelve {
+                    return Some(format!(
+                        "Move them somewhere else, then run bolt {command} --shelve again."
+                    ));
+                }
+                let why = if *redo {
+                    "each is a new step, and a new step clears what redo can bring back"
                 } else {
-                    (
-                        "undo",
-                        "each is a step of its own, which the next undo would take back",
-                    )
+                    "each is a step of its own, which the next undo would take back"
                 };
                 Some(format!(
                     "Run bolt {command} --shelve to set your changes there aside on a new shelf, \
@@ -151,7 +150,8 @@ impl SwitchError {
             }
             SwitchError::StepGone { .. } => Some(
                 "bolt tidy removes what steps older than the undo window changed, and a damaged \
-                 store can lose it too, so undo and redo can't take this step any more."
+                 store can lose it too, so undo and redo can't go past this step. To get back to \
+                 an older save, find it with bolt history and go to it with bolt goto."
                     .to_owned(),
             ),
             SwitchError::Resolve(e) => e.hint(),
@@ -163,7 +163,24 @@ impl SwitchError {
 
 /// The warnings that name entries left unwritten or links written as files: one of each per
 /// command, whichever switch they came from.
-const LISTED: [&str; 2] = [warning::PLACEHOLDERS_WRITTEN, warning::NOT_WRITTEN_HERE];
+pub(crate) const LISTED: [&str; 2] = [warning::PLACEHOLDERS_WRITTEN, warning::NOT_WRITTEN_HERE];
+
+/// Why an undo or redo step didn't happen, naming what is where it would write.
+fn in_the_way_of_step(paths: &[String], redo: bool, shelve: bool) -> String {
+    let command = if redo { "redo" } else { "undo" };
+    let (what, aside) = if shelve {
+        (
+            "Files Bolt ignores, or unsaved links that could come back only as plain files, are",
+            ", and --shelve can't set them aside",
+        )
+    } else {
+        ("Your unsaved changes, or files Bolt ignores, are", "")
+    };
+    format!(
+        "{what} where the {command} would write{aside}, so that step changed nothing:{}",
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )
+}
 
 /// Moves the project to `target`. Unsaved work the switch would overwrite stops it before
 /// anything changes; the rest stays in the folder. `git_excludes` is the user's own Git ignore
@@ -304,8 +321,15 @@ fn throw_away(
     crate::fsio::act_point("discard:planned");
     let kept_from = kept_on(&entry.state, from, command, paths.unwrap_or_default(), who);
     let mut packs = repo.new_packs()?;
-    let (folder_change, safety_copies) =
-        kept::switch_saves(repo, &plan.actions, from, &kept_from, drive, &mut packs)?;
+    let (folder_change, safety_copies) = kept::switch_saves(
+        repo,
+        &plan.actions,
+        from,
+        from,
+        &kept_from,
+        drive,
+        &mut packs,
+    )?;
     let to_make = Switch {
         head,
         action: Action::Command,
@@ -411,7 +435,7 @@ fn go(
     let mut packs = repo.new_packs()?;
     let kept_from = kept_on(&entry.state, from, command, &[], who);
     let (folder_change, safety_copies) =
-        kept::switch_saves(repo, &plan.actions, to, &kept_from, drive, &mut packs)?;
+        kept::switch_saves(repo, &plan.actions, from, to, &kept_from, drive, &mut packs)?;
     let to_make = Switch {
         head,
         action: Action::Command,

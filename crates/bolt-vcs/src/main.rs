@@ -13,7 +13,7 @@ use bolt_core::config::{
     ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
     load_identity, now_person,
 };
-use bolt_core::diary::{Action, DiaryEntry, Position};
+use bolt_core::diary::{Action, Position};
 use bolt_core::diff::{count_changes, for_each_change};
 use bolt_core::fsio::fault_point;
 use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
@@ -21,7 +21,6 @@ use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
-use bolt_core::pack::ObjectKind;
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
@@ -1162,10 +1161,7 @@ fn undo_command(
     } else {
         ("Undid", "undone", "undo")
     };
-    let mut warnings: Vec<Warning> = taken
-        .iter()
-        .flat_map(|t| t.applied.warnings.iter().cloned())
-        .collect();
+    let mut warnings = undo::warnings(&taken);
     if json {
         warnings.extend(repo.store().warnings());
         let warnings = told_once(warnings);
@@ -1235,8 +1231,8 @@ fn undo_command(
     }
 }
 
-/// `warnings` with each told once, in the order first met: every step reads the folder, so what
-/// is wrong there would otherwise be told once a step.
+/// `warnings` with each told once, in the order first met: naming several saves can meet the same
+/// problem more than once.
 fn told_once(warnings: Vec<Warning>) -> Vec<Warning> {
     let mut told: Vec<Warning> = Vec::new();
     for w in warnings {
@@ -1256,11 +1252,7 @@ fn named_save(repo: &Repository, id: &Id, warnings: &mut Vec<Warning>) -> (Strin
             let first = save.message.lines().next().unwrap_or_default().to_owned();
             (short, Some(first))
         }
-        Err(_) => {
-            let mut hex = id.to_hex();
-            hex.truncate(12);
-            (hex, None)
-        }
+        Err(_) => (id.short_hex(), None),
     }
 }
 
@@ -1273,11 +1265,7 @@ fn finished_switch(repo: &Repository) -> Option<String> {
         Action::Undo(step) => ("undo", step),
         Action::Redo(step) => ("redo", step),
     };
-    let bytes = repo
-        .store()
-        .read_record(&step, ObjectKind::DiaryEntry)
-        .ok()?;
-    let step = DiaryEntry::decode(&bytes).ok()?;
+    let step = repo.entry(&step).ok()?;
     Some(format!("{what} of {}", escape(&step.command, false)))
 }
 

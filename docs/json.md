@@ -161,15 +161,15 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `bolt undo --json` and `bolt redo --json`
 
-`bolt undo [N]` takes back the newest step not yet undone, or the newest `N` one after another, and `bolt redo [N]` brings back the step undone last, or the last `N` ([decision 070](decisions/070-undo-and-redo-step-through-the-diary.md)). Every command that changed something is a step; undos and redos aren't, and a new step clears what redo can bring back. Each step taken is a diary entry of its own. Undoing a step puts back the lines, where the project is, the tags and the server lines as they were just before it, and redoing it puts back its own; both write back, or write again, what the step did to the files, at exactly the paths it wrote, and other unsaved work stays as it is ([decision 071](decisions/071-a-step-records-its-change-to-the-folder.md)). Shelves stay, except one a `shelf` or `unshelf` step added or removed. With nothing (more) to undo or redo, the command succeeds with fewer steps than asked for, or none; the diary's first entry can never be undone. Unsaved work or a file Bolt ignores where a step would write, or a step whose saves can't be read any more (`tidy` removed them, or they were lost), stops the command before that step changes anything (exit code 1). With `--shelve`, the unsaved work in a step's way is set aside on a new shelf as part of that step, which is then taken; ignored files, and unsaved links that could come back only as plain files, still stop it. After finishing a switch that a crash or a file in use stopped, `undo` and `redo` take no step (`finished` is `true`), so running the command again takes one more ([decision 075](decisions/075-crash-recovery.md)).
+`bolt undo [N]` takes back the newest step not yet undone, or the newest `N` one after another, and `bolt redo [N]` brings back the step undone last, or the last `N` ([decision 070](decisions/070-undo-and-redo-step-through-the-diary.md)). Every command that changed something is a step; undos and redos aren't, and a new step clears what redo can bring back. Each step taken is a diary entry of its own. Undoing a step puts back the lines, where the project is, the tags and the server lines as they were just before it, and redoing it puts back its own; both write back, or write again, what the step did to the files, at exactly the paths it wrote, and other unsaved work stays as it is ([decision 071](decisions/071-a-step-records-its-change-to-the-folder.md)). Shelves stay, except one a `shelf` or `unshelf` step added or removed. With nothing (more) to undo or redo, the command succeeds with fewer steps than asked for, or none; the diary's first entry can never be undone. Unsaved work or a file Bolt ignores where a step would write, or a step whose saves can't be read any more (`tidy` removed them, or they were lost), stops the command before that step changes anything (exit code 1). With `--shelve`, the unsaved work in a step's way is set aside on a new shelf as part of that step, which is then taken; ignored files, and unsaved links that could come back only as plain files, still stop it, and then nothing is set aside. After finishing a switch that a crash or a file in use stopped, `undo` and `redo` take no step (`finished` is `true`), so running the command again takes one more ([decision 075](decisions/075-crash-recovery.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
 | `bolt_json` | number | `1` |
 | `undone` (`undo`) or `redone` (`redo`) | list of step | The steps taken, in the order they were taken. `[]` if none. |
-| `finished` | boolean | `true` if the command finished a stopped switch instead of taking a step. |
+| `finished` | boolean | `true` if the command finished a stopped switch instead of taking a step. A switch that had taken effect, with only its journal left to remove, counts as one. |
 | `shelved` | list | The shelves `--shelve` made, in the order it made them, each `{"label": …, "save": …}`: the shelf's number (a string), and its save's fingerprint (64 hex digits). `[]` if none. |
-| `position` | object | Where the project is now, as in `status`. |
+| `position` | object or `null` | Where the project is now, as in `status`. `null` only if Bolt couldn't read the project's newest diary entry back after the command, which did its work all the same. |
 | `warnings` | list | See §4. |
 
 **A step:**
@@ -193,7 +193,7 @@ Saving gives one of two documents, told apart by `result`.
 | `shelf_gone` | `label`, `save` | A shelf left the list. |
 | `tags` | | The tags changed. |
 | `server_lines` | | The server lines changed. |
-| `files` | `from`, `to` | The folder was switched between two saves (each 64 hex digits): what it held at the paths written, and what was written there. Either can be a save made only for this. |
+| `files` | `from`, `to` | The folder was switched between two saves (each 64 hex digits): what it held before and what it holds after, at every path the step touched, whether it wrote there or the folder already held what it would write. Either can be a save made only for this. |
 
 A step that stops the command fails it with exit code 1. Its document is the error document of §5 with `undone` or `redone` and `shelved` added, which list the steps taken, and the shelves made, before it stopped.
 

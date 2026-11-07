@@ -2,6 +2,7 @@
 //! with what each did to the folder written back or written again.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
@@ -9,13 +10,13 @@ use crate::drive::Drive;
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::kept;
-use crate::pack::ObjectKind;
-use crate::repo::{ChangeLock, RepoError, Repository, damaged};
+use crate::repo::{ChangeLock, Repository};
 use crate::save::Person;
-use crate::snapshot::SaveError;
-use crate::store::StoreError;
+use crate::scope::within;
+use crate::store::{StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
+use crate::warning::Warning;
 use crate::writeout::{self, Applied};
 
 /// What one step taken did.
@@ -129,6 +130,43 @@ pub struct UndoError {
     pub error: SwitchError,
 }
 
+impl fmt::Display for UndoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for UndoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
+/// The warnings of the steps taken, as one command's: each told once, with one for every entry
+/// left unwritten and one for every link written as a file, whichever step they came from.
+#[must_use]
+pub fn warnings(taken: &[Taken]) -> Vec<Warning> {
+    let (mut not_written, mut placeholders) = (BTreeSet::new(), BTreeSet::new());
+    let mut told: Vec<Warning> = Vec::new();
+    for t in taken {
+        not_written.extend(t.applied.not_written.iter().cloned());
+        placeholders.extend(t.applied.placeholders.iter().cloned());
+        for w in &t.applied.warnings {
+            if !switch::LISTED.contains(&w.kind) && !told.contains(w) {
+                told.push(w.clone());
+            }
+        }
+    }
+    let listed = |paths: BTreeSet<String>| paths.into_iter().collect::<Vec<_>>();
+    if !not_written.is_empty() {
+        told.push(writeout::not_written_warning(&listed(not_written)));
+    }
+    if !placeholders.is_empty() {
+        told.push(writeout::placeholders_warning(&listed(placeholders)));
+    }
+    told
+}
+
 /// What to undo or redo, and how.
 pub struct StepRequest<'a> {
     /// How many steps, one diary entry each.
@@ -158,14 +196,6 @@ pub fn redo(
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<UndoOutcome, UndoError> {
     take(repo, req, on_wait, true)
-}
-
-/// A diary entry's ID as lists and messages show it: its first 12 hex digits.
-#[must_use]
-pub fn short_entry(id: &Id) -> String {
-    let mut hex = id.to_hex();
-    hex.truncate(12);
-    hex
 }
 
 fn take(
@@ -227,7 +257,7 @@ fn take_one(
 ) -> Result<Option<(Taken, Option<Shelf>)>, SwitchError> {
     let (head, now) = repo.current()?;
     let next = {
-        let mut read = |id: &Id| read_entry(repo, id);
+        let mut read = |id: &Id| repo.entry(id);
         if redo {
             timeline::undone_steps(head, &mut read)?.into_iter().next()
         } else {
@@ -238,7 +268,7 @@ fn take_one(
         return Ok(None);
     };
     let parent = match entry.parent {
-        Some(id) => Some(read_entry(repo, &id)?.state),
+        Some(id) => Some(repo.entry(&id)?.state),
         None => None,
     };
     // Undo puts back the state before the step, and redo the step's own. The diary's first
@@ -268,6 +298,7 @@ fn take_one(
     let command = command(redo);
     let (mut shelf, mut planned, mut folder_change, mut packs) = (None, None, None, None);
     if let Some(change) = entry.folder_change {
+        saves_readable(repo, step, change)?;
         // Undo switches from what the step wrote back to what the folder held, redo the other way.
         let (mut from, to) = if redo {
             (change.from, change.to)
@@ -275,37 +306,37 @@ fn take_one(
             (change.to, change.from)
         };
         let drive = repo.drive()?;
+        let current = tip_of(&now)?;
         let ignored = req.git_excludes;
-        let mut plan = writeout::plan(repo, from, to, None, false, drive, ignored)
-            .map_err(|e| step_gone(step, e))?;
+        let mut plan = writeout::plan(repo, from, to, None, false, drive, ignored)?;
         if !plan.collisions.is_empty() && req.shelve {
-            let aside = SetAside {
-                current: tip_of(&now)?,
+            let shelving = Shelving {
+                current,
                 from,
                 state: &now.state,
                 req,
-                command,
+                redo,
                 drive,
             };
-            if let Some((made, from_with_it)) = aside.make(repo, lock, &plan.collisions)? {
-                let label = free_label(&state.shelves);
-                state.shelves.insert(0, (label.clone(), made));
-                shelf = Some((label, made));
-                from = from_with_it;
-                plan = writeout::plan(repo, from, to, None, false, drive, ignored)
-                    .map_err(|e| step_gone(step, e))?;
-            }
+            let (made, from_with_it) = shelving.set_aside(repo, lock, &plan.collisions)?;
+            let label = free_label(&state.shelves);
+            state.shelves.insert(0, (label.clone(), made));
+            shelf = Some((label, made));
+            from = from_with_it;
+            plan = writeout::plan(repo, from, to, None, false, drive, ignored)?;
         }
         if !plan.collisions.is_empty() {
             return Err(SwitchError::InTheWayOfStep {
                 paths: plan.collisions,
                 redo,
+                shelve: req.shelve,
             });
         }
         let mut made = repo.new_packs()?;
-        let kept_from = switch::kept_on(&now.state, from, command, &[], req.who);
+        let kept_from = switch::kept_on(&now.state, current, command, &[], req.who);
+        let actions = &plan.actions;
         folder_change =
-            kept::switch_saves(repo, &plan.actions, to, &kept_from, drive, &mut made)?.0;
+            kept::switch_saves(repo, actions, from, to, &kept_from, drive, &mut made)?.0;
         packs = Some(made);
         planned = Some((plan, drive));
     }
@@ -358,29 +389,32 @@ fn take_one(
 }
 
 /// What `--shelve` needs to set the unsaved work in a step's way aside.
-struct SetAside<'a> {
+struct Shelving<'a> {
     /// The save the project is on, which the shelf is made on.
     current: Id,
     /// The save the step's switch is planned from.
     from: Id,
     state: &'a State,
     req: &'a StepRequest<'a>,
-    command: &'static str,
+    redo: bool,
     drive: Drive,
 }
 
-impl SetAside<'_> {
+impl Shelving<'_> {
     /// Makes the shelf of the unsaved work at `collisions`, and the save to plan the step from
-    /// instead, holding that work too so that the step overwrites it; both are stored at once for
-    /// the planner to read. `None` when none of it is unsaved work.
-    fn make(
+    /// instead, holding that work too so that the step overwrites it. Both are stored at once,
+    /// for the planner to read, unless something in the way can't be set aside (a file Bolt
+    /// ignores, or an unsaved link that could come back only as a plain file): then nothing is
+    /// stored, and the error names what can't be.
+    fn set_aside(
         &self,
         repo: &mut Repository,
         lock: &ChangeLock,
         collisions: &[String],
-    ) -> Result<Option<(Id, Id)>, SwitchError> {
-        let (current, drive) = (self.current, self.drive);
+    ) -> Result<(Id, Id), SwitchError> {
+        let (current, drive, command) = (self.current, self.drive, command(self.redo));
         // A discard of those paths throws away exactly the unsaved work there.
+        let ignored = self.req.git_excludes;
         let mut work = writeout::plan(
             repo,
             current,
@@ -388,22 +422,37 @@ impl SetAside<'_> {
             Some(collisions),
             true,
             drive,
-            self.req.git_excludes,
+            ignored,
         )?;
-        // Links that could come back only as plain files stay, and still stop the step.
+        // Links that could come back only as plain files stay where they are.
         let links = kept::links_to_leave(repo, &work.actions, current, drive)?;
         let stays = kept::goes_with(links.iter().map(String::as_str), drive);
         work.actions.retain(|a| !stays(&a.path));
         let who = self.req.who;
-        let mut shelf = switch::kept_on(self.state, current, self.command, &[], who);
-        shelf.message = format!("Set aside by {}", self.command);
-        let onto = switch::kept_on(self.state, self.from, self.command, &[], who);
+        let mut shelf = switch::kept_on(self.state, current, command, &[], who);
+        shelf.message = format!("Set aside by {command}");
+        let onto = switch::kept_on(self.state, self.from, command, &[], who);
         let mut packs = repo.new_packs()?;
-        let made = kept::set_aside(repo, &work.actions, &shelf, &onto, drive, &mut packs)?;
-        if made.is_some() {
-            repo.store_packs(lock, packs)?;
+        let aside = kept::set_aside(repo, &work.actions, &shelf, &onto, drive, &mut packs)?;
+        // Something set aside at a collision, below it or above it takes it out of the way.
+        let paths = aside.as_ref().map_or(&[][..], |a| a.paths.as_slice());
+        let taken_out = |c: &str| paths.iter().any(|p| within(p, c) || within(c, p));
+        let left: Vec<String> = collisions
+            .iter()
+            .filter(|c| !taken_out(c))
+            .cloned()
+            .collect();
+        match aside {
+            Some(aside) if left.is_empty() => {
+                repo.store_packs(lock, packs)?;
+                Ok((aside.shelf, aside.step_from))
+            }
+            _ => Err(SwitchError::InTheWayOfStep {
+                paths: left,
+                redo: self.redo,
+                shelve: true,
+            }),
         }
-        Ok(made)
     }
 }
 
@@ -455,29 +504,29 @@ fn free_label(shelves: &[(String, Id)]) -> String {
     n.to_string()
 }
 
-/// A diary entry the walk needs. One the store lacks or can't decode is damage, named.
-fn read_entry(repo: &Repository, id: &Id) -> Result<DiaryEntry, RepoError> {
-    let bytes = match repo.store().read_record(id, ObjectKind::DiaryEntry) {
-        Ok(bytes) => bytes,
-        Err(StoreError::Missing(_)) => {
-            return Err(damaged(format!("the diary has no entry {id}")));
-        }
-        Err(e) => return Err(e.into()),
-    };
-    DiaryEntry::decode(&bytes).map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
-}
-
-/// A step's saves the store can't give while planning: `tidy` removed them, or they were lost.
-fn step_gone(step: Id, e: SaveError) -> SwitchError {
-    match e {
-        SaveError::Repo(RepoError::Store(_) | RepoError::Damaged { .. } | RepoError::Decode(_)) => {
+/// Reads the two saves of a step's folder change before anything is planned. One the store
+/// lacks, can't decode or holds only damaged copies of is gone (`tidy` removed it, or it was
+/// lost), and the step can't be taken; any other failure is told as itself.
+fn saves_readable(repo: &Repository, step: Id, change: FolderChange) -> Result<(), SwitchError> {
+    for save in [change.from, change.to] {
+        let Err(e) = repo.store().save(&save, repo.signatures_allowed()) else {
+            continue;
+        };
+        let gone = match &e {
+            StoreError::Missing(_) | StoreError::Decode(_) | StoreError::WrongKind { .. } => true,
+            StoreError::Pack(e) => is_damage(e),
+            StoreError::SaveTooLarge { .. } => false,
+        };
+        return Err(if gone {
             SwitchError::StepGone {
                 step,
                 detail: e.to_string(),
             }
-        }
-        e => e.into(),
+        } else {
+            e.into()
+        });
     }
+    Ok(())
 }
 
 #[cfg(test)]

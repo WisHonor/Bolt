@@ -1,8 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
+use crate::journal::Journal;
+use crate::repo::RepoError;
 use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
 use crate::switch::discard;
 use crate::test_support::symlink;
+use crate::warning;
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -201,8 +204,101 @@ fn a_step_whose_saves_are_gone_is_named_and_nothing_changes() {
         SwitchError::StepGone { step: named, .. } => assert_eq!(*named, step),
         other => panic!("{other:?}"),
     }
-    assert!(failed.error.to_string().contains(&short_entry(&step)));
+    assert!(failed.error.to_string().contains(&step.short_hex()));
     assert_eq!(repo.current().unwrap().0, step);
+}
+
+#[test]
+fn a_journal_left_after_its_switch_counts_as_a_stop_finished() {
+    let (_dir, mut repo) = saved(&[("a.txt", b"a")]);
+    let before = repo.head().unwrap();
+    let step = plant(&mut repo, "save", |_| {});
+    // The switch took effect (`head` names its entry), but its journal was left behind.
+    {
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let left = Journal {
+            target: step,
+            from: before,
+            actions: vec![],
+        };
+        left.write(&repo, &lock).unwrap();
+    }
+    let who = who();
+    let done = undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(done.finished);
+    assert!(done.taken.is_empty());
+    assert_eq!(repo.head().unwrap(), step);
+    assert_eq!(Journal::read(&repo).unwrap(), None);
+    // Run again, it takes the step.
+    let done = undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(!done.finished);
+    assert_eq!(done.taken[0].step, step);
+}
+
+#[test]
+fn a_missing_diary_entry_is_damage_that_names_it() {
+    let (_dir, mut repo) = saved(&[("a.txt", b"a")]);
+    let missing = Id([9; 32]);
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (_, mut entry) = repo.current().unwrap();
+    entry.parent = Some(missing);
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
+    let who = who();
+    let failed = undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap_err();
+    match failed.error {
+        SwitchError::Repo(RepoError::Damaged { detail }) => {
+            assert!(detail.contains(&missing.to_hex()), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_steps_warnings_are_told_as_one_commands() {
+    let state = State {
+        lines: BTreeMap::new(),
+        tags: None,
+        position: Position::AtSave(Id([0; 32])),
+        shelves: vec![],
+        server_lines: None,
+    };
+    let entry = DiaryEntry {
+        parent: None,
+        action: Action::Command,
+        command: "goto".into(),
+        who: who(),
+        bolt_version: String::new(),
+        state: state.clone(),
+        folder_change: None,
+    };
+    let skipped = Warning::new(warning::GITIGNORE_SKIPPED, "skipped");
+    let step = |placeholder: &str| {
+        let placeholders = vec![placeholder.to_owned()];
+        let applied = Applied {
+            warnings: vec![
+                writeout::placeholders_warning(&placeholders),
+                skipped.clone(),
+            ],
+            placeholders,
+            ..Applied::default()
+        };
+        Taken {
+            step: Id([1; 32]),
+            entry: entry.clone(),
+            before: state.clone(),
+            after: state.clone(),
+            effects: vec![],
+            applied,
+        }
+    };
+    let both = ["a".to_owned(), "b".to_owned()];
+    let one_warning = writeout::placeholders_warning(&both);
+    assert_eq!(
+        warnings(&[step("a"), step("b")]),
+        [skipped.clone(), one_warning]
+    );
 }
 
 #[test]
