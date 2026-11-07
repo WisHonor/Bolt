@@ -232,23 +232,25 @@ impl Store {
     }
 
     /// The ID of every index line of `kind`. A pack that can't be opened or searched for a reason
-    /// other than damage is passed over, with its warning; damage is the error.
+    /// other than damage is passed over whole, with its warning; damage is the error.
     pub(crate) fn ids_of(&self, kind: ObjectKind) -> Result<HashSet<Id>, StoreError> {
         let mut ids = HashSet::new();
         let (mut skipped, mut unread) = (Vec::new(), Vec::new());
         self.each_pack(&mut skipped, |n, pack| {
+            // Kept only once the whole index has read: the lines before a failure name entries
+            // that may not read either.
+            let mut found = Vec::new();
             for e in pack.entries() {
                 match e {
-                    Ok(e) if e.kind == kind => {
-                        ids.insert(e.id);
-                    }
+                    Ok(e) if e.kind == kind => found.push(e.id),
                     Ok(_) => {}
                     Err(e) => {
                         unread.push((n, e));
-                        break;
+                        return Ok(ControlFlow::Continue(()));
                     }
                 }
             }
+            ids.extend(found);
             Ok::<_, StoreError>(ControlFlow::<()>::Continue(()))
         })?;
         for (n, e) in unread {

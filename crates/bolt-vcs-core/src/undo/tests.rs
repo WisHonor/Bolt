@@ -650,3 +650,61 @@ fn an_entry_is_named_by_digits_no_other_entry_starts_with() {
     let none = entry_named("abababac", newer, &mut read);
     assert!(matches!(none, Err(SwitchError::NoEntry { .. })), "{none:?}");
 }
+
+/// The packs in the store, by path.
+fn pack_paths(repo: &Repository) -> HashSet<std::path::PathBuf> {
+    let listed = fs::read_dir(repo.packs_dir()).unwrap();
+    listed.map(|e| e.unwrap().path()).collect()
+}
+
+/// A pack whose index fails part way for a reason other than damage, here cut short while open,
+/// is passed over whole with a lost `head`: the entries read before the failure aren't offered.
+#[test]
+fn a_lost_head_passes_over_a_pack_whose_index_fails_part_way() {
+    let (dir, mut repo) = saved(&[("a.txt", b"a")]);
+    let (head, entry) = repo.current().unwrap();
+    // Two crashed commands' entries, one after the other, alone in a pack.
+    let before = pack_paths(&repo);
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let first = DiaryEntry {
+        parent: Some(head),
+        ..entry
+    };
+    let one = packs
+        .add_record(ObjectKind::DiaryEntry, &first.encode())
+        .unwrap();
+    let second = DiaryEntry {
+        parent: Some(one),
+        ..first
+    };
+    repo.store_entry(&lock, packs, &second).unwrap();
+    drop(lock);
+    let [cut]: [_; 1] = pack_paths(&repo)
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    fs::remove_file(dir.path().join(".bolt/state/head")).unwrap();
+    let mut repo = Repository::open(dir.path()).unwrap();
+    // Opened now, and kept open; then cut after its first index line: the trailer is 48 bytes,
+    // and an index line 25.
+    repo.entry(&one).unwrap();
+    let len = fs::metadata(&cut).unwrap().len();
+    let file = fs::OpenOptions::new().write(true).open(&cut).unwrap();
+    file.set_len(len - 48 - 25).unwrap();
+    drop(file);
+    let ends: Vec<Id> = stopped_at(&repo).unwrap().iter().map(|e| e.entry).collect();
+    assert_eq!(ends, [head]);
+    let warnings = repo.store().warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].kind, warning::PACK_UNREADABLE);
+    let name = cut.file_name().unwrap().to_str().unwrap();
+    assert!(warnings[0].message.contains(name), "{warnings:?}");
+    // And it is picked up from the others.
+    let who = who();
+    let done = undo_to(&mut repo, &head.to_hex()[..8], &one_step(&who), &mut |_| {}).unwrap();
+    assert!(done.head_lost);
+    assert_eq!(repo.current().unwrap().1.parent, Some(head));
+}
