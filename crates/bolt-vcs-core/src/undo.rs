@@ -13,6 +13,7 @@ use crate::id::{Id, is_hex_start};
 use crate::kept;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
+use crate::shelf::free_label;
 use crate::store::{StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
@@ -827,15 +828,6 @@ fn restore_shelves(
         shelves.insert(at, (label, save));
         at += 1;
     }
-}
-
-/// The smallest number from 1 that no shelf has as its label.
-fn free_label(shelves: &[(String, Id)]) -> String {
-    let mut n = 1usize;
-    while shelves.iter().any(|(label, _)| *label == n.to_string()) {
-        n += 1;
-    }
-    n.to_string()
 }
 
 /// Reads the two saves of a step's folder change before anything is planned. One the store

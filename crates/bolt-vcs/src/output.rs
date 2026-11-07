@@ -9,6 +9,7 @@ use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
+use bolt_core::shelf::ShelfInfo;
 use bolt_core::text::{escape, thousands};
 use bolt_core::undo::{Effect, Taken};
 use bolt_core::warning::{self, Warning};
@@ -300,6 +301,36 @@ pub fn entry_line(
         let _ = write!(line, ": {}", parts.join(", "));
     }
     line
+}
+
+/// A shelf as `bolt shelf --list --json` gives it (docs/json.md, "A shelf").
+pub fn shelf_json(s: &ShelfInfo) -> Value {
+    json!({
+        "label": s.label,
+        "save": s.save.to_hex(),
+        "message": s.message,
+        "line": s.line,
+        "saver": person_json(&s.saver),
+        "files": s.files,
+    })
+}
+
+/// A shelf as `bolt shelf --list` shows it: its number, right-aligned to `width`, when it was
+/// made, on which line, how many files it changes, and its message's first line.
+pub fn shelf_line(s: &ShelfInfo, width: usize, now_ms: i64) -> String {
+    let label = escape(&s.label, false);
+    let when = relative_time(s.saver.time_ms, s.saver.tz_offset_min, now_ms);
+    let at = match &s.line {
+        Some(line) => format!("on {}", escape(line, false)),
+        None => "at a save".to_owned(),
+    };
+    let files = match s.files {
+        0 => "only folders".to_owned(),
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
+    let title = escape(s.message.lines().next().unwrap_or_default(), false);
+    format!("{label:>width$}  {when}  {at}  {files}  \"{title}\"")
 }
 
 /// A save named, then its message's first line in quotes if it can be read.

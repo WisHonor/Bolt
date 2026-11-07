@@ -61,12 +61,13 @@ pub enum SwitchError {
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
     Collisions { paths: Vec<String> },
+    /// `command` is the one to run again: `discard` or `shelf`.
     #[error(
-        "Something is in the way where discarded files would go back (ignored, or new since \
-         Bolt looked), so nothing was changed:{}",
+        "Something is in the way where files would go back as your last save has them (ignored, \
+         or new since Bolt looked), so nothing was changed:{}",
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
-    InTheWay { paths: Vec<String> },
+    InTheWay { paths: Vec<String>, command: String },
     #[error(
         "{} could be any of these, so nothing was changed:{}",
         escape(path, false),
@@ -113,6 +114,16 @@ pub enum SwitchError {
         step.short_hex()
     )]
     StepGone { step: Id, detail: String },
+    /// `label` is the shelf asked for, if one was.
+    #[error("{}", no_shelf(label.as_deref()))]
+    NoShelf { label: Option<String> },
+    #[error(
+        "Your unsaved changes, or files Bolt ignores, are where shelf {} would write, or the save \
+         you're on changed what is there since it was shelved, so nothing was changed:{}",
+        escape(label, false),
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )]
+    ShelfInTheWay { paths: Vec<String>, label: String },
     #[error(transparent)]
     Resolve(#[from] ResolveError),
     #[error(transparent)]
@@ -132,15 +143,16 @@ impl SwitchError {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
-            // Shelving comes in milestone 4.
             SwitchError::Collisions { .. } => Some(
-                "Save them first (bolt save \"describe your change\") or discard them, and move \
-                 ignored files somewhere else, then run bolt goto again."
+                "Save them first (bolt save \"describe your change\"), shelve them (bolt shelf) or \
+                 discard them (bolt discard), and move ignored files somewhere else, then run bolt \
+                 goto again."
                     .to_owned(),
             ),
-            SwitchError::InTheWay { .. } => {
-                Some("Move them somewhere else, then run bolt discard again.".to_owned())
-            }
+            SwitchError::InTheWay { command, .. } => Some(format!(
+                "Move them somewhere else, then run bolt {} again.",
+                escape(command, false)
+            )),
             SwitchError::Ambiguous { .. } => {
                 Some("Name the one you mean, spelled exactly as it is saved.".to_owned())
             }
@@ -191,6 +203,18 @@ impl SwitchError {
                  an older save, find it with bolt history and go to it with bolt goto."
                     .to_owned(),
             ),
+            SwitchError::NoShelf { label: None } => {
+                Some("bolt shelf sets your unsaved changes aside on one.".to_owned())
+            }
+            SwitchError::NoShelf { .. } => {
+                Some("bolt shelf --list shows the shelves there are.".to_owned())
+            }
+            SwitchError::ShelfInTheWay { label, .. } => Some(format!(
+                "Save, shelve or discard your changes there, and move ignored files somewhere \
+                 else, then run bolt unshelf {} (a new shelf would be the newest). Where the save \
+                 you're on changed them, go to the save you shelved on and unshelf there.",
+                escape(label, false)
+            )),
             SwitchError::Resolve(e) => e.hint(),
             SwitchError::Save(e) => e.hint_when_reading(),
             SwitchError::Repo(e) => e.hint(),
@@ -201,6 +225,14 @@ impl SwitchError {
 /// The warnings that name entries left unwritten or links written as files: one of each per
 /// command, whichever switch they came from.
 pub(crate) const LISTED: [&str; 2] = [warning::PLACEHOLDERS_WRITTEN, warning::NOT_WRITTEN_HERE];
+
+/// Why `unshelf` found nothing to bring back: no shelf at all, or none with `label`.
+fn no_shelf(label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("There's no shelf {}.", escape(label, false)),
+        None => "There's no shelf to bring back.".to_owned(),
+    }
+}
 
 /// Why an undo or redo step didn't happen, naming what is where it would write.
 fn in_the_way_of_step(paths: &[String], redo: bool, shelve: bool) -> String {
@@ -288,15 +320,31 @@ pub(crate) fn locked<T>(
     result
 }
 
-fn throw_away(
-    repo: &mut Repository,
-    lock: &ChangeLock,
+/// What `discard` or `shelf` throws away, planned under the lock.
+pub(crate) struct Away {
+    /// The diary entry `head` names, and its ID.
+    pub head: Id,
+    pub entry: DiaryEntry,
+    /// The save the project is on.
+    pub from: Id,
+    pub drive: Drive,
+    /// A switch to `from` that removes new files too, without the links left.
+    pub plan: Plan,
+    /// Unsaved links left as they are, since they could come back only as files.
+    pub links_left: Vec<String>,
+}
+
+/// Plans throwing away the unsaved work at `paths` (a folder standing for everything in it), or
+/// everywhere without any, as `discard` and `shelf` do. Something in the way of what goes back
+/// stops it, and so does a path that names nothing, or more than one saved entry. Unsaved links
+/// that could come back only as files are left out, told of by `left_warning`.
+pub(crate) fn plan_away(
+    repo: &Repository,
     paths: Option<&[String]>,
-    who: &Person,
     command: &str,
     git_excludes: Option<&Path>,
-    earlier: &mut Earlier,
-) -> Result<DiscardOutcome, SwitchError> {
+    left_warning: fn(&[String]) -> Warning,
+) -> Result<Away, SwitchError> {
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
     let drive = repo.drive()?;
@@ -305,6 +353,7 @@ fn throw_away(
     if !plan.collisions.is_empty() {
         return Err(SwitchError::InTheWay {
             paths: plan.collisions,
+            command: command.to_owned(),
         });
     }
     for path in paths.unwrap_or_default().iter().filter(|p| !p.is_empty()) {
@@ -329,8 +378,36 @@ fn throw_away(
         let stays = kept::goes_with(links_left.iter().map(String::as_str), drive);
         plan.actions.retain(|a| !stays(&a.path));
         plan.placeholders.retain(|p| !stays(p));
-        plan.warnings.push(links_left_warning(&links_left));
+        plan.warnings.push(left_warning(&links_left));
     }
+    Ok(Away {
+        head,
+        entry,
+        from,
+        drive,
+        plan,
+        links_left,
+    })
+}
+
+fn throw_away(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    paths: Option<&[String]>,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    earlier: &mut Earlier,
+) -> Result<DiscardOutcome, SwitchError> {
+    let away = plan_away(repo, paths, command, git_excludes, links_left_warning)?;
+    let Away {
+        head,
+        entry,
+        from,
+        drive,
+        plan,
+        links_left,
+    } = away;
     let (mut restored, mut removed, mut folders) = (Vec::new(), Vec::new(), 0);
     for a in &plan.actions {
         // A file or link the folder held at this path is thrown away, whatever replaces it.

@@ -26,6 +26,7 @@ use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
+use bolt_core::shelf;
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
@@ -123,6 +124,21 @@ enum Command {
     Redo {
         #[command(flatten)]
         steps: Steps,
+    },
+    /// Set your unsaved changes aside on a new shelf, and put your files back as your last save
+    /// has them.
+    Shelf {
+        /// What the shelf holds, in a few words.
+        message: Option<String>,
+        /// List the shelves, newest first.
+        #[arg(long, conflicts_with = "message")]
+        list: bool,
+    },
+    /// Bring back the newest shelf, or the one with this number, onto the save you're on.
+    Unshelf {
+        /// The shelf's number, as bolt shelf --list shows it.
+        #[arg(value_name = "NUMBER")]
+        number: Option<String>,
     },
 }
 
@@ -1273,6 +1289,168 @@ fn undo_command(
     }
 }
 
+/// `bolt shelf`.
+fn shelf_command(
+    json: bool,
+    message: Option<&str>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut |_| {
+        eprintln!("Waiting for another Bolt command to finish...")
+    })?;
+    let applied = done.as_ref().map(|d| d.applied.clone()).unwrap_or_default();
+    let mut warnings = applied.warnings.clone();
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        let shelf = done
+            .as_ref()
+            .map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "shelf": shelf,
+            "written": applied.written,
+            "removed": applied.removed,
+            "not_written": applied.not_written,
+            "placeholders": applied.placeholders,
+            "files_in_use": applied.in_use,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
+    } else {
+        match &done {
+            Some(d) => {
+                let files = match d.files {
+                    0 => String::new(),
+                    1 => " in 1 file".to_owned(),
+                    n => format!(" in {n} files"),
+                };
+                let label = escape(&d.label, false);
+                format!(
+                    "Set your unsaved changes{files} aside on shelf {label}: bolt unshelf brings \
+                     them back.\n"
+                )
+            }
+            // The warning that follows names the links that stay, and says why.
+            None if warnings.iter().any(|w| w.kind == warning::LINKS_LEFT) => {
+                "Nothing was shelved.\n".to_owned()
+            }
+            None => "Nothing to shelve: your files match your last save.\n".to_owned(),
+        }
+    };
+    output::print_quietly(&text, &warnings)
+}
+
+/// `bolt shelf --list`.
+fn shelf_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    let list = shelf::shelves(repo)?;
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        let shelves: Vec<serde_json::Value> = list.iter().map(output::shelf_json).collect();
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "shelves": shelves,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
+    } else if list.is_empty() {
+        "No shelves: bolt shelf sets your unsaved changes aside on one.\n".to_owned()
+    } else {
+        let now = now_ms();
+        let width = list
+            .iter()
+            .map(|s| escape(&s.label, false).chars().count())
+            .max()
+            .unwrap_or(0);
+        list.iter()
+            .map(|s| output::shelf_line(s, width, now) + "\n")
+            .collect()
+    };
+    output::print_quietly(&text, &warnings)
+}
+
+/// `bolt unshelf`, of the shelf `number` or the newest.
+fn unshelf_command(
+    json: bool,
+    number: Option<&str>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut |_| {
+        eprintln!("Waiting for another Bolt command to finish...")
+    })?;
+    let mut warnings = done.applied.warnings.clone();
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        let shelf =
+            (!done.finished).then(|| json!({"label": done.label, "save": done.save.to_hex()}));
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "finished": done.finished,
+            "shelf": shelf,
+            "written": done.applied.written,
+            "removed": done.applied.removed,
+            "carried": done.carried,
+            "not_written": done.applied.not_written,
+            "placeholders": done.applied.placeholders,
+            "files_in_use": done.applied.in_use,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
+    } else if done.finished {
+        let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
+        // The shelf named may be the one the stopped switch brought back.
+        let again = match number {
+            Some(n) => format!("bolt unshelf {} again goes on from there", escape(n, false)),
+            None => "bolt unshelf again brings back the newest shelf left".to_owned(),
+        };
+        format!(
+            "Finished the {what} that was stopped, so no shelf was brought back this time. \
+             Running {again}.\n"
+        )
+    } else {
+        let title = repo
+            .store()
+            .save(&done.save, repo.signatures_allowed())
+            .map(|s| {
+                let first = s.message.lines().next().unwrap_or_default().to_owned();
+                format!(" \"{}\"", escape(&first, false))
+            })
+            .unwrap_or_default();
+        let count = |n: usize| match n {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        let what = match (done.applied.written, done.applied.removed) {
+            (0, 0) => "your files already held its changes".to_owned(),
+            (0, removed) => format!("{} removed", count(removed)),
+            (written, 0) => format!("{} written", count(written)),
+            (written, removed) => format!("{} written, {removed} removed", count(written)),
+        };
+        let label = escape(&done.label, false);
+        let mut text = format!("Brought back shelf {label}{title}: {what}.\n");
+        match done.carried {
+            0 => {}
+            1 => text += "Your other unsaved changes in 1 file stayed as they are.\n",
+            n => text += &format!("Your other unsaved changes in {n} files stayed as they are.\n"),
+        }
+        text
+    };
+    output::print_quietly(&text, &warnings)
+}
+
 /// How many of the steps undo can take `bolt undo --list` shows.
 const UNDO_LIST: usize = 20;
 
@@ -1518,6 +1696,9 @@ fn main() -> ExitCode {
             undo_command(cli.json, false, &steps, to.as_deref(), &mut opened)
         }
         Command::Redo { steps } => undo_command(cli.json, true, &steps, None, &mut opened),
+        Command::Shelf { list: true, .. } => shelf_list_command(cli.json, &mut opened),
+        Command::Shelf { message, .. } => shelf_command(cli.json, message.as_deref(), &mut opened),
+        Command::Unshelf { number } => unshelf_command(cli.json, number.as_deref(), &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

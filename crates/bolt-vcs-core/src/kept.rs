@@ -343,11 +343,16 @@ pub(crate) fn links_to_leave(
         path: "the project folder".to_owned(),
         source,
     })?;
+    // A write that takes over a removed spelling found that entry there: it is named once, there.
+    let renamed = writeout::renamed(actions, drive);
     let mut links = Vec::new();
     for a in actions {
         let Some(e) = a.expected.filter(|e| e.kind == EntryKind::Symlink) else {
             continue;
         };
+        if renamed.contains(a.path.as_str()) {
+            continue;
+        }
         if saved
             .entry(&a.path)?
             .is_some_and(|s| s.kind == e.kind && s.id == e.id)
@@ -364,7 +369,6 @@ pub(crate) fn links_to_leave(
     if !writeout::can_make_links(repo)? {
         return Ok(links.into_iter().map(|(path, _)| path.to_owned()).collect());
     }
-    let renamed = writeout::renamed(actions, drive);
     let left = placeholders(store, base_root, actions, &renamed, &links, drive)?;
     Ok(left.into_iter().collect())
 }

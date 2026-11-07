@@ -269,6 +269,70 @@ fn a_link_renamed_only_in_letter_case_is_left_as_it_is() {
     }
 }
 
+/// Makes `link` lead to the folder `target`: a link, or on Windows a junction, which needs no
+/// rights and which Bolt reads as a link too.
+fn folder_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    crate::test_support::junction(link, target);
+}
+
+fn remove_link(link: &Path) {
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+    // A junction is a folder to Windows.
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
+}
+
+#[test]
+fn a_saved_folder_replaced_by_a_link_spelled_otherwise_is_left_once() {
+    let (dir, mut repo) = saved(&[("a.txt", b"a"), ("node/x", b"x")]);
+    let root = dir.path();
+    let ignores_case = {
+        let _lock = repo.lock_for_change("probe", &mut |_| {}).unwrap();
+        repo.drive().unwrap().ignores_case
+    };
+    if !ignores_case {
+        return;
+    }
+    fs::remove_dir_all(root.join("node")).unwrap();
+    folder_link(&std::env::temp_dir(), &root.join("Node"));
+    let done = discard(&mut repo, None, &who(), "discard", None, &mut |_| {}).unwrap();
+    // The saved folder would go back where the link is, so both stay as they are.
+    assert_eq!(done.links_left, ["Node"]);
+    assert_eq!(done.folder_change, None);
+    let told: Vec<&Warning> = done
+        .applied
+        .warnings
+        .iter()
+        .filter(|w| w.kind == warning::LINKS_LEFT)
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].message.contains("1 unsaved link"), "{told:?}");
+    assert!(fs::read_link(root.join("Node")).is_ok());
+}
+
+#[test]
+fn a_saved_link_pointed_elsewhere_outside_is_left_and_no_placeholder_is_told() {
+    let (dir, mut repo) = saved(&[("a.txt", b"a")]);
+    let root = dir.path();
+    let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    folder_link(one.path(), &root.join("out"));
+    assert!(matches!(save_now(&mut repo), SaveOutcome::Saved { .. }));
+    remove_link(&root.join("out"));
+    folder_link(two.path(), &root.join("out"));
+    // The saved link, written back, would be a placeholder: it leads out too.
+    let done = discard(&mut repo, None, &who(), "discard", None, &mut |_| {}).unwrap();
+    assert_eq!(done.links_left, ["out"]);
+    assert!(done.applied.placeholders.is_empty(), "{done:?}");
+    let warned = |kind: &str| done.applied.warnings.iter().any(|w| w.kind == kind);
+    assert!(!warned(warning::PLACEHOLDERS_WRITTEN), "{done:?}");
+    let now = fs::read_link(root.join("out")).unwrap();
+    assert!(now.ends_with(two.path().file_name().unwrap()), "{now:?}");
+}
+
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_goto_stopped_at_every_step_is_finished_or_never_happened() {
