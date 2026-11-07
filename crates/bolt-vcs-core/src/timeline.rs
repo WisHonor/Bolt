@@ -13,7 +13,8 @@ pub(crate) type Read<'a> = dyn FnMut(&Id) -> Result<DiaryEntry, RepoError> + 'a;
 #[derive(Debug)]
 pub(crate) struct Steps {
     pub done: Vec<(Id, DiaryEntry)>,
-    /// Whether more steps are done than `done` holds.
+    /// Whether undo can take more steps than `done` holds: the next one isn't the diary's first
+    /// entry, which can't be undone.
     pub more_done: bool,
     pub undone: Vec<(Id, DiaryEntry)>,
 }
@@ -28,7 +29,7 @@ pub(crate) fn steps(head: Id, read: &mut Read<'_>, limit: usize) -> Result<Steps
     let mut at = Some(head);
     while let Some(step) = newest_done_at(at, read, &mut seen)? {
         if done.len() == limit {
-            more_done = true;
+            more_done = step.1.parent.is_some();
             break;
         }
         at = step.1.parent;
@@ -39,6 +40,24 @@ pub(crate) fn steps(head: Id, read: &mut Read<'_>, limit: usize) -> Result<Steps
         more_done,
         undone,
     })
+}
+
+/// How many done steps are newer than `step`, if it is done at `head`: the done steps are walked
+/// newest first, counted and let go, as far as `step`.
+pub(crate) fn done_after(
+    head: Id,
+    step: Id,
+    read: &mut Read<'_>,
+) -> Result<Option<usize>, RepoError> {
+    let (mut seen, mut newer, mut at) = (HashSet::new(), 0, Some(head));
+    while let Some((id, entry)) = newest_done_at(at, read, &mut seen)? {
+        if id == step {
+            return Ok(Some(newer));
+        }
+        newer += 1;
+        at = entry.parent;
+    }
+    Ok(None)
 }
 
 /// The newest done step: what `undo` takes. `None` past the first entry.
@@ -190,6 +209,10 @@ mod tests {
             newest_done(self.head.unwrap(), &mut self.read())
         }
 
+        fn done_after(&self, step: Id) -> Result<Option<usize>, RepoError> {
+            done_after(self.head.unwrap(), step, &mut self.read())
+        }
+
         /// `ids`, oldest first, as the lists hold them: newest first, each with its entry.
         fn listed(&self, ids: &[Id]) -> Vec<(Id, DiaryEntry)> {
             ids.iter()
@@ -254,7 +277,15 @@ mod tests {
                 let half = done.len() / 2;
                 let some = diary.steps(half).unwrap();
                 prop_assert_eq!(&some.done[..], &all.done[..half]);
-                prop_assert_eq!(some.more_done, half < done.len());
+                // More only if the next done step can be undone: the first entry can't.
+                let next = all.done.get(half);
+                prop_assert_eq!(some.more_done, next.is_some_and(|(_, e)| e.parent.is_some()));
+                for (newer, (id, _)) in all.done.iter().enumerate() {
+                    prop_assert_eq!(diary.done_after(*id).unwrap(), Some(newer));
+                }
+                for (id, _) in &all.undone {
+                    prop_assert_eq!(diary.done_after(*id).unwrap(), None);
+                }
             }
         }
     }
@@ -300,10 +331,15 @@ mod tests {
         let made: Vec<Id> = (0..5).map(|_| diary.add(Action::Command)).collect();
         diary.add(Action::Undo(made[4]));
 
-        let steps = diary.steps(3).unwrap();
-        assert_eq!(steps.done, diary.listed(&made[1..4]));
+        let steps = diary.steps(2).unwrap();
+        assert_eq!(steps.done, diary.listed(&made[2..4]));
         assert!(steps.more_done);
         assert_eq!(steps.undone, diary.listed(&made[4..]));
+
+        // Only the first entry is left past the limit, and undo can't take it.
+        let steps = diary.steps(3).unwrap();
+        assert_eq!(steps.done, diary.listed(&made[1..4]));
+        assert!(!steps.more_done);
 
         let steps = diary.steps(4).unwrap();
         assert_eq!(steps.done, diary.listed(&made[..4]));

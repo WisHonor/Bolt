@@ -178,6 +178,35 @@ pub fn short_change_id(
     }
 }
 
+/// The current line's saves and their change IDs, read once and kept as IDs alone, to shorten
+/// any number of change IDs as [`short_change_id`] shortens one.
+pub struct LineIds {
+    /// Sorted.
+    change_ids: Vec<ChangeId>,
+    saves: HashSet<Id>,
+}
+
+impl LineIds {
+    /// Reads the current line, or the saves back from the one the project is at.
+    pub fn read(repo: &Repository) -> Result<LineIds, RepoError> {
+        let (mut change_ids, mut saves) = (Vec::new(), HashSet::new());
+        for step in chain(repo, current_save(repo)?) {
+            let (id, save) = step?;
+            change_ids.push(save.change_id);
+            saves.insert(id);
+        }
+        change_ids.sort_unstable();
+        Ok(LineIds { change_ids, saves })
+    }
+
+    /// The shortest form of `change_id`, the change ID of the save `id`, that no other save on
+    /// the line starts with.
+    #[must_use]
+    pub fn short(&self, id: &Id, change_id: &ChangeId) -> String {
+        short_among(&self.change_ids, change_id, self.saves.contains(id))
+    }
+}
+
 /// `short_change_id`, by reading the line from `tip`.
 fn walk_short(
     repo: &Repository,
@@ -871,12 +900,12 @@ mod tests {
                 }
                 prop_assert_eq!(cached_line(&repo), uncached_line(&repo));
                 let tip = current_save(&repo).unwrap();
+                let line = LineIds::read(&repo).unwrap();
                 for id in &saves {
                     let change_id = repo.store().save(id, false).unwrap().change_id;
-                    prop_assert_eq!(
-                        short_change_id(&repo, id, &change_id).unwrap(),
-                        walk_short(&repo, tip, id, &change_id).unwrap()
-                    );
+                    let walked = walk_short(&repo, tip, id, &change_id).unwrap();
+                    prop_assert_eq!(&short_change_id(&repo, id, &change_id).unwrap(), &walked);
+                    prop_assert_eq!(line.short(id, &change_id), walked);
                 }
             }
         }

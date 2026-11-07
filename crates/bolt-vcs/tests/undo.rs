@@ -10,6 +10,7 @@ use bolt_core::id::Id;
 use bolt_core::listing::EntryKind;
 use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
+use bolt_core::text::escape;
 
 mod support;
 use support::{Env, text};
@@ -733,9 +734,20 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
     assert!(lines[18].trim_start().starts_with("19  "), "{said}");
     assert!(lines[19].ends_with("can't be undone"), "{said}");
     assert!(!said.contains("and more"), "{said}");
-    // One more: 20 are shown, and the list says there are more.
+    // One more: 20 steps undo can take, all shown, and past them only the first entry, which it
+    // can't.
     write(&env, "a.txt", "19\n");
     ok(&env, &["save", "Save 19"]);
+    let said = ok(&env, &["undo", "--list"]);
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 20, "{said}");
+    assert!(lines[19].trim_start().starts_with("20  "), "{said}");
+    assert!(!said.contains("can't be undone"), "{said}");
+    assert!(!said.contains("and more"), "{said}");
+    assert_eq!(json(&env, &["undo", "--list"])["more"], false);
+    // One more again: 20 are shown, and the list says there are more.
+    write(&env, "a.txt", "20\n");
+    ok(&env, &["save", "Save 20"]);
     let said = ok(&env, &["undo", "--list"]);
     let lines: Vec<&str> = said.lines().collect();
     assert_eq!(lines.len(), 21, "{said}");
@@ -744,7 +756,6 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
         lines[20],
         "and more: bolt undo --list --all shows the whole diary"
     );
-    assert!(!said.contains("can't be undone"), "{said}");
     let doc = json(&env, &["undo", "--list"]);
     assert_eq!(doc["undo"].as_array().unwrap().len(), 20, "{doc}");
     assert_eq!(doc["more"], true);
@@ -806,7 +817,8 @@ fn undo_to_a_cleared_step_is_one_new_step_that_undo_takes_back() {
     assert!(changed(&env).is_empty());
     // Undo takes it back.
     let said = ok(&env, &["undo"]);
-    assert!(said.contains("Undid undo"), "{said}");
+    let undid = format!("Undid undo --to {}:", goto.short_hex());
+    assert!(said.contains(&undid), "{said}");
     assert_eq!(head(&env).1.action, Action::Undo(jump));
     assert_eq!(main_tip(&env), three);
     assert_eq!(state(&env).position, Position::OnLine("main".into()));
@@ -846,6 +858,13 @@ fn undo_to_a_cleared_step_keeps_the_shelves() {
     assert_eq!(now[0].0, "2");
     assert_eq!(now[1], shelves[0]);
     assert_eq!(saved_files(&env, now[0].1)["b.txt"], b"edit\n");
+    // Undoing the jump writes the edit back, and takes the shelf the jump made off the list.
+    let said = ok(&env, &["undo"]);
+    let undid = format!("Undid undo --to {}:", goto.short_hex());
+    assert!(said.contains(&undid), "{said}");
+    assert!(said.contains("shelf 2 is gone"), "{said}");
+    assert_eq!(fs::read(env.root().join("b.txt")).unwrap(), b"edit\n");
+    assert_eq!(state(&env).shelves, shelves);
 }
 
 #[test]
@@ -984,4 +1003,76 @@ fn undo_list_json_has_both_lists() {
     assert_eq!(all[0]["target"], steps[0].to_hex());
     assert_eq!(listed(&doc["entries"])[1..], hex(&steps)[..]);
     assert_eq!(doc["warnings"], serde_json::json!([]));
+}
+
+#[test]
+fn undo_to_that_stops_on_the_way_says_how_far_it_got() {
+    let (env, _, goto) = after_a_goto();
+    let saved = entry(&env, goto).parent.unwrap();
+    write(&env, "n.txt", "new\n");
+    ok(&env, &["discard"]);
+    write(&env, "a.txt", "mine\n");
+    // The discard is undone; the goto before it would write over a.txt.
+    let to = start_of(saved, 8);
+    let (out, said) = refused(&env, &["undo", "--to", &to]);
+    assert!(out.contains("Undid discard"), "{out}");
+    let how_far = format!("Undid 1 step on the way to entry {to} before one stopped.");
+    assert!(out.contains(&how_far), "{out}");
+    assert!(said.contains("a.txt"), "{said}");
+    assert!(
+        said.contains(&format!("bolt undo --to {to} --shelve")),
+        "{said}"
+    );
+    assert_eq!(fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
+    assert_eq!(fs::read(env.root().join("n.txt")).unwrap(), b"new\n");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn undo_to_after_a_stop_finishes_it_and_takes_no_step() {
+    let (env, one, goto) = after_a_goto();
+    let files_step = diary(&env)[2];
+    let out = env
+        .bolt()
+        .arg("undo")
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(journal_exists(&env));
+    let to = start_of(files_step, 8);
+    let said = ok(&env, &["undo", "--to", &to]);
+    assert!(said.contains("Finished the undo of goto"), "{said}");
+    let again = format!("Running bolt undo --to {to} again goes on from there.");
+    assert!(said.contains(&again), "{said}");
+    assert_eq!(head(&env).1.action, Action::Undo(goto));
+    assert_eq!(files(env.root()), holding(TWO));
+    assert!(!journal_exists(&env));
+    // Run again, it goes the rest of the way.
+    assert!(ok(&env, &["undo", "--to", &to]).contains("Undid save"));
+    assert_eq!(main_tip(&env), one);
+}
+
+#[test]
+fn the_lists_escape_what_the_diary_holds() {
+    let env = project(&[("a.txt", "a\n")]);
+    let (command, label) = ("save\u{1b}[2J", "1\u{1b}]0;x\u{7}");
+    {
+        let mut repo = Repository::open(env.root()).unwrap();
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let (head, mut planted) = repo.current().unwrap();
+        planted.parent = Some(head);
+        planted.command = command.into();
+        let save = planted.state.lines["main"];
+        planted.state.shelves.insert(0, (label.into(), save));
+        let packs = repo.new_packs().unwrap();
+        repo.commit(&lock, packs, &planted).unwrap();
+    }
+    for args in [&["undo", "--list"][..], &["undo", "--list", "--all"]] {
+        let said = ok(&env, args);
+        assert!(!said.contains(['\u{1b}', '\u{7}']), "{said:?}");
+        assert!(said.contains(&escape(command, false)), "{said}");
+        let shelf = format!("shelf {} added", escape(label, false));
+        assert!(said.contains(&shelf), "{said}");
+    }
 }

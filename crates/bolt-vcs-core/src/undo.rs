@@ -117,8 +117,6 @@ pub fn effects(before: &State, after: &State, folder: Option<FolderChange>) -> V
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoOutcome {
     pub taken: Vec<Taken>,
-    /// How many steps it set out to take: none after finishing a stopped switch.
-    pub asked: usize,
     /// A stopped switch was finished, so no step was taken.
     pub finished: bool,
     /// The shelves `--shelve` made, by label, oldest first: one for each step it was needed for.
@@ -213,8 +211,7 @@ fn take(
         on_wait,
         command(redo),
         |repo, lock, earlier, taken, shelved| {
-            take_steps(repo, lock, req, redo, earlier, taken, shelved)?;
-            Ok(req.n)
+            take_steps(repo, lock, req, redo, earlier, taken, shelved)
         },
     )
 }
@@ -248,29 +245,29 @@ pub fn undo_to(
         "undo",
         |repo, lock, earlier, taken, shelved| {
             let (head, _) = repo.current()?;
-            let (to, steps) = {
+            let (to, way) = {
                 let mut read = |id: &Id| repo.entry(id);
                 let to = entry_named(&text, head, &mut read)?;
                 if to.0 == head {
-                    return Ok(0);
+                    return Ok(());
                 }
-                (to, timeline::steps(head, &mut read, usize::MAX)?)
+                // Redo brings back the undone steps up to it, or undo takes the steps after it.
+                let undone = timeline::undone_steps(head, &mut read)?;
+                let way = match undone.iter().position(|(id, _)| *id == to.0) {
+                    Some(i) => Some((true, i + 1)),
+                    None => timeline::done_after(head, to.0, &mut read)?.map(|n| (false, n)),
+                };
+                (to, way)
             };
-            let on = |list: &[(Id, DiaryEntry)]| list.iter().position(|(id, _)| *id == to.0);
-            let (redo, n) = match (on(&steps.undone), on(&steps.done)) {
-                (Some(i), _) => (true, i + 1),
-                (None, Some(i)) => (false, i),
-                (None, None) => {
-                    if let Some((step, shelf)) = jump(repo, lock, req, earlier, to)? {
-                        taken.push(step);
-                        shelved.extend(shelf);
-                    }
-                    return Ok(1);
+            let Some((redo, n)) = way else {
+                if let Some((step, shelf)) = jump(repo, lock, req, earlier, to)? {
+                    taken.push(step);
+                    shelved.extend(shelf);
                 }
+                return Ok(());
             };
             let req = StepRequest { n, ..*req };
-            take_steps(repo, lock, &req, redo, earlier, taken, shelved)?;
-            Ok(n)
+            take_steps(repo, lock, &req, redo, earlier, taken, shelved)
         },
     );
     went.map_err(|e| UndoError {
@@ -280,8 +277,7 @@ pub fn undo_to(
 }
 
 /// Runs `steps` under the lock for changes, unless the run finished a stopped switch first, with
-/// the steps it takes and the shelves `--shelve` makes collected as it goes. `steps` gives how
-/// many steps it set out to take.
+/// the steps it takes and the shelves `--shelve` makes collected as it goes.
 fn stepping(
     repo: &mut Repository,
     on_wait: &mut dyn FnMut(&str),
@@ -292,21 +288,20 @@ fn stepping(
         &mut Earlier,
         &mut Vec<Taken>,
         &mut Vec<Shelf>,
-    ) -> Result<usize, SwitchError>,
+    ) -> Result<(), SwitchError>,
 ) -> Result<UndoOutcome, UndoError> {
     let (mut taken, mut shelved) = (Vec::new(), Vec::new());
     let done = switch::locked(repo, command, on_wait, |repo, lock, earlier, finished| {
         // Running the command again after a stop finishes it, and no more.
-        if finished {
-            return Ok(None);
+        if !finished {
+            steps(repo, lock, earlier, &mut taken, &mut shelved)?;
         }
-        steps(repo, lock, earlier, &mut taken, &mut shelved).map(Some)
+        Ok(finished)
     });
     match done {
-        Ok(asked) => Ok(UndoOutcome {
+        Ok(finished) => Ok(UndoOutcome {
             taken,
-            asked: asked.unwrap_or(0),
-            finished: asked.is_none(),
+            finished,
             shelved,
         }),
         Err(error) => Err(UndoError {
@@ -409,18 +404,21 @@ pub fn undo_list(repo: &Repository, limit: usize) -> Result<UndoList, RepoError>
 /// Calls `each` with every entry from `head` back, newest first, and what it changed.
 pub fn whole_diary<E: From<RepoError>>(
     repo: &Repository,
-    each: impl FnMut(Id, &DiaryEntry, &[Effect]) -> Result<(), E>,
+    mut each: impl FnMut(Id, &DiaryEntry, &[Effect]) -> Result<(), E>,
 ) -> Result<(), E> {
     let (head, _) = repo.current()?;
-    back_from(head, &mut |id| repo.entry(id), each)
+    back_from(head, &mut |id| repo.entry(id), |id, entry, before| {
+        each(id, entry, &did(before, entry))
+    })
 }
 
-/// [`whole_diary`] from `head`, with entries read by `read`. An entry's ID covers its parent's,
-/// and the store checks every entry against its ID, so the walk can't come round again.
+/// Calls `each` with every entry from `head` back, newest first, and the entry before it, read
+/// by `read`. An entry's ID covers its parent's, and the store checks every entry against its
+/// ID, so the walk can't come round again.
 fn back_from<E: From<RepoError>>(
     head: Id,
     read: &mut timeline::Read<'_>,
-    mut each: impl FnMut(Id, &DiaryEntry, &[Effect]) -> Result<(), E>,
+    mut each: impl FnMut(Id, &DiaryEntry, Option<&DiaryEntry>) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut at = Some((head, read(&head)?));
     while let Some((id, entry)) = at {
@@ -428,9 +426,30 @@ fn back_from<E: From<RepoError>>(
             Some(parent) => Some((parent, read(&parent)?)),
             None => None,
         };
-        each(id, &entry, &did(at.as_ref().map(|(_, e)| e), &entry))?;
+        each(id, &entry, at.as_ref().map(|(_, e)| e))?;
     }
     Ok(())
+}
+
+/// The entry a step `undo --to` took went to, given that step's own entry, the one command
+/// entry that records `undo`: the newest before it in the state it put back, the shelves aside
+/// (that entry, or one just like it). `None` for any other step.
+pub fn went_to(repo: &Repository, step: &DiaryEntry) -> Result<Option<Id>, RepoError> {
+    if step.action != Action::Command || step.command != "undo" {
+        return Ok(None);
+    }
+    let (now, mut at) = (&step.state, step.parent);
+    while let Some(id) = at {
+        let entry = repo.entry(&id)?;
+        let then = &entry.state;
+        let same = (&then.lines, &then.position, then.tags, then.server_lines)
+            == (&now.lines, &now.position, now.tags, now.server_lines);
+        if same {
+            return Ok(Some(id));
+        }
+        at = entry.parent;
+    }
+    Ok(None)
 }
 
 /// What `entry` changed from `before`, the entry before it; nothing for the diary's first entry.
@@ -508,6 +527,10 @@ fn jump(
         });
     }
     if state == now.state && plan.actions.is_empty() {
+        // Nothing to record, but what reading the folder found is told, as `goto` tells it.
+        for w in switch::switch_warnings(plan, Applied::default(), earlier).warnings {
+            repo.store().note(w);
+        }
         return Ok(None);
     }
     let kept = switch::kept_on(&now.state, current, "undo", &[], req.who);

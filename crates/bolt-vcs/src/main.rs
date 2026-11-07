@@ -17,7 +17,9 @@ use bolt_core::config::{
 use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{count_changes, for_each_change};
 use bolt_core::fsio::fault_point;
-use bolt_core::history::{ResolveError, current_save, for_each_on_line, resolve, short_change_id};
+use bolt_core::history::{
+    LineIds, ResolveError, current_save, for_each_on_line, resolve, short_change_id,
+};
 use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
@@ -544,14 +546,17 @@ fn short_or_whole(
     warnings: &mut Vec<Warning>,
 ) -> String {
     short_change_id(repo, id, change_id).unwrap_or_else(|problem| {
-        warnings.push(Warning::new(
-            warning::CHANGE_ID_NOT_SHORTENED,
-            format!(
-                "Bolt couldn't read this line's older saves to shorten the change ID. {problem}"
-            ),
-        ));
+        warnings.push(not_shortened(&problem));
         change_id.to_letters()
     })
+}
+
+/// Says the line couldn't be read to shorten change IDs, so they are given whole.
+fn not_shortened(problem: &RepoError) -> Warning {
+    Warning::new(
+        warning::CHANGE_ID_NOT_SHORTENED,
+        format!("Bolt couldn't read this line's older saves to shorten the change ID. {problem}"),
+    )
 }
 
 /// `document`, plus the identity a project's settings named and Bolt ignored, if there was one.
@@ -1206,7 +1211,9 @@ fn undo_command(
     {
         let mut named = |id: &Id| named_save(repo, id, &mut warnings);
         for t in &taken {
-            text += &output::step_line(t, &shelved, &mut named);
+            // A step `undo --to` took records only `undo`: say where it went.
+            let went = undo::went_to(repo, &t.entry).ok().flatten();
+            text += &output::step_line(t, went.as_ref(), &shelved, &mut named);
             text.push('\n');
         }
     }
@@ -1308,6 +1315,7 @@ fn undo_list_to(
             steps.iter().map(json).collect()
         };
         warnings.extend(repo.store().warnings());
+        let warnings = told_once(warnings);
         let document = json!({
             "bolt_json": BOLT_JSON,
             "redo": entries(&list.redo),
@@ -1332,15 +1340,13 @@ fn undo_list_to(
     let shown: Vec<(String, &StepInfo)> = redo.chain(undo).collect();
     let width = shown.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let now = now_ms();
-    let mut named_warnings = Vec::new();
-    {
-        let mut named = names(repo, &mut named_warnings);
-        let files = &mut |from, to| files_between(repo, from, to);
-        for (n, s) in &shown {
-            let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
-            let (entry, when) = (s.entry.short_hex(), when(&s.diary, now));
-            writeln!(out, "{n:>width$}  {entry}  {when}  {what}")?;
-        }
+    let (mut named, unshortened) = names(repo);
+    warnings.extend(unshortened);
+    let files = &mut |from, to| files_between(repo, from, to);
+    for (n, s) in &shown {
+        let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
+        let (entry, when) = (s.entry.short_hex(), when(&s.diary, now));
+        writeln!(out, "{n:>width$}  {entry}  {when}  {what}")?;
     }
     if list.more {
         writeln!(
@@ -1348,9 +1354,8 @@ fn undo_list_to(
             "and more: bolt undo --list --all shows the whole diary"
         )?;
     }
-    warnings.extend(named_warnings);
     warnings.extend(repo.store().warnings());
-    Ok(warnings)
+    Ok(told_once(warnings))
 }
 
 /// Every entry of the diary, newest first, printed as it is read.
@@ -1373,37 +1378,45 @@ fn whole_diary_to(
             },
             || {
                 warnings.extend(repo.store().warnings());
-                (json!({}), warnings)
+                (json!({}), told_once(warnings))
             },
         );
     }
     let now = now_ms();
-    let mut named_warnings = Vec::new();
-    {
-        let mut named = names(repo, &mut named_warnings);
-        let files = &mut |from, to| files_between(repo, from, to);
-        undo::whole_diary(repo, |id, entry, effects| {
-            let what = output::entry_line(entry, effects, &mut named, files);
-            writeln!(out, "{}  {}  {what}", id.short_hex(), when(entry, now))?;
-            Ok::<(), Failure>(())
-        })?;
-    }
-    warnings.extend(named_warnings);
+    let (mut named, unshortened) = names(repo);
+    warnings.extend(unshortened);
+    let files = &mut |from, to| files_between(repo, from, to);
+    undo::whole_diary(repo, |id, entry, effects| {
+        let what = output::entry_line(entry, effects, &mut named, files);
+        writeln!(out, "{}  {}  {what}", id.short_hex(), when(entry, now))?;
+        Ok::<(), Failure>(())
+    })?;
     warnings.extend(repo.store().warnings());
-    Ok(warnings)
+    Ok(told_once(warnings))
 }
 
-/// Names saves as `named_save` does, each once: a list can name one save many times.
-fn names<'a>(
-    repo: &'a Repository,
-    warnings: &'a mut Vec<Warning>,
-) -> impl FnMut(&Id) -> (String, Option<String>) + 'a {
+/// Names saves as `named_save` does, but each once, their change IDs shortened from one walk of
+/// the current line for them all; with the warning that it couldn't be read, if so.
+fn names(
+    repo: &Repository,
+) -> (
+    impl FnMut(&Id) -> (String, Option<String>) + '_,
+    Option<Warning>,
+) {
+    let (line, unshortened) = match LineIds::read(repo) {
+        Ok(line) => (Some(line), None),
+        Err(problem) => (None, Some(not_shortened(&problem))),
+    };
     let mut known = HashMap::new();
-    move |id: &Id| {
+    let named = move |id: &Id| {
+        let short = |change_id: &ChangeId| match &line {
+            Some(line) => line.short(id, change_id),
+            None => change_id.to_letters(),
+        };
         let name = known.entry(*id);
-        name.or_insert_with(|| named_save(repo, id, warnings))
-            .clone()
-    }
+        name.or_insert_with(|| named_by(repo, id, short)).clone()
+    };
+    (named, unshortened)
 }
 
 /// How many files two saves differ in, if both can be read.
@@ -1433,11 +1446,21 @@ fn told_once(warnings: Vec<Warning>) -> Vec<Warning> {
 /// A save as messages name it: its change ID at its shortest, and the first line of its
 /// message; 12 hex digits of its fingerprint if it can't be read.
 fn named_save(repo: &Repository, id: &Id, warnings: &mut Vec<Warning>) -> (String, Option<String>) {
+    named_by(repo, id, |change_id| {
+        short_or_whole(repo, id, change_id, warnings)
+    })
+}
+
+/// [`named_save`], with the change ID shortened by `short`.
+fn named_by(
+    repo: &Repository,
+    id: &Id,
+    short: impl FnOnce(&ChangeId) -> String,
+) -> (String, Option<String>) {
     match repo.store().save(id, repo.signatures_allowed()) {
         Ok(save) => {
-            let short = short_or_whole(repo, id, &save.change_id, warnings);
             let first = save.message.lines().next().unwrap_or_default().to_owned();
-            (short, Some(first))
+            (short(&save.change_id), Some(first))
         }
         Err(_) => (id.short_hex(), None),
     }

@@ -108,14 +108,19 @@ fn effect_json(e: &Effect) -> Value {
 }
 
 /// What a step taken did, in one line for people: undone, redone, or gone to by `undo --to`.
-/// `named` gives a save's short change ID, and its message's first line if it can be read. The
-/// shelves `--shelve` made (`shelved`) are told on lines of their own.
+/// `went` is the entry `undo --to` went to, when the step's command was one. `named` gives a
+/// save's short change ID, and its message's first line if it can be read. The shelves `--shelve`
+/// made (`shelved`) are told on lines of their own.
 pub fn step_line(
     t: &Taken,
+    went: Option<&Id>,
     shelved: &[(String, Id)],
     named: &mut dyn FnMut(&Id) -> (String, Option<String>),
 ) -> String {
-    let command = escape(&t.entry.command, false);
+    let mut command = escape(&t.entry.command, false);
+    if let Some(went) = went {
+        let _ = write!(command, " --to {}", went.short_hex());
+    }
     let (redo, jump) = (
         matches!(t.action, Action::Redo(_)),
         t.action == Action::Command,
@@ -213,8 +218,7 @@ pub fn step_line(
         let _ = write!(line, ": {}", parts.join(", "));
     }
     // A save undone leaves its files as they are.
-    let saved = |e: &Effect| matches!(e, Effect::Line { from: Some(_), .. });
-    if !redo && !jump && !files && t.effects.iter().any(saved) {
+    if !redo && !files && made.is_some() {
         line.push_str("; its changes show as unsaved");
     }
     line.push('.');
@@ -778,6 +782,64 @@ mod tests {
 
     const SAVES: &str = r#"{"bolt_json":1,"line":"main","saves":["#;
     const CHANGES: &str = r#"{"bolt_json":1,"changes":["#;
+
+    #[test]
+    fn an_undone_jump_says_where_it_went_and_leaves_nothing_unsaved() {
+        use bolt_core::diary::State;
+        use bolt_core::writeout::Applied;
+        use std::collections::BTreeMap;
+        let (old, new, went) = (Id([1; 32]), Id([2; 32]), Id([3; 32]));
+        let on = |save| State {
+            lines: BTreeMap::from([("main".to_owned(), save)]),
+            tags: None,
+            position: Position::OnLine("main".into()),
+            shelves: vec![],
+            server_lines: None,
+        };
+        // A step that moved main and wrote no file, undone.
+        let undone = |command: &str| Taken {
+            step: Id([4; 32]),
+            entry: DiaryEntry {
+                parent: Some(Id([5; 32])),
+                action: Action::Command,
+                command: command.into(),
+                who: Person {
+                    name: "Ada".into(),
+                    email: "a@example.com".into(),
+                    time_ms: 0,
+                    tz_offset_min: 0,
+                },
+                bolt_version: String::new(),
+                state: on(new),
+                folder_change: None,
+            },
+            action: Action::Undo(Id([4; 32])),
+            before: on(new),
+            after: on(old),
+            effects: vec![Effect::Line {
+                name: "main".into(),
+                from: Some(new),
+                to: Some(old),
+            }],
+            applied: Applied::default(),
+        };
+        let mut named = |id: &Id| (id.short_hex(), Some("Add b".to_owned()));
+        let (old, new) = (old.short_hex(), new.short_hex());
+        assert_eq!(
+            step_line(&undone("undo"), Some(&went), &[], &mut named),
+            format!(
+                "Undid undo --to {}: main is back at {old}.",
+                went.short_hex()
+            )
+        );
+        // A save undone leaves its changes unsaved, and says so.
+        assert_eq!(
+            step_line(&undone("save"), None, &[], &mut named),
+            format!(
+                "Undid save {new} \"Add b\": main is back at {old}; its changes show as unsaved."
+            )
+        );
+    }
 
     #[test]
     fn a_stream_that_fails_after_its_first_items_ends_as_one_document_with_the_error() {
