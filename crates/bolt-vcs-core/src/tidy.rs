@@ -18,7 +18,7 @@ use crate::pack::{self, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Save;
 use crate::store::{StoreError, is_damage};
-use crate::text::escape;
+use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 use crate::writeout;
 
@@ -122,7 +122,7 @@ pub fn tidy(
             let freed = meta.size.saturating_sub(holds.kept_stored);
             report.to_free = report.to_free.saturating_add(freed);
             moved = moved.saturating_add(holds.kept);
-            rewrite.push(name);
+            rewrite.push((name, holds.kept));
         }
     }
     if let Some((path, kind)) = unfollowed {
@@ -141,10 +141,23 @@ pub fn tidy(
     remove(repo, &folder, &packs_dir, unread, &mut report);
     let mut out = repo.new_packs()?;
     let mut taken = Vec::new();
-    for name in rewrite {
+    for (name, kept) in rewrite {
         let path = packs_dir.join(&name);
+        fsio::act_point("tidy:copying");
         match merge::copy_pack(&folder, &name, &path, &mut out, &|id| keep.contains(id)) {
-            Ok(()) => taken.push(name),
+            Ok(copied) if copied == kept => taken.push(name),
+            // The index read otherwise than when it was checked: what it judged can't be trusted.
+            Ok(copied) => repo.store().note(Warning::new(
+                warning::PACK_NOT_TIDIED,
+                format!(
+                    "Pack {} wasn't tidied because its index read differently the second time: \
+                     {} of the {} objects to keep in it were found. It is left as it is, and the \
+                     next tidy tries again; a failing disk can cause this.",
+                    shown(&path),
+                    thousands(copied),
+                    thousands(kept)
+                ),
+            )),
             Err(Failed::Read(e)) => not_tidied(repo, &path, &e),
             Err(Failed::Write(e)) => return Err(e.into()),
         }
@@ -157,8 +170,7 @@ pub fn tidy(
     report.packs_written = made.len();
     fault_point("tidy:written")?;
     // A new pack can have an old one's name: it holds the same, checked.
-    let ignores_case = merge::drive_ignores_case(repo);
-    taken.retain(|name| !merge::is_new(&made, name, ignores_case));
+    taken.retain(|name| !merge::is_new(&made, name));
     remove(repo, &folder, &packs_dir, taken, &mut report);
     repo.store_mut().refresh()?;
     report.bytes_after = packs(&folder)?

@@ -78,12 +78,16 @@ struct Packs {
     open: Vec<(usize, Arc<PackReader>)>,
     /// The pack that held the last object read.
     last: usize,
+    /// Packs that failed to open, with the error, until the packs are listed again.
+    failed: HashMap<usize, PackError>,
 }
 
 impl Packs {
     /// Adds the packs among `names` not listed yet and, unless `keep`, forgets those listed but
     /// not among them.
     fn list(&mut self, mut names: Vec<OsString>, keep: bool) {
+        // A pack can be replaced under its name, by one this process writes, say.
+        self.failed.clear();
         if !keep {
             let there: HashSet<&OsString> = names.iter().collect();
             for slot in &mut self.names {
@@ -119,6 +123,9 @@ struct Checked {
     /// Each pack with a copy that couldn't be read for a reason other than damage, though another
     /// copy of the same object could, with the first reason found.
     unreadable: BTreeMap<PathBuf, String>,
+    /// Each pack that couldn't be opened or searched for a reason other than damage, with the
+    /// first reason found.
+    unreadable_packs: BTreeMap<PathBuf, String>,
     /// Warnings about the store from the command itself, such as a merge that didn't finish.
     notes: Vec<Warning>,
 }
@@ -127,25 +134,14 @@ struct Checked {
 #[derive(Default)]
 struct Tries {
     wrong_kind: Option<ObjectKind>,
-    damage: Option<PackError>,
-    /// A failure that says nothing about the copy, such as a lack of memory.
-    other: Option<PackError>,
+    /// Every failure but a copy of another kind, as it came.
+    failed: Vec<PackError>,
     unreadable: Vec<(PathBuf, String)>,
 }
 
 impl Tries {
-    /// Keeps `e`, a failure that wasn't a copy's own.
-    fn note(&mut self, e: PackError) {
-        if is_damage(&e) {
-            self.damage.get_or_insert(e);
-        } else {
-            self.other.get_or_insert(e);
-        }
-    }
-
     fn error(self, id: &Id, kind: ObjectKind) -> StoreError {
-        // A failure that says nothing about the copy comes first: calling it damage would mislead.
-        match (self.other.or(self.damage), self.wrong_kind) {
+        match (most(self.failed), self.wrong_kind) {
             (Some(e), _) => StoreError::Pack(e),
             (None, Some(found)) => StoreError::WrongKind {
                 id: *id,
@@ -217,7 +213,7 @@ impl Store {
         kind: ObjectKind,
         mut test: impl FnMut(&Id) -> Result<bool, E>,
     ) -> Result<bool, E> {
-        let mut skipped = None;
+        let mut skipped = Vec::new();
         let found = self.each_pack(&mut skipped, |_, pack| {
             for e in pack.entries() {
                 let e = e.map_err(StoreError::from)?;
@@ -227,11 +223,31 @@ impl Store {
             }
             Ok(ControlFlow::Continue(()))
         })?;
-        match (found, skipped) {
+        match (found, most(skipped)) {
             (Some(()), _) => Ok(true),
             // A pack that couldn't be read may hold one.
             (None, Some(e)) => Err(StoreError::from(e).into()),
             (None, None) => Ok(false),
+        }
+    }
+
+    /// The ID of every index line of `kind`. A pack that can't be opened or searched for a reason
+    /// other than damage is passed over, with its warning; damage is the error.
+    pub(crate) fn ids_of(&self, kind: ObjectKind) -> Result<HashSet<Id>, StoreError> {
+        let mut ids = HashSet::new();
+        let mut skipped = Vec::new();
+        self.each_pack(&mut skipped, |_, pack| {
+            for e in pack.entries() {
+                let e = e?;
+                if e.kind == kind {
+                    ids.insert(e.id);
+                }
+            }
+            Ok::<_, StoreError>(ControlFlow::<()>::Continue(()))
+        })?;
+        match skipped.into_iter().find(is_damage) {
+            Some(e) => Err(e.into()),
+            None => Ok(ids),
         }
     }
 
@@ -244,7 +260,7 @@ impl Store {
     /// skipped. A copy recording another `size` than the object's is damage, and is never read.
     pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {
         let mut tries = Tries::default();
-        let mut skipped = None;
+        let mut skipped = Vec::new();
         let found = self.search(id, &mut skipped, |c| {
             if c.entry.kind == kind && c.entry.uncompressed_size != size {
                 let wrong = PackError::Corrupt {
@@ -260,11 +276,12 @@ impl Store {
             }
             ControlFlow::Continue(())
         })?;
-        // A pack that couldn't be read may hold a good copy, so its error is the answer.
-        match (found, tries.other.or(skipped)) {
+        // A pack or copy that couldn't be read for a reason other than damage may hold a good
+        // copy, so its error is the answer. Damage isn't: storing the object again is harmless.
+        match (found, most(tries.failed.into_iter().chain(skipped))) {
             (Some(()), _) => Ok(true),
-            (None, Some(e)) => Err(e.into()),
-            (None, None) => Ok(false),
+            (None, Some(e)) if !is_damage(&e) && !is_gone(&e) => Err(e.into()),
+            (None, _) => Ok(false),
         }
     }
 
@@ -282,7 +299,8 @@ impl Store {
     }
 
     /// A warning for each pack found holding a bad copy of an object, then one for each pack with
-    /// a copy that couldn't be read, though another copy could.
+    /// a copy that couldn't be read, though another copy could, then one for each pack that
+    /// couldn't be opened or searched for a reason other than damage.
     #[must_use]
     pub fn warnings(&self) -> Vec<Warning> {
         let mut warnings: Vec<Warning> = self
@@ -296,6 +314,17 @@ impl Store {
                 warning::COPY_UNREADABLE,
                 format!(
                     "Bolt couldn't read a copy in pack {}: {}.",
+                    escape(&path.display().to_string(), false),
+                    escape(reason.trim_end_matches('.'), false)
+                ),
+            )
+        }));
+        warnings.extend(checked.unreadable_packs.iter().map(|(path, reason)| {
+            Warning::new(
+                warning::PACK_UNREADABLE,
+                format!(
+                    "Bolt couldn't read pack {}: {}. It went on without it; check that the file \
+                     can be read.",
                     escape(&path.display().to_string(), false),
                     escape(reason.trim_end_matches('.'), false)
                 ),
@@ -406,9 +435,7 @@ impl Store {
             }
         }
         let (mut copies, skipped) = self.all_copies(id)?;
-        if let Some(e) = skipped {
-            tries.note(e);
-        }
+        tries.failed.extend(skipped);
         if near {
             copies.retain(|c| c.n != first.n);
         }
@@ -443,7 +470,7 @@ impl Store {
         // A bad copy is never read again but still counts, so no good copy is damage every time.
         let known_bad = self.checked().bad.get(&c.at()).cloned();
         if let Some(reason) = known_bad {
-            tries.damage.get_or_insert_with(|| PackError::Corrupt {
+            tries.failed.push(PackError::Corrupt {
                 path: path(),
                 reason,
             });
@@ -462,7 +489,7 @@ impl Store {
             }
             Err(e) if is_damage(&e) => {
                 let reason = self.note_damage(c.at(), path(), &e);
-                tries.damage.get_or_insert_with(|| PackError::Corrupt {
+                tries.failed.push(PackError::Corrupt {
                     path: path(),
                     reason,
                 });
@@ -471,7 +498,7 @@ impl Store {
             // Memory or I/O: the copy may be fine, so it is neither remembered nor damage.
             Err(e) => {
                 tries.unreadable.push((path(), e.to_string()));
-                tries.other.get_or_insert(e);
+                tries.failed.push(e);
                 Err(true)
             }
         }
@@ -485,17 +512,20 @@ impl Store {
     /// first pack by name that holds it.
     /// A pack that couldn't be read may hold `id`, so without a copy its error is the answer.
     fn first_copy(&self, id: &Id) -> Result<Option<Copy>, StoreError> {
-        let mut skipped = None;
-        match (self.search(id, &mut skipped, ControlFlow::Break)?, skipped) {
+        let mut skipped = Vec::new();
+        match (
+            self.search(id, &mut skipped, ControlFlow::Break)?,
+            most(skipped),
+        ) {
             (None, Some(e)) => Err(e.into()),
             (found, _) => Ok(found),
         }
     }
 
-    /// Every copy of `id` found, and the error of the first pack that couldn't be read.
-    fn all_copies(&self, id: &Id) -> Result<(Vec<Copy>, Option<PackError>), StoreError> {
+    /// Every copy of `id` found, and the errors of the packs that couldn't be read.
+    fn all_copies(&self, id: &Id) -> Result<(Vec<Copy>, Vec<PackError>), StoreError> {
         let mut copies = Vec::new();
-        let mut skipped = None;
+        let mut skipped = Vec::new();
         self.search(id, &mut skipped, |c| {
             copies.push(c);
             ControlFlow::<()>::Continue(())
@@ -508,7 +538,7 @@ impl Store {
     fn search<T>(
         &self,
         id: &Id,
-        skipped: &mut Option<PackError>,
+        skipped: &mut Vec<PackError>,
         mut visit: impl FnMut(Copy) -> ControlFlow<T>,
     ) -> Result<Option<T>, StoreError> {
         let mut unsearched = Vec::new();
@@ -529,27 +559,39 @@ impl Store {
         Ok(found)
     }
 
-    /// Notes pack `n`, which couldn't be opened or searched, as damaged if `e` says so, and keeps
-    /// the first such error in `skipped`.
-    fn pass_over(&self, n: usize, e: PackError, skipped: &mut Option<PackError>) {
+    /// Notes pack `n`, which couldn't be opened or searched, as damaged or unreadable as `e`
+    /// says, and keeps `e` in `skipped`, naming the pack.
+    fn pass_over(&self, n: usize, e: PackError, skipped: &mut Vec<PackError>) {
+        let path = self.pack_path(n);
         if let PackError::Corrupt { reason, .. } = &e {
-            let path = self.pack_path(n);
             let reason = reason.clone();
             self.checked().damaged.entry(path).or_insert(reason);
+        } else if !is_damage(&e) && !is_gone(&e) {
+            let shown = escape(&path.display().to_string(), false);
+            let reason = e.to_string();
+            self.checked()
+                .unreadable_packs
+                .entry(path)
+                .or_insert(reason);
+            if let PackError::Io(e) = e {
+                let said = format!("Bolt couldn't read pack {shown}: {e}");
+                skipped.push(io::Error::new(e.kind(), said).into());
+                return;
+            }
         }
-        skipped.get_or_insert(e);
+        skipped.push(e);
     }
 
     /// Hands `f` each pack, first the one that held the last object read, then the others open,
     /// then the closed ones by name, until it breaks. Open ones first, so a lookup that finds
     /// nothing opens only the packs that don't fit among the open ones. A pack gone when it is
     /// opened (merged into another) sends the store to list the packs again, once; a pack already
-    /// handed out isn't handed out again. A pack that can't be opened is passed over, noted as
-    /// damaged, and its error kept in `skipped`: a lookup can still find a good copy elsewhere,
-    /// but can't tell that the pack doesn't hold one.
+    /// handed out isn't handed out again. A pack that can't be opened is passed over, noted, and
+    /// its error kept in `skipped`: a lookup can still find a good copy elsewhere, but can't tell
+    /// that the pack doesn't hold one.
     fn each_pack<T, E: From<StoreError>>(
         &self,
-        skipped: &mut Option<PackError>,
+        skipped: &mut Vec<PackError>,
         mut f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
     ) -> Result<Option<T>, E> {
         let mut done = HashSet::new();
@@ -597,7 +639,7 @@ impl Store {
     }
 
     /// Pack `n`, kept open from an earlier lookup if it was, else opened and kept open, closing
-    /// the least recently used past `MAX_OPEN`.
+    /// the least recently used past `MAX_OPEN`. One that failed to open fails again unopened.
     fn pack(&self, n: usize) -> Result<Arc<PackReader>, PackError> {
         let name = {
             let mut packs = self.packs();
@@ -607,13 +649,24 @@ impl Store {
                 packs.open.insert(0, open);
                 return Ok(pack);
             }
+            if let Some(e) = packs.failed.get(&n) {
+                return Err(again(e));
+            }
             // Closed first, so no more than `MAX_OPEN` are open even for a moment.
             packs.open.truncate(MAX_OPEN - 1);
             packs.names.get(n).cloned().flatten()
         };
         let name = name.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         let path = self.path.join(&name);
-        let pack = Arc::new(PackReader::open_in(&self.dir, &name, &path)?);
+        let pack = match PackReader::open_in(&self.dir, &name, &path) {
+            Ok(pack) => Arc::new(pack),
+            Err(e) => {
+                if !is_gone(&e) {
+                    self.packs().failed.insert(n, again(&e));
+                }
+                return Err(e);
+            }
+        };
         let mut packs = self.packs();
         packs.open.insert(0, (n, Arc::clone(&pack)));
         packs.open.truncate(MAX_OPEN);
@@ -678,6 +731,40 @@ pub(crate) fn is_damage(e: &PackError) -> bool {
         e,
         PackError::FingerprintMismatch { .. } | PackError::Corrupt { .. }
     )
+}
+
+/// A pack gone since it was listed, merged into another, say.
+fn is_gone(e: &PackError) -> bool {
+    matches!(e, PackError::Io(e) if e.kind() == io::ErrorKind::NotFound)
+}
+
+/// The failure of `failed` that matters most, the first of its kind: one that says nothing
+/// about the copy, which may be fine (calling it damage would mislead), then damage, then a pack
+/// gone, which says nothing at all.
+fn most(failed: impl IntoIterator<Item = PackError>) -> Option<PackError> {
+    let rank = |e: &PackError| match e {
+        e if is_gone(e) => 0,
+        e if is_damage(e) => 1,
+        _ => 2,
+    };
+    failed
+        .into_iter()
+        .reduce(|kept, e| if rank(&e) > rank(&kept) { e } else { kept })
+}
+
+/// `e` once more, for a pack that failed to open before.
+fn again(e: &PackError) -> PackError {
+    match e {
+        PackError::Io(e) => io::Error::new(e.kind(), e.to_string()).into(),
+        PackError::Corrupt { path, reason } => PackError::Corrupt {
+            path: path.clone(),
+            reason: reason.clone(),
+        },
+        PackError::FingerprintMismatch { id } => PackError::FingerprintMismatch { id: *id },
+        PackError::ContentChanged => PackError::ContentChanged,
+        PackError::TooLarge => PackError::TooLarge,
+        PackError::OutOfMemory => PackError::OutOfMemory,
+    }
 }
 
 #[cfg(test)]
@@ -1020,6 +1107,92 @@ mod tests {
             assert!(store.open_count() <= 16, "{} open", store.open_count());
         }
         assert_eq!(store.open_count(), 16);
+    }
+
+    /// A pack Bolt may not read is passed over, named in one warning however many lookups pass
+    /// it, and named in the error of a lookup that finds nothing.
+    #[test]
+    fn a_pack_that_cannot_be_opened_is_named() {
+        let (_root, tmp, packs) = dirs();
+        let content = b"found past the locked pack".to_vec();
+        let id = hash_content(&content);
+        // Searched first on a cold store.
+        let locked = packs.join("00.pack");
+        std::fs::rename(pack_of(&tmp, &packs, &[b"locked".to_vec()]), &locked).unwrap();
+        pack_of(&tmp, &packs, std::slice::from_ref(&content));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let none = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&locked, none).unwrap();
+            // root reads everything, so there is nothing to test.
+            if std::fs::read(&locked).is_ok() {
+                return;
+            }
+        }
+        #[cfg(windows)]
+        let _held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&locked)
+                .unwrap()
+        };
+        let store = Store::open(&packs).unwrap();
+        for _ in 0..2 {
+            let mut out = Vec::new();
+            store.copy_content(&id, &mut out).unwrap();
+            assert_eq!(out, content);
+        }
+        let missing = store
+            .copy_content(&hash_content(b"nowhere"), &mut Vec::new())
+            .unwrap_err();
+        assert!(missing.to_string().contains("00.pack"), "{missing}");
+        assert!(!matches!(
+            RepoError::from(missing),
+            RepoError::Damaged { .. }
+        ));
+        // Listing every ID, as for a lost head, passes over it too.
+        let ids = store.ids_of(ObjectKind::Content).unwrap();
+        assert_eq!(ids, HashSet::from([id]));
+        let warnings = store.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "pack_unreadable");
+        assert!(warnings[0].message.contains("00.pack"), "{warnings:?}");
+    }
+
+    /// Opening a junk pack again would close a good open one each time; every lookup that reaches
+    /// it still gets its damage.
+    #[test]
+    fn a_junk_pack_is_opened_once_per_command() {
+        let (_root, tmp, packs) = dirs();
+        for i in 0..16u8 {
+            pack_of(&tmp, &packs, &[vec![i; 3]]);
+        }
+        std::fs::write(packs.join("zz.pack"), vec![b'x'; 200]).unwrap();
+        let store = Store::open(&packs).unwrap();
+        let miss = |i: u8| {
+            let e = store
+                .copy_content(&hash_content(&[i; 5]), &mut Vec::new())
+                .unwrap_err();
+            let junk = matches!(&e, StoreError::Pack(PackError::Corrupt { path, .. })
+                if path.ends_with("zz.pack"));
+            assert!(junk, "{e:?}");
+        };
+        // The first try at the junk pack closed a good one, which the next miss opens again.
+        miss(0);
+        miss(1);
+        let opened = open_files::total();
+        for i in 2..6 {
+            miss(i);
+        }
+        assert_eq!(open_files::total(), opened, "packs were opened again");
+        assert_eq!(store.damaged_packs().len(), 1);
+        // Listing every ID, as for a lost head, stops at damage.
+        let listed = store.ids_of(ObjectKind::Content);
+        let damage = matches!(&listed, Err(StoreError::Pack(PackError::Corrupt { .. })));
+        assert!(damage, "{:?}", listed.map(|ids| ids.len()));
     }
 
     #[test]

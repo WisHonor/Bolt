@@ -160,8 +160,7 @@ pub fn short_change_id(
     let Position::OnLine(line) = &entry.state.position else {
         return walk_short(repo, tip, id, change_id);
     };
-    let key = *repo.cache_key();
-    let mut cache = ChangeIds::load(repo, &key);
+    let mut cache = ChangeIds::load(repo);
     let ids = cache.line(repo, line, tip)?;
     let listed = ids.binary_search(change_id).is_ok();
     let short = match (listed, *id == tip) {
@@ -171,7 +170,7 @@ pub fn short_change_id(
         // says.
         (true, false) => None,
     };
-    cache.store(repo, &key, &entry.state);
+    cache.store(repo, &entry.state);
     match short {
         Some(short) => Ok(short),
         None => walk_short(repo, tip, id, change_id),
@@ -235,10 +234,9 @@ pub fn for_each_on_line<E: From<RepoError>>(
     let tip = tip_of(&entry)?;
     let ids = match &entry.state.position {
         Position::OnLine(line) => {
-            let key = *repo.cache_key();
-            let mut cache = ChangeIds::load(repo, &key);
+            let mut cache = ChangeIds::load(repo);
             let ids = cache.line(repo, line, tip)?.to_vec();
-            cache.store(repo, &key, &entry.state);
+            cache.store(repo, &entry.state);
             ids
         }
         Position::AtSave(_) => {
@@ -458,11 +456,15 @@ mod tests {
         id
     }
 
+    /// The user's own cache key, as the command line hands it over.
+    const KEY: [u8; crate::keyed::KEY_LEN] = [7; crate::keyed::KEY_LEN];
+
     /// A project whose line `main` ends with a save for each start given, the first one oldest.
     /// Also returns the saves' IDs, oldest first, and the first save's.
     fn project_with(starts: &[&str]) -> (tempfile::TempDir, Repository, Vec<Id>) {
         let dir = tempfile::tempdir().unwrap();
         let mut repo = Repository::init(dir.path(), &who()).unwrap();
+        repo.set_cache_key(KEY);
         let mut tip = repo.current().unwrap().1.state.lines["main"];
         let mut ids = vec![tip];
         for start in starts {
@@ -826,11 +828,10 @@ mod tests {
         let (dir, repo, ids) = project_with(&["klmnopl", "klmnopk"]);
         let lie = lying_cache(&repo);
         // The lie, sealed with this account's key, is believed: the test can tell.
-        let key = *repo.cache_key();
-        plant_cache(dir.path(), &crate::keyed::seal(&key, &lie.encode()));
+        plant_cache(dir.path(), &crate::keyed::seal(&KEY, &lie.encode()));
         assert_eq!(cached_line(&repo)[0], "klmnopkk");
         let other = [0x5a; crate::keyed::KEY_LEN];
-        assert_ne!(other, key);
+        assert_ne!(other, KEY);
         plant_cache(dir.path(), &crate::keyed::seal(&other, &lie.encode()));
         assert_eq!(cached_line(&repo), uncached_line(&repo));
         assert_eq!(cached_line(&repo)[0], "klmnopk");

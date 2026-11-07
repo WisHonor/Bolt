@@ -355,15 +355,10 @@ fn pick_up(
     })
 }
 
-/// The ID of every diary entry the store holds, from the packs' indexes alone.
+/// The ID of every diary entry the store holds, from the packs' indexes alone. A pack Bolt may not
+/// read is passed over with a warning naming it, so that the others can still be picked.
 fn stored_entries(repo: &Repository) -> Result<HashSet<Id>, RepoError> {
-    let mut ids = HashSet::new();
-    // No index line passes, so every pack's index is read to the end.
-    repo.store().any_entry(ObjectKind::DiaryEntry, |id| {
-        ids.insert(*id);
-        Ok::<_, RepoError>(false)
-    })?;
-    Ok(ids)
+    Ok(repo.store().ids_of(ObjectKind::DiaryEntry)?)
 }
 
 /// The diary entries in the store that no other entry has as its parent, newest first by `who`

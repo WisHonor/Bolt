@@ -18,7 +18,7 @@ use crate::encoding::DecodeError;
 use crate::fsio::{self, Done, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
 use crate::journal::Journal;
-use crate::keyed::{self, KEY_LEN};
+use crate::keyed::KEY_LEN;
 use crate::listing::Listing;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::safe_fs;
@@ -305,6 +305,17 @@ pub(crate) fn refused(e: io::Error) -> RepoError {
     match e.kind() {
         io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => damaged(e.to_string()),
         _ => e.into(),
+    }
+}
+
+/// `e`, from opening the lock file at `shown`, as `refused` takes it, naming the file.
+fn lock_error(shown: &Path, e: io::Error) -> RepoError {
+    match refused(e) {
+        RepoError::Io(e) => {
+            let shown = escape(&shown.display().to_string(), false);
+            io::Error::new(e.kind(), format!("Bolt couldn't open {shown}: {e}")).into()
+        }
+        e => e,
     }
 }
 
@@ -645,9 +656,8 @@ pub struct Repository {
     /// The head read before the store was last loaded, so every object it reaches is
     /// registered. `None` when there was no head yet, or none that is an entry's ID.
     head: Option<Id>,
-    /// What seals this handle's caches: one for this handle alone unless `set_cache_key` gave
-    /// the user's own.
-    cache_key: [u8; KEY_LEN],
+    /// The user's own key, which seals the caches; without it none is read or written.
+    cache_key: Option<[u8; KEY_LEN]>,
 }
 
 /// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
@@ -986,7 +996,7 @@ impl Repository {
                 features: BTreeSet::new(),
             },
             head: None,
-            cache_key: keyed::run_key()?,
+            cache_key: None,
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
         // `start` too.
@@ -1103,16 +1113,30 @@ impl Repository {
             format,
             store,
             head,
-            cache_key: keyed::run_key()?,
+            cache_key: None,
         };
         repo.clean_tmp()?;
         Ok(repo)
     }
 
     /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
-    /// command holds the change lock; otherwise it may be a pack being written right now.
+    /// command holds the change lock; otherwise it may be a pack being written right now. The
+    /// lock file is only opened to read, so a project the user can't write still opens; where it
+    /// can't be, the leftovers wait for a command that can.
     fn clean_tmp(&self) -> Result<(), RepoError> {
-        let file = self.open_lock_file()?;
+        let shown = self.bolt.join("state").join("lock");
+        let file = match safe_fs::open_regular_in(&self.held.state, OsStr::new("lock"), &shown) {
+            Ok(file) => file,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(lock_error(&shown, e)),
+        };
         if file.try_lock().is_err() {
             return Ok(());
         }
@@ -1134,7 +1158,8 @@ impl Repository {
 
     fn open_lock_file(&self) -> Result<File, RepoError> {
         let shown = self.bolt.join("state").join("lock");
-        fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown).map_err(refused)
+        fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown)
+            .map_err(|e| lock_error(&shown, e))
     }
 
     #[must_use]
@@ -1162,16 +1187,17 @@ impl Repository {
         &self.held.bolt
     }
 
-    /// The key that seals this project's caches for this handle.
+    /// The key that seals this project's caches, if `set_cache_key` gave one.
     #[must_use]
-    pub fn cache_key(&self) -> &[u8; KEY_LEN] {
-        &self.cache_key
+    pub fn cache_key(&self) -> Option<&[u8; KEY_LEN]> {
+        self.cache_key.as_ref()
     }
 
     /// Seals caches with `key` from now on: the user's own, which the command line reads, so
-    /// that they last from one command to the next.
+    /// that they last from one command to the next. Until then no cache is read or written: what
+    /// a key for one run seals, no later run trusts, and writing it would replace a good cache.
     pub fn set_cache_key(&mut self, key: [u8; KEY_LEN]) {
-        self.cache_key = key;
+        self.cache_key = Some(key);
     }
 
     /// `state/`, held open.
@@ -1472,6 +1498,8 @@ mod tests {
             std::fs::create_dir_all(bolt.join(sub)).unwrap();
         }
         std::fs::write(bolt.join("format"), FORMAT_TEXT).unwrap();
+        // As `start` leaves it: opening a project never makes it.
+        std::fs::write(bolt.join("state").join("lock"), b"").unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
     }
@@ -2150,6 +2178,45 @@ mod tests {
                 "tmp-xyz"
             ]
         );
+    }
+
+    /// A project shared read-only, say: reading needs no write to `state/lock`, and a command that
+    /// would change the project names the file it can't open.
+    #[test]
+    fn a_project_the_user_cannot_write_still_reads() {
+        let dir = tempdir();
+        let (head, _) = Repository::init(dir.path(), &entry(0).who)
+            .unwrap()
+            .current()
+            .unwrap();
+        let state = dir.path().join(".bolt").join("state");
+        let lock = state.join("lock");
+        // And `state/`, mode 0555 then on Unix (Windows ignores a folder's read-only flag).
+        let was = [&lock, &state].map(|p| (p, std::fs::metadata(p).unwrap().permissions()));
+        let read_only = |on: bool| {
+            for (path, was) in &was {
+                let mut now = was.clone();
+                if on {
+                    now.set_readonly(true);
+                }
+                std::fs::set_permissions(path, now).unwrap();
+            }
+        };
+        read_only(true);
+        // root writes anyway, so there is nothing to test.
+        let root_user = std::fs::OpenOptions::new().write(true).open(&lock).is_ok();
+        let opened = Repository::open(dir.path()).map(|mut repo| {
+            let refused = repo.lock_for_change("save", &mut |_| {}).map(drop);
+            (repo, refused)
+        });
+        read_only(false);
+        if root_user {
+            return;
+        }
+        let (repo, refused) = opened.unwrap();
+        assert_eq!(repo.current().unwrap().0, head);
+        let e = refused.unwrap_err();
+        assert!(e.to_string().contains(&lock.display().to_string()), "{e}");
     }
 
     /// Windows makes a link in `tmp/` before moving it into place, so a run that stops can leave

@@ -7,6 +7,8 @@ use crate::text::escape;
 pub const DAMAGED_PACK: &str = "damaged_pack";
 /// A stored copy couldn't be read for a reason other than damage, though another copy worked.
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
+/// A pack couldn't be opened or searched for a reason other than damage, such as no permission.
+pub const PACK_UNREADABLE: &str = "pack_unreadable";
 /// Small packs were merged after a command, but one or more couldn't be: the command happened.
 pub const PACK_NOT_MERGED: &str = "pack_not_merged";
 /// `tidy` left a pack as it is: it couldn't read it, or couldn't remove it.

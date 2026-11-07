@@ -134,15 +134,18 @@ impl FileCache {
         Ok(FileCache { files })
     }
 
-    /// The cache in `repo`, or an empty one if it is missing, unreadable, or not sealed by this
-    /// handle's key.
+    /// The cache in `repo`, or an empty one if it is missing, unreadable, or not sealed by the
+    /// handle's key, or the handle has none.
     #[must_use]
     pub fn load(repo: &Repository) -> FileCache {
+        let Some(key) = repo.cache_key() else {
+            return FileCache::default();
+        };
         let shown = repo.cache_dir().join(FILE);
         let read =
             safe_fs::read_capped_in(repo.cache_folder(), OsStr::new(FILE), &shown, MAX_BYTES);
         read.ok()
-            .and_then(|bytes| FileCache::decode(keyed::open_sealed(repo.cache_key(), &bytes)?).ok())
+            .and_then(|bytes| FileCache::decode(keyed::open_sealed(key, &bytes)?).ok())
             .unwrap_or_default()
     }
 
@@ -184,15 +187,19 @@ impl FileCache {
             .insert(path.to_owned(), Entry { state, racy: false });
     }
 
-    /// Writes the cache, sealed, replacing the old one whole. `now_ns` is the drive's time at the
-    /// start of the scan (`drive_now`): a file whose modified time isn't at least 2 s older is kept
-    /// as racy, never matched, since it may change again within one tick of the drive's clock.
+    /// Writes the cache, sealed, replacing the old one whole; nothing when the handle has no key.
+    /// `now_ns` is the drive's time at the start of the scan (`drive_now`): a file whose modified
+    /// time isn't at least 2 s older is kept as racy, never matched, since it may change again
+    /// within one tick of the drive's clock.
     pub fn store(mut self, repo: &Repository, now_ns: i128) -> Result<(), RepoError> {
+        let Some(key) = repo.cache_key() else {
+            return Ok(());
+        };
         let trusted_before = now_ns.saturating_sub(RACY_NS);
         for entry in self.files.values_mut() {
             entry.racy |= entry.state.modified_ns > trusted_before;
         }
-        let sealed = keyed::seal(repo.cache_key(), &self.encode());
+        let sealed = keyed::seal(key, &self.encode());
         if sealed.len() as u64 > MAX_BYTES {
             return Err(RepoError::Io(io::Error::other(
                 "the file-state cache would be bigger than 256 MiB",

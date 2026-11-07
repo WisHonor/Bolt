@@ -421,16 +421,15 @@ pub fn save_folder(
     }
     let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
-    let key = *repo.cache_key();
     // An amend needs the change-ID cache before the walk; a save, only once it has its save.
     let mut early_cache = None;
     if req.amend
         && let Some(line) = &line
     {
-        let mut cache = ChangeIds::load(repo, &key);
+        let mut cache = ChangeIds::load(repo);
         let by = shown_elsewhere(repo, &mut cache, &entry.state, line, parent_id, &parent);
         // Kept however the amend ends: reading the other lines is what costs.
-        cache.store(repo, &key, &entry.state);
+        cache.store(repo, &entry.state);
         let by = by?;
         if !by.is_empty() {
             return Err(SaveError::AmendShared { by });
@@ -564,7 +563,7 @@ pub fn save_folder(
     let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
     // Worked out before the commit, so that nothing after it can fail the save. The line's
     // change IDs come from the cache, which then learns this one; an amend keeps the same IDs.
-    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo, &key));
+    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo));
     let shortened = cache
         .line(repo, line, parent_id)
         .map(|ids| history::short_among(ids, &save.change_id, req.amend));
@@ -596,7 +595,7 @@ pub fn save_folder(
     } else {
         cache.add(line, parent_id, save_id, save.change_id);
     }
-    cache.store(repo, &key, &diary.state);
+    cache.store(repo, &diary.state);
     keep_file_cache(repo, seen, now, &mut warnings);
     // Counted from the save before it, which for an amend is the first parent it took over.
     let before = match (req.amend, save.parents.first()) {
@@ -1474,9 +1473,11 @@ mod tests {
         }
     }
 
+    /// A new project, its caches sealed with a key as the command line hands over the user's.
     pub(super) fn project() -> (tempfile::TempDir, Repository) {
         let dir = tempfile::tempdir().unwrap();
-        let repo = Repository::init(dir.path(), &who()).unwrap();
+        let mut repo = Repository::init(dir.path(), &who()).unwrap();
+        repo.set_cache_key([7; 32]);
         (dir, repo)
     }
 
@@ -1755,6 +1756,48 @@ mod tests {
         assert!(damaged[0].to_string().contains("00.pack"), "{damaged:?}");
         let fresh = Repository::open(dir.path()).unwrap();
         assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
+    }
+
+    /// The only copy is in a pack too damaged to open, which might hold a good one: storing it
+    /// again is harmless, where stopping would leave the user unable to save.
+    #[test]
+    fn a_save_stores_again_past_a_damaged_only_copy() {
+        let (dir, _repo) = project();
+        let licence = b"Permission is hereby granted, free of charge, to any person\n";
+        let bolt = dir.path().join(".bolt");
+        let mut w = crate::pack::PackWriter::create(&bolt.join("tmp")).unwrap();
+        w.add_content(licence).unwrap();
+        let pack = w.finish(&bolt.join("store/packs")).unwrap().unwrap();
+        let mut bytes = fs::read(&pack).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&pack, bytes).unwrap();
+        write(dir.path(), "LICENSE", licence);
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let root = saved_root(save_now(&mut repo).unwrap());
+        let name = pack.file_name().unwrap().to_str().unwrap();
+        let warnings = repo.store().warnings();
+        let named = |w: &Warning| w.kind == warning::DAMAGED_PACK && w.message.contains(name);
+        assert!(warnings.iter().any(named), "{warnings:?}");
+        let fresh = Repository::open(dir.path()).unwrap();
+        assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
+    }
+
+    /// What a key for one run seals, no later run trusts: writing it would only replace a cache
+    /// the user's own key sealed.
+    #[test]
+    fn a_run_only_key_writes_no_cache() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"1");
+        save_now(&mut repo).unwrap();
+        let cache = dir.path().join(".bolt/cache");
+        let read = |name: &str| fs::read(cache.join(name)).unwrap();
+        let before = (read("change-ids"), read("files"));
+        // No key given, as a program using the engine runs it.
+        let mut repo = Repository::open(dir.path()).unwrap();
+        write(dir.path(), "a.txt", b"2");
+        save_now(&mut repo).unwrap();
+        history::for_each_on_line::<RepoError>(&repo, |_, _, _| Ok(())).unwrap();
+        assert!((read("change-ids"), read("files")) == before);
     }
 
     #[test]
@@ -2326,8 +2369,7 @@ mod tests {
         let SaveOutcome::Saved { save_id, .. } = save_now(&mut repo).unwrap() else {
             panic!("nothing was saved");
         };
-        let cached =
-            |repo: &Repository, line: &str| ChangeIds::load(repo, &KEY).get(line).is_some();
+        let cached = |repo: &Repository, line: &str| ChangeIds::load(repo).get(line).is_some();
         // A line from the first save, which doesn't hold this one: nothing to amend.
         plant_line(&mut repo, "b", first);
         let same = save_as(&mut repo, None, true);

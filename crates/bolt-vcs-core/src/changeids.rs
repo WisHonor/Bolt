@@ -10,7 +10,7 @@ use crate::diary::State;
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::fsio;
 use crate::id::{ChangeId, Id};
-use crate::keyed::{self, KEY_LEN};
+use crate::keyed;
 use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
 
@@ -109,8 +109,12 @@ impl ChangeIds {
         self.lines.get(line).map(|l| (l.tip, l.ids.as_slice()))
     }
 
-    /// The cache in `repo`, or an empty one if it can't be read or `key` didn't seal it.
-    pub(crate) fn load(repo: &Repository, key: &[u8; KEY_LEN]) -> ChangeIds {
+    /// The cache in `repo`, or an empty one if it can't be read or the handle's key didn't seal
+    /// it, or the handle has none.
+    pub(crate) fn load(repo: &Repository) -> ChangeIds {
+        let Some(key) = repo.cache_key() else {
+            return ChangeIds::default();
+        };
         let shown = repo.cache_dir().join(FILE);
         let read =
             safe_fs::read_capped_in(repo.cache_folder(), OsStr::new(FILE), &shown, MAX_BYTES);
@@ -119,9 +123,13 @@ impl ChangeIds {
             .unwrap_or_default()
     }
 
-    /// Writes the cache back, sealed with `key`, if it changed, keeping only the lines `state`
-    /// has. A cache that can't be written is just not there next time, so a failure is ignored.
-    pub(crate) fn store(&mut self, repo: &Repository, key: &[u8; KEY_LEN], state: &State) {
+    /// Writes the cache back, sealed with the handle's key, if it changed, keeping only the lines
+    /// `state` has; nothing when the handle has no key. A cache that can't be written is just not
+    /// there next time, so a failure is ignored.
+    pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
+        let Some(key) = repo.cache_key() else {
+            return;
+        };
         let before = self.lines.len();
         self.lines.retain(|name, _| state.lines.contains_key(name));
         if !self.changed && self.lines.len() == before {

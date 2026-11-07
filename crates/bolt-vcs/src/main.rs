@@ -266,7 +266,8 @@ fn read_first_save(repo: &Repository) -> Result<(Id, Save, String), Failure> {
 /// the caches go unused this time: they only make Bolt faster.
 fn with_users_key(mut repo: Repository) -> Repository {
     match bolt_core::keyed::cache_key() {
-        Ok(key) => repo.set_cache_key(key),
+        Ok(Some(key)) => repo.set_cache_key(key),
+        Ok(None) => {}
         Err(e) => repo.store().note(Warning::new(
             warning::CACHE_KEY_UNUSABLE,
             format!(

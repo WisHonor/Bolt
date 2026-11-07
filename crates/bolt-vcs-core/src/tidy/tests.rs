@@ -690,6 +690,68 @@ fn a_pack_whose_index_fails_its_checksum_is_left_whole() {
     assert!(said.contains("Ask for help"), "{said}");
 }
 
+/// An index that reads otherwise the second time, as a failing disk could, must not drop a kept
+/// object: the pack whose copy didn't take what its checked index said to keep stays.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_pack_whose_copy_takes_other_than_was_judged_is_left() {
+    use crate::fsio::fault;
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    let content = hash_content(b"one");
+    let holding = pack_names(&repo)
+        .into_iter()
+        .find(|name| {
+            let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+            pack.find(&content).unwrap().is_some()
+        })
+        .unwrap();
+    let path = repo.packs_dir().join(&holding);
+    age_packs(&repo, 48);
+    let at = path.clone();
+    fault::act_at("tidy:copying", move || flip_index_id(&at, &content));
+    tidied(&mut repo);
+    let warned: Vec<_> = repo
+        .store()
+        .warnings()
+        .into_iter()
+        .filter(|w| w.kind == warning::PACK_NOT_TIDIED)
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].message.contains(&holding), "{warned:?}");
+    // Read as it was written, the pack still holds the kept file.
+    let mut flipped = content;
+    flipped.0[31] ^= 1;
+    flip_index_id(&path, &flipped);
+    assert!(text_reads(&repo, "one"));
+}
+
+/// Where letter case counts, an old pack named like a new one in capitals is another file, and
+/// keeping it loses nothing; where it doesn't, it is the new pack.
+#[test]
+fn an_old_pack_named_like_a_new_one_in_other_letters_is_never_removed() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    // Tidied twice, what is kept is one pack in order of ID, which tidying writes again as it is.
+    for _ in 0..2 {
+        age_packs(&repo, 48);
+        tidied(&mut repo);
+    }
+    let names = pack_names(&repo);
+    assert_eq!(names.len(), 1, "{names:?}");
+    let name = names.first().unwrap();
+    let upper = format!(
+        "{}.pack",
+        name.trim_end_matches(".pack").to_ascii_uppercase()
+    );
+    fs::rename(repo.packs_dir().join(name), repo.packs_dir().join(&upper)).unwrap();
+    age_packs(&repo, 48);
+    let report = tidied(&mut repo);
+    assert_eq!(report.packs_written, 1, "{report:?}");
+    assert!(repo.packs_dir().join(&upper).exists(), "{report:?}");
+    assert!(text_reads(&repo, "one"));
+}
+
 #[test]
 fn tidy_stops_at_a_chunk_list_or_a_conflict_record() {
     for kind in [ObjectKind::ChunkList, ObjectKind::Conflict] {
