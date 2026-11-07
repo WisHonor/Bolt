@@ -8,7 +8,6 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -508,7 +507,8 @@ impl WalkState {
     /// The rules of a Git list at the project path `rel`, which apply from the top folder, read as
     /// a `.gitignore` is: no link on the way to it is followed. A folder on the way that is a link
     /// is skipped with a warning that says `why`; one that isn't there, or isn't a folder (a
-    /// worktree's `.git` is a file), means there is no list, as in Git.
+    /// worktree's `.git` is a file), means there is no list, as in Git. The folders on the way are
+    /// only searched, as Git does, so a `.git` others may not list (mode 0711) is no problem.
     fn top_list_rules(
         &mut self,
         rel: &Path,
@@ -519,10 +519,11 @@ impl WalkState {
             return Ok(None);
         };
         let mut dir = PathBuf::new();
+        let mut held = Arc::clone(&self.handles.top);
         for part in up {
             dir.push(part);
-            match self.handles.dir(&dir) {
-                Ok(_) => {}
+            match held.open_dir_to_search(part) {
+                Ok(next) => held = Arc::new(next),
                 Err(e) if is_link_refusal(&e) => {
                     self.warnings.push(Warning::new(
                         warning::GITIGNORE_SKIPPED,
@@ -550,7 +551,7 @@ impl WalkState {
                 }
             }
         }
-        self.file_rules(up, name, "", Some(why), in_force)
+        self.rules_in(&held, name, &shown(rel), "", Some(why), in_force)
     }
 
     /// The rules of the ignore file `name` in the folder `up`, for the project's `folder`, or none
@@ -567,13 +568,32 @@ impl WalkState {
         in_force: &mut u64,
     ) -> Result<Option<Rules>, SaveError> {
         let rel = shown(&up.join(name));
+        let dir = match self.handles.held(up) {
+            Ok(dir) => Arc::clone(dir),
+            Err(source) => {
+                let path = folder_of(&rel);
+                return Err(SaveError::Unreadable { path, source });
+            }
+        };
+        self.rules_in(&dir, name, &rel, folder, why, in_force)
+    }
+
+    /// `file_rules` for the file `name` in the folder `dir`, at the project path `rel`.
+    fn rules_in(
+        &mut self,
+        dir: &Dir,
+        name: &OsStr,
+        rel: &str,
+        folder: &str,
+        why: Option<&str>,
+        in_force: &mut u64,
+    ) -> Result<Option<Rules>, SaveError> {
         let unreadable = |source| SaveError::Unreadable {
-            path: folder_of(&rel),
+            path: folder_of(rel),
             source,
         };
-        let dir = self.handles.dir(up).map_err(unreadable)?;
         let max = safe_fs::MAX_IGNORE_FILE_BYTES;
-        let bytes = match safe_fs::read_capped_in(dir, name, Path::new(&rel), max) {
+        let bytes = match safe_fs::read_capped_in(dir, name, Path::new(rel), max) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
@@ -593,7 +613,7 @@ impl WalkState {
                             "Bolt skipped {}: it is a link, folder or special file, not a regular \
                              file, so its rules weren't used. {why}. Make it a regular file if its \
                              rules should apply.",
-                            escape(&rel, false)
+                            escape(rel, false)
                         ),
                     ));
                     return Ok(None);
@@ -602,7 +622,7 @@ impl WalkState {
                 // once.
                 let said = e.to_string();
                 return Err(SaveError::Ignore {
-                    detail: if said.starts_with(&rel) {
+                    detail: if said.starts_with(rel) {
                         said
                     } else {
                         format!("{rel}: {said}")
@@ -610,7 +630,7 @@ impl WalkState {
                 });
             }
         };
-        self.counted(&bytes, &rel, folder, why.is_some(), in_force)
+        self.counted(&bytes, rel, folder, why.is_some(), in_force)
             .map(Some)
     }
 
@@ -852,7 +872,7 @@ fn scan_folder(
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     let (top, dropped) = base.listing(base.root)?;
     let mut rules = WalkState::new(root, drive, top, dropped, own_list)?;
-    let mut folders = walk_and_look(root, &mut base, &mut limits, drive, &mut rules)?;
+    let mut folders = walk_and_look(root, &mut base, &mut limits, drive, &mut rules, &look_at)?;
     // Sorted, so a name the walk found can be looked up.
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -938,9 +958,25 @@ struct Look {
 /// Files of one folder to look at, with the handle that listed the folder: a folder swapped since
 /// is never looked into, and the read that opens it again by name finds other files there.
 struct Job {
-    number: usize,
     dir: Arc<Dir>,
     looks: Vec<Look>,
+}
+
+/// A problem the walk or a look found, at its project path: the empty path, which comes first,
+/// for one that is no entry's (the project folder's, or Bolt's own).
+type Problem = (String, SaveError);
+
+/// Whether the project path `a` comes before `b`, as paths come in a save's listings: name by
+/// name, each by its bytes.
+fn before(a: &str, b: &str) -> bool {
+    a.split('/').lt(b.split('/'))
+}
+
+/// Keeps in `first` whichever of it and `problem` comes first by path.
+fn keep_first(first: &mut Option<Problem>, problem: Problem) {
+    if first.as_ref().is_none_or(|(at, _)| before(&problem.0, at)) {
+        *first = Some(problem);
+    }
 }
 
 /// The most files one thread looks at in one go.
@@ -951,16 +987,17 @@ const MOST_LOOKERS: usize = 6;
 const WAITING_PER_LOOKER: usize = 2;
 
 /// Walks the folder (`walk_folders`) and fills in the details of every file and link it keeps,
-/// each from a look at the entry itself. Never from the folder listing: on Windows it keeps the
-/// old size and time of a file that is open and being written, so a change would hide behind them.
-/// Each look opens the file there, so they run on other threads while the walk goes on, as Git's
-/// preloaded index does.
+/// each from a look at the entry itself (`look_at`, on other threads while the walk goes on, as
+/// Git's preloaded index does). Never from the folder listing: on Windows it keeps the old size and
+/// time of a file that is open and being written, so a change would hide behind them. Whichever
+/// thread finds one first, the problem it gives is the first by path.
 fn walk_and_look(
     root: &Path,
     base: &mut Base,
     limits: &mut SaveLimits,
     drive: Drive,
     rules: &mut WalkState,
+    look_at: &(dyn Fn(Job) -> Looked + Sync),
 ) -> Result<Folders, SaveError> {
     let threads = thread::available_parallelism()
         .map_or(1, usize::from)
@@ -972,19 +1009,18 @@ fn walk_and_look(
     let (send, jobs) = mpsc::sync_channel(waiting);
     // The lookers alone hold it, so once they have all stopped the walk can't send.
     let jobs = Arc::new(Mutex::new(jobs));
-    let failed = AtomicBool::new(false);
     let (walked, looked) = thread::scope(|scope| {
         let mut lookers = Vec::new();
         for _ in 0..threads {
-            let (jobs, failed) = (Arc::clone(&jobs), &failed);
-            match thread::Builder::new().spawn_scoped(scope, move || look(&jobs, failed)) {
+            let jobs = Arc::clone(&jobs);
+            match thread::Builder::new().spawn_scoped(scope, move || look(&jobs, look_at)) {
                 Ok(looker) => lookers.push(looker),
                 // Dropping `send` lets those started finish.
-                Err(e) => return (Err(SaveError::Repo(e.into())), Vec::new()),
+                Err(e) => return (Err((String::new(), SaveError::Repo(e.into()))), Vec::new()),
             }
         }
         drop(jobs);
-        let walked = walk_folders(root, base, limits, drive, rules, &send, &failed);
+        let walked = walk_folders(root, base, limits, drive, rules, &send);
         drop(send);
         let mut looked = Vec::new();
         for looker in lookers {
@@ -993,7 +1029,7 @@ fn walk_and_look(
                 Err(_) => {
                     let stopped =
                         io::Error::other("a look at the project's files stopped unexpectedly");
-                    looked.push((0, Err(SaveError::Repo(stopped.into()))));
+                    looked.push(Err((String::new(), SaveError::Repo(stopped.into()))));
                 }
             }
         }
@@ -1004,18 +1040,20 @@ fn walk_and_look(
     // swapped since the walk is found to be another file, never read as this one.
     rules.handles.down.clear();
     rules.handles.past = None;
-    let folders = walked?;
-    // Every job before a failed one was taken, so the first problem is always the same one.
-    let mut looked = looked;
-    looked.sort_by_key(|(i, _)| *i);
-    let mut found = Vec::new();
-    for (_, job) in looked {
-        found.extend(job?);
-    }
-    let Some(mut folders) = folders else {
-        let stopped = io::Error::other("the looks at the project's files stopped");
-        return Err(SaveError::Repo(stopped.into()));
+    let (mut folders, mut first) = match walked {
+        Ok(folders) => (folders, None),
+        Err(problem) => (Folders::new(), Some(problem)),
     };
+    let mut found = Vec::new();
+    for job in looked {
+        match job {
+            Ok(looks) => found.extend(looks),
+            Err(problem) => keep_first(&mut first, problem),
+        }
+    }
+    if let Some((_, problem)) = first {
+        return Err(problem);
+    }
     for (look, meta) in found {
         if let Some(c) = folders
             .get_mut(&look.folder)
@@ -1027,22 +1065,21 @@ fn walk_and_look(
     Ok(folders)
 }
 
-/// A job's files, each with its details, or the first problem a look at them found.
-type Looked = Result<Vec<(Look, EntryMeta)>, SaveError>;
+/// A job's files, each with its details, or the first problem a look at them found: its files
+/// are in path order.
+type Looked = Result<Vec<(Look, EntryMeta)>, Problem>;
 
-/// A looker: takes jobs from `jobs` until there are none, or until one fails.
-fn look(jobs: &Mutex<Receiver<Job>>, failed: &AtomicBool) -> Vec<(usize, Looked)> {
+/// A looker: hands each job from `jobs` to `look_at`, until there are none. Each is looked at,
+/// even past a problem, as a later one may hold one that comes first by path.
+fn look(jobs: &Mutex<Receiver<Job>>, look_at: &dyn Fn(Job) -> Looked) -> Vec<Looked> {
     let mut done = Vec::new();
-    while !failed.load(Ordering::Relaxed) {
+    loop {
         let next = match jobs.lock() {
             Ok(jobs) => jobs.recv(),
             Err(_) => break,
         };
         let Ok(job) = next else { break };
-        let number = job.number;
-        let found = look_at(job);
-        failed.fetch_or(found.is_err(), Ordering::Relaxed);
-        done.push((number, found));
+        done.push(look_at(job));
     }
     done
 }
@@ -1052,25 +1089,26 @@ fn look_at(job: Job) -> Looked {
     fsio::act_point("walk:looking");
     let mut found = Vec::with_capacity(job.looks.len());
     for look in job.looks {
-        let meta =
-            job.dir
-                .metadata(OsStr::new(&look.name))
-                .map_err(|source| SaveError::Unreadable {
-                    path: look.rel.clone(),
-                    source,
-                })?;
+        let meta = match job.dir.metadata(OsStr::new(&look.name)) {
+            Ok(meta) => meta,
+            Err(source) => {
+                let path = look.rel.clone();
+                return Err((look.rel, SaveError::Unreadable { path, source }));
+            }
+        };
         // The listing and this look disagree: it changed in between.
         if meta.kind != look.listed {
-            return Err(SaveError::ChangedDuringSave { path: look.rel });
+            let path = look.rel.clone();
+            return Err((look.rel, SaveError::ChangedDuringSave { path }));
         }
         found.push((look, meta));
     }
     Ok(found)
 }
 
-/// The walk itself, handing the files and links it keeps to `send` a folder at a time, numbered
-/// in the order met, to be looked at while it goes on. Stops early, with nothing, once a look has
-/// `failed`: that look's problem is the answer.
+/// The walk itself, handing the files and links it keeps to `send` a folder at a time, to be
+/// looked at while it goes on. Past a problem it goes on only for one that comes before it by
+/// path, which it meets late because a folder's files come before its folders; it gives the first.
 fn walk_folders(
     root: &Path,
     base: &mut Base,
@@ -1078,15 +1116,16 @@ fn walk_folders(
     drive: Drive,
     rules: &mut WalkState,
     send: &SyncSender<Job>,
-    failed: &AtomicBool,
-) -> Result<Option<Folders>, SaveError> {
+) -> Result<Folders, Problem> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
     // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
-    let mut path = vec![InFolder::listed(&mut rules.handles, String::new(), 0)?];
-    let (mut job, mut jobs) = (None, 0);
+    let top = InFolder::listed(&mut rules.handles, String::new(), 0);
+    let mut path = vec![top.map_err(|problem| (String::new(), problem))?];
+    let mut job = None;
+    let mut first: Option<Problem> = None;
     while let Some(here) = path.last_mut() {
         let Some(entry) = here.left.pop() else {
             path.pop();
@@ -1109,110 +1148,110 @@ fn walk_folders(
             continue;
         }
         let rel_path = Path::new(&up).join(&entry.name);
-        let kept = if closed {
-            rules.keeps_closed_folder(&root.join(&rel_path))
-        } else {
-            rules.keeps(&root.join(&rel_path), is_dir)
-        };
-        // Going on without the rules of an ignore file that failed would save what it keeps out.
-        if let Some(problem) = rules.problem.take() {
-            return Err(problem);
-        }
-        if !kept {
+        let rel = shown(&rel_path);
+        if first.as_ref().is_some_and(|(at, _)| !before(&rel, at)) {
             continue;
         }
-        let rel = shown(&rel_path);
-        let name = entry.name.to_str().ok_or_else(|| SaveError::InvalidName {
-            path: rel.clone(),
-            reason: "its name is not valid UTF-8".into(),
-        })?;
-        validate_name(name).map_err(|e| SaveError::InvalidName {
-            path: rel.clone(),
-            reason: e.to_string(),
-        })?;
-        limits
-            .check_path(rel.len())
-            .map_err(|why| too_long(why, &rel))?;
-        let kind = match entry.kind {
-            EntryType::Dir => {
-                limits.check_depth(depth).map_err(too_large)?;
-                folders.entry(rel.clone()).or_default();
-                // The walk hands a folder over before it asks about anything inside.
-                rules.note_folder(&rel, base)?;
-                Kind::Folder
-            }
-            EntryType::Symlink => Kind::Symlink,
-            EntryType::File => Kind::File,
-            // A Windows reparse point that isn't a link (a cloud placeholder, say): reading it
-            // says that Bolt can't save it yet.
-            EntryType::Other if cfg!(windows) => Kind::File,
-            // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
-            EntryType::Other => continue,
-        };
-        limits.add(1).map_err(too_large)?;
-        let children = folders.entry(up.clone()).or_default();
-        if kind == Kind::Folder {
-            // Every file here is met before any folder, so they can be looked at now.
-            if !send_job(&mut job, &mut jobs, send, failed) {
-                return Ok(None);
-            }
-        } else {
-            let full = |j: &Job| {
-                j.looks.len() == LOOKS_PER_JOB || j.looks.first().is_some_and(|l| l.folder != up)
+        let visited = (|| -> Result<Option<InFolder>, SaveError> {
+            let kept = if closed {
+                rules.keeps_closed_folder(&root.join(&rel_path))
+            } else {
+                rules.keeps(&root.join(&rel_path), is_dir)
             };
-            if job.as_ref().is_some_and(full) && !send_job(&mut job, &mut jobs, send, failed) {
+            // Going on without the rules of an ignore file that failed would save what it keeps
+            // out. They are for what is in its folder, which comes after it by path.
+            if let Some(problem) = rules.problem.take() {
+                return Err(problem);
+            }
+            if !kept {
                 return Ok(None);
             }
-            let dir = listed_by.ok_or_else(|| {
-                SaveError::Repo(
-                    io::Error::other("a file was met after its folder's folders").into(),
-                )
+            let name = entry.name.to_str().ok_or_else(|| SaveError::InvalidName {
+                path: rel.clone(),
+                reason: "its name is not valid UTF-8".into(),
             })?;
-            let job = job.get_or_insert_with(|| Job {
-                number: jobs,
-                dir,
-                looks: Vec::new(),
-            });
-            job.looks.push(Look {
-                folder: up,
-                at: children.len(),
-                listed: entry.kind,
+            validate_name(name).map_err(|e| SaveError::InvalidName {
+                path: rel.clone(),
+                reason: e.to_string(),
+            })?;
+            limits
+                .check_path(rel.len())
+                .map_err(|why| too_long(why, &rel))?;
+            let kind = match entry.kind {
+                EntryType::Dir => {
+                    limits.check_depth(depth).map_err(too_large)?;
+                    folders.entry(rel.clone()).or_default();
+                    // The walk hands a folder over before it asks about anything inside.
+                    rules.note_folder(&rel, base)?;
+                    Kind::Folder
+                }
+                EntryType::Symlink => Kind::Symlink,
+                EntryType::File => Kind::File,
+                // A Windows reparse point that isn't a link (a cloud placeholder, say): reading it
+                // says that Bolt can't save it yet.
+                EntryType::Other if cfg!(windows) => Kind::File,
+                // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
+                EntryType::Other => return Ok(None),
+            };
+            limits.add(1).map_err(too_large)?;
+            let children = folders.entry(up.clone()).or_default();
+            if kind == Kind::Folder {
+                // Every file here is met before any folder, so they can be looked at now.
+                send_job(&mut job, send);
+            } else {
+                let full = |j: &Job| {
+                    j.looks.len() == LOOKS_PER_JOB
+                        || j.looks.first().is_some_and(|l| l.folder != up)
+                };
+                if job.as_ref().is_some_and(full) {
+                    send_job(&mut job, send);
+                }
+                let dir = listed_by.ok_or_else(|| {
+                    SaveError::Repo(
+                        io::Error::other("a file was met after its folder's folders").into(),
+                    )
+                })?;
+                let job = job.get_or_insert_with(|| Job {
+                    dir,
+                    looks: Vec::new(),
+                });
+                job.looks.push(Look {
+                    folder: up,
+                    at: children.len(),
+                    listed: entry.kind,
+                    name: name.to_owned(),
+                    rel: rel.clone(),
+                });
+            }
+            children.push(Child {
                 name: name.to_owned(),
+                kind,
                 rel: rel.clone(),
+                meta: None,
             });
-        }
-        children.push(Child {
-            name: name.to_owned(),
-            kind,
-            rel: rel.clone(),
-            meta: None,
-        });
-        if kind == Kind::Folder {
-            path.push(InFolder::listed(&mut rules.handles, rel, depth)?);
+            if kind != Kind::Folder {
+                return Ok(None);
+            }
+            InFolder::listed(&mut rules.handles, rel.clone(), depth).map(Some)
+        })();
+        match visited {
+            Ok(Some(inner)) => path.push(inner),
+            Ok(None) => {}
+            // Before any problem found so far, by the check above.
+            Err(problem) => first = Some((rel, problem)),
         }
     }
-    if !send_job(&mut job, &mut jobs, send, failed) {
-        return Ok(None);
-    }
-    Ok(Some(folders))
+    send_job(&mut job, send);
+    first.map_or(Ok(folders), Err)
 }
 
-/// Sends `job`, if there is one, and counts it; waits while the lookers are busy. False once a
-/// look has failed, or every looker has stopped.
-fn send_job(
-    job: &mut Option<Job>,
-    jobs: &mut usize,
-    send: &SyncSender<Job>,
-    failed: &AtomicBool,
-) -> bool {
-    if failed.load(Ordering::Relaxed) {
-        return false;
+/// Sends `job`, if there is one; waits while the lookers are busy. If they have all stopped, one
+/// failed, which its join says.
+fn send_job(job: &mut Option<Job>, send: &SyncSender<Job>) {
+    if let Some(job) = job.take() {
+        fsio::act_point("walk:sending");
+        let _ = send.send(job);
     }
-    let Some(job) = job.take() else {
-        return true;
-    };
-    *jobs += 1;
-    send.send(job).is_ok()
 }
 
 /// Says the save left out entries whose names Git treats as `.git` or Bolt as `.bolt`, naming the
@@ -2044,6 +2083,29 @@ mod tests {
             Err(SaveError::Unreadable { path, .. }) => assert_eq!(path, ".git"),
             other => panic!("{:?}", other.map(|_| ())),
         }
+    }
+
+    /// As Git does, Bolt reaches `.git/info/exclude` without listing `.git`: a `.git` that can be
+    /// searched but not listed, as mode 0711 is to all but its owner, is no problem.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_folder_that_cannot_be_listed_does_not_stop_a_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".git/info/exclude", b"a.txt\n");
+        write(root, "a.txt", b"x");
+        write(root, "b.txt", b"x");
+        let git = root.join(".git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o311)).unwrap();
+        // root reads everything, so there is nothing to test.
+        let root_user = fs::read_dir(&git).is_ok();
+        let saved = save_now(&mut repo);
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            return;
+        }
+        assert_eq!(saved_paths(&repo, saved.unwrap()), ["b.txt"]);
     }
 
     /// The user's own list, named inside the project, is read there as a `.gitignore` is.
@@ -3564,6 +3626,37 @@ mod tests {
         assert!(detail.contains("longer than 4096 bytes"), "{detail}");
     }
 
+    /// The walk meets a folder's files before its folders, but problems come by path, as in a
+    /// save's listings: `a/…` before `zzz…`, though the walk met `zzz…` first.
+    #[test]
+    fn a_problem_in_a_folder_comes_before_one_in_a_later_file() {
+        let (dir, repo) = project();
+        write(dir.path(), "zzzzzzzzzzz", b"x");
+        write(dir.path(), "a/bbbbbbbbbb", b"x");
+        let walked = walk_project(&repo, SaveLimits::default().with_max_path(10));
+        let Err(SaveError::TooLarge { detail }) = walked else {
+            panic!("paths of 11 and 12 bytes were accepted under a limit of 10");
+        };
+        assert!(detail.ends_with(": a/bbbbbbbbbb"), "{detail}");
+    }
+
+    /// An entry kept as it was, in a folder on disk, counts its path against the limit as a new
+    /// one does.
+    #[test]
+    fn a_kept_entry_with_a_path_past_the_limit_is_refused() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[("a/sub-project", EntryKind::ProjectLink, COMMIT)],
+        );
+        write(dir.path(), "a/x", b"x");
+        let walked = walk_project(&repo, SaveLimits::default().with_max_path(10));
+        let Err(SaveError::TooLarge { detail }) = walked else {
+            panic!("a kept path of 13 bytes was accepted under a limit of 10");
+        };
+        assert!(detail.ends_with(": a/sub-project"), "{detail}");
+    }
+
     #[test]
     fn reading_the_last_save_counts_every_path_against_the_entry_limit() {
         let (dir, mut repo) = project();
@@ -3692,6 +3785,36 @@ mod tests {
         assert!(packs.is_empty());
     }
 
+    /// Past the folders a save holds (126 below the top when it reads files), a folder is opened
+    /// again from the deepest one held. One swapped for another after the walk is found out there
+    /// too, and the other's file is never read as the walk's.
+    #[test]
+    fn a_folder_swapped_past_the_held_ones_is_found_out() {
+        let (dir, repo) = project();
+        let bottom = format!("{}x", "d/".repeat(140));
+        write(dir.path(), &bottom, b"mine");
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        // Level 130 goes elsewhere, and another chain down to `x` takes its place.
+        let level_130 = dir.path().join("d/".repeat(130).trim_end_matches('/'));
+        fs::rename(&level_130, dir.path().join("old")).unwrap();
+        write(dir.path(), &bottom, b"else");
+        let mut packs = repo.new_packs().unwrap();
+        let built = crate::snapshot::build(
+            repo.store(),
+            &mut packs,
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        match built {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, bottom),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert!(!packs.contains(&hash_content(b"else")));
+    }
+
     /// Past 127 levels the walk opens a folder again from the deepest one it holds, and so does
     /// the save when it reads the files there.
     #[test]
@@ -3752,6 +3875,72 @@ mod tests {
         assert_eq!(tree[&format!("{}e/x", down(299))].1, b"e");
     }
 
+    /// Lets `gate`'s lookers go at the `sends`th job the walk sends, from this thread.
+    #[cfg(feature = "fault-injection")]
+    fn open_at_send(gate: Arc<(Mutex<bool>, std::sync::Condvar)>, sends: usize) {
+        crate::fsio::fault::act_at("walk:sending", move || {
+            if sends > 1 {
+                open_at_send(gate, sends - 1);
+            } else {
+                let (open, opened) = &*gate;
+                *open.lock().unwrap() = true;
+                opened.notify_all();
+            }
+        });
+    }
+
+    /// Each job holds its folder open. With the lookers held back, each takes a job, the queue
+    /// fills behind them, and the walk waits to send one more, all from folders deeper than those
+    /// it holds: still at most 128 folders are open at once.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_full_job_queue_of_deep_folders_keeps_within_128_folders_open() {
+        use bolt_platform::dir::{Dir, open_count};
+        let (dir, repo) = project();
+        // 200 levels of `d`, then 40 folders side by side that each hold a file.
+        {
+            let n = OsStr::new;
+            let mut at = Dir::open_top(dir.path()).unwrap();
+            for _ in 0..200 {
+                at.create_dir(n("d")).unwrap();
+                at = at.open_dir(n("d")).unwrap();
+            }
+            for i in 0..40 {
+                let name = format!("f{i:02}");
+                at.create_dir(n(&name)).unwrap();
+                let side = at.open_dir(n(&name)).unwrap();
+                side.create_new(n("x"), false).unwrap();
+            }
+        }
+        let threads = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .clamp(1, MOST_LOOKERS);
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let held = |job: Job| {
+            let (open, opened) = &*gate;
+            let mut go = open.lock().unwrap();
+            while !*go {
+                go = opened.wait(go).unwrap();
+            }
+            drop(go);
+            look_at(job)
+        };
+        open_at_send(Arc::clone(&gate), threads * (1 + WAITING_PER_LOOKER) + 1);
+        // Counted on this thread, which the walk runs on, beside the folders of `.bolt`.
+        let drive = this_drive();
+        let mut base = newest(&repo);
+        let (top, dropped) = base.listing(base.root).unwrap();
+        let mut rules = WalkState::new(dir.path(), drive, top, dropped, None).unwrap();
+        let before = open_count::now();
+        open_count::most_since_last();
+        let mut limits = SaveLimits::default();
+        let folders =
+            walk_and_look(dir.path(), &mut base, &mut limits, drive, &mut rules, &held).unwrap();
+        let most = open_count::most_since_last() - before;
+        assert!((1..=129).contains(&most), "{most} folders open at once");
+        assert_eq!(folders.len(), 1 + 200 + 40);
+    }
+
     /// A Windows reparse point that isn't a link but is marked as a folder (a cloud folder, say) is
     /// a folder to the ignore rules, so a `name/` line leaves it out without a word; a kept one is
     /// never opened (and stops the save when read, as a special file).
@@ -3788,5 +3977,16 @@ mod tests {
             Ok(()) => assert_eq!(tree["l"], (EntryKind::Symlink, b"dir/target.txt".to_vec())),
             Err(e) => crate::test_support::skip_without_link_right(e),
         }
+    }
+
+    /// Elsewhere `\` is part of a name, not a separator, so a target holding one is stored as read.
+    #[cfg(unix)]
+    #[test]
+    fn link_targets_holding_a_backslash_are_stored_as_read_on_unix() {
+        let (dir, mut repo) = project();
+        std::os::unix::fs::symlink("dir\\target.txt", dir.path().join("l")).unwrap();
+        let saved = saved_root(save_now(&mut repo).unwrap());
+        let tree = saved_tree(repo.store(), saved);
+        assert_eq!(tree["l"], (EntryKind::Symlink, b"dir\\target.txt".to_vec()));
     }
 }

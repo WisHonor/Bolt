@@ -89,6 +89,10 @@ pub(super) fn open_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<OwnedHandl
     as_folder(handle, &what)
 }
 
+pub(super) fn open_dir_to_search(dir: &OwnedHandle, name: &OsStr) -> io::Result<OwnedHandle> {
+    open_dir(dir, name)
+}
+
 pub(super) fn entries(dir: &OwnedHandle) -> io::Result<Vec<DirEntry>> {
     // A handle of its own (the empty name is the folder itself), so two listings never share a
     // place in the folder.

@@ -439,7 +439,6 @@ pub fn save_folder(
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
     let trusted = now.map(|_| FileCache::load(repo)).unwrap_or_default();
-    // Probed under the lock: the probe's file sits in `tmp/`, which is cleared when it is free.
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let base = Base::new(repo.store(), parent.root, SaveLimits::default());
     let Scan {
@@ -468,7 +467,7 @@ pub fn save_folder(
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039).
     if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
-        endings::check(repo.store(), &mut handles, &folders, &old)?;
+        endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
     }
     if let Some(large) = large_save(repo.store(), drive, &folders, &old)? {
         // New files mean something to save, so a missing line name is asked for now: the
@@ -674,25 +673,23 @@ fn saved_file<'l>(before: Option<&'l Listing>, name: &str) -> Option<&'l Entry> 
         .filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable))
 }
 
-/// What the save would add, from the walk's sizes, if it is more than a save adds without asking.
-/// A file is new where the base save holds no file under a name `drive` takes as its own, so a
-/// changed file, or one renamed only in letter case on a drive that ignores case, doesn't count.
-/// Only listings are read.
-fn large_save(
+/// Hands `each` every file in `folders`, with its folder's path and the base save's file it stands
+/// for, if any: one under a name `drive` takes as its own, in a folder of the base save whose name
+/// `drive` takes as its folder's. `old` is what the base save holds in each folder of `folders`
+/// under its own name. Only listings are read.
+fn each_file_with_saved<'f>(
     store: &Store,
     drive: Drive,
-    folders: &Folders,
+    folders: &'f Folders,
     old: &HashMap<String, Option<Listing>>,
-) -> Result<Option<LargeSave>, SaveError> {
+    mut each: impl FnMut(&'f str, &'f Child, Option<&Entry>) -> Result<(), SaveError>,
+) -> Result<(), SaveError> {
     let folds = drive.ignores_case || drive.composes_unicode;
-    let (mut new_files, mut new_bytes) = (0u64, 0u64);
-    let mut by_top: HashMap<&str, u64> = HashMap::new();
     // Base folders the walk didn't match because their name is spelled otherwise on disk.
     let mut found: HashMap<&str, Listing> = HashMap::new();
     for (rel, children) in folders {
         let respelled = found.remove(rel.as_str());
         let before = old.get(rel).and_then(Option::as_ref).or(respelled.as_ref());
-        let top = rel.split('/').next().unwrap_or_default();
         // Built at the first name missing from `before`: its entries by name as the drive sees it.
         let mut alike: Option<HashMap<String, &Entry>> = None;
         let mut lookup = |name: &str| -> Option<&Entry> {
@@ -718,19 +715,38 @@ fn large_save(
                 }
                 Kind::File => {
                     let saved = lookup(&c.name).and_then(|e| saved_file(before, &e.name));
-                    if saved.is_some() {
-                        continue;
-                    }
-                    let size = c.meta.as_ref().map_or(0, |m| m.size);
-                    new_files = new_files.saturating_add(1);
-                    new_bytes = new_bytes.saturating_add(size);
-                    let held = by_top.entry(top).or_default();
-                    *held = held.saturating_add(size);
+                    each(rel, c, saved)?;
                 }
                 _ => {}
             }
         }
     }
+    Ok(())
+}
+
+/// What the save would add, from the walk's sizes, if it is more than a save adds without asking.
+/// A file is new where the base save holds no file under a name `drive` takes as its own, so a
+/// changed file, or one renamed only in letter case on a drive that ignores case, doesn't count.
+/// Only listings are read.
+fn large_save(
+    store: &Store,
+    drive: Drive,
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+) -> Result<Option<LargeSave>, SaveError> {
+    let (mut new_files, mut new_bytes) = (0u64, 0u64);
+    let mut by_top: HashMap<&str, u64> = HashMap::new();
+    each_file_with_saved(store, drive, folders, old, |rel, c, saved| {
+        if saved.is_none() {
+            let size = c.meta.as_ref().map_or(0, |m| m.size);
+            new_files = new_files.saturating_add(1);
+            new_bytes = new_bytes.saturating_add(size);
+            let top = rel.split('/').next().unwrap_or_default();
+            let held = by_top.entry(top).or_default();
+            *held = held.saturating_add(size);
+        }
+        Ok(())
+    })?;
     if new_bytes <= ASK_OVER_BYTES && new_files <= ASK_OVER_FILES {
         return Ok(None);
     }
@@ -1195,13 +1211,22 @@ fn store_link(
     Ok((id, target.len() as u64))
 }
 
-/// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it.
+/// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it. One
+/// that is no longer a link changed since the walk.
 pub(crate) fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
         source,
     };
-    let target = dir.read_link(OsStr::new(name)).map_err(unreadable)?;
+    let name = OsStr::new(name);
+    let target = dir
+        .read_link(name)
+        .map_err(|source| match dir.metadata(name) {
+            Ok(now) if now.kind != EntryType::Symlink => SaveError::ChangedDuringSave {
+                path: rel.to_owned(),
+            },
+            _ => unreadable(source),
+        })?;
     let target = target.into_string().map_err(|_| {
         unreadable(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2526,6 +2551,41 @@ mod tests {
             &HashSet::new(),
         ) {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),
+            other => panic!("{other:?}"),
+        }
+        assert!(packs.is_empty());
+    }
+
+    #[test]
+    fn a_link_swapped_for_a_file_is_changed_during_the_save() {
+        let (dir, repo) = project();
+        let (link, outside) = (dir.path().join("link"), tempfile::tempdir().unwrap());
+        // A junction on Windows, which needs no right to make, and is removed as a folder.
+        #[cfg(windows)]
+        crate::test_support::junction(&link, outside.path());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let Scan {
+            mut handles,
+            folders,
+            ..
+        } = walk_project(&repo, SaveLimits::default()).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, b"a file now").unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        match build(
+            repo.store(),
+            &mut packs,
+            &mut handles,
+            &folders,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        ) {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "link"),
             other => panic!("{other:?}"),
         }
         assert!(packs.is_empty());

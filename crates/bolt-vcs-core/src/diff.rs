@@ -197,7 +197,9 @@ fn walk<E: From<StoreError>>(
         match step {
             Step::Entry { old, new } => each(&path, old.as_ref(), new.as_ref())?,
             Step::Folder { old, new, depth } => {
-                old_seen.check_depth(depth).map_err(too_large)?; // the new save is as deep
+                // A backstop: a folder this deep has a path past the limit checked above. The new
+                // save is as deep.
+                old_seen.check_depth(depth).map_err(too_large)?;
                 if depth > 0 {
                     path.push('/');
                 }

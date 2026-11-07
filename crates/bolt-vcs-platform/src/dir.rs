@@ -82,6 +82,14 @@ impl Dir {
         sys::open_dir(&self.handle, name).map(Dir::held)
     }
 
+    /// Opens the folder `name` in this one only to reach what is in it, which on Unix needs the
+    /// right to search it but not to list it. Such a folder can't be listed; on Windows it is
+    /// opened as `open_dir` opens it.
+    pub fn open_dir_to_search(&self, name: &OsStr) -> io::Result<Dir> {
+        one_name(name)?;
+        sys::open_dir_to_search(&self.handle, name).map(Dir::held)
+    }
+
     fn held(handle: sys::Handle) -> Dir {
         Dir {
             handle,
@@ -408,6 +416,7 @@ mod tests {
         for name in links {
             let refused = |e: io::Error| assert!(is_link_refusal(&e), "{name}: {e}");
             refused(d.open_dir(n(name)).unwrap_err());
+            refused(d.open_dir_to_search(n(name)).unwrap_err());
             refused(d.open_file(n(name)).unwrap_err());
             refused(d.open_or_create(n(name)).unwrap_err());
             refused(d.remove_dir(n(name)).unwrap_err());
@@ -423,10 +432,46 @@ mod tests {
             );
         }
         assert!(!is_link_refusal(&d.open_dir(n("file")).unwrap_err()));
+        let file = d.open_dir_to_search(n("file")).unwrap_err();
+        assert_eq!(file.kind(), io::ErrorKind::NotADirectory);
         // Nothing moved or changed, through the links or beside them.
         assert_eq!(fs::read_to_string(tmp.path().join("file")).unwrap(), "file");
         assert_eq!(fs::read_to_string(real.join("x")).unwrap(), "x");
         assert!(gone(&tmp.path().join("moved")));
+    }
+
+    /// A folder that can be searched but not listed opens to search, and what it holds can be
+    /// read through it; one that can't be searched is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_opened_to_search_needs_only_the_right_to_search_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, d) = held();
+        let hidden = tmp.path().join("hidden");
+        fs::create_dir(&hidden).unwrap();
+        fs::write(hidden.join("x"), "x").unwrap();
+        let mode = |m| fs::set_permissions(&hidden, fs::Permissions::from_mode(m)).unwrap();
+        mode(0o311);
+        // root reads everything, so there is nothing to test.
+        if fs::read_dir(&hidden).is_ok() {
+            mode(0o755);
+            return;
+        }
+        let listed = d.open_dir(n("hidden")).map(drop);
+        let mut read = String::new();
+        let searched = d.open_dir_to_search(n("hidden")).and_then(|h| {
+            h.open_file(n("x"))?.read_to_string(&mut read)?;
+            h.entries()
+        });
+        mode(0o000);
+        let refused = d.open_dir_to_search(n("hidden")).map(drop);
+        // Back to normal first, so that the temporary folder can be removed whatever happens.
+        mode(0o755);
+        assert_eq!(listed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        // Read, but not listed.
+        assert_eq!(read, "x");
+        assert!(searched.is_err());
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

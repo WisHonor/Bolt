@@ -223,6 +223,20 @@ pub fn bolt_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> 
     cmd
 }
 
+/// `bolt <args>` in `dir`, as the test user with its settings in `config`, allowed at most `most`
+/// open files at once.
+#[cfg(unix)]
+pub fn bolt_with_open_files(config: &Path, dir: &Path, most: u32, args: &[&str]) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!("ulimit -n {most} && exec \"$0\" \"$@\""))
+        .arg(assert_cmd::cargo::cargo_bin("bolt"))
+        .args(args)
+        .current_dir(dir);
+    as_test_user(&mut cmd, config);
+    cmd
+}
+
 /// Runs `cmd` as the test user, with no fault point and its own settings folder `config`.
 fn as_test_user(cmd: &mut Command, config: &Path) {
     cmd.env("BOLT_USER_NAME", "Test")

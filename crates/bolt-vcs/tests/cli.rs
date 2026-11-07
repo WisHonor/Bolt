@@ -485,6 +485,31 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     );
 }
 
+/// macOS lets a program hold 256 files open by default, folders and packs included. A save of a
+/// tree deeper than the folders it holds open stays within that, however far CI raises the limit.
+#[cfg(unix)]
+#[test]
+fn a_deep_tree_saves_within_macos_open_file_limit() {
+    use bolt_platform::dir::Dir;
+    use std::ffi::OsStr;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    // 600 levels, each with a file, made a name at a time: macOS takes no path that long.
+    {
+        let n = OsStr::new;
+        let mut at = Dir::open_top(env.root()).unwrap();
+        for _ in 0..600 {
+            at.create_new(n("f"), false).unwrap();
+            at.create_dir(n("d")).unwrap();
+            at = at.open_dir(n("d")).unwrap();
+        }
+    }
+    let mut save = support::bolt_with_open_files(env.config(), env.root(), 256, &["save", "deep"]);
+    let out = save.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).starts_with("Saved "));
+}
+
 #[test]
 fn start_json_output() {
     let env = Env::new();
