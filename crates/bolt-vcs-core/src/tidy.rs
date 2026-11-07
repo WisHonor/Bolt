@@ -7,14 +7,14 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use bolt_platform::dir::{Dir, EntryMeta};
+use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::fsio::{self, fault_point};
 use crate::id::Id;
 use crate::listing::{EntryKind, Listing};
 use crate::merge::{self, Failed};
-use crate::pack::{ENTRY_HEADER_LEN, ObjectKind, PackError, PackReader};
+use crate::pack::{self, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Save;
 use crate::store::{StoreError, is_damage};
@@ -40,20 +40,27 @@ pub struct TidyReport {
     pub packs_young: usize,
 }
 
-/// What becomes of an old pack.
-enum Fate {
-    /// It holds nothing to keep.
-    Removed,
-    /// It holds only what is kept, in version 2, and isn't small.
-    Stays,
-    /// What it holds that is kept, about this many bytes, goes into a new pack.
-    Rewritten(u64),
+/// What a pack's index says it holds.
+#[derive(Default)]
+struct Holds {
+    /// A kind of object this version doesn't follow, if it holds one.
+    unfollowed: Option<ObjectKind>,
+    /// Why its index can't be trusted to judge it by: it fails its checksum.
+    untrusted: Option<PackError>,
+    version: u32,
+    /// How many of its objects are kept, and their stored bytes.
+    kept: u64,
+    kept_stored: u64,
+    /// Whether it holds anything not kept.
+    other: bool,
+    uncompressed: u64,
 }
 
 /// Removes what nothing needs any more: what no line, shelf, tag or server line reaches, and what
 /// only steps older than `window_days` before `now_ms` needed. Packs changed in the 24 hours
 /// before `now_ms` are left as they are. `on_estimate` is told about how much that frees before
-/// anything is removed. Anything that must be kept but can't be read stops it before then.
+/// anything is removed. Anything that must be kept but can't be read stops it before then, and so
+/// does a chunk list or a conflict record, which it can't follow.
 pub fn tidy(
     repo: &mut Repository,
     window_days: u32,
@@ -75,31 +82,63 @@ pub fn tidy(
     let now_ns = i128::from(now_ms).saturating_mul(1_000_000);
     let mut report = TidyReport::default();
     let (mut unread, mut rewrite) = (Vec::new(), Vec::new());
+    let (mut moved, mut unfollowed) = (0u64, None);
     // An open file can't always be replaced or removed on Windows.
     repo.store().close_all();
     for (name, meta) in packs(&folder)? {
         let path = packs_dir.join(&name);
         report.bytes_before = report.bytes_before.saturating_add(meta.size);
-        if now_ns.saturating_sub(meta.modified_ns) < GRACE_NS {
+        let young = now_ns.saturating_sub(meta.modified_ns) < GRACE_NS;
+        // A young pack is read too: a chunk list there can name chunks in older packs.
+        let holds = judge(&folder, &name, &path, &keep, !young);
+        if let Ok(Holds {
+            unfollowed: Some(kind),
+            ..
+        }) = &holds
+        {
+            unfollowed.get_or_insert((path.clone(), *kind));
+        }
+        if young {
             report.packs_young += 1;
             continue;
         }
-        match fate(&folder, &name, &path, meta.size, &keep) {
-            Ok(Fate::Removed) => {
-                report.to_free = report.to_free.saturating_add(meta.size);
-                unread.push(name);
+        let holds = match holds {
+            Ok(Holds {
+                untrusted: Some(e), ..
+            })
+            | Err(e) => {
+                not_tidied(repo, &path, &e);
+                continue;
             }
-            Ok(Fate::Stays) => {}
-            Ok(Fate::Rewritten(kept_bytes)) => {
-                let freed = meta.size.saturating_sub(kept_bytes);
-                report.to_free = report.to_free.saturating_add(freed);
-                rewrite.push(name);
-            }
-            Err(e) => not_tidied(repo, &path, &e),
+            Ok(holds) => holds,
+        };
+        if holds.kept == 0 {
+            report.to_free = report.to_free.saturating_add(meta.size);
+            unread.push(name);
+        } else if holds.other
+            || holds.version == 1
+            || merge::is_small(meta.size, holds.uncompressed)
+        {
+            let freed = meta.size.saturating_sub(holds.kept_stored);
+            report.to_free = report.to_free.saturating_add(freed);
+            moved = moved.saturating_add(holds.kept);
+            rewrite.push(name);
         }
+    }
+    if let Some((path, kind)) = unfollowed {
+        let what = match kind {
+            ObjectKind::ChunkList => "a chunk list",
+            _ => "a conflict record",
+        };
+        return Err(RepoError::CantTidy { path, what });
+    }
+    if moved > 0 {
+        report.to_free = report.to_free.saturating_sub(pack::v2_overhead(moved));
     }
     on_estimate(report.to_free);
 
+    // Before anything is written, so that tidying frees space even on a full disk.
+    remove(repo, &folder, &packs_dir, unread, &mut report);
     let mut out = repo.new_packs()?;
     let mut taken = Vec::new();
     for name in rewrite {
@@ -117,13 +156,28 @@ pub fn tidy(
         .collect();
     report.packs_written = made.len();
     fault_point("tidy:written")?;
+    // A new pack can have an old one's name: it holds the same, checked.
+    let ignores_case = merge::drive_ignores_case(repo);
+    taken.retain(|name| !merge::is_new(&made, name, ignores_case));
+    remove(repo, &folder, &packs_dir, taken, &mut report);
+    repo.store_mut().refresh()?;
+    report.bytes_after = packs(&folder)?
+        .iter()
+        .fold(0u64, |sum, (_, meta)| sum.saturating_add(meta.size));
+    Ok(report)
+}
 
-    for name in unread.into_iter().chain(taken) {
-        // A new pack can have an old one's name: it holds the same, checked.
-        if made.contains(&name) {
-            continue;
-        }
-        let removed = fault_point("tidy:removing").and_then(|()| fsio::remove_file(&folder, &name));
+/// Removes the old packs `names` from `folder`, one at a time. One that can't be removed is left,
+/// with a warning.
+fn remove(
+    repo: &Repository,
+    folder: &Dir,
+    packs_dir: &Path,
+    names: Vec<OsString>,
+    report: &mut TidyReport,
+) {
+    for name in names {
+        let removed = fault_point("tidy:removing").and_then(|()| fsio::remove_file(folder, &name));
         match removed {
             Ok(()) => report.packs_removed += 1,
             Err(e) => repo.store().note(Warning::new(
@@ -137,15 +191,10 @@ pub fn tidy(
             )),
         }
     }
-    repo.store_mut().refresh()?;
-    report.bytes_after = packs(&folder)?
-        .iter()
-        .fold(0u64, |sum, (_, meta)| sum.saturating_add(meta.size));
-    Ok(report)
 }
 
-/// Every `.pack` in `folder`, by name, with its details. One whose details can't be read is left
-/// for reads to report.
+/// Every `.pack` file in `folder`, by name, with its details. Anything else, and one whose details
+/// can't be read, is left for reads to report.
 fn packs(folder: &Dir) -> Result<Vec<(OsString, EntryMeta)>, RepoError> {
     let mut found = Vec::new();
     for entry in folder.entries()? {
@@ -153,6 +202,7 @@ fn packs(folder: &Dir) -> Result<Vec<(OsString, EntryMeta)>, RepoError> {
             .extension()
             .is_some_and(|e| e == "pack")
             && let Ok(meta) = folder.metadata(&entry.name)
+            && meta.kind == EntryType::File
         {
             found.push((entry.name, meta));
         }
@@ -161,35 +211,38 @@ fn packs(folder: &Dir) -> Result<Vec<(OsString, EntryMeta)>, RepoError> {
     Ok(found)
 }
 
-/// What becomes of the pack `name`, `size` bytes on disk, judged from its index alone.
-fn fate(
+/// What the index of the pack `name` says it holds, each line checked as it is read. With
+/// `judged`, the whole index is checked against its checksum too: reads check each object
+/// against its ID, but tidying deletes by the index alone.
+fn judge(
     folder: &Dir,
     name: &OsStr,
     path: &Path,
-    size: u64,
     keep: &HashSet<Id>,
-) -> Result<Fate, PackError> {
+    judged: bool,
+) -> Result<Holds, PackError> {
     let pack = PackReader::open_in(folder, name, path)?;
-    let (mut kept, mut other) = (false, false);
-    let (mut kept_bytes, mut uncompressed) = (0u64, 0u64);
+    let mut holds = Holds {
+        version: pack.version(),
+        ..Holds::default()
+    };
     for entry in pack.entries() {
         let entry = entry?;
-        uncompressed = uncompressed.saturating_add(entry.uncompressed_size);
+        if matches!(entry.kind, ObjectKind::ChunkList | ObjectKind::Conflict) {
+            holds.unfollowed.get_or_insert(entry.kind);
+        }
+        holds.uncompressed = holds.uncompressed.saturating_add(entry.uncompressed_size);
         if keep.contains(&entry.id) {
-            kept = true;
-            let bytes = ENTRY_HEADER_LEN.saturating_add(entry.stored_size);
-            kept_bytes = kept_bytes.saturating_add(bytes);
+            holds.kept = holds.kept.saturating_add(1);
+            holds.kept_stored = holds.kept_stored.saturating_add(entry.stored_size);
         } else {
-            other = true;
+            holds.other = true;
         }
     }
-    Ok(if !kept {
-        Fate::Removed
-    } else if !other && pack.version() == 2 && !merge::is_small(size, uncompressed) {
-        Fate::Stays
-    } else {
-        Fate::Rewritten(kept_bytes)
-    })
+    if judged {
+        holds.untrusted = pack.check_index().err();
+    }
+    Ok(holds)
 }
 
 /// A pack's path, as messages show it.

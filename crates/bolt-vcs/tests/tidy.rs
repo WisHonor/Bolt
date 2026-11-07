@@ -72,10 +72,8 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     let (before, after) = (doc["bytes_before"].as_u64(), doc["bytes_after"].as_u64());
     let freed = before.unwrap() - after.unwrap();
     assert!(freed >= 64 << 10, "{doc}");
-    assert!(
-        doc["to_free"].as_u64().unwrap().abs_diff(freed) < 4 << 10,
-        "{doc}"
-    );
+    // Nothing kept is in two packs here, so the estimate is exact.
+    assert_eq!(doc["to_free"], json!(freed), "{doc}");
     assert_eq!(doc["packs_removed"], json!(packs.len()), "{doc}");
     assert_eq!(doc["packs_written"], 1, "{doc}");
     assert_eq!(doc["packs_young"], 0, "{doc}");

@@ -105,6 +105,13 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
+    /// `tidy` found a kind of object it doesn't follow, so it can't tell what that one keeps.
+    #[error(
+        "Bolt can't tidy this project: pack {} holds {what}, which this version of Bolt doesn't \
+         follow.",
+        escape(&path.display().to_string(), false)
+    )]
+    CantTidy { path: PathBuf, what: &'static str },
     /// `state/head` is missing, isn't an entry's ID, or names an entry the store can't give: no
     /// command can tell which state is current, though every save is in the store.
     #[error(
@@ -201,6 +208,10 @@ impl RepoError {
                 RepoError::NewerFormat { .. } => "Update Bolt to open it.",
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
+                }
+                RepoError::CantTidy { .. } => {
+                    "Nothing was removed, and the project works as before. A version of Bolt that \
+                     follows them can tidy it."
                 }
                 RepoError::HeadLost { .. } => {
                     "Your saves are safe. `bolt undo --list` lists the entries where the diary may \

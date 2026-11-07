@@ -386,6 +386,14 @@ impl Drop for PackWriter {
     }
 }
 
+/// What a version 2 pack of `objects` objects takes on disk besides their stored bytes: its
+/// header, trailer and index, and each object's entry header.
+pub(crate) fn v2_overhead(objects: u64) -> u64 {
+    (PACK_HEADER_LEN + TRAILER_LEN)
+        .saturating_add(v2::index_len(objects))
+        .saturating_add(objects.saturating_mul(ENTRY_HEADER_LEN))
+}
+
 /// Most objects Bolt's writer puts in one pack. The format allows more, but a writer holds the
 /// index of the pack it builds in memory, about 100 bytes an object.
 pub const WRITER_PACK_OBJECTS: u64 = 1 << 20;

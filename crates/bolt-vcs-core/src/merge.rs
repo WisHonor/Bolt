@@ -109,9 +109,10 @@ pub(crate) fn merge_small_packs(
         .collect();
     fault_point("merge:written")?;
     report.merged = taken.len();
+    let ignores_case = drive_ignores_case(repo);
     for name in taken {
         // Merging what a stopped merge left can make the same pack again.
-        if made.contains(&name) {
+        if is_new(&made, &name, ignores_case) {
             continue;
         }
         let removed =
@@ -183,6 +184,19 @@ fn holds_little(folder: &Dir, name: &OsStr, path: &Path) -> Result<bool, PackErr
         }
     }
     Ok(true)
+}
+
+/// Whether the old pack `name` is one of the new packs `made`: where the drive ignores letter case,
+/// a name differing only in case is the file the new pack's rename replaced.
+pub(crate) fn is_new(made: &[OsString], name: &OsStr, ignores_case: bool) -> bool {
+    made.iter()
+        .any(|m| m == name || (ignores_case && m.eq_ignore_ascii_case(name)))
+}
+
+/// Whether the store's drive ignores letter case; taken to, if it can't be told, so that no new
+/// pack is ever removed by another spelling of its name.
+pub(crate) fn drive_ignores_case(repo: &Repository) -> bool {
+    repo.drive().map_or(true, |d| d.ignores_case)
 }
 
 /// Whether a pack of `on_disk` bytes whose index records `uncompressed` bytes is small.
@@ -545,6 +559,17 @@ mod tests {
         assert_eq!(pack_names(&packs).len(), 1);
         std::fs::rename(packs.join("away"), packs.join(&first)).unwrap();
         assert_all_readable(&repo, 33, "after the merge");
+    }
+
+    /// An old pack named in capitals, on a drive that ignores case, is the file a new pack with its
+    /// index replaced: removing it by its old spelling would remove the new pack.
+    #[test]
+    fn a_new_pack_is_known_by_its_name_in_any_case_where_the_drive_ignores_case() {
+        let made = [OsString::from("ab12.pack")];
+        assert!(is_new(&made, OsStr::new("ab12.pack"), false));
+        assert!(!is_new(&made, OsStr::new("AB12.pack"), false));
+        assert!(is_new(&made, OsStr::new("AB12.pack"), true));
+        assert!(!is_new(&made, OsStr::new("ab13.pack"), true));
     }
 
     #[test]

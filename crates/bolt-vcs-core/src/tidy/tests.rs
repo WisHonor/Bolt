@@ -640,6 +640,126 @@ fn tidy_leaves_a_pack_it_cannot_read_with_a_warning() {
     assert!(!reads(&repo, &entry, ObjectKind::DiaryEntry));
 }
 
+/// Flips the last bit of `id` where the version 2 index of the pack at `path` lists it, as a
+/// failing disk could.
+fn flip_index_id(path: &Path, id: &Id) {
+    let mut pack = fs::read(path).unwrap();
+    let u64_at = |at: usize| u64::from_le_bytes(pack[at..at + 8].try_into().unwrap());
+    let index = usize::try_from(u64_at(pack.len() - 48)).unwrap();
+    let count = usize::try_from(u64_at(index)).unwrap();
+    let ids = index + 8 + 1024;
+    let i = (0..count)
+        .find(|i| pack[ids + 32 * i..ids + 32 * (i + 1)] == id.0)
+        .unwrap();
+    pack[ids + 32 * i + 31] ^= 1;
+    fs::write(path, pack).unwrap();
+}
+
+#[test]
+fn a_pack_whose_index_fails_its_checksum_is_left_whole() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    let content = hash_content(b"one");
+    let holding = pack_names(&repo)
+        .into_iter()
+        .find(|name| {
+            let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+            pack.find(&content).unwrap().is_some()
+        })
+        .unwrap();
+    let path = repo.packs_dir().join(&holding);
+    // Read by its index alone, the kept file would look like something nothing needs.
+    repo.store().close_all();
+    flip_index_id(&path, &content);
+    let bytes = fs::read(&path).unwrap();
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let warned: Vec<_> = repo
+        .store()
+        .warnings()
+        .into_iter()
+        .filter(|w| w.kind == warning::PACK_NOT_TIDIED)
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    let said = &warned[0].message;
+    assert!(
+        said.contains(&holding) && said.contains("checksum"),
+        "{said}"
+    );
+    assert!(said.contains("Ask for help"), "{said}");
+}
+
+#[test]
+fn tidy_stops_at_a_chunk_list_or_a_conflict_record() {
+    for kind in [ObjectKind::ChunkList, ObjectKind::Conflict] {
+        let (dir, mut repo) = project(50);
+        save_text(dir.path(), &mut repo, "one", 40);
+        let (entry, _) = crash_leftover(&mut repo);
+        age_packs(&repo, 48);
+        // In a young pack: a chunk list there could name chunks in the older ones.
+        let before = pack_names(&repo);
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        packs.add_record(kind, b"not followed here").unwrap();
+        repo.store_packs(&lock, packs).unwrap();
+        drop(lock);
+        let planted = pack_names(&repo).difference(&before).next().cloned();
+        let planted = planted.unwrap();
+        let before = pack_names(&repo);
+        let stopped = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {
+            panic!("an estimate was given")
+        });
+        match stopped {
+            Err(e @ RepoError::CantTidy { .. }) => {
+                assert!(e.to_string().contains(&planted), "{e}");
+                assert!(e.hint().unwrap().starts_with("Nothing was removed"), "{e}");
+            }
+            other => panic!("{kind:?}: {other:?}"),
+        }
+        assert_eq!(pack_names(&repo), before, "{kind:?}");
+        assert!(reads(&repo, &entry, ObjectKind::DiaryEntry), "{kind:?}");
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn packs_holding_nothing_to_keep_go_first_even_when_writing_fails() {
+    use crate::fsio::fault;
+    for n in 1.. {
+        assert!(n < 50, "writing the new pack never failed");
+        let (dir, mut repo) = project(50);
+        save_text(dir.path(), &mut repo, "one", 40);
+        let before = pack_names(&repo);
+        crash_leftover(&mut repo);
+        age_packs(&repo, 48);
+        fault::arm(n);
+        let result = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {});
+        fault::disarm();
+        let Err(e) = result else {
+            continue;
+        };
+        if !e.to_string().starts_with("injected fault at pack:") {
+            continue;
+        }
+        // As on a full disk: the pack holding nothing to keep is gone, the others as they were.
+        assert_eq!(pack_names(&repo), before, "fault {n}");
+        assert!(text_reads(&repo, "one"));
+        break;
+    }
+}
+
+#[test]
+fn only_pack_files_are_judged() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.pack"), b"x").unwrap();
+    fs::create_dir(dir.path().join("b.pack")).unwrap();
+    fs::write(dir.path().join("c.txt"), b"x").unwrap();
+    let found = packs(&Dir::open_top(dir.path()).unwrap()).unwrap();
+    let names: Vec<&OsString> = found.iter().map(|(name, _)| name).collect();
+    assert_eq!(names, [&OsString::from("a.pack")]);
+}
+
 #[test]
 fn tidy_says_what_it_will_free_and_what_it_freed() {
     let (dir, mut repo) = project(50);
@@ -668,7 +788,8 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     assert_eq!(told, [(report.to_free, true)]);
     let freed = report.bytes_before - report.bytes_after;
     assert!(freed >= 64 << 10, "{report:?}");
-    assert!(report.to_free.abs_diff(freed) < 4 << 10, "{report:?}");
+    // Nothing kept is in two packs here, so the estimate is exact.
+    assert_eq!(report.to_free, freed, "{report:?}");
     assert_eq!(report.packs_removed, before.len(), "{report:?}");
     assert_eq!(report.packs_written, 1, "{report:?}");
     // Nothing more to free.
@@ -784,14 +905,16 @@ fn planted(without: Option<Ref>) -> (tempfile::TempDir, Repository, BTreeMap<Ref
     .into_iter()
     .map(|what| (what, unique(what)))
     .collect();
+    // The parent only it reaches comes second: every parent is followed, not just the first.
+    let parents = if has(Ref::Parent) {
+        vec![base, saves["parent"]]
+    } else {
+        vec![base]
+    };
     let main = a_save(
         &mut packs,
         if has(Ref::Root) { root } else { empty },
-        vec![if has(Ref::Parent) {
-            saves["parent"]
-        } else {
-            base
-        }],
+        parents,
         "main",
     );
     let tag = Tag {
