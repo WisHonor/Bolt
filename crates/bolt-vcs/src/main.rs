@@ -387,7 +387,7 @@ fn ask_line_name() -> Result<Option<String>, Failure> {
     if !std::io::stdin().is_terminal() {
         return Ok(None);
     }
-    eprint!("Name a new line for this save: ");
+    let _ = write!(std::io::stderr(), "Name a new line for this save: ");
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
     let answer = answer.trim();
@@ -407,7 +407,7 @@ fn ask_large(large: &LargeSave) -> Option<bool> {
     if !std::io::stdin().is_terminal() {
         return None;
     }
-    eprint!("{large} Save them? [y/N] ");
+    let _ = write!(std::io::stderr(), "{large} Save them? [y/N] ");
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer).is_err() {
         return Some(false);
@@ -458,7 +458,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
         only: only.as_deref(),
         amend,
     };
-    let mut on_wait = |_: &str| eprintln!("Waiting for another Bolt command to finish...");
+    let mut on_wait = waiting;
     // With --json nothing is asked, so a large save stops and names --yes.
     let mut said_no = false;
     let mut confirm = |large: &LargeSave| {
@@ -647,7 +647,8 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     let short = short_or_whole(repo, id, &save.change_id, &mut warnings);
     warnings.extend(repo.store().warnings());
     let mut out = output::Stdout::new();
-    let done = (|| -> std::io::Result<()> {
+    // What stdout can't take is remembered, for `ended` to tell.
+    let _ = (|| -> std::io::Result<()> {
         if json {
             let changes: Vec<serde_json::Value> = found
                 .changes
@@ -690,12 +691,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         }
         Ok(())
     })();
-    // Told whatever became of the output; a reader that went away ends the command quietly.
-    output::print_warnings(&warnings);
-    if out.closed {
-        return Ok(());
-    }
-    Ok(done?)
+    output::ended(None, "", &warnings, None)
 }
 
 /// Why `bolt changes` stopped: a file couldn't be read, or what it shows couldn't be written.
@@ -854,12 +850,7 @@ fn changes_command(
             Ok(warnings)
         })
     };
-    // Whoever read the output stopped reading (`bolt changes | head`): nothing more to say.
-    if out.closed {
-        return Ok(());
-    }
-    output::print_warnings(&result?);
-    Ok(())
+    output::listed(result, || warnings().0)
 }
 
 fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -868,13 +859,15 @@ fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     )?));
     let unfinished = unfinished_warning(repo);
     let mut out = output::Stdout::new();
-    let done = history_to(&mut out, repo, json, unfinished);
-    // Whoever read the output stopped reading (`bolt history | head`): nothing more to say.
-    if out.closed {
-        return Ok(());
-    }
-    output::print_warnings(&done?);
-    Ok(())
+    let done = history_to(&mut out, repo, json, unfinished.clone());
+    output::listed(done, || so_far(unfinished, repo))
+}
+
+/// The warnings of a listing stdout stopped: `unfinished`, found before it began, and the store's.
+fn so_far(unfinished: Option<Warning>, repo: &Repository) -> Vec<Warning> {
+    let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
+    warnings.extend(repo.store().warnings());
+    warnings
 }
 
 fn history_to(
@@ -930,6 +923,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         None => current_save(repo)?,
     };
     let unfinished = unfinished_warning(repo);
+    let early = unfinished.clone();
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
     let old_root = match save.parents.first() {
@@ -993,12 +987,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         warnings.extend(store.warnings());
         Ok(warnings)
     })();
-    // As in `history`: a reader that went away ends the command quietly.
-    if out.closed {
-        return Ok(());
-    }
-    output::print_warnings(&done?);
-    Ok(())
+    output::listed(done, || so_far(early, repo))
 }
 
 fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -1057,7 +1046,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         &who,
         "goto",
         git_excludes.as_deref(),
-        &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
+        &mut waiting,
     )?;
     let mut warnings = done.applied.warnings.clone();
     // The switch has happened, so a save that can't be read back only goes unnamed.
@@ -1133,7 +1122,7 @@ fn discard_command(
         &who,
         "discard",
         git_excludes.as_deref(),
-        &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
+        &mut waiting,
     )?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
@@ -1175,7 +1164,7 @@ fn undo_command(
         who: &who,
         git_excludes: git_excludes.as_deref(),
     };
-    let on_wait = &mut |_: &str| eprintln!("Waiting for another Bolt command to finish...");
+    let on_wait = &mut waiting;
     let done = match to {
         Some(to) => undo::undo_to(repo, to, &req, on_wait),
         None if redo => undo::redo(repo, &req, on_wait),
@@ -1204,40 +1193,13 @@ fn undo_command(
     } else {
         ("Undid", "undone", "undo")
     };
-    if json {
-        warnings.extend(repo.store().warnings());
-        let warnings = told_once(warnings);
-        let shelves: Vec<serde_json::Value> = shelved
-            .iter()
-            .map(|(label, save)| json!({"label": label, "save": save.to_hex()}))
-            .collect();
-        let mut document = json!({ "shelved": shelves });
-        let key = if to.is_some() { "steps" } else { list };
-        document[key] = taken.iter().map(output::step_json).collect();
-        if head_lost {
-            document["head_lost"] = true.into();
-        }
-        let Some(failure) = failure else {
-            let position = match taken.last() {
-                Some(t) => Some(t.after.position.clone()),
-                None => repo.current().ok().map(|(_, e)| e.state.position),
-            };
-            document["bolt_json"] = BOLT_JSON.into();
-            document["finished"] = finished.into();
-            document["position"] = position.map_or(json!(null), |p| output::position_json(&p));
-            document["warnings"] = output::warnings_json(&warnings);
-            return output::print_done(&format!("{document}\n"), &warnings);
-        };
-        let document = output::failed_document(document, &failure, &warnings);
-        output::print_quietly(&format!("{document}\n"), &[])?;
-        return Err(Failure {
-            printed: true,
-            ..failure
-        });
-    }
+    // The text output; with --json, what stderr gets if stdout can't take the document. A
+    // document gives saves whole, so naming them here adds nothing to its warnings.
+    let mut text_only = Vec::new();
     let mut text = String::new();
     {
-        let mut named = |id: &Id| named_save(repo, id, &mut warnings);
+        let into = if json { &mut text_only } else { &mut warnings };
+        let mut named = |id: &Id| named_save(repo, id, into);
         for t in &taken {
             if head_lost {
                 text += &output::picked_up_line(t, &mut named);
@@ -1293,14 +1255,46 @@ fn undo_command(
         }
         _ => {}
     }
+    if json {
+        warnings.extend(repo.store().warnings());
+        let warnings = told_once(warnings);
+        let shelves: Vec<serde_json::Value> = shelved
+            .iter()
+            .map(|(label, save)| json!({"label": label, "save": save.to_hex()}))
+            .collect();
+        let mut document = json!({ "shelved": shelves });
+        let key = if to.is_some() { "steps" } else { list };
+        document[key] = taken.iter().map(output::step_json).collect();
+        if head_lost {
+            document["head_lost"] = true.into();
+        }
+        let Some(failure) = failure else {
+            let position = match taken.last() {
+                Some(t) => Some(t.after.position.clone()),
+                None => repo.current().ok().map(|(_, e)| e.state.position),
+            };
+            document["bolt_json"] = BOLT_JSON.into();
+            document["finished"] = finished.into();
+            document["position"] = position.map_or(json!(null), |p| output::position_json(&p));
+            document["warnings"] = output::warnings_json(&warnings);
+            return output::print_done(&format!("{document}\n"), &warnings);
+        };
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        let in_document = Failure {
+            printed: true,
+            ..failure
+        };
+        return output::ended(Some(in_document), &text, &warnings, None);
+    }
     match failure {
         None => {
             warnings.extend(repo.store().warnings());
             output::print_done(&text, &told_once(warnings))
         }
         Some(failure) => {
-            output::print_quietly(&text, &told_once(warnings))?;
-            Err(failure)
+            output::print_out(&text);
+            output::ended(Some(failure), &text, &told_once(warnings), None)
         }
     }
 }
@@ -1316,9 +1310,7 @@ fn shelf_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut |_| {
-        eprintln!("Waiting for another Bolt command to finish...")
-    })?;
+    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut waiting)?;
     let made = match &done {
         Shelved::Made(made) => Some(made),
         Shelved::Nothing { .. } => None,
@@ -1415,9 +1407,7 @@ fn unshelf_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut |_| {
-        eprintln!("Waiting for another Bolt command to finish...")
-    })?;
+    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut waiting)?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
     let text = if json {
@@ -1500,17 +1490,14 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     )?));
     let window = undo_window_days()?;
     let terminal = std::io::stderr().is_terminal();
-    let done = tidy::tidy(
-        repo,
-        window,
-        now_ms(),
-        &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
-        &mut |to_free| {
-            if terminal {
-                eprintln!("Tidying: about {} to free", output::format_size(to_free));
-            }
-        },
-    )?;
+    let done = tidy::tidy(repo, window, now_ms(), &mut waiting, &mut |to_free| {
+        if terminal {
+            output::tell(&format!(
+                "Tidying: about {} to free",
+                output::format_size(to_free)
+            ));
+        }
+    })?;
     let warnings = repo.store().warnings();
     let text = if json {
         let document = json!({
@@ -1542,7 +1529,8 @@ fn undo_list_command(
     let repo: &Repository = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
     )?));
-    let warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    let unfinished = unfinished_warning(repo);
+    let warnings: Vec<Warning> = unfinished.clone().into_iter().collect();
     let mut out = output::Stdout::new();
     // With `head` lost, either list gives where the diary may have stopped instead.
     let done = if matches!(repo.current(), Err(RepoError::HeadLost { .. })) {
@@ -1552,12 +1540,7 @@ fn undo_list_command(
     } else {
         undo_list_to(&mut out, repo, json, warnings)
     };
-    // As in `history`: a reader that went away ends the command quietly.
-    if out.closed {
-        return Ok(());
-    }
-    output::print_warnings(&done?);
-    Ok(())
+    output::listed(done, || so_far(unfinished, repo))
 }
 
 /// The steps redo can bring back, newest first and numbered for `bolt redo N`, then those undo
@@ -1747,6 +1730,11 @@ fn files_between(repo: &Repository, from: Id, to: Id) -> Option<usize> {
 /// When an entry's command ran, as lists say it.
 fn when(entry: &DiaryEntry, now: i64) -> String {
     output::relative_time(entry.who.time_ms, entry.who.tz_offset_min, now)
+}
+
+/// What a command says while another one holds the project.
+fn waiting(_: &str) {
+    output::tell("Waiting for another Bolt command to finish...");
 }
 
 /// `warnings` with each told once, in the order first met: naming several saves can meet the same

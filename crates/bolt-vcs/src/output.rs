@@ -2,6 +2,7 @@
 
 use std::fmt::{self, Write as _};
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -525,11 +526,10 @@ pub fn write_lines(
     Ok(())
 }
 
-/// Standard output, remembering when whoever reads it went away (`bolt changes | head`), so the
-/// command can end quietly instead of failing.
+/// Standard output. What it couldn't take is remembered for the whole command (its reader went
+/// away, as in `bolt changes | head`, or a write failed), so [`ended`] can tell it on stderr.
 pub struct Stdout {
     inner: io::StdoutLock<'static>,
-    pub closed: bool,
 }
 
 /// A write that failed for another reason than its reader going away: its kind and the message.
@@ -538,6 +538,14 @@ type Failed = OnceLock<(io::ErrorKind, String)>;
 /// The first write to stdout that failed so. Nothing more is written there after it, so what was
 /// printed is cut off rather than spliced.
 static FAILED: Failed = OnceLock::new();
+
+/// Whether stdout's reader went away.
+static GONE: AtomicBool = AtomicBool::new(false);
+
+/// Whether stdout couldn't take something the command printed: its reader went, or a write failed.
+fn lost() -> bool {
+    GONE.load(Ordering::Relaxed) || FAILED.get().is_some()
+}
 
 /// `write` done, unless a write kept in `failed` came before it; a failure of its own is kept,
 /// but not a reader gone, nor an interrupted write, which `write_all` tries again.
@@ -561,56 +569,114 @@ impl Stdout {
     pub fn new() -> Stdout {
         Stdout {
             inner: io::stdout().lock(),
-            closed: false,
         }
     }
+}
 
-    fn noting<T>(&mut self, done: io::Result<T>) -> io::Result<T> {
-        if let Err(e) = &done
-            && e.kind() == io::ErrorKind::BrokenPipe
-        {
-            self.closed = true;
-        }
-        done
+/// `done`, with a reader gone remembered.
+fn noting<T>(done: io::Result<T>) -> io::Result<T> {
+    if let Err(e) = &done
+        && e.kind() == io::ErrorKind::BrokenPipe
+    {
+        GONE.store(true, Ordering::Relaxed);
     }
+    done
 }
 
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let done = guarded(&FAILED, || self.inner.write(buf));
-        self.noting(done)
+        noting(guarded(&FAILED, || self.inner.write(buf)))
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let done = guarded(&FAILED, || self.inner.flush());
-        self.noting(done)
+        noting(guarded(&FAILED, || self.inner.flush()))
     }
 }
 
-/// Prints `text` on stdout, then `warnings` on stderr. They say what the command did or didn't
-/// do, so they are told even when stdout can't take the text; a reader that went away then ends
-/// the command quietly.
-pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+/// Writes `text` on stdout. What it couldn't take is remembered, for [`ended`] to tell.
+pub fn print_out(text: &str) {
     let mut out = Stdout::new();
-    let done = out.write_all(text.as_bytes()).and_then(|()| out.flush());
-    print_warnings(warnings);
-    if out.closed {
-        return Ok(());
-    }
-    done.map_err(Failure::from)
+    let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
 }
 
-/// [`print_quietly`], for a command that changed the project: if printing fails, the hint says
-/// the change stands.
+/// Writes `line` on stderr. A line stderr can't take is lost, never a panic: its reader may have
+/// gone with stdout's.
+pub fn tell(line: &str) {
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
+/// What a changing command whose output was lost did all the same.
+const DONE: &str = "The command did its work all the same: only what Bolt printed was lost. bolt \
+                    status and bolt undo --list show where the project stands.";
+
+/// Ends a command, once it has printed what it could on stdout.
+///
+/// While stdout took it all, `warnings` go to stderr (a failure its `--json` document ends with
+/// lists them there instead), and `failure` comes back for [`print_error`].
+///
+/// When stdout couldn't take it (its reader went, or a write failed), stderr gets it as text, in
+/// this order: the command's own `failure`, with `taken`, what an `undo` or `redo` took before it
+/// stopped, as its text says it; then `warnings`, each once; then, only if a write failed, that
+/// it did, with `done`, what the command did all the same, as the hint. It all comes back told:
+/// the command's failure, or the write's; or nothing if it succeeded and only the reader went.
+pub fn ended(
+    failure: Option<Failure>,
+    taken: &str,
+    warnings: &[Warning],
+    done: Option<&str>,
+) -> Result<(), Failure> {
+    if !lost() {
+        if !failure.as_ref().is_some_and(|f| f.printed) {
+            print_warnings(warnings);
+        }
+        return failure.map_or(Ok(()), Err);
+    }
+    if let Some(failure) = &failure {
+        tell_failure(failure);
+    }
+    let _ = write!(io::stderr().lock(), "{taken}");
+    print_warnings(warnings);
+    let wrote = FAILED.get().map(|(_, why)| Failure {
+        message: why.clone(),
+        hint: done.map(str::to_owned),
+        printed: false,
+    });
+    if let Some(wrote) = &wrote {
+        tell_failure(wrote);
+    }
+    match failure.or(wrote) {
+        Some(failure) => Err(Failure {
+            printed: true,
+            ..failure
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Prints `text` on stdout, then ends the command with `warnings` ([`ended`]).
+pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+    print_out(text);
+    ended(None, "", warnings, None)
+}
+
+/// [`print_quietly`], for a command that changed the project: if a write fails, the hint says the
+/// change stands.
 pub fn print_done(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
-    print_quietly(text, warnings).map_err(|failure| Failure {
-        hint: Some(
-            "The command did its work all the same: only what Bolt printed was lost. bolt status \
-             and bolt undo --list show where the project stands."
-                .into(),
-        ),
-        ..failure
-    })
+    print_out(text);
+    ended(None, "", warnings, Some(DONE))
+}
+
+/// Ends a command that printed as it read ([`ended`]): `done` is how that went, with the warnings
+/// it found by the end; `found` gives those it had so far, for when stdout stopped it first.
+pub fn listed(
+    done: Result<Vec<Warning>, Failure>,
+    found: impl FnOnce() -> Vec<Warning>,
+) -> Result<(), Failure> {
+    match done {
+        Ok(warnings) => ended(None, "", &warnings, None),
+        Err(_) if lost() => ended(None, "", &found(), None),
+        Err(failure) => Err(failure),
+    }
 }
 
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
@@ -631,25 +697,23 @@ pub fn print_warnings(warnings: &[Warning]) {
     let mut damaged = false;
     for w in warnings {
         if !told.contains(w) {
-            eprintln!("warning: {}", w.message);
+            tell(&format!("warning: {}", w.message));
             damaged |= w.kind == warning::DAMAGED_PACK;
             told.push(w.clone());
         }
     }
     if damaged {
-        eprintln!(
-            "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
-        );
+        tell("hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it.");
     }
 }
 
 /// A failed command's message and what to do about it. Text from outside Bolt in a message is
 /// already escaped by the error that made it; the lines Bolt writes itself are not.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Failure {
     pub message: String,
     pub hint: Option<String>,
-    /// The command's `--json` document already ends with this failure.
+    /// Already told: the command's `--json` document ends with it, or [`ended`] said it.
     pub printed: bool,
 }
 
@@ -729,22 +793,21 @@ pub fn stream_document<W: Write>(
     }
 }
 
-/// Prints `failure`: to stdout as JSON with `--json`, else to stderr as text. `warnings` are what
-/// the command had found before it failed; only the JSON document lists them. A failure the
-/// command's own document already ends with is not printed again. A document can't be written
-/// to a stdout that fails, so the failure goes to stderr as text then; a reader that went away
-/// hears nothing.
+/// Prints `failure`, unless it was already told: with `--json`, as a document on stdout, which
+/// lists `warnings`, what the command had found before it failed, and which [`ended`] tells on
+/// stderr if stdout can't take it; else on stderr as text, after the warnings a failure tells.
 pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
     if failure.printed {
         return;
     }
     if json {
-        let mut out = Stdout::new();
-        let done =
-            writeln!(out, "{}", error_document(failure, warnings)).and_then(|()| out.flush());
-        if done.is_ok() || out.closed {
-            return;
-        }
+        print_out(&format!("{}\n", error_document(failure, warnings)));
+        let in_document = Failure {
+            printed: true,
+            ..failure.clone()
+        };
+        let _ = ended(Some(in_document), "", warnings, None);
+        return;
     }
     let told: Vec<Warning> = warnings
         .iter()
@@ -752,11 +815,16 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
         .cloned()
         .collect();
     print_warnings(&told);
-    // Escaped once more, so that a piece nobody thought of escaping still can't drive the
-    // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
-    eprintln!("error: {}", escape(&failure.message, true));
+    tell_failure(failure);
+}
+
+/// `failure`'s message and hint on stderr. Escaped once more, so that a piece nobody thought of
+/// escaping still can't drive the terminal; only the newlines Bolt writes survive, the pieces
+/// having had theirs escaped.
+fn tell_failure(failure: &Failure) {
+    tell(&format!("error: {}", escape(&failure.message, true)));
     if let Some(hint) = &failure.hint {
-        eprintln!("hint: {}", escape(hint, true));
+        tell(&format!("hint: {}", escape(hint, true)));
     }
 }
 

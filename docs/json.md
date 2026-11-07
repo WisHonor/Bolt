@@ -373,7 +373,7 @@ Folders are not listed; the files in them are.
 
 ## 4. Warnings
 
-`warnings` is in every document, the one for a failed command included, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. When a command finishes, people see each one on stderr as `warning: <message>`. A command that fails lists the warnings it had found before it failed in its document, and people are shown only the error, except for the warnings of a stopped switch the command finished first (`switch_finished`, `changed_since_plan`, `placeholders_written`, `not_written_here`) and `head_not_flushed`, of a step whose head had moved: that happened all the same, so they come before the error.
+`warnings` is in every document, the one for a failed command included, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. When a command finishes, people see each one on stderr as `warning: <message>`. A command that fails lists the warnings it had found before it failed in its document, and people are shown only the error, except for the warnings of a stopped switch the command finished first (`switch_finished`, `changed_since_plan`, `placeholders_written`, `not_written_here`) and `head_not_flushed`, of a step whose head had moved: that happened all the same, so they come before the error. When stdout can't take what a command prints, stderr gets it instead, in the order §5 gives.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -432,7 +432,13 @@ A command that fails before it has printed anything gives a document of just thi
 
 `history`, `show`, `changes` and `undo --list --all` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added, with `save` too for `show` and `changes`. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves`, `changes` or `entries`.
 
-Stdout itself can fail (a full disk, say). A document can't be ended on a stdout that fails, so the command then stops printing it, and exits with 1, the error on stderr as text: `Bolt couldn't write its output:`, and why. What it had printed is cut off. A command that changes the project did its work all the same, and the hint says so. A reader that went away (`bolt history --json | head -c 100`) is no failure: the command stops printing, gives no error, and exits as it would have. Either way, the warnings a command had found by then still go to stderr as text, each once, before any error: they say what it did or didn't do (a `goto`'s `changed_since_plan`, say). A command that prints as it reads finds most of its warnings at the end, so one stopped early may have none to give.
+Stdout itself may not take what a command prints there, its document included: a write fails (a full disk, say), or its reader has gone (`bolt history --json | head -c 100`). The command then stops printing, and what it had printed is cut off. What it meant to say goes to stderr instead, as text, in this order:
+
+1. Its own error, if it failed: `error:` with the message, then `hint:`. An `undo N` or `redo N` that stopped part way then gives the steps it took before stopping, as its text output says them.
+2. Its warnings, `warning:` with each message, each once: what it had found by then. A command that prints as it reads finds most of its warnings at the end, so one stopped early gives only those it had found, such as `history`'s `switch_unfinished`.
+3. Only when a write failed, not when the reader has gone: `error: Bolt couldn't write its output:` and why. A command that changed the project did its work all the same, and the hint says so.
+
+The exit code is the command's own: 0 when it succeeded and only the reader went, 1 when it failed or a write failed. A line stderr can't take is lost, and never stops Bolt: its reader may have gone too (`bolt status 2>&1 | true`).
 
 ```text
 {"bolt_json":1,"line":"main","saves":[ …the saves read so far… ],"error":{"hint":null,"message":"…"},"warnings":[]}

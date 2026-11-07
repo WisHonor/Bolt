@@ -348,6 +348,36 @@ fn undo_two_stops_at_the_first_it_cannot_take_and_says_how_many_were_taken() {
     assert_eq!(fs::read(env.root().join("n.txt")).unwrap(), b"new\n");
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn an_undo_that_stops_part_way_says_why_and_what_it_took_when_stdout_fails() {
+    for args in [&["undo", "2"][..], &["undo", "2", "--json"]] {
+        let (env, _, _) = after_a_goto();
+        write(&env, "n.txt", "new\n");
+        ok(&env, &["discard"]);
+        write(&env, "a.txt", "mine\n");
+        let out = env
+            .bolt_process_in(env.root())
+            .args(args)
+            .stdout(support::failing_stdout(&env))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let said = text(&out.stderr);
+        // Why it stopped, then the step it took, then that its output was lost.
+        let why = said.find("so that step changed nothing").expect(&said);
+        let took = said.find("Undid 1 of the 2 steps asked for.").expect(&said);
+        let lost = said
+            .find("error: Bolt couldn't write its output: ")
+            .expect(&said);
+        assert!(
+            said.starts_with("error: ") && why < took && took < lost,
+            "{said}"
+        );
+        assert!(said.contains("Undid discard"), "{said}");
+    }
+}
+
 #[test]
 fn a_new_command_clears_what_redo_could_bring_back() {
     let env = project(&[("a.txt", "a\n")]);

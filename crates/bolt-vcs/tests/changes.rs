@@ -160,8 +160,10 @@ fn a_reader_that_goes_away_ends_it_quietly() {
     stdout.read_exact(&mut first).unwrap();
     drop(stdout);
     let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stderr), "");
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    // No error: only the warnings it had found by then, such as a diff cut at its deadline.
+    assert!(said.lines().all(|l| l.starts_with("warning: ")), "{said}");
 }
 
 #[test]

@@ -2087,6 +2087,80 @@ fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) 
     (out.status.code(), text(&out.stderr))
 }
 
+/// `bolt <args>` in `env`'s folder with stdout and stderr on one pipe whose reader has gone before
+/// the command starts (`bolt status 2>&1 | true`): its exit code.
+fn with_both_readers_gone(env: &support::Env, args: &[&str]) -> Option<i32> {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = env
+        .bolt_process_in(env.root())
+        .args(args)
+        .stdout(writer.try_clone().unwrap())
+        .stderr(writer)
+        .output()
+        .unwrap();
+    out.status.code()
+}
+
+#[test]
+fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    // A folder holding a Git repository of its own: `status` and `save` warn about it.
+    std::fs::create_dir_all(env.root().join("inner/.git")).unwrap();
+    env.overwrite("inner/x.txt", "x\n");
+    env.overwrite("a.txt", "a\n");
+    for args in [&["status"][..], &["status", "--json"], &["save", "Add a"]] {
+        assert_eq!(with_both_readers_gone(&env, args), Some(0), "{args:?}");
+    }
+    let history = env.bolt().arg("history").output().unwrap();
+    assert!(text(&history.stdout).contains("Add a"));
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_stderr() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = support::main_tip(&env).to_hex();
+    env.overwrite("a.txt", "a\n");
+    env.overwrite("b.txt", "b\n");
+    env.bolt().args(["save", "Two files"]).assert().success();
+    // A goto stopped after removing a.txt, then a.txt written again.
+    let stopped = env
+        .bolt()
+        .args(["goto", &first])
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+    // A listing that stopped early still gives what it found first.
+    let (code, said) = with_reader_gone(&env, &["history"]);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(
+        said.starts_with("warning: A switch between saves was stopped before it was done"),
+        "{said}"
+    );
+    env.overwrite("a.txt", "mine\n");
+    // The next goto finishes it, warning that a.txt changed, then stops: a.txt is in the way.
+    let (code, said) = with_reader_gone(&env, &["goto", "main", "--json"]);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(
+        said.starts_with(
+            "error: Your unsaved changes, or files Bolt ignores, are in the way, so nothing was \
+             changed:\n  a.txt\nhint: "
+        ),
+        "{said}"
+    );
+    for kind in [
+        "warning: Finished a switch between saves that was stopped",
+        "warning: 1 entry changed while Bolt was switching",
+    ] {
+        assert_eq!(said.matches(kind).count(), 1, "{said}");
+    }
+    assert!(!said.contains("couldn't write"), "{said}");
+}
+
 #[test]
 fn every_command_ends_quietly_when_its_reader_has_gone() {
     let mut loud = Vec::new();
