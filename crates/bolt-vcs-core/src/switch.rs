@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
+use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State};
 use crate::drive::{self, Drive};
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
@@ -17,7 +17,7 @@ use crate::save::Person;
 use crate::scope::within;
 use crate::snapshot::{NAMED, SaveError, listed};
 use crate::store::StoreError;
-use crate::text::escape;
+use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
@@ -117,13 +117,13 @@ pub enum SwitchError {
     /// `label` is the shelf asked for, if one was.
     #[error("{}", no_shelf(label.as_deref()))]
     NoShelf { label: Option<String> },
+    #[error("{}", shelf_in_the_way(.0))]
+    ShelfInTheWay(Box<ShelfCollisions>),
     #[error(
-        "Your unsaved changes, or files Bolt ignores, are where shelf {} would write, or the save \
-         you're on changed what is there since it was shelved, so nothing was changed:{}",
-        escape(label, false),
-        listed(paths.iter().take(NAMED), paths.len() as u64)
+        "That would make more than {} shelves, the most a project keeps, so nothing was changed.",
+        thousands(MAX_SHELVES)
     )]
-    ShelfInTheWay { paths: Vec<String>, label: String },
+    TooManyShelves,
     #[error(transparent)]
     Resolve(#[from] ResolveError),
     #[error(transparent)]
@@ -136,6 +136,18 @@ impl From<StoreError> for SwitchError {
     fn from(e: StoreError) -> Self {
         SwitchError::Repo(e.into())
     }
+}
+
+/// What is where an unshelf would write.
+#[derive(Debug)]
+pub struct ShelfCollisions {
+    pub label: String,
+    /// The save the shelf was made on.
+    pub base: Id,
+    /// Unsaved work, or files Bolt ignores.
+    pub unsaved: Vec<String>,
+    /// What the save the project is on changed since `base`.
+    pub changed: Vec<String>,
 }
 
 impl SwitchError {
@@ -209,12 +221,32 @@ impl SwitchError {
             SwitchError::NoShelf { .. } => {
                 Some("bolt shelf --list shows the shelves there are.".to_owned())
             }
-            SwitchError::ShelfInTheWay { label, .. } => Some(format!(
-                "Save, shelve or discard your changes there, and move ignored files somewhere \
-                 else, then run bolt unshelf {} (a new shelf would be the newest). Where the save \
-                 you're on changed them, go to the save you shelved on and unshelf there.",
-                escape(label, false)
-            )),
+            SwitchError::ShelfInTheWay(c) => {
+                let unshelf = format!("bolt unshelf {}", escape(&c.label, false));
+                let goto = format!("bolt goto {}", c.base.short_hex());
+                let not_yet = "Bolt can't yet bring a shelf back onto changes saved since it was \
+                               made";
+                Some(match (c.unsaved.is_empty(), c.changed.is_empty()) {
+                    (false, true) => format!(
+                        "Save, shelve or discard your changes there, and move ignored files \
+                         somewhere else, then run {unshelf} (a new shelf would be the newest)."
+                    ),
+                    (true, _) => format!(
+                        "{not_yet}: go to the save it was made on with {goto}, then run {unshelf} \
+                         there."
+                    ),
+                    (false, false) => format!(
+                        "Save, shelve or discard your unsaved changes there, and move ignored files \
+                         somewhere else. Then go to the save the shelf was made on with {goto} and \
+                         run {unshelf} there (a new shelf would be the newest). {not_yet}."
+                    ),
+                })
+            }
+            SwitchError::TooManyShelves => Some(
+                "Bring some back with bolt unshelf (bolt discard then drops what you don't want), \
+                 and run the command again."
+                    .to_owned(),
+            ),
             SwitchError::Resolve(e) => e.hint(),
             SwitchError::Save(e) => e.hint_when_reading(),
             SwitchError::Repo(e) => e.hint(),
@@ -231,6 +263,36 @@ fn no_shelf(label: Option<&str>) -> String {
     match label {
         Some(label) => format!("There's no shelf {}.", escape(label, false)),
         None => "There's no shelf to bring back.".to_owned(),
+    }
+}
+
+/// Why a shelf can't come back, naming what is in the way, each kind on its own.
+fn shelf_in_the_way(c: &ShelfCollisions) -> String {
+    let mut message = format!(
+        "Shelf {} can't come back here, so nothing was changed.",
+        escape(&c.label, false)
+    );
+    if !c.unsaved.is_empty() {
+        message += "\nYour unsaved changes, or files Bolt ignores, are where it would write:";
+        message += &listed(c.unsaved.iter().take(NAMED), c.unsaved.len() as u64);
+    }
+    if !c.changed.is_empty() {
+        message += "\nThe save you're on changed what is there since the shelf was made:";
+        message += &listed(c.changed.iter().take(NAMED), c.changed.len() as u64);
+    }
+    message
+}
+
+/// Why write-out could bring unsaved links back only as plain files: for one link, or several.
+pub(crate) fn why_links_stay(one: bool) -> &'static str {
+    if one {
+        "since it may lead out of the project, or through a name Bolt never writes (a spelling of \
+         .git or .bolt, or a name this computer can't hold), or this computer can't make links (on \
+         Windows that takes Developer Mode)"
+    } else {
+        "since they may lead out of the project, or through a name Bolt never writes (a spelling \
+         of .git or .bolt, or a name this computer can't hold), or this computer can't make links \
+         (on Windows that takes Developer Mode)"
     }
 }
 
@@ -475,17 +537,13 @@ fn links_left_warning(paths: &[String]) -> Warning {
     let message = match paths.len() {
         1 => format!(
             "Didn't throw away 1 unsaved link: an undo could bring it back only as a plain file \
-             holding its target, since it may lead out of the project, or through a name Bolt \
-             never writes (a spelling of .git or .bolt, or a name this computer can't hold), or \
-             this computer can't make links (on Windows that takes Developer Mode):{list}\n\
-             Delete it yourself if you don't want it."
+             holding its target, {}:{list}\nDelete it yourself if you don't want it.",
+            why_links_stay(true)
         ),
         n => format!(
             "Didn't throw away {n} unsaved links: an undo could bring them back only as plain \
-             files holding their targets, since they may lead out of the project, or through a \
-             name Bolt never writes (a spelling of .git or .bolt, or a name this computer can't \
-             hold), or this computer can't make links (on Windows that takes Developer Mode):\
-             {list}\nDelete them yourself if you don't want them."
+             files holding their targets, {}:{list}\nDelete them yourself if you don't want them.",
+            why_links_stay(false)
         ),
     };
     Warning::new(warning::LINKS_LEFT, message)

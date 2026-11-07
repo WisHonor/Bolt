@@ -348,22 +348,44 @@ fn unshelf_onto_another_save_applies_where_nothing_collides() {
     assert_eq!(files(env.root()), wanted);
 }
 
+/// The text of `bolt goto` to the save `save`, as a hint names it.
+fn goto_hint(save: Id) -> String {
+    format!("bolt goto {}", &save.to_hex()[..12])
+}
+
 #[test]
 fn unshelf_onto_a_save_that_changed_a_shelved_file_stops() {
     let env = project(SAVED);
+    let shelved_on = main_tip(&env);
     write(&env, "a.txt", "mine\n");
     ok(&env, &["shelf"]);
     write(&env, "a.txt", "theirs\n");
     ok(&env, &["save", "Change a"]);
     let before = (env.standing(), files(env.root()), state(&env).shelves);
     let (_, said) = refused(&env, &["unshelf"]);
-    assert!(said.contains("a.txt"), "{said}");
-    assert!(said.contains("then run bolt unshelf 1"), "{said}");
-    assert!(said.contains("go to the save you shelved on"), "{said}");
+    assert!(
+        said.contains("changed what is there since the shelf was made:\n  a.txt"),
+        "{said}"
+    );
+    assert!(!said.contains("Your unsaved changes"), "{said}");
+    // Saving, shelving or discarding wouldn't clear the way: going to that save does.
+    assert!(!said.contains("Save, shelve or discard"), "{said}");
+    let goto = goto_hint(shelved_on);
+    let way = format!("{goto}, then run bolt unshelf 1 there");
+    assert!(said.contains(&way), "{said}");
     assert_eq!(
         (env.standing(), files(env.root()), state(&env).shelves),
         before
     );
+    let words: Vec<&str> = goto.split(' ').collect();
+    ok(&env, &words[1..]);
+    assert_eq!(state(&env).position, Position::AtSave(shelved_on));
+    ok(&env, &["unshelf", "1"]);
+    assert_eq!(
+        files(env.root()),
+        with(&holding(SAVED), &[("a.txt", Some("mine\n"))])
+    );
+    assert!(labels(&env).is_empty());
 }
 
 #[test]
@@ -377,14 +399,60 @@ fn unsaved_work_in_the_way_stops_unshelf() {
     assert_eq!(out.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let message = doc["error"]["message"].as_str().unwrap();
-    assert!(message.contains("a.txt"), "{doc}");
+    assert!(
+        message.contains("files Bolt ignores, are where it would write:\n  a.txt"),
+        "{doc}"
+    );
+    assert!(!message.contains("since the shelf was made"), "{doc}");
     let hint = doc["error"]["hint"].as_str().unwrap();
     assert!(hint.contains("Save, shelve or discard"), "{doc}");
     assert!(hint.contains("bolt unshelf 1"), "{doc}");
+    assert!(!hint.contains("bolt goto"), "{doc}");
     assert_eq!(
         (env.standing(), files(env.root()), state(&env).shelves),
         before
     );
+}
+
+#[test]
+fn unshelf_tells_unsaved_work_from_what_the_save_changed() {
+    let env = project(SAVED);
+    let shelved_on = main_tip(&env);
+    write(&env, "a.txt", "mine\n");
+    write(&env, "b.txt", "mine\n");
+    ok(&env, &["shelf"]);
+    write(&env, "a.txt", "theirs\n");
+    ok(&env, &["save", "Change a"]);
+    write(&env, "b.txt", "again\n");
+    let (_, said) = refused(&env, &["unshelf"]);
+    assert!(
+        said.contains("files Bolt ignores, are where it would write:\n  b.txt\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains("changed what is there since the shelf was made:\n  a.txt\n"),
+        "{said}"
+    );
+    assert!(
+        said.contains("Save, shelve or discard your unsaved changes"),
+        "{said}"
+    );
+    let goto = goto_hint(shelved_on);
+    assert!(
+        said.contains(&format!("{goto} and run bolt unshelf 1 there")),
+        "{said}"
+    );
+    // As the hint says: the work set aside, then the shelf brought back on its own save.
+    ok(&env, &["shelf"]);
+    let words: Vec<&str> = goto.split(' ').collect();
+    ok(&env, &words[1..]);
+    ok(&env, &["unshelf", "1"]);
+    let both = with(
+        &holding(SAVED),
+        &[("a.txt", Some("mine\n")), ("b.txt", Some("mine\n"))],
+    );
+    assert_eq!(files(env.root()), both);
+    assert_eq!(labels(&env), ["2"]);
 }
 
 #[test]
@@ -471,23 +539,38 @@ fn running_unshelf_again_after_a_stop_finishes_it_and_brings_back_no_other_shelf
     write(&env, "b.txt", "mine\n");
     write(&env, "n.txt", "new\n");
     ok(&env, &["shelf", "Second"]);
-    let stopped = |env: &Env| {
+    // `bolt <args>`, stopped after its first write.
+    let stopped = |env: &Env, args: &[&str]| {
         let out = env
             .bolt()
-            .arg("unshelf")
+            .args(args)
             .env("BOLT_FAULT_FAIL", "switch:changed")
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            text(&out.stdout)
+        );
         assert!(journal_exists(env));
     };
-    stopped(&env);
-    let said = ok(&env, &["unshelf"]);
-    assert!(
-        said.contains("Finished the unshelf that was stopped"),
-        "{said}"
-    );
-    assert!(said.contains("Running bolt unshelf again"), "{said}");
+    // `bolt <args>`, which finishes the stop and brings no shelf back.
+    let finishes = |env: &Env, args: &[&str]| -> String {
+        let said = ok(env, args);
+        let done = " that was stopped, so no shelf was brought back this time.";
+        assert!(
+            said.starts_with("Finished the ") && said.contains(done),
+            "{said}"
+        );
+        assert!(!journal_exists(env));
+        said
+    };
+    stopped(&env, &["unshelf"]);
+    let said = finishes(&env, &["unshelf"]);
+    assert!(said.starts_with("Finished the unshelf"), "{said}");
+    let again = "Running bolt unshelf again brings back the newest shelf left.";
+    assert!(said.contains(again), "{said}");
     // The newest is back whole, and the other is still on the list.
     let second = with(
         &holding(SAVED),
@@ -495,17 +578,39 @@ fn running_unshelf_again_after_a_stop_finishes_it_and_brings_back_no_other_shelf
     );
     assert_eq!(files(env.root()), second);
     assert_eq!(labels(&env), ["1"]);
-    assert!(!journal_exists(&env));
-    // The same again, told in JSON.
-    stopped(&env);
-    let doc = json(&env, &["unshelf"]);
-    assert_eq!(doc["finished"], true, "{doc}");
-    assert_eq!(doc["shelf"], serde_json::Value::Null, "{doc}");
+    // Named, the shelf the stopped switch was bringing back is off the list.
+    stopped(&env, &["unshelf", "1"]);
+    let said = finishes(&env, &["unshelf", "1"]);
+    assert!(
+        said.contains("There's no shelf 1 on the list now"),
+        "{said}"
+    );
     assert_eq!(
         files(env.root()),
         with(&second, &[("a.txt", Some("mine\n"))])
     );
     assert!(labels(&env).is_empty());
+    // Another command's stop, finished with no shelf left, then with one named that is there.
+    stopped(&env, &["discard"]);
+    let said = finishes(&env, &["unshelf"]);
+    assert!(said.starts_with("Finished the discard"), "{said}");
+    assert!(said.contains("There are no shelves left."), "{said}");
+    write(&env, "a.txt", "third\n");
+    ok(&env, &["shelf"]);
+    write(&env, "b.txt", "fourth\n");
+    stopped(&env, &["discard"]);
+    let said = finishes(&env, &["unshelf", "1"]);
+    assert!(
+        said.contains("Running bolt unshelf 1 again brings it back."),
+        "{said}"
+    );
+    // And told in JSON.
+    write(&env, "b.txt", "fifth\n");
+    stopped(&env, &["discard"]);
+    let doc = json(&env, &["unshelf"]);
+    assert_eq!(doc["finished"], true, "{doc}");
+    assert_eq!(doc["shelf"], serde_json::Value::Null, "{doc}");
+    assert_eq!(labels(&env), ["1"]);
 }
 
 #[test]

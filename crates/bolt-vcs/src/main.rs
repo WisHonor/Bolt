@@ -1335,7 +1335,15 @@ fn shelf_command(
                      them back.\n"
                 )
             }
-            // The warning that follows names the links that stay, and says why.
+            // The warnings that follow name what stayed, and say why.
+            None if warnings
+                .iter()
+                .any(|w| w.kind == warning::CHANGED_SINCE_PLAN) =>
+            {
+                "Nothing was shelved: your files changed while Bolt was reading them. Run bolt \
+                 shelf again.\n"
+                    .to_owned()
+            }
             None if warnings.iter().any(|w| w.kind == warning::LINKS_LEFT) => {
                 "Nothing was shelved.\n".to_owned()
             }
@@ -1411,14 +1419,29 @@ fn unshelf_command(
         format!("{document}\n")
     } else if done.finished {
         let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
-        // The shelf named may be the one the stopped switch brought back.
-        let again = match number {
-            Some(n) => format!("bolt unshelf {} again goes on from there", escape(n, false)),
-            None => "bolt unshelf again brings back the newest shelf left".to_owned(),
+        // What running it again would do; nothing is said if the list can't be read.
+        let left = repo.current().map(|(_, e)| e.state.shelves);
+        let next = match (number, left) {
+            (_, Err(_)) => String::new(),
+            (None, Ok(left)) if left.is_empty() => " There are no shelves left.".to_owned(),
+            (None, Ok(_)) => {
+                " Running bolt unshelf again brings back the newest shelf left.".to_owned()
+            }
+            (Some(n), Ok(left)) if left.iter().any(|(label, _)| label == n) => {
+                format!(
+                    " Running bolt unshelf {} again brings it back.",
+                    escape(n, false)
+                )
+            }
+            // The stopped switch may have been the one bringing it back.
+            (Some(n), Ok(_)) => format!(
+                " There's no shelf {} on the list now: bolt shelf --list shows the shelves there \
+                 are.",
+                escape(n, false)
+            ),
         };
         format!(
-            "Finished the {what} that was stopped, so no shelf was brought back this time. \
-             Running {again}.\n"
+            "Finished the {what} that was stopped, so no shelf was brought back this time.{next}\n"
         )
     } else {
         let title = repo

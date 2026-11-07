@@ -1820,7 +1820,8 @@ fn in_use_warning(paths: &[String]) -> Warning {
     )
 }
 
-fn changed_warning(paths: &[String]) -> Warning {
+/// Says entries changed after the plan, so they were left as they are.
+pub(crate) fn changed_warning(paths: &[String]) -> Warning {
     Warning::new(
         warning::CHANGED_SINCE_PLAN,
         format!(

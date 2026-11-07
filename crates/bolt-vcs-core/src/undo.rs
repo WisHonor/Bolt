@@ -13,7 +13,7 @@ use crate::id::{Id, is_hex_start};
 use crate::kept;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
-use crate::shelf::free_label;
+use crate::shelf::{free_label, within_limit};
 use crate::store::{StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
@@ -604,6 +604,7 @@ fn take_one(
     };
     let before_step = parent.as_ref().map_or(&[][..], |p| p.shelves.as_slice());
     restore_shelves(&mut state.shelves, before_step, &entry.state.shelves, redo);
+    within_limit(state.shelves.len())?;
 
     let action = if redo {
         Action::Redo(step)
@@ -722,6 +723,7 @@ impl Shelving<'_> {
         to: Id,
         shelves: &mut Vec<Shelf>,
     ) -> Result<(Plan, Id, Shelf), SwitchError> {
+        within_limit(shelves.len() + 1)?;
         let (made, from) = self.set_aside(repo, lock, collisions)?;
         let label = free_label(shelves);
         shelves.insert(0, (label.clone(), made));

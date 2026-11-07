@@ -1,21 +1,23 @@
 //! `bolt shelf` and `bolt unshelf`: unsaved changes set aside on a numbered shelf, a kept save
 //! the state lists, and brought back onto whatever save the project is on.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::diary::Action;
+use crate::diary::{Action, MAX_SHELVES};
 use crate::diff::{count_changes, for_each_change};
+use crate::drive::Drive;
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::kept;
+use crate::listing::{Entry, EntryKind};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Person;
 use crate::snapshot::{NAMED, listed};
 use crate::store::StoreError;
-use crate::switch::{self, Away, Earlier, Switch, SwitchError};
+use crate::switch::{self, Away, Earlier, ShelfCollisions, Switch, SwitchError};
 use crate::warning::{self, Warning};
-use crate::writeout::{self, Applied, Plan};
+use crate::writeout::{self, Applied, Plan, Tree};
 
 /// A shelf's message when it is given none.
 const DEFAULT_MESSAGE: &str = "Shelved";
@@ -83,21 +85,34 @@ pub fn shelf(
             entry,
             from,
             drive,
-            plan,
+            mut plan,
             links_left,
         } = away;
         if plan.actions.is_empty() {
             return Ok(set_aside_nothing(repo, plan, earlier));
         }
+        within_limit(entry.state.shelves.len() + 1)?;
+        crate::fsio::act_point("shelf:planned");
         let mut kept = switch::kept_on(&entry.state, from, "shelf", &[], who);
         kept.message = message.to_owned();
         let mut packs = repo.new_packs()?;
         let (folder_change, _) =
             kept::switch_saves(repo, &plan, from, from, &kept, drive, &mut packs)?;
-        // Everything planned changed again before it could be kept, so it all stays.
+        // Every file planned changed again before it could be kept, so they all stay.
         let Some(change) = folder_change else {
+            let changed: Vec<String> = plan
+                .actions
+                .iter()
+                .filter(|a| a.expected.is_some_and(|e| e.kind != EntryKind::Folder))
+                .map(|a| a.path.clone())
+                .collect();
+            plan.warnings.push(writeout::changed_warning(&changed));
             return Ok(set_aside_nothing(repo, plan, earlier));
         };
+        // Stored first so that the shelf can be counted before the step: once the folder is put
+        // back, a count that fails mustn't fail the command.
+        repo.store_packs(lock, packs)?;
+        let files = changed_files(repo, from, change.from)?;
         let mut state = entry.state.clone();
         let label = free_label(&state.shelves);
         state.shelves.insert(0, (label.clone(), change.from));
@@ -108,10 +123,9 @@ pub fn shelf(
             folder_change,
             plan,
             drive,
-            packs,
+            packs: repo.new_packs()?,
         };
         let applied = switch::switch(repo, lock, to_make, who, "shelf", earlier)?;
-        let files = changed_files(repo, from, change.from)?;
         Ok(Some(ShelfOutcome {
             label,
             save: change.from,
@@ -158,10 +172,14 @@ pub fn unshelf(
         let drive = repo.drive()?;
         let plan = writeout::plan(repo, base, shelf, None, false, drive, git_excludes)?;
         if !plan.collisions.is_empty() {
-            return Err(SwitchError::ShelfInTheWay {
-                paths: plan.collisions,
+            // Each kind of path in the way has its own way out.
+            let (changed, unsaved) = changed_since(repo, base, current, plan.collisions, drive)?;
+            return Err(SwitchError::ShelfInTheWay(Box::new(ShelfCollisions {
                 label: name,
-            });
+                base,
+                unsaved,
+                changed,
+            })));
         }
         // Planned from the save shelved on, the plan counts what the save it is on changed.
         let carried = if base == current {
@@ -222,11 +240,50 @@ pub fn shelves(repo: &Repository) -> Result<Vec<ShelfInfo>, RepoError> {
 
 /// The smallest number from 1 that no shelf has as its label.
 pub(crate) fn free_label(shelves: &[(String, Id)]) -> String {
+    let taken: HashSet<&str> = shelves.iter().map(|(label, _)| label.as_str()).collect();
     let mut n = 1usize;
-    while shelves.iter().any(|(label, _)| *label == n.to_string()) {
+    loop {
+        let label = n.to_string();
+        if !taken.contains(label.as_str()) {
+            return label;
+        }
         n += 1;
     }
-    n.to_string()
+}
+
+/// Refuses a list of `count` shelves, more than a diary entry holds.
+pub(crate) fn within_limit(count: usize) -> Result<(), SwitchError> {
+    if count as u64 > MAX_SHELVES {
+        return Err(SwitchError::TooManyShelves);
+    }
+    Ok(())
+}
+
+/// `paths` parted into those where the save `now` differs from the save `then`, and the rest.
+fn changed_since(
+    repo: &Repository,
+    then: Id,
+    now: Id,
+    paths: Vec<String>,
+    drive: Drive,
+) -> Result<(Vec<String>, Vec<String>), StoreError> {
+    if then == now {
+        return Ok((Vec::new(), paths));
+    }
+    let (store, signed) = (repo.store(), repo.signatures_allowed());
+    let unstored = HashMap::new();
+    let mut before = Tree::new(store, &unstored, store.save(&then, signed)?.root, drive);
+    let mut after = Tree::new(store, &unstored, store.save(&now, signed)?.root, drive);
+    let held = |e: Option<Entry>| e.map(|e| (e.kind, e.id));
+    let (mut changed, mut rest) = (Vec::new(), Vec::new());
+    for path in paths {
+        if held(before.entry(&path)?) == held(after.entry(&path)?) {
+            rest.push(path);
+        } else {
+            changed.push(path);
+        }
+    }
+    Ok((changed, rest))
 }
 
 /// `None`, with what reading the folder found noted with the store's warnings.
@@ -284,18 +341,19 @@ fn links_left_warning(paths: &[String]) -> Warning {
     let message = match paths.len() {
         1 => format!(
             "Didn't shelve 1 unsaved link: it could come back only as a plain file holding its \
-             target, since it may lead out of the project, or through a name Bolt never writes (a \
-             spelling of .git or .bolt, or a name this computer can't hold), or this computer \
-             can't make links (on Windows that takes Developer Mode):{list}\nIt stays in your \
-             folder as it is."
+             target, {}:{list}\nIt stays in your folder as it is: delete it yourself if you \
+             don't want it there.",
+            switch::why_links_stay(true)
         ),
         n => format!(
             "Didn't shelve {n} unsaved links: they could come back only as plain files holding \
-             their targets, since they may lead out of the project, or through a name Bolt never \
-             writes (a spelling of .git or .bolt, or a name this computer can't hold), or this \
-             computer can't make links (on Windows that takes Developer Mode):{list}\nThey stay \
-             in your folder as they are."
+             their targets, {}:{list}\nThey stay in your folder as they are: delete them yourself \
+             if you don't want them there.",
+            switch::why_links_stay(false)
         ),
     };
     Warning::new(warning::LINKS_LEFT, message)
 }
+
+#[cfg(test)]
+mod tests;
