@@ -138,8 +138,9 @@ pub(crate) fn merge_after_commit(repo: &mut Repository, lock: &ChangeLock) {
         Ok(Some(report)) => {
             for path in &report.kept_damaged {
                 notes.push(format!(
-                    "Pack {} wasn't merged with the other small packs because a copy in it \
-                     failed its check. Ask for help before trying to repair the project.",
+                    "Pack {} wasn't merged with the other small packs because it is damaged: \
+                     it, or a copy in it, failed Bolt's checks. Ask for help before trying to \
+                     repair the project.",
                     shown(path)
                 ));
             }

@@ -100,19 +100,20 @@ fn plant_end(env: &Env, parent: Id, change: impl FnOnce(&mut DiaryEntry)) -> Id 
     repo.store_entry(&lock, packs, &planted).unwrap()
 }
 
+/// The packs that hold the diary entry `id`.
+fn packs_holding(env: &Env, id: Id) -> Vec<PathBuf> {
+    let folder = env.root().join(".bolt/store/packs");
+    packs(env)
+        .into_iter()
+        .map(|name| folder.join(name))
+        .filter(|pack| PackReader::open(pack).unwrap().find(&id).unwrap().is_some())
+        .collect()
+}
+
 /// Removes the pack that holds the diary entry `id`, as a failing disk or a sync tool can.
 fn remove_pack_holding(env: &Env, id: Id) {
-    let folder = env.root().join(".bolt/store/packs");
-    for name in packs(env) {
-        let pack = folder.join(name);
-        if PackReader::open(&pack)
-            .unwrap()
-            .find(&id)
-            .unwrap()
-            .is_some()
-        {
-            fs::remove_file(pack).unwrap();
-        }
+    for pack in packs_holding(env, id) {
+        fs::remove_file(pack).unwrap();
     }
 }
 
@@ -551,6 +552,38 @@ fn undo_list_with_a_lost_head_goes_on_past_an_entry_whose_pack_is_gone() {
     // It can be picked up from there.
     ok(&env, &["undo", "--to", &two.to_hex()[..8]]);
     assert_eq!(head(&env).1.parent, Some(two));
+}
+
+/// A pack Bolt may not read is passed over and named, so the entries in the others can still be
+/// picked.
+#[cfg(unix)]
+#[test]
+fn undo_list_with_a_lost_head_passes_over_a_pack_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let (env, [_, one, two]) = project();
+    let [locked] = packs_holding(&env, two).try_into().unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // root reads everything, so there is nothing to test.
+    if fs::read(&locked).is_ok() {
+        return;
+    }
+    fs::remove_file(head_file(&env)).unwrap();
+    let out = env.bolt().args(["undo", "--list"]).output().unwrap();
+    let (said, warned) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{warned}");
+    // `Two` is in the pack passed over, so `One` is where the diary ends.
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 3, "{said}");
+    assert!(lines[1].starts_with(&one.short_hex()), "{said}");
+    let name = locked.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        warned.contains("warning: Bolt couldn't read pack") && warned.contains(&name),
+        "{warned}"
+    );
+    let doc = json(&env, &["undo", "--list"]);
+    assert_eq!(doc["ends"][0]["entry"], one.to_hex(), "{doc}");
+    assert_eq!(doc["warnings"][0]["kind"], "pack_unreadable", "{doc}");
+    assert_eq!(doc["warnings"].as_array().unwrap().len(), 1, "{doc}");
 }
 
 #[cfg(feature = "fault-injection")]

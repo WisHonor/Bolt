@@ -124,8 +124,8 @@ struct Checked {
     /// copy of the same object could, with the first reason found.
     unreadable: BTreeMap<PathBuf, String>,
     /// Each pack that couldn't be opened or searched for a reason other than damage, with the
-    /// first reason found.
-    unreadable_packs: BTreeMap<PathBuf, String>,
+    /// first reason found and its kind.
+    unreadable_packs: BTreeMap<PathBuf, (String, io::ErrorKind)>,
     /// Warnings about the store from the command itself, such as a merge that didn't finish.
     notes: Vec<Warning>,
 }
@@ -235,16 +235,25 @@ impl Store {
     /// other than damage is passed over, with its warning; damage is the error.
     pub(crate) fn ids_of(&self, kind: ObjectKind) -> Result<HashSet<Id>, StoreError> {
         let mut ids = HashSet::new();
-        let mut skipped = Vec::new();
-        self.each_pack(&mut skipped, |_, pack| {
+        let (mut skipped, mut unread) = (Vec::new(), Vec::new());
+        self.each_pack(&mut skipped, |n, pack| {
             for e in pack.entries() {
-                let e = e?;
-                if e.kind == kind {
-                    ids.insert(e.id);
+                match e {
+                    Ok(e) if e.kind == kind => {
+                        ids.insert(e.id);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        unread.push((n, e));
+                        break;
+                    }
                 }
             }
             Ok::<_, StoreError>(ControlFlow::<()>::Continue(()))
         })?;
+        for (n, e) in unread {
+            self.pass_over(n, e, &mut skipped);
+        }
         match skipped.into_iter().find(is_damage) {
             Some(e) => Err(e.into()),
             None => Ok(ids),
@@ -319,17 +328,27 @@ impl Store {
                 ),
             )
         }));
-        warnings.extend(checked.unreadable_packs.iter().map(|(path, reason)| {
-            Warning::new(
-                warning::PACK_UNREADABLE,
-                format!(
-                    "Bolt couldn't read pack {}: {}. It went on without it; check that the file \
-                     can be read.",
-                    escape(&path.display().to_string(), false),
-                    escape(reason.trim_end_matches('.'), false)
-                ),
-            )
-        }));
+        warnings.extend(
+            checked
+                .unreadable_packs
+                .iter()
+                .map(|(path, (reason, kind))| {
+                    // The same pack reads fine with more memory.
+                    let next = if *kind == io::ErrorKind::OutOfMemory {
+                        "closing other programs may free enough memory to read it"
+                    } else {
+                        "check that the file can be read"
+                    };
+                    Warning::new(
+                        warning::PACK_UNREADABLE,
+                        format!(
+                            "Bolt couldn't read pack {}: {}. It went on without it; {next}.",
+                            escape(&path.display().to_string(), false),
+                            escape(reason.trim_end_matches('.'), false)
+                        ),
+                    )
+                }),
+        );
         warnings.extend(checked.notes.iter().cloned());
         warnings
     }
@@ -567,17 +586,20 @@ impl Store {
             let reason = reason.clone();
             self.checked().damaged.entry(path).or_insert(reason);
         } else if !is_damage(&e) && !is_gone(&e) {
+            let kind = match &e {
+                PackError::Io(e) => e.kind(),
+                PackError::OutOfMemory => io::ErrorKind::OutOfMemory,
+                _ => io::ErrorKind::Other,
+            };
             let shown = escape(&path.display().to_string(), false);
-            let reason = e.to_string();
+            let said = format!("Bolt couldn't read pack {shown}: {e}");
+            let reason = (e.to_string(), kind);
             self.checked()
                 .unreadable_packs
                 .entry(path)
                 .or_insert(reason);
-            if let PackError::Io(e) = e {
-                let said = format!("Bolt couldn't read pack {shown}: {e}");
-                skipped.push(io::Error::new(e.kind(), said).into());
-                return;
-            }
+            skipped.push(io::Error::new(kind, said).into());
+            return;
         }
         skipped.push(e);
     }
@@ -1193,6 +1215,74 @@ mod tests {
         let listed = store.ids_of(ObjectKind::Content);
         let damage = matches!(&listed, Err(StoreError::Pack(PackError::Corrupt { .. })));
         assert!(damage, "{:?}", listed.map(|ids| ids.len()));
+    }
+
+    /// A pack that failed to open fails unopened until the packs are listed again: a good pack
+    /// may have been put under its name since.
+    #[test]
+    fn a_listing_forgets_which_packs_failed_to_open() {
+        let (_root, tmp, packs) = dirs();
+        let content = b"under the junk's name".to_vec();
+        let id = hash_content(&content);
+        let path = pack_of(&tmp, &packs, std::slice::from_ref(&content));
+        let good = std::fs::read(&path).unwrap();
+        std::fs::write(&path, vec![b'x'; 200]).unwrap();
+        let mut store = Store::open(&packs).unwrap();
+        assert!(store.copy_content(&id, &mut Vec::new()).is_err());
+        std::fs::write(&path, good).unwrap();
+        assert!(store.copy_content(&id, &mut Vec::new()).is_err());
+        store.refresh().unwrap();
+        let mut out = Vec::new();
+        store.copy_content(&id, &mut out).unwrap();
+        assert_eq!(out, content);
+    }
+
+    /// An index read to the end fails for a reason other than damage, here a pack cut short
+    /// while open: a listing of every ID, as for a lost head, passes over it with its warning.
+    #[test]
+    fn a_listing_of_every_id_passes_over_an_index_it_cannot_read() {
+        let (_root, tmp, packs) = dirs();
+        pack_of(&tmp, &packs, &[b"one".to_vec()]);
+        let cut = pack_of(&tmp, &packs, &[b"two".to_vec()]);
+        let store = Store::open(&packs).unwrap();
+        // Opened now, and kept open.
+        store
+            .copy_content(&hash_content(b"two"), &mut Vec::new())
+            .unwrap();
+        let len = std::fs::metadata(&cut).unwrap().len();
+        let file = std::fs::OpenOptions::new().write(true).open(&cut).unwrap();
+        // Into its one ID: what is left of the index ends in the middle of it.
+        file.set_len(len - 100).unwrap();
+        drop(file);
+        let ids = store.ids_of(ObjectKind::Content).unwrap();
+        assert_eq!(ids, HashSet::from([hash_content(b"one")]));
+        let warnings = store.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].kind, "pack_unreadable");
+        let name = cut.file_name().unwrap().to_str().unwrap();
+        assert!(warnings[0].message.contains(name), "{warnings:?}");
+    }
+
+    /// Whatever the failure, the error kept names the pack, and the warning's advice fits it.
+    #[test]
+    fn a_pack_passed_over_is_named_whatever_the_failure() {
+        let (_root, tmp, packs) = dirs();
+        let path = pack_of(&tmp, &packs, &[b"one".to_vec()]);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let store = Store::open(&packs).unwrap();
+        let mut skipped = Vec::new();
+        store.pass_over(0, PackError::OutOfMemory, &mut skipped);
+        let kept = skipped[0].to_string();
+        assert!(
+            kept.contains(name) && kept.contains("ran out of memory"),
+            "{kept}"
+        );
+        let said = &store.warnings()[0].message;
+        assert!(said.contains(name), "{said}");
+        assert!(
+            said.ends_with("may free enough memory to read it."),
+            "{said}"
+        );
     }
 
     #[test]

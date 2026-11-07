@@ -311,12 +311,15 @@ pub(crate) fn refused(e: io::Error) -> RepoError {
 /// `e`, from opening the lock file at `shown`, as `refused` takes it, naming the file.
 fn lock_error(shown: &Path, e: io::Error) -> RepoError {
     match refused(e) {
-        RepoError::Io(e) => {
-            let shown = escape(&shown.display().to_string(), false);
-            io::Error::new(e.kind(), format!("Bolt couldn't open {shown}: {e}")).into()
-        }
+        RepoError::Io(e) => naming(shown, "open", e).into(),
         e => e,
     }
+}
+
+/// `e`, met when Bolt went to `doing` the file at `shown`, naming the file.
+fn naming(shown: &Path, doing: &str, e: io::Error) -> io::Error {
+    let shown = escape(&shown.display().to_string(), false);
+    io::Error::new(e.kind(), format!("Bolt couldn't {doing} {shown}: {e}"))
 }
 
 /// The folders that must be real folders, never links or junctions (storage-format.md §10),
@@ -1122,9 +1125,9 @@ impl Repository {
     /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
     /// command holds the change lock; otherwise it may be a pack being written right now. The
     /// lock file is only opened to read, so a project the user can't write still opens; where it
-    /// can't be, the leftovers wait for a command that can.
+    /// can't be, or a leftover can't be removed, the leftovers wait for a command that can.
     fn clean_tmp(&self) -> Result<(), RepoError> {
-        let shown = self.bolt.join("state").join("lock");
+        let shown = self.lock_path();
         let file = match safe_fs::open_regular_in(&self.held.state, OsStr::new("lock"), &shown) {
             Ok(file) => file,
             Err(e)
@@ -1137,10 +1140,16 @@ impl Repository {
             }
             Err(e) => return Err(lock_error(&shown, e)),
         };
-        if file.try_lock().is_err() {
-            return Ok(());
+        if file.try_lock().is_ok() {
+            self.clear_tmp(&ChangeLock { _file: file });
         }
-        self.remove_temp_files(&ChangeLock { _file: file })
+        Ok(())
+    }
+
+    /// `remove_temp_files` as far as it gets: a leftover this user can't remove (in a project
+    /// shared read-only, say) is only litter, so it fails nothing.
+    fn clear_tmp(&self, lock: &ChangeLock) {
+        let _ = self.remove_temp_files(lock);
     }
 
     /// Deletes what Bolt left in `tmp/`, under the lock, so none of it is being written: its files,
@@ -1157,9 +1166,14 @@ impl Repository {
     }
 
     fn open_lock_file(&self) -> Result<File, RepoError> {
-        let shown = self.bolt.join("state").join("lock");
+        let shown = self.lock_path();
         fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown)
             .map_err(|e| lock_error(&shown, e))
+    }
+
+    /// `state/lock`, to name it.
+    fn lock_path(&self) -> PathBuf {
+        self.bolt.join("state").join("lock")
     }
 
     #[must_use]
@@ -1326,6 +1340,7 @@ impl Repository {
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<ChangeLock, RepoError> {
         let file = self.open_lock_file()?;
+        let locking = |e| naming(&self.lock_path(), "lock", e);
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
@@ -1337,10 +1352,14 @@ impl Repository {
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .unwrap_or_default();
                 on_wait(&info);
-                file.lock()?;
+                file.lock().map_err(locking)?;
             }
-            Err(TryLockError::Error(e)) => return Err(e.into()),
+            Err(TryLockError::Error(e)) => return Err(locking(e).into()),
         }
+        let lock = ChangeLock { _file: file };
+        // Opening the project couldn't clear `tmp/` where a drive locks only a file open for
+        // writing.
+        self.clear_tmp(&lock);
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
@@ -1354,7 +1373,7 @@ impl Repository {
         // the command at `current`, unless it is the `undo --to` that picks one up.
         self.head = read_head(&self.held.state, &self.bolt)?.id();
         self.store.refresh()?;
-        Ok(ChangeLock { _file: file })
+        Ok(lock)
     }
 
     /// Stores `entry` in the last of `packs`, moves that pack into the store, registers all of
@@ -2180,8 +2199,8 @@ mod tests {
         );
     }
 
-    /// A project shared read-only, say: reading needs no write to `state/lock`, and a command that
-    /// would change the project names the file it can't open.
+    /// A project shared read-only, say: reading needs no write to `state/lock` or `tmp/`, and a
+    /// command that would change the project names the file it can't open.
     #[test]
     fn a_project_the_user_cannot_write_still_reads() {
         let dir = tempdir();
@@ -2189,10 +2208,23 @@ mod tests {
             .unwrap()
             .current()
             .unwrap();
-        let state = dir.path().join(".bolt").join("state");
+        let bolt = dir.path().join(".bolt");
+        let (state, tmp) = (bolt.join("state"), bolt.join("tmp"));
         let lock = state.join("lock");
-        // And `state/`, mode 0555 then on Unix (Windows ignores a folder's read-only flag).
-        let was = [&lock, &state].map(|p| (p, std::fs::metadata(p).unwrap().permissions()));
+        // A stopped command's leftover, which this user can't remove.
+        let left = tmp.join(bolt_platform::temp_name());
+        std::fs::write(&left, b"half a pack").unwrap();
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&left)
+                .unwrap()
+        };
+        // The folders too, mode 0555 then on Unix (Windows ignores a folder's read-only flag).
+        let was = [&lock, &state, &tmp].map(|p| (p, std::fs::metadata(p).unwrap().permissions()));
         let read_only = |on: bool| {
             for (path, was) in &was {
                 let mut now = was.clone();
@@ -2210,13 +2242,31 @@ mod tests {
             (repo, refused)
         });
         read_only(false);
+        #[cfg(windows)]
+        drop(held);
         if root_user {
             return;
         }
         let (repo, refused) = opened.unwrap();
         assert_eq!(repo.current().unwrap().0, head);
+        assert!(left.exists());
         let e = refused.unwrap_err();
         assert!(e.to_string().contains(&lock.display().to_string()), "{e}");
+    }
+
+    /// Where a drive locks only a file open for writing, opening a project leaves `tmp/` as it
+    /// is; taking the lock to change the project clears it.
+    #[test]
+    fn taking_the_lock_clears_what_stopped_commands_left_in_tmp() {
+        let (dir, mut repo) = project();
+        let left = dir
+            .path()
+            .join(".bolt/tmp")
+            .join(bolt_platform::temp_name());
+        std::fs::write(&left, b"half a pack").unwrap();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        assert!(!left.exists());
+        drop(lock);
     }
 
     /// Windows makes a link in `tmp/` before moving it into place, so a run that stops can leave

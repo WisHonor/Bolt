@@ -212,14 +212,23 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
         !end.timed_out && matches!(end.code, Some(0 | 1)),
         "`bolt history` hung or crashed on a FIFO named *.pack: {end:?}"
     );
-    // A save looks for its new file in every pack, so it reaches the FIFO and must refuse it.
+    // A save looks for its new file in every pack, so it reaches the FIFO: it passes over it as
+    // damaged, naming it, and stores the file in a pack of its own.
     std::fs::write(env.root().join("new.txt"), "new").unwrap();
     let mut cmd = env.bolt();
     cmd.args(["save", "add new"]);
     let end = run_limited(cmd, 10);
     assert!(
-        end.code == Some(1) && end.stderr.contains("zz.pack"),
-        "`bolt save` hung or didn't refuse a FIFO named *.pack: {end:?}"
+        !end.timed_out && end.code == Some(0) && end.stderr.contains("zz.pack"),
+        "`bolt save` hung, failed or didn't name a FIFO named *.pack: {end:?}"
+    );
+    // The new save reads back: status reads its listing.
+    let mut cmd = env.bolt();
+    cmd.arg("status");
+    let end = run_limited(cmd, 10);
+    assert!(
+        !end.timed_out && end.code == Some(0),
+        "`bolt status` hung or failed after the save: {end:?}"
     );
     // So does the check that reads every pack.
     let packs = env.root().join(".bolt/store/packs");
