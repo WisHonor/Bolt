@@ -208,7 +208,7 @@ pub(super) fn rename_into(
         }
     }
     let plain = RenameInfo::new(root, to_name, FILE_RENAME_REPLACE_IF_EXISTS)?;
-    even_if_read_only(to.as_handle(), to_name, || {
+    even_if_read_only(to, to_name, || {
         set_rename(source, &plain, FileRenameInformation)
     })
 }
@@ -232,13 +232,13 @@ pub(super) fn remove_file(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
     if what.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 && !link {
         return Err(is_a_folder());
     }
-    delete(handle.as_handle())
+    delete(handle.as_handle(), dir, name)
 }
 
 pub(super) fn remove_dir(dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
     let (handle, what) = open_entry(dir, name, DELETE, FILE_WRITE_THROUGH)?;
     let folder = as_folder(handle, &what)?;
-    delete(folder.as_handle())
+    delete(folder.as_handle(), dir, name)
 }
 
 pub(super) fn symlink(
@@ -312,7 +312,7 @@ pub(super) fn symlink(
     })();
     // A link left under a name nobody chose would only puzzle; removing it can't touch its target.
     if placed.is_err() {
-        let _ = delete(link.as_handle());
+        let _ = delete(link.as_handle(), scratch, &temp);
     }
     placed
 }
@@ -629,9 +629,9 @@ fn set_info<T>(
     Ok(())
 }
 
-/// Deletes the open entry. Its name goes as soon as this handle closes, even while others still
-/// have it open (POSIX semantics).
-fn delete(handle: BorrowedHandle<'_>) -> io::Result<()> {
+/// Deletes the open entry, `name` in the folder `dir`. Its name goes as soon as this handle
+/// closes, even while others still have it open (POSIX semantics).
+fn delete(handle: BorrowedHandle<'_>, dir: &OwnedHandle, name: &OsStr) -> io::Result<()> {
     // A read-only file goes too, as on Unix. Windows before 10 (1809) refuses that flag; drives
     // without POSIX deletes (FAT, say) refuse both, and get the plain delete, whose name goes once
     // the last handle closes.
@@ -651,16 +651,14 @@ fn delete(handle: BorrowedHandle<'_>) -> io::Result<()> {
         }
     }
     let plain = FILE_DISPOSITION_INFO { DeleteFile: true };
-    even_if_read_only(handle, OsStr::new(""), || {
-        set_info(handle, FileDispositionInfo, &plain)
-    })
+    even_if_read_only(dir, name, || set_info(handle, FileDispositionInfo, &plain))
 }
 
-/// Runs `change`: a plain rename over `name` in `dir`, or a plain delete of it (of `dir` itself
-/// when `name` is empty). Drives without POSIX renames and deletes refuse both for a read-only
-/// entry, so its flag is cleared for another try, and set again if that fails too.
+/// Runs `change`: a plain rename over `name` in the folder `dir`, or a plain delete of it. Drives
+/// without POSIX renames and deletes refuse both for a read-only entry, so its flag is cleared, by
+/// name, for another try, and set again if that fails too.
 fn even_if_read_only(
-    dir: BorrowedHandle<'_>,
+    dir: &OwnedHandle,
     name: &OsStr,
     change: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
@@ -679,11 +677,11 @@ fn even_if_read_only(
     }
 }
 
-/// Sets or clears the read-only flag of `name` in `dir` (of `dir` itself when `name` is empty),
-/// keeping its other attributes; says whether that changed it.
-fn set_read_only(dir: BorrowedHandle<'_>, name: &OsStr, on: bool) -> io::Result<bool> {
+/// Sets or clears the read-only flag of `name` in the folder `dir`, keeping its other attributes;
+/// says whether that changed it.
+fn set_read_only(dir: &OwnedHandle, name: &OsStr, on: bool) -> io::Result<bool> {
     let access = FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
-    let entry = nt_open(dir, name, access, FILE_OPEN, 0)?;
+    let entry = nt_open(dir.as_handle(), name, access, FILE_OPEN, 0)?;
     let what: FILE_ATTRIBUTE_TAG_INFO = info(entry.as_handle(), FileAttributeTagInfo)?;
     let was = what.FileAttributes;
     let now = if on {

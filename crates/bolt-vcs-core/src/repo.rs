@@ -927,7 +927,11 @@ impl Repository {
         let root = &resolved(root);
         let bolt = root.join(".bolt");
         let found = Repository::check_new_with(root, owner_check)?;
-        let top = Dir::open_top(root)?;
+        let top = Dir::open_top(root).map_err(|e| {
+            let shown = escape(&root.display().to_string(), false);
+            let said = format!("Bolt couldn't open the project folder {shown}: {e}");
+            io::Error::new(e.kind(), said)
+        })?;
         if !found {
             match top.create_dir(OsStr::new(".bolt")) {
                 Ok(()) => top.sync()?,
@@ -2652,6 +2656,24 @@ mod tests {
         let started = Repository::init_with(&root, &entry(0).who, &check);
         assert!(started.is_err(), "{:?}", started.map(|_| ()));
         assert!(!bolt.exists() && !format_path(&root).exists());
+    }
+
+    #[test]
+    fn start_names_a_project_folder_it_cannot_open() {
+        let dir = tempdir();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        // Gone while its owner is asked, so it can't be opened after the checks.
+        let check = |folder: &Path, _seen: bool| {
+            if folder == root && root.exists() {
+                std::fs::remove_dir(&root).unwrap();
+            }
+            Ok(())
+        };
+        let e = Repository::init_with(&root, &entry(0).who, &check)
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains(&root.display().to_string()), "{e}");
     }
 
     /// A link that appears where `bolt start` is about to make `.bolt` is never followed.

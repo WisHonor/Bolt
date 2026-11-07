@@ -868,6 +868,7 @@ mod tests {
         assert!(gone(&tmp.path().join("folder")));
     }
 
+    #[cfg(windows)]
     fn is_read_only(path: &Path) -> bool {
         fs::metadata(path).unwrap().permissions().readonly()
     }
