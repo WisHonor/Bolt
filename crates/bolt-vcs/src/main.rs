@@ -690,13 +690,12 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         }
         Ok(())
     })();
-    // As in `history`: a reader that went away ends the command quietly.
+    // Told whatever became of the output; a reader that went away ends the command quietly.
+    output::print_warnings(&warnings);
     if out.closed {
         return Ok(());
     }
-    done?;
-    output::print_warnings(&warnings);
-    Ok(())
+    Ok(done?)
 }
 
 /// Why `bolt changes` stopped: a file couldn't be read, or what it shows couldn't be written.

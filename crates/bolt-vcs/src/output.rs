@@ -2,7 +2,7 @@
 
 use std::fmt::{self, Write as _};
 use std::io::{self, IsTerminal, Write};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use bolt_core::changes::{Endings, Lines, Tag, eol_only, only_line_endings};
@@ -587,16 +587,17 @@ impl Write for Stdout {
     }
 }
 
-/// Prints `text` on stdout, then `warnings` on stderr; a reader that went away ends it quietly.
+/// Prints `text` on stdout, then `warnings` on stderr. They say what the command did or didn't
+/// do, so they are told even when stdout can't take the text; a reader that went away then ends
+/// the command quietly.
 pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
     let mut out = Stdout::new();
     let done = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+    print_warnings(warnings);
     if out.closed {
         return Ok(());
     }
-    done?;
-    print_warnings(warnings);
-    Ok(())
+    done.map_err(Failure::from)
 }
 
 /// [`print_quietly`], for a command that changed the project: if printing fails, the hint says
@@ -620,12 +621,22 @@ pub fn warnings_json(warnings: &[Warning]) -> Value {
         .collect()
 }
 
-/// Prints each warning on stderr for people; a damaged copy also gets the hint.
+/// The warnings already on stderr. A command whose output failed tells its own, the store's among
+/// them, before the error, which then doesn't tell them again.
+static TOLD: Mutex<Vec<Warning>> = Mutex::new(Vec::new());
+
+/// Prints each warning on stderr for people, once; a damaged copy also gets the hint.
 pub fn print_warnings(warnings: &[Warning]) {
-    for warning in warnings {
-        eprintln!("warning: {}", warning.message);
+    let mut told = TOLD.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut damaged = false;
+    for w in warnings {
+        if !told.contains(w) {
+            eprintln!("warning: {}", w.message);
+            damaged |= w.kind == warning::DAMAGED_PACK;
+            told.push(w.clone());
+        }
     }
-    if warnings.iter().any(|w| w.kind == warning::DAMAGED_PACK) {
+    if damaged {
         eprintln!(
             "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
         );
@@ -735,9 +746,12 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
             return;
         }
     }
-    for w in warnings.iter().filter(|w| warning::told_on_failure(w.kind)) {
-        eprintln!("warning: {}", w.message);
-    }
+    let told: Vec<Warning> = warnings
+        .iter()
+        .filter(|w| warning::told_on_failure(w.kind))
+        .cloned()
+        .collect();
+    print_warnings(&told);
     // Escaped once more, so that a piece nobody thought of escaping still can't drive the
     // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
     eprintln!("error: {}", escape(&failure.message, true));

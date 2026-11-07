@@ -290,3 +290,32 @@ fn a_stdout_that_fails_mid_document_ends_it_with_the_error_on_stderr() {
         assert_eq!(said.lines().count(), 1, "{args:?}: {said}");
     }
 }
+
+#[test]
+fn a_spelling_of_bolt_in_the_save_you_are_on_is_told_as_that_saves() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    support::plant_save(env.root(), |pack| {
+        support::with_bolt_spelling_under_git(pack, &[("a.txt", b"a\n")])
+    });
+    let on = support::main_tip(&env);
+    fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    let out = env.bolt().args(["changes", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        doc["error"]["message"],
+        format!(
+            "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+             writes, so it can't be used.",
+            on.short_hex()
+        ),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "Bolt never makes such a save, so another program put it there. Nothing was changed: ask \
+         for help before trying to repair it.",
+        "{doc}"
+    );
+}

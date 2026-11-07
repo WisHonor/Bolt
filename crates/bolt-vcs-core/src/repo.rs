@@ -107,8 +107,8 @@ pub enum RepoError {
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
     /// A folder of a save holds a spelling of `.bolt`, which no listing Bolt makes holds: of
-    /// `save` once the command knows which save it was reading, the one the project is on when
-    /// `current`.
+    /// `save` once the command knows which save it was reading. `current` only when the project
+    /// is on that save, which a save read for another reason (a shelf's base, say) isn't.
     #[error(
         "{} holds a name spelled like Bolt's own folder (.bolt), which Bolt never writes, so it \
          can't be used.",
@@ -273,8 +273,8 @@ impl RepoError {
         )
     }
 
-    /// This error, met reading the folders of the save `save`, the one the project is on when
-    /// `current`: a spelling of `.bolt` is told as that save's.
+    /// This error, met reading the folders of the save `save`: a spelling of `.bolt` is told as
+    /// that save's, `current` when the project is on it.
     #[must_use]
     pub(crate) fn in_save(self, save: Id, current: bool) -> RepoError {
         match self {

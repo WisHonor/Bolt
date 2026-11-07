@@ -1262,12 +1262,10 @@ fn a_file_held_open_keeps_the_switch_unfinished_until_let_go() {
     assert_holds(dir.path(), NEW);
 }
 
-#[test]
-fn a_spelling_of_bolt_the_plan_meets_is_told_as_the_save_holding_it() {
-    let (_dir, mut repo) = project();
-    let (good, _) = planted(&mut repo, &files(&[("a.txt", b"a")]));
+/// Commits a save whose top listing holds `.BOLT`, and gives its ID.
+fn planted_hostile(repo: &mut Repository) -> Id {
     // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
-    crate::test_support::plant_root(&mut repo, |packs| {
+    crate::test_support::plant_root(repo, |packs| {
         let id = packs.add_content(b"x").unwrap();
         let named = |name: &str| Entry {
             name: name.into(),
@@ -1283,19 +1281,83 @@ fn a_spelling_of_bolt_the_plan_meets_is_told_as_the_save_holding_it() {
             .add_record(ObjectKind::FolderListing, &hostile)
             .unwrap()
     });
-    let hostile = current_save(&repo).unwrap();
-    let told = |from, to| {
+    current_save(repo).unwrap()
+}
+
+#[test]
+fn a_spelling_of_bolt_the_plan_meets_is_told_as_the_save_holding_it() {
+    let (_dir, mut repo) = project();
+    let (good, _) = planted(&mut repo, &files(&[("a.txt", b"a")]));
+    let other = planted_hostile(&mut repo);
+    let hostile = planted_hostile(&mut repo);
+    let told = |repo: &Repository, from, to| {
         let met = SaveError::Repo(RepoError::BoltName {
             save: None,
             current: false,
         });
-        match told_whose(&repo, met, from, to) {
+        match told_whose(repo, met, from, to) {
             SaveError::Repo(RepoError::BoltName { save, current }) => (save, current),
             other => panic!("{other:?}"),
         }
     };
-    // The target's tree holds it; else it is the save the folder is on.
-    assert_eq!(told(good, hostile), (Some(hostile), false));
-    assert_eq!(told(hostile, good), (Some(hostile), true));
-    assert_eq!(told(good, good), (Some(good), true));
+    // On a save that holds it, every switch away meets it, whatever the target holds.
+    assert_eq!(told(&repo, hostile, good), (Some(hostile), true));
+    assert_eq!(told(&repo, hostile, other), (Some(hostile), true));
+    // The save planned from is named if it holds it, else the target; the narrower hint only
+    // for the save the project is on, which an unshelf's base or an undo's kept save isn't.
+    planted(&mut repo, &files(&[("b.txt", b"b")]));
+    assert_eq!(told(&repo, hostile, good), (Some(hostile), false));
+    assert_eq!(told(&repo, good, hostile), (Some(hostile), false));
+    assert_eq!(told(&repo, other, hostile), (Some(other), false));
+    // Reading the folder against such a save meets it first.
+    let drive = this_drive(&mut repo);
+    match plan(&repo, hostile, good, None, false, drive, None) {
+        Err(SaveError::Repo(RepoError::BoltName { save, current })) => {
+            assert_eq!((save, current), (Some(hostile), false));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_placeholder_swapped_in_for_an_unsaved_link_is_kept_before_it_goes() {
+    let (dir, mut repo) = project();
+    let from = current_save(&repo).unwrap();
+    let target = b"a.txt";
+    let id = hash_content(target);
+    // What a discard plans for an unsaved link `l` -> a.txt, which the save doesn't hold.
+    let actions = vec![Action {
+        path: "l".into(),
+        change: Change::RemoveFile,
+        expected: Some(Expected {
+            kind: EntryKind::Symlink,
+            id,
+            size: 5,
+        }),
+    }];
+    // Another program swaps the link for a file holding exactly its target.
+    fs::write(dir.path().join("l"), target).unwrap();
+    let (head, _) = repo.current().unwrap();
+    let lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let copies = keep_safety_copies(&repo, &actions, from, drive, &mut packs).unwrap();
+    let copy = SafetyCopy {
+        path: "l".into(),
+        kind: EntryKind::Symlink,
+        id,
+        size: 5,
+    };
+    assert_eq!(copies, [copy]);
+    repo.store_packs(&lock, packs).unwrap();
+    let journal = Journal {
+        target: head,
+        from: head,
+        actions,
+    };
+    let done = apply(&repo, &lock, &journal, drive).unwrap();
+    assert_eq!((done.removed, done.changed_since_plan.len()), (1, 0));
+    let mut kept = Vec::new();
+    repo.store().copy_content(&id, &mut kept).unwrap();
+    assert_eq!(kept, target);
 }

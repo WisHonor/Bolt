@@ -16,7 +16,7 @@ use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in}
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
 use crate::fsio::{self, Done};
-use crate::history::tip_of;
+use crate::history::{current_save, tip_of};
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
@@ -96,20 +96,27 @@ pub fn plan(
 }
 
 /// `e`, a spelling of `.bolt` the plan met past reading the folder against `from`, told as the
-/// save that holds it: `to` if its whole tree meets one, else `from`, the one the folder is on.
+/// save that holds it: `from` if its whole tree meets one, as every switch from it would, else
+/// `to`.
 fn told_whose(repo: &Repository, e: SaveError, from: Id, to: Id) -> SaveError {
     if !matches!(e, SaveError::Repo(RepoError::BoltName { save: None, .. })) {
         return e;
     }
     let holds = || -> Result<(), RepoError> {
-        let root = repo.store().save(&to, repo.signatures_allowed())?.root;
+        let root = repo.store().save(&from, repo.signatures_allowed())?.root;
         for_each_change(repo.store(), None, root, |_| Ok::<(), RepoError>(()))
     };
-    if from != to && matches!(holds(), Err(RepoError::BoltName { .. })) {
-        e.in_save(to, false)
-    } else {
-        e.in_save(from, true)
-    }
+    let named = match holds() {
+        Err(RepoError::BoltName { .. }) => from,
+        _ => to,
+    };
+    e.in_save(named, is_current(repo, named))
+}
+
+/// Whether the project is on `save`: an unshelf plans from the shelf's base, and an undo step
+/// can plan from a kept save.
+fn is_current(repo: &Repository, save: Id) -> bool {
+    current_save(repo).is_ok_and(|on| on == save)
 }
 
 fn planned(
@@ -124,8 +131,8 @@ fn planned(
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
-    let now =
-        read_folder(repo, from_root, false, git_excludes).map_err(|e| e.in_save(from, true))?;
+    let now = read_folder(repo, from_root, false, git_excludes)
+        .map_err(|e| e.in_save(from, is_current(repo, from)))?;
     let mut unsaved = BTreeSet::new();
     for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
         unsaved.insert(c.path.to_owned());
@@ -448,8 +455,9 @@ fn copy_in(
     }
 }
 
-/// The target of the link at `path` if it is still the one the plan found (`e`); `None` if it is
-/// gone or changed since. Anything else that stops it being read is an error.
+/// The target of the link at `path` if it is still the one the plan found (`e`), or a file
+/// holding exactly that target; `None` if it is gone or changed since. Anything else that stops
+/// it being read is an error.
 pub(crate) fn planned_link(
     disk: &mut Folders,
     path: &str,
@@ -474,18 +482,40 @@ pub(crate) fn planned_link(
 }
 
 /// The target of the link `name` in `dir`, at the project path `path`, if it is still the one
-/// the plan found (`e`); `None` if it is no longer a link or holds another target.
+/// the plan found (`e`) or a file holding exactly that target, which the run takes for it;
+/// `None` if it is neither.
 fn link_in(dir: &Dir, name: &str, path: &str, e: Expected) -> Result<Option<String>, SaveError> {
+    let os = OsStr::new(name);
     let target = match crate::snapshot::link_target(dir, name, path) {
         Ok(target) => target,
-        Err(_)
-            if !dir
-                .metadata(OsStr::new(name))
+        Err(err)
+            if dir
+                .metadata(os)
                 .is_ok_and(|now| now.kind == EntryType::Symlink) =>
         {
-            return Ok(None);
+            return Err(err);
         }
-        Err(err) => return Err(err),
+        Err(_) => {
+            let file = match dir.open_file(os) {
+                Ok(file) => file,
+                Err(_)
+                    if !dir
+                        .metadata(os)
+                        .is_ok_and(|now| now.kind == EntryType::File) =>
+                {
+                    return Ok(None);
+                }
+                Err(err) => return Err(unreadable(path, err)),
+            };
+            let mut bytes = Vec::new();
+            file.take(e.size.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|err| unreadable(path, err))?;
+            match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => return Ok(None),
+            }
+        }
     };
     Ok((hash_content(target.as_bytes()) == e.id).then_some(target))
 }

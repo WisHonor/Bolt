@@ -216,15 +216,38 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     }
     let scope = scope(repo, paths)?;
     let mut disk = Folders::open(repo.root()).map_err(|e| unreadable("the project folder", e))?;
-    for_each_change_in(store, &now.listings, Some(save.root), now.root, |c| {
+    let walked = for_each_change_in(store, &now.listings, Some(save.root), now.root, |c| {
         if !scope.as_ref().is_none_or(|s| s.holds(c.path)) {
             return Ok(());
         }
         let c = PathChange::from(c);
         let old = stored(store, c.old_kind, c.old_id, c.old_size)?;
         let new = on_disk(&mut disk, &c)?;
-        each(&c.path, &c, lines(&old, &new))
+        each(&c.path, &c, lines(&old, &new)).map_err(Stopped::Each)
+    });
+    // A spelling of `.bolt` met reading is in the save the project is on, as for `status`.
+    walked.map_err(|stopped| match stopped {
+        Stopped::Reading(e) => e.in_save(tip, true).into(),
+        Stopped::Each(e) => e,
     })
+}
+
+/// What stopped [`unsaved_changes`]' walk: reading, or the caller's `each`.
+enum Stopped<E> {
+    Reading(SaveError),
+    Each(E),
+}
+
+impl<E> From<SaveError> for Stopped<E> {
+    fn from(e: SaveError) -> Self {
+        Stopped::Reading(e)
+    }
+}
+
+impl<E> From<StoreError> for Stopped<E> {
+    fn from(e: StoreError) -> Self {
+        Stopped::Reading(e.into())
+    }
 }
 
 /// Hands `each` every file the save `save` changed, compared with its first parent (every file,

@@ -327,8 +327,9 @@ pub(crate) fn goes_with<'a>(
 
 /// The paths of the unsaved links `actions` would throw away that write-out could bring back
 /// only as plain files: judged by its own rule against the tree the kept save would have, which
-/// each link left changes. A link no longer as the plan found it is the switch's to leave.
-/// Whether links can be made is tried once.
+/// each link left changes. A link no longer as the plan found it is the switch's to leave; a file
+/// holding exactly its target is still that link, as the switch takes it. Whether links can be
+/// made is tried once.
 pub(crate) fn links_to_leave(
     repo: &Repository,
     actions: &[Action],
@@ -931,6 +932,27 @@ mod tests {
         assert_eq!(leaving(&mut repo, save, None), ["bin/tool", "node"]);
         let current = ["current".to_owned()];
         assert_eq!(leaving(&mut repo, save, Some(&current)), ["current"]);
+    }
+
+    #[test]
+    fn a_placeholder_swapped_in_for_an_unsaved_link_is_judged_as_that_link() {
+        let (dir, mut repo, save) = saved(&[("a.txt", b"a")]);
+        let target = b"../out";
+        // The plan found an unsaved link `l` leading out of the project, which comes back only
+        // as a plain file; another program has since swapped it for one holding its target.
+        let actions = [Action {
+            path: "l".into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::Symlink,
+                id: hash_content(target),
+                size: 6,
+            }),
+        }];
+        fs::write(dir.path().join("l"), target).unwrap();
+        let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        assert_eq!(links_to_leave(&repo, &actions, save, drive).unwrap(), ["l"]);
     }
 
     #[test]

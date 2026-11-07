@@ -10,13 +10,15 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use bolt_core::id::Id;
 use bolt_core::journal::{Action, Change, Content, Journal};
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackSet};
+use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_platform::dir::Dir;
-use support::{Env, add_listing, listings, plant_save, text};
+use support::{
+    Env, add_listing, holding_bolt_spelling, listings, plant_save, text,
+    with_bolt_spelling_under_git,
+};
 use tempfile::TempDir;
 
 use EntryKind::{Executable, File, Symlink};
@@ -331,24 +333,6 @@ fn the_short_name_of_gitmodules_is_never_written() {
     case.assert_nothing_escaped();
 }
 
-/// Stores a listing holding the folder `.BOLT`, with `inside` in it. No listing Bolt makes holds
-/// one, so it is spelled `-BOLT`, then the bytes are changed.
-fn holding_bolt_spelling(pack: &mut PackSet, inside: Id) -> Id {
-    let listing = Listing::new(vec![Entry {
-        name: "-BOLT".into(),
-        kind: EntryKind::Folder,
-        id: inside,
-        size: 0,
-    }])
-    .unwrap()
-    .encode();
-    let at = listing.windows(5).position(|w| w == b"-BOLT").unwrap();
-    let mut hostile = listing;
-    hostile[at] = b'.';
-    pack.add_record(ObjectKind::FolderListing, &hostile)
-        .unwrap()
-}
-
 #[test]
 fn a_save_naming_a_spelling_of_bolt_is_refused_whole() {
     let case = Case::new();
@@ -446,6 +430,53 @@ fn a_spelling_of_bolt_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_tha
          for help before trying to repair it.",
         "{doc}"
     );
+}
+
+#[test]
+fn a_spelling_of_bolt_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let files: [(&str, &[u8]); 2] = [("a.txt", b"a\n"), ("b.txt", b"b\n")];
+    // Saves to go to, one without the bad listing and one sharing it, then the save the project
+    // is on. Reading the folder skips `.git`, so the plan's later comparisons meet it first.
+    plant_save(env.root(), |pack| {
+        listings(pack, &[("a.txt", File, b"a\n"), ("b.txt", File, b"b\n")])
+    });
+    let without = env.state().1.lines["main"];
+    plant_save(env.root(), |pack| {
+        with_bolt_spelling_under_git(pack, &files)
+    });
+    let sharing = env.state().1.lines["main"];
+    plant_save(env.root(), |pack| {
+        with_bolt_spelling_under_git(pack, &files[..1])
+    });
+    let on = env.state().1.lines["main"];
+    std::fs::write(env.root().join("a.txt"), b"a\n").unwrap();
+    for target in [without, sharing] {
+        let out = env
+            .bolt()
+            .args(["goto", &target.to_hex(), "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            doc["error"]["message"],
+            format!(
+                "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+                 writes, so it can't be used.",
+                on.short_hex()
+            ),
+            "{doc}"
+        );
+        assert_eq!(
+            doc["error"]["hint"],
+            "Bolt never makes such a save, so another program put it there. Nothing was changed: \
+             ask for help before trying to repair it.",
+            "{doc}"
+        );
+    }
+    assert!(!env.root().join("b.txt").exists());
 }
 
 /// Writes `actions` as the journal of a switch from where the project is to the diary entry

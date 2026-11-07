@@ -2120,6 +2120,91 @@ fn every_command_ends_quietly_when_its_reader_has_gone() {
     assert!(loud.is_empty(), "{loud:#?}");
 }
 
+/// A project at its first save with one planted after it holding a link that leads out of the
+/// project, which `bolt goto` writes as a plain file and warns about; that save's ID.
+fn warned_about() -> (support::Env, String) {
+    let link = ("out", EntryKind::Symlink, b"../outside" as &[u8]);
+    let (env, ids) = support::planted_saves(&[&[link]]);
+    (env, ids[0].to_hex())
+}
+
+const PLACEHOLDER_WARNING: &str = "warning: Wrote 1 link as plain files holding their targets: \
+                                   they lead out of the project, or this computer can't make \
+                                   links (on Windows that takes Developer Mode):\n  out\n";
+
+#[test]
+fn a_commands_warnings_reach_stderr_when_its_reader_has_gone() {
+    for json in [false, true] {
+        let (env, save) = warned_about();
+        let mut args = vec!["goto", save.as_str()];
+        if json {
+            args.push("--json");
+        }
+        // Still no error: only the warning.
+        assert_eq!(
+            with_reader_gone(&env, &args),
+            (Some(0), PLACEHOLDER_WARNING.to_owned())
+        );
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn a_commands_warnings_come_before_the_error_when_stdout_fails() {
+    let (env, save) = warned_about();
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["goto", &save])
+        .stdout(support::failing_stdout(&env))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    let after = said.strip_prefix(PLACEHOLDER_WARNING).expect(&said);
+    assert!(
+        after.starts_with("error: Bolt couldn't write its output: "),
+        "{said}"
+    );
+    assert!(
+        after.ends_with(
+            "\nhint: The command did its work all the same: only what Bolt printed was lost. \
+             bolt status and bolt undo --list show where the project stands.\n"
+        ),
+        "{said}"
+    );
+    assert_eq!(after.lines().count(), 2, "{said}");
+}
+
+#[cfg(all(feature = "fault-injection", any(windows, target_os = "linux")))]
+#[test]
+fn a_warning_the_store_keeps_is_told_once_when_stdout_fails() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = support::main_tip(&env).to_hex();
+    env.overwrite("a.txt", "a\n");
+    env.overwrite("b.txt", "b\n");
+    env.bolt().args(["save", "Two files"]).assert().success();
+    // A goto stopped after its first change. The next one finishes it first and says so, in its
+    // own warnings and in the store's, which a failure tells too.
+    let stopped = env
+        .bolt()
+        .args(["goto", &first])
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["goto", "main"])
+        .stdout(support::failing_stdout(&env))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    let finished = "warning: Finished a switch between saves that was stopped";
+    assert_eq!(said.matches(finished).count(), 1, "{said}");
+}
+
 #[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn a_command_that_did_its_work_but_couldnt_print_says_so() {

@@ -325,8 +325,8 @@ impl SaveError {
         self.next_step(false)
     }
 
-    /// This error, met reading the folders of the save `save`, the one the project is on when
-    /// `current`: a spelling of `.bolt` is told as that save's.
+    /// This error, met reading the folders of the save `save`: a spelling of `.bolt` is told as
+    /// that save's, `current` when the project is on it.
     #[must_use]
     pub(crate) fn in_save(self, save: Id, current: bool) -> SaveError {
         match self {

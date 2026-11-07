@@ -308,6 +308,49 @@ pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id 
     }
 }
 
+/// Stores a listing holding the folder `.BOLT`, with `inside` in it. No listing Bolt makes holds
+/// one, so it is spelled `-BOLT`, then the bytes are changed.
+pub fn holding_bolt_spelling(pack: &mut PackSet, inside: Id) -> Id {
+    let listing = Listing::new(vec![Entry {
+        name: "-BOLT".into(),
+        kind: EntryKind::Folder,
+        id: inside,
+        size: 0,
+    }])
+    .unwrap()
+    .encode();
+    let at = listing.windows(5).position(|w| w == b"-BOLT").unwrap();
+    let mut hostile = listing;
+    hostile[at] = b'.';
+    pack.add_record(ObjectKind::FolderListing, &hostile)
+        .unwrap()
+}
+
+/// Stores a top listing holding `files` and a `.git` folder that holds a spelling of `.bolt`, and
+/// returns its ID. A folder walk never reads `.git`, so the bad listing is first met comparing
+/// the save with the folder, or with another save.
+pub fn with_bolt_spelling_under_git(pack: &mut PackSet, files: &[(&str, &[u8])]) -> Id {
+    let inside = listings(pack, &[("pwned", EntryKind::File, b"PWNED")]);
+    let git = holding_bolt_spelling(pack, inside);
+    let mut top: Vec<Entry> = files
+        .iter()
+        .map(|&(name, bytes)| Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id: pack.add_content(bytes).unwrap(),
+            size: bytes.len() as u64,
+        })
+        .collect();
+    top.push(Entry {
+        name: ".git".into(),
+        kind: EntryKind::Folder,
+        id: git,
+        size: 0,
+    });
+    let top = Listing::new(top).unwrap().encode();
+    pack.add_record(ObjectKind::FolderListing, &top).unwrap()
+}
+
 /// A started project at its first save, not on a line, with `saves` planted on `main` one after
 /// another, each holding its entries as for [`listings`]; their IDs. `bolt goto` then writes each.
 pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
