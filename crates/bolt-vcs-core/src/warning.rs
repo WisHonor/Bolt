@@ -9,6 +9,8 @@ pub const DAMAGED_PACK: &str = "damaged_pack";
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
 /// Small packs were merged after a command, but one or more couldn't be: the command happened.
 pub const PACK_NOT_MERGED: &str = "pack_not_merged";
+/// `tidy` left a pack as it is: it couldn't read it, or couldn't remove it.
+pub const PACK_NOT_TIDIED: &str = "pack_not_tidied";
 /// The command happened, but `state/` couldn't be flushed once its head moved, so a power cut
 /// soon after could undo it.
 pub const HEAD_NOT_FLUSHED: &str = "head_not_flushed";

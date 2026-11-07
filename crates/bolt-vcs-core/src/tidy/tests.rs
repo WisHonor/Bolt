@@ -1,0 +1,937 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use super::*;
+use crate::diary::{Action, DiaryEntry, FolderChange, Position, ServerLines, State, Tag, TagList};
+use crate::history::tip_of;
+use crate::id::{ChangeId, hash_content};
+use crate::listing::{Entry, EntryKind};
+use crate::pack::{ObjectKind, PackReader, PackSet};
+use crate::save::{Person, Save};
+use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
+use crate::store::Store;
+use crate::switch::{SwitchError, discard};
+use crate::test_support::{
+    add_link, add_listing, commit_records, plant_damaged_copies, plant_root, plant_save,
+};
+use crate::undo::{self, StepRequest};
+use crate::warning;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const DAY: i64 = 86_400_000;
+
+fn now() -> i64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    i64::try_from(since.as_millis()).unwrap()
+}
+
+fn days_ago(days: i64) -> Person {
+    Person {
+        name: "Ada".into(),
+        email: "ada@example.com".into(),
+        time_ms: now() - days * DAY,
+        tz_offset_min: 0,
+    }
+}
+
+/// A project started `days` ago.
+fn project(days: i64) -> (tempfile::TempDir, Repository) {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path(), &days_ago(days)).unwrap();
+    (dir, repo)
+}
+
+fn tip(repo: &Repository) -> Id {
+    tip_of(&repo.current().unwrap().1).unwrap()
+}
+
+fn saved(repo: &mut Repository, days: i64, amend: bool) -> Id {
+    let who = days_ago(days);
+    let req = SaveRequest {
+        message: (!amend).then_some("Change"),
+        who: &who,
+        command: "save",
+        accept_crlf: false,
+        git_excludes: None,
+        new_line: None,
+        only: None,
+        amend,
+    };
+    match save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
+        SaveOutcome::Saved { save_id, .. } => save_id,
+        SaveOutcome::NothingChanged { .. } => panic!("nothing was saved"),
+    }
+}
+
+/// Writes `text` into `a.txt` and saves it, `days` ago.
+fn save_text(dir: &Path, repo: &mut Repository, text: &str, days: i64) -> Id {
+    fs::write(dir.join("a.txt"), text).unwrap();
+    saved(repo, days, false)
+}
+
+/// Undoes one step, or redoes one, `days` ago.
+fn step(repo: &mut Repository, days: i64, redo: bool) -> Result<(), SwitchError> {
+    let who = days_ago(days);
+    let req = StepRequest {
+        n: 1,
+        shelve: false,
+        who: &who,
+        git_excludes: None,
+    };
+    let done = if redo {
+        undo::redo(repo, &req, &mut |_| {})
+    } else {
+        undo::undo(repo, &req, &mut |_| {})
+    };
+    let done = done.map_err(|e| e.error)?;
+    assert_eq!(done.taken.len(), 1, "no step was taken");
+    Ok(())
+}
+
+/// Writes `text` into `a.txt` and throws it away, `days` ago; gives the save that kept it.
+fn discard_text(dir: &Path, repo: &mut Repository, text: &str, days: i64) -> Id {
+    fs::write(dir.join("a.txt"), text).unwrap();
+    discard(repo, None, &days_ago(days), "discard", None, &mut |_| {}).unwrap();
+    repo.current().unwrap().1.folder_change.unwrap().from
+}
+
+/// Sets the modified time of the pack at `path` `hours` back.
+fn set_age(path: &Path, hours: u64) {
+    let file = fs::File::options().write(true).open(path).unwrap();
+    let then = SystemTime::now() - Duration::from_secs(hours * 3600);
+    file.set_modified(then).unwrap();
+}
+
+/// Makes every pack `hours` old, so that `tidy` may change it.
+fn age_packs(repo: &Repository, hours: u64) {
+    repo.store().close_all();
+    for name in pack_names(repo) {
+        set_age(&repo.packs_dir().join(name), hours);
+    }
+}
+
+fn pack_names(repo: &Repository) -> BTreeSet<String> {
+    fs::read_dir(repo.packs_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".pack"))
+        .collect()
+}
+
+fn tidied(repo: &mut Repository) -> TidyReport {
+    tidy(repo, 30, now(), &mut |_| {}, &mut |_| {}).unwrap()
+}
+
+/// Whether a store opened afresh reads `id` back as a `kind`.
+fn reads(repo: &Repository, id: &Id, kind: ObjectKind) -> bool {
+    let store = Store::open(repo.packs_dir()).unwrap();
+    match kind {
+        ObjectKind::Content => store.copy_content(id, &mut Vec::new()).is_ok(),
+        _ => store.read_record(id, kind).is_ok(),
+    }
+}
+
+fn text_reads(repo: &Repository, text: &str) -> bool {
+    reads(repo, &hash_content(text.as_bytes()), ObjectKind::Content)
+}
+
+/// Stores a save of `root` on `parents`, made long ago.
+fn a_save(packs: &mut PackSet, root: Id, parents: Vec<Id>, message: &str) -> Id {
+    let who = days_ago(100);
+    let save = Save {
+        root,
+        parents,
+        author: who.clone(),
+        saver: who,
+        message: message.into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: BTreeMap::new(),
+    };
+    packs.add_record(ObjectKind::Save, &save.encode()).unwrap()
+}
+
+/// Commits an entry after the current one, as `change` leaves a copy of it.
+fn commit(repo: &mut Repository, change: impl FnOnce(&mut DiaryEntry)) -> Id {
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (head, mut entry) = repo.current().unwrap();
+    entry.parent = Some(head);
+    entry.action = Action::Command;
+    entry.command = "test".into();
+    entry.folder_change = None;
+    change(&mut entry);
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &entry).unwrap()
+}
+
+/// Commits an entry after the current one, made `days` ago.
+fn append(
+    repo: &mut Repository,
+    days: i64,
+    action: Action,
+    state: State,
+    folder_change: Option<FolderChange>,
+) -> Id {
+    commit(repo, |e| {
+        e.who = days_ago(days);
+        e.action = action;
+        e.state = state;
+        e.folder_change = folder_change;
+    })
+}
+
+/// Stores an entry after the current one, holding a save of its own, without moving `head`, as a
+/// command a crash stopped leaves them. Gives the entry and the save.
+fn crash_leftover(repo: &mut Repository) -> (Id, Id) {
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (head, mut entry) = repo.current().unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let text = b"left by a crash";
+    let content = packs.add_content(text).unwrap();
+    let file = Entry {
+        name: "crash.txt".into(),
+        kind: EntryKind::File,
+        id: content,
+        size: text.len() as u64,
+    };
+    let (root, _) = add_listing(&mut packs, vec![file]);
+    let save = a_save(&mut packs, root, vec![tip_of(&entry).unwrap()], "Crashed");
+    entry.parent = Some(head);
+    entry.command = "save".into();
+    entry.folder_change = None;
+    entry.state.lines.insert("main".into(), save);
+    let id = repo.store_entry(&lock, packs, &entry).unwrap();
+    (id, save)
+}
+
+#[test]
+fn tidy_keeps_every_line_tag_server_line_and_shelf_with_all_their_history() {
+    let (_dir, mut repo) = project(100);
+    let first = tip(&repo);
+    plant_save(&mut repo, &[("a.txt", EntryKind::File, b"one")]);
+    let one = tip(&repo);
+    plant_save(&mut repo, &[("a.txt", EntryKind::File, b"two")]);
+    let main = tip(&repo);
+    // Two saves in a row, then `main` back where it was: only what names the second reaches them.
+    let off_main = |repo: &mut Repository, what: &str| -> [Id; 2] {
+        let mut made = [main; 2];
+        for (i, at) in made.iter_mut().enumerate() {
+            let text = format!("{what} {i}");
+            plant_save(repo, &[("a.txt", EntryKind::File, text.as_bytes())]);
+            *at = tip(repo);
+        }
+        commit(repo, |e| {
+            e.state.lines.insert("main".into(), main);
+        });
+        made
+    };
+    let shelved = off_main(&mut repo, "shelved");
+    let tagged = off_main(&mut repo, "tagged");
+    let served = off_main(&mut repo, "served");
+    let other = off_main(&mut repo, "other line");
+    let undone = off_main(&mut repo, "undone");
+    let tag = Tag {
+        save: tagged[1],
+        message: "First playable".into(),
+        git_tags: vec![],
+    };
+    let tags = TagList {
+        tags: BTreeMap::from([("v1".to_owned(), tag)]),
+    };
+    let servers = ServerLines {
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([("main".to_owned(), served[1])]),
+        )]),
+    };
+    let (tag_list, server_lines) = commit_records(&mut repo, &tags, &servers);
+    commit(&mut repo, |e| {
+        e.state.shelves = vec![("1".into(), shelved[1])];
+        e.state.lines.insert("other".into(), other[1]);
+    });
+    // Every entry is older than the window, so only the current state counts.
+    age_packs(&repo, 48);
+    let report = tidied(&mut repo);
+    assert!(report.packs_removed > 0, "{report:?}");
+    let saves = [
+        first, one, main, shelved[0], shelved[1], tagged[0], tagged[1],
+    ]
+    .into_iter()
+    .chain([served[0], served[1], other[0], other[1]]);
+    for id in saves {
+        assert!(reads(&repo, &id, ObjectKind::Save), "save {id}");
+    }
+    assert!(reads(&repo, &tag_list, ObjectKind::TagList));
+    assert!(reads(&repo, &server_lines, ObjectKind::ServerLines));
+    for what in ["shelved", "tagged", "served", "other line"] {
+        for i in 0..2 {
+            assert!(text_reads(&repo, &format!("{what} {i}")), "{what} {i}");
+        }
+    }
+    assert!(text_reads(&repo, "one") && text_reads(&repo, "two"));
+    for id in undone {
+        assert!(!reads(&repo, &id, ObjectKind::Save), "undone save {id}");
+    }
+    assert!(!text_reads(&repo, "undone 0") && !text_reads(&repo, "undone 1"));
+}
+
+#[test]
+fn tidy_keeps_what_the_window_reaches_and_removes_older() {
+    let (dir, mut repo) = project(50);
+    let one = save_text(dir.path(), &mut repo, "one", 45);
+    // Forty days ago: a save undone, and work thrown away.
+    let undone = save_text(dir.path(), &mut repo, "two", 40);
+    step(&mut repo, 40, false).unwrap();
+    let thrown = discard_text(dir.path(), &mut repo, "thrown away", 40);
+    // Two days ago, the same again.
+    let lately = save_text(dir.path(), &mut repo, "three", 2);
+    step(&mut repo, 2, false).unwrap();
+    let thrown_lately = discard_text(dir.path(), &mut repo, "thrown away lately", 2);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    for id in [one, lately, thrown_lately] {
+        assert!(reads(&repo, &id, ObjectKind::Save), "save {id}");
+    }
+    assert!(text_reads(&repo, "three") && text_reads(&repo, "thrown away lately"));
+    for id in [undone, thrown] {
+        assert!(!reads(&repo, &id, ObjectKind::Save), "save {id}");
+    }
+    assert!(!text_reads(&repo, "two") && !text_reads(&repo, "thrown away"));
+    // The recent discard can still be undone: its work comes back.
+    step(&mut repo, 0, false).unwrap();
+    let a = fs::read_to_string(dir.path().join("a.txt")).unwrap();
+    assert_eq!(a, "thrown away lately");
+    // The old one can't: what it kept is gone, and undo says so.
+    match step(&mut repo, 0, false) {
+        Err(SwitchError::StepGone { .. }) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_amend_made_after_a_month_away_can_still_be_undone_after_tidy() {
+    let (dir, mut repo) = project(50);
+    let replaced = save_text(dir.path(), &mut repo, "one", 40);
+    fs::write(dir.path().join("a.txt"), "one, amended").unwrap();
+    let amended = saved(&mut repo, 1, true);
+    assert_ne!(replaced, amended);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    // Only the state before the amend reaches the save it replaced.
+    assert!(reads(&repo, &replaced, ObjectKind::Save));
+    step(&mut repo, 0, false).unwrap();
+    assert_eq!(repo.current().unwrap().1.state.lines["main"], replaced);
+}
+
+#[test]
+fn an_undo_whose_state_was_tidied_away_stops_and_changes_nothing() {
+    let (dir, mut repo) = project(50);
+    let replaced = save_text(dir.path(), &mut repo, "one", 45);
+    fs::write(dir.path().join("a.txt"), "one, amended").unwrap();
+    // Amended before the window: undoing it would need the save it replaced.
+    saved(&mut repo, 40, true);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(!reads(&repo, &replaced, ObjectKind::Save));
+    let head = repo.head().unwrap();
+    match step(&mut repo, 0, false) {
+        Err(SwitchError::StepGone { step, .. }) => assert_eq!(step, head),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(repo.head().unwrap(), head);
+}
+
+#[test]
+fn a_step_undone_within_the_window_can_be_redone_after_tidy_however_old() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    let old = save_text(dir.path(), &mut repo, "two", 40);
+    step(&mut repo, 2, false).unwrap();
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(reads(&repo, &old, ObjectKind::Save));
+    step(&mut repo, 0, true).unwrap();
+    assert_eq!(repo.current().unwrap().1.state.lines["main"], old);
+}
+
+#[test]
+fn undo_to_an_entry_whose_saves_were_tidied_away_names_it() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    save_text(dir.path(), &mut repo, "two", 40);
+    let entry = repo.head().unwrap();
+    // Undone, then cleared from what redo can bring back by a new save.
+    step(&mut repo, 40, false).unwrap();
+    save_text(dir.path(), &mut repo, "three", 40);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    let head = repo.head().unwrap();
+    let who = days_ago(0);
+    let req = StepRequest {
+        n: 1,
+        shelve: false,
+        who: &who,
+        git_excludes: None,
+    };
+    let failed = undo::undo_to(&mut repo, &entry.to_hex()[..12], &req, &mut |_| {}).unwrap_err();
+    assert!(failed.taken.is_empty());
+    match &failed.error {
+        SwitchError::EntryGone { entry: named, .. } => assert_eq!(*named, entry),
+        other => panic!("{other:?}"),
+    }
+    let said = failed.error.to_string();
+    assert!(said.contains(&entry.short_hex()), "{said}");
+    assert!(failed.error.hint().unwrap().contains("bolt tidy"));
+    assert_eq!(repo.head().unwrap(), head);
+    let a = fs::read_to_string(dir.path().join("a.txt")).unwrap();
+    assert_eq!(a, "three");
+}
+
+#[test]
+fn tidy_removes_entries_a_crash_left() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    let head = repo.head().unwrap();
+    let (entry, save) = crash_leftover(&mut repo);
+    assert!(reads(&repo, &entry, ObjectKind::DiaryEntry));
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(!reads(&repo, &entry, ObjectKind::DiaryEntry));
+    assert!(!reads(&repo, &save, ObjectKind::Save));
+    assert!(!text_reads(&repo, "left by a crash"));
+    assert_eq!(repo.current().unwrap().0, head);
+    assert!(reads(&repo, &head, ObjectKind::DiaryEntry));
+}
+
+#[test]
+fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    age_packs(&repo, 48);
+    let aged = pack_names(&repo);
+    let (entry, save) = crash_leftover(&mut repo);
+    let young: Vec<String> = pack_names(&repo).difference(&aged).cloned().collect();
+    assert_eq!(young.len(), 1);
+    let young = repo.packs_dir().join(&young[0]);
+    repo.store().close_all();
+    set_age(&young, 23);
+    let bytes = fs::read(&young).unwrap();
+    let report = tidied(&mut repo);
+    assert_eq!(report.packs_young, 1, "{report:?}");
+    assert_eq!(fs::read(&young).unwrap(), bytes);
+    assert!(reads(&repo, &entry, ObjectKind::DiaryEntry));
+    assert!(reads(&repo, &save, ObjectKind::Save));
+    // A day later it goes.
+    repo.store().close_all();
+    set_age(&young, 25);
+    tidied(&mut repo);
+    assert!(!young.exists());
+    assert!(!reads(&repo, &entry, ObjectKind::DiaryEntry));
+}
+
+#[test]
+fn tidy_stops_before_removing_anything_when_something_to_keep_is_missing() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    let (entry, _) = crash_leftover(&mut repo);
+    // A save on `main` whose top folder's listing isn't in the store.
+    let missing = Id([9; 32]);
+    plant_root(&mut repo, |_| missing);
+    age_packs(&repo, 48);
+    let before = pack_names(&repo);
+    let mut told = None;
+    let failed = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |n| told = Some(n));
+    match failed {
+        Err(e @ RepoError::Damaged { .. }) => {
+            assert!(e.to_string().contains(&missing.to_hex()), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(told, None);
+    assert_eq!(pack_names(&repo), before);
+    assert!(reads(&repo, &entry, ObjectKind::DiaryEntry));
+}
+
+/// Every object `keep` names, by kind, from the packs' indexes.
+#[cfg(feature = "fault-injection")]
+fn stored(repo: &Repository, keep: &HashSet<Id>) -> BTreeMap<Id, ObjectKind> {
+    let mut found = BTreeMap::new();
+    for name in pack_names(repo) {
+        let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+        for e in pack.entries() {
+            let e = e.unwrap();
+            if keep.contains(&e.id) {
+                found.insert(e.id, e.kind);
+            }
+        }
+    }
+    found
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn tidy_stopped_at_every_step_loses_nothing() {
+    use crate::fsio::fault;
+    let mut stopped = BTreeSet::new();
+    for n in 1.. {
+        assert!(n < 100, "tidy never finished");
+        let (dir, mut repo) = project(50);
+        save_text(dir.path(), &mut repo, "one", 45);
+        save_text(dir.path(), &mut repo, "two", 40);
+        step(&mut repo, 40, false).unwrap();
+        discard_text(dir.path(), &mut repo, "thrown away", 40);
+        save_text(dir.path(), &mut repo, "three", 2);
+        crash_leftover(&mut repo);
+        age_packs(&repo, 48);
+        let keep = kept(&repo, 30, now()).unwrap();
+        let objects = stored(&repo, &keep);
+        assert!(objects.len() > 10);
+        fault::arm(n);
+        let result = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {});
+        fault::disarm();
+        let why = format!("fault {n}");
+        let all_read = |repo: &Repository| {
+            for (id, kind) in &objects {
+                assert!(reads(repo, id, *kind), "{why}: {kind:?} {id}");
+            }
+        };
+        all_read(&repo);
+        let done = match &result {
+            Err(e) => {
+                let said = e.to_string();
+                let at = said.strip_prefix("injected fault at ");
+                stopped.insert(at.unwrap_or_else(|| panic!("{why}: {said}")).to_owned());
+                false
+            }
+            Ok(_) => {
+                let warnings = repo.store().warnings();
+                let hit = warnings
+                    .iter()
+                    .any(|w| w.message.contains("injected fault"));
+                if hit {
+                    stopped.insert("tidy:removing".to_owned());
+                }
+                !hit
+            }
+        };
+        // Tidying again finishes the job.
+        tidied(&mut repo);
+        all_read(&repo);
+        assert!(!text_reads(&repo, "two") && !text_reads(&repo, "thrown away"));
+        assert!(!text_reads(&repo, "left by a crash"), "{why}");
+        if done {
+            break;
+        }
+    }
+    for at in ["tidy:marked", "tidy:written", "tidy:removing"] {
+        assert!(stopped.contains(at), "never stopped at {at}: {stopped:?}");
+    }
+}
+
+/// Writes a version 1 pack `name` into `packs` holding `contents`, stored as they are.
+fn plant_version_1(packs: &Path, name: &str, contents: &[&[u8]]) {
+    use crate::encoding::Writer;
+    use crate::pack::{PACK_END_MAGIC, PACK_MAGIC};
+    let mut objects: Vec<(Id, &[u8])> = contents.iter().map(|c| (hash_content(c), *c)).collect();
+    objects.sort_by_key(|(id, _)| *id);
+    let mut pack = PACK_MAGIC.to_vec();
+    pack.extend_from_slice(&1u32.to_le_bytes());
+    pack.extend_from_slice(&0u32.to_le_bytes());
+    let mut index = Writer::new();
+    index.varint(objects.len() as u64);
+    for (id, bytes) in &objects {
+        let (at, len) = (pack.len() as u64, bytes.len() as u64);
+        let mut head = Writer::new();
+        head.u8(ObjectKind::Content as u8);
+        head.id(id);
+        head.u64(len);
+        head.u64(len);
+        head.u8(0);
+        pack.extend_from_slice(&head.into_bytes());
+        pack.extend_from_slice(bytes);
+        index.id(id);
+        index.u8(ObjectKind::Content as u8);
+        index.u64(at);
+        index.varint(len);
+        index.varint(len);
+    }
+    let index = index.into_bytes();
+    let at = pack.len() as u64;
+    pack.extend_from_slice(&index);
+    pack.extend_from_slice(&at.to_le_bytes());
+    pack.extend_from_slice(blake3::hash(&index).as_bytes());
+    pack.extend_from_slice(&PACK_END_MAGIC);
+    fs::write(packs.join(name), pack).unwrap();
+}
+
+#[test]
+fn tidy_rewrites_version_1_and_small_packs_as_version_2() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    plant_version_1(repo.packs_dir(), "old.pack", &[b"one".as_slice()]);
+    // 64 MiB that don't compress, alone in a pack: not small, and all of it kept.
+    let mut big = vec![0u8; 64 << 20];
+    blake3::Hasher::new()
+        .update(b"big")
+        .finalize_xof()
+        .fill(&mut big);
+    let big_id = {
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let id = packs.add_content(&big).unwrap();
+        repo.store_packs(&lock, packs).unwrap();
+        id
+    };
+    let big_pack = pack_names(&repo)
+        .into_iter()
+        .find(|name| fs::metadata(repo.packs_dir().join(name)).unwrap().len() > 64 << 20)
+        .unwrap();
+    plant_root(&mut repo, |packs| {
+        let file = Entry {
+            name: "big.bin".into(),
+            kind: EntryKind::File,
+            id: big_id,
+            size: big.len() as u64,
+        };
+        add_listing(packs, vec![file]).0
+    });
+    age_packs(&repo, 48);
+    let before = pack_names(&repo);
+    let report = tidied(&mut repo);
+    let after = pack_names(&repo);
+    assert_eq!(report.packs_written, 1, "{report:?}");
+    // Only the big pack is as it was; the others, version 1 and small, were written again.
+    let stayed: Vec<&String> = after.intersection(&before).collect();
+    assert_eq!(stayed, [&big_pack]);
+    for name in &after {
+        let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+        assert_eq!(pack.version(), 2, "{name}");
+    }
+    assert!(text_reads(&repo, "one"));
+    assert!(reads(&repo, &big_id, ObjectKind::Content));
+}
+
+#[test]
+fn tidy_leaves_a_pack_it_cannot_read_with_a_warning() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    let (entry, _) = crash_leftover(&mut repo);
+    // A bad copy of something kept, whose good copy is in another pack, and a pack that isn't one.
+    plant_damaged_copies(repo.packs_dir(), &[(ObjectKind::Content, b"one")]);
+    let junk = repo.packs_dir().join("zz.pack");
+    fs::write(&junk, vec![b'x'; 200]).unwrap();
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    let warnings: Vec<_> = repo
+        .store()
+        .warnings()
+        .into_iter()
+        .filter(|w| w.kind == warning::PACK_NOT_TIDIED)
+        .collect();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    for name in ["00.pack", "zz.pack"] {
+        assert!(repo.packs_dir().join(name).exists(), "{name}");
+        let named = warnings.iter().filter(|w| w.message.contains(name)).count();
+        assert_eq!(named, 1, "{name}: {warnings:?}");
+    }
+    assert!(text_reads(&repo, "one"));
+    assert!(!reads(&repo, &entry, ObjectKind::DiaryEntry));
+}
+
+#[test]
+fn tidy_says_what_it_will_free_and_what_it_freed() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 40);
+    // 64 KiB that don't compress, which nothing reaches.
+    let mut lost = vec![0u8; 64 << 10];
+    blake3::Hasher::new()
+        .update(b"lost")
+        .finalize_xof()
+        .fill(&mut lost);
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    packs.add_content(&lost).unwrap();
+    repo.store_packs(&lock, packs).unwrap();
+    drop(lock);
+    age_packs(&repo, 48);
+    let before = pack_names(&repo);
+    let packs_dir = repo.packs_dir().to_owned();
+    let mut told = Vec::new();
+    let report = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |n| {
+        // Said before anything is removed.
+        let there = before.iter().all(|name| packs_dir.join(name).exists());
+        told.push((n, there));
+    })
+    .unwrap();
+    assert_eq!(told, [(report.to_free, true)]);
+    let freed = report.bytes_before - report.bytes_after;
+    assert!(freed >= 64 << 10, "{report:?}");
+    assert!(report.to_free.abs_diff(freed) < 4 << 10, "{report:?}");
+    assert_eq!(report.packs_removed, before.len(), "{report:?}");
+    assert_eq!(report.packs_written, 1, "{report:?}");
+    // Nothing more to free.
+    let again = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {}).unwrap();
+    assert_eq!((again.to_free, again.packs_removed), (0, 0), "{again:?}");
+}
+
+/// The references `kept` follows.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Ref {
+    Line,
+    AtSave,
+    Shelf,
+    TagList,
+    Tag,
+    ServerLines,
+    ServerLine,
+    Parent,
+    Root,
+    File,
+    Executable,
+    Link,
+    Folder,
+    ProjectLink,
+    Diary,
+    Change,
+    Before,
+    Target,
+    TargetBefore,
+    TargetChange,
+}
+
+const REFS: [Ref; 20] = [
+    Ref::Line,
+    Ref::AtSave,
+    Ref::Shelf,
+    Ref::TagList,
+    Ref::Tag,
+    Ref::ServerLines,
+    Ref::ServerLine,
+    Ref::Parent,
+    Ref::Root,
+    Ref::File,
+    Ref::Executable,
+    Ref::Link,
+    Ref::Folder,
+    Ref::ProjectLink,
+    Ref::Diary,
+    Ref::Change,
+    Ref::Before,
+    Ref::Target,
+    Ref::TargetBefore,
+    Ref::TargetChange,
+];
+
+/// A store in which each reference names an object nothing else does, but `without`, which is
+/// taken away: its object is stored all the same. Gives each object by the reference to it.
+fn planted(without: Option<Ref>) -> (tempfile::TempDir, Repository, BTreeMap<Ref, Id>) {
+    let has = |r: Ref| without != Some(r);
+    let (dir, mut repo) = project(100);
+    let base = tip(&repo);
+    let mut named = BTreeMap::new();
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let (empty, _) = add_listing(&mut packs, vec![]);
+    let deep = packs.add_content(b"deep").unwrap();
+    let below = Entry {
+        name: "deep.txt".into(),
+        kind: EntryKind::File,
+        id: deep,
+        size: 4,
+    };
+    let (folder, _) = add_listing(&mut packs, vec![below]);
+    let link = add_link(&mut packs, &[7; 20]);
+    let file = packs.add_content(b"file").unwrap();
+    let executable = packs.add_content(b"executable").unwrap();
+    let target = packs.add_content(b"link target").unwrap();
+    let mut entries = Vec::new();
+    for (r, name, kind, id) in [
+        (Ref::File, "a.txt", EntryKind::File, file),
+        (Ref::Executable, "b.sh", EntryKind::Executable, executable),
+        (Ref::Link, "c", EntryKind::Symlink, target),
+        (Ref::Folder, "d", EntryKind::Folder, folder),
+        (Ref::ProjectLink, "e", EntryKind::ProjectLink, link),
+    ] {
+        named.insert(r, id);
+        if has(r) {
+            entries.push(Entry {
+                name: name.into(),
+                kind,
+                id,
+                size: 0,
+            });
+        }
+    }
+    let (root, _) = add_listing(&mut packs, entries);
+    let mut unique = |what: &str| a_save(&mut packs, empty, vec![base], what);
+    let saves: BTreeMap<&str, Id> = [
+        "parent",
+        "line",
+        "at",
+        "shelved",
+        "tagged",
+        "served",
+        "before",
+        "target",
+        "target before",
+        "from",
+        "to",
+        "target from",
+        "target to",
+    ]
+    .into_iter()
+    .map(|what| (what, unique(what)))
+    .collect();
+    let main = a_save(
+        &mut packs,
+        if has(Ref::Root) { root } else { empty },
+        vec![if has(Ref::Parent) {
+            saves["parent"]
+        } else {
+            base
+        }],
+        "main",
+    );
+    let tag = Tag {
+        save: if has(Ref::Tag) { saves["tagged"] } else { base },
+        message: String::new(),
+        git_tags: vec![],
+    };
+    let tags = TagList {
+        tags: BTreeMap::from([("v1".to_owned(), tag)]),
+    };
+    let tag_list = packs
+        .add_record(ObjectKind::TagList, &tags.encode())
+        .unwrap();
+    let served = if has(Ref::ServerLine) {
+        saves["served"]
+    } else {
+        base
+    };
+    let servers = ServerLines {
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([("main".to_owned(), served)]),
+        )]),
+    };
+    let server_lines = packs
+        .add_record(ObjectKind::ServerLines, &servers.encode())
+        .unwrap();
+    repo.store_packs(&lock, packs).unwrap();
+    drop(lock);
+    for (r, what) in [
+        (Ref::Parent, "parent"),
+        (Ref::Line, "line"),
+        (Ref::AtSave, "at"),
+        (Ref::Shelf, "shelved"),
+        (Ref::Tag, "tagged"),
+        (Ref::ServerLine, "served"),
+        (Ref::Before, "before"),
+        (Ref::Target, "target"),
+        (Ref::TargetBefore, "target before"),
+        (Ref::Change, "from"),
+        (Ref::TargetChange, "target from"),
+    ] {
+        named.insert(r, saves[what]);
+    }
+    named.extend([
+        (Ref::Root, root),
+        (Ref::TagList, tag_list),
+        (Ref::ServerLines, server_lines),
+    ]);
+
+    // The diary: old entries, then the head, an undo within the window.
+    let on_main = |save: Id| State {
+        lines: BTreeMap::from([("main".to_owned(), save)]),
+        tags: None,
+        position: Position::OnLine("main".into()),
+        shelves: vec![],
+        server_lines: None,
+    };
+    let change = |from: &str, to: &str| FolderChange {
+        from: saves[from],
+        to: saves[to],
+    };
+    append(
+        &mut repo,
+        100,
+        Action::Command,
+        on_main(saves["target before"]),
+        None,
+    );
+    let step_change = has(Ref::TargetChange).then(|| change("target from", "target to"));
+    let step = append(
+        &mut repo,
+        100,
+        Action::Command,
+        on_main(saves["target"]),
+        step_change,
+    );
+    // An entry only the diary reaches; without `Diary` a crash left it off the diary.
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let middle = DiaryEntry {
+        parent: Some(step),
+        action: Action::Command,
+        command: "test".into(),
+        who: days_ago(100),
+        bolt_version: "0.1.0".into(),
+        state: on_main(base),
+        folder_change: None,
+    };
+    let packs = repo.new_packs().unwrap();
+    let middle = if has(Ref::Diary) {
+        repo.commit(&lock, packs, &middle).unwrap()
+    } else {
+        repo.store_entry(&lock, packs, &middle).unwrap()
+    };
+    drop(lock);
+    named.insert(Ref::Diary, middle);
+    append(
+        &mut repo,
+        100,
+        Action::Command,
+        on_main(saves["before"]),
+        None,
+    );
+    let mut state = on_main(main);
+    if has(Ref::Line) {
+        state.lines.insert("other".into(), saves["line"]);
+    }
+    if has(Ref::AtSave) {
+        state.position = Position::AtSave(saves["at"]);
+    }
+    if has(Ref::Shelf) {
+        state.shelves = vec![("1".into(), saves["shelved"])];
+    }
+    state.tags = has(Ref::TagList).then_some(tag_list);
+    state.server_lines = has(Ref::ServerLines).then_some(server_lines);
+    let action = if has(Ref::Target) && has(Ref::TargetBefore) {
+        Action::Undo(step)
+    } else {
+        Action::Command
+    };
+    let days = if has(Ref::Before) { 0 } else { 100 };
+    let head_change = has(Ref::Change).then(|| change("from", "to"));
+    append(&mut repo, days, action, state, head_change);
+    (dir, repo, named)
+}
+
+#[test]
+fn each_kind_of_reference_is_followed() {
+    let (_dir, repo, named) = planted(None);
+    let keep = kept(&repo, 30, now()).unwrap();
+    for (r, id) in &named {
+        assert!(keep.contains(id), "{r:?} isn't followed");
+    }
+    // Each taken away in turn: what it named goes.
+    for r in REFS {
+        let (_dir, repo, named) = planted(Some(r));
+        let keep = kept(&repo, 30, now()).unwrap();
+        assert!(
+            !keep.contains(&named[&r]),
+            "{r:?} taken away, but what it names is kept"
+        );
+    }
+}

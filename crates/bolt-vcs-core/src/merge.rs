@@ -2,6 +2,7 @@
 //! have run (decisions 057 and 062).
 
 use crate::fsio::{self, fault_point};
+use crate::id::Id;
 use crate::pack::{PackError, PackReader, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::store::{is_damage, read_whole};
@@ -95,7 +96,7 @@ pub(crate) fn merge_small_packs(
     for name in small {
         let path = packs_dir.join(&name);
         fsio::act_point("merge:copying");
-        match copy_pack(&folder, &name, &path, &mut out) {
+        match copy_pack(&folder, &name, &path, &mut out, &|_| true) {
             Ok(()) => taken.push(name),
             Err(Failed::Read(e)) => report.keep(path, &e),
             Err(Failed::Write(e)) => return Err(e.into()),
@@ -184,18 +185,32 @@ fn holds_little(folder: &Dir, name: &OsStr, path: &Path) -> Result<bool, PackErr
     Ok(true)
 }
 
+/// Whether a pack of `on_disk` bytes whose index records `uncompressed` bytes is small.
+pub(crate) fn is_small(on_disk: u64, uncompressed: u64) -> bool {
+    on_disk < SMALL_ON_DISK && uncompressed <= SMALL_UNCOMPRESSED
+}
+
 /// Why a pack wasn't copied: reading it, which keeps only that pack out, or writing the new ones,
 /// which stops the merge.
-enum Failed {
+pub(crate) enum Failed {
     Read(PackError),
     Write(PackError),
 }
 
-/// Checks each object of the pack `name` and copies it into `out`.
-fn copy_pack(folder: &Dir, name: &OsStr, path: &Path, out: &mut PackSet) -> Result<(), Failed> {
+/// Checks each object of the pack `name` that `keep` takes and copies it into `out`.
+pub(crate) fn copy_pack(
+    folder: &Dir,
+    name: &OsStr,
+    path: &Path,
+    out: &mut PackSet,
+    keep: &dyn Fn(&Id) -> bool,
+) -> Result<(), Failed> {
     let pack = PackReader::open_in(folder, name, path).map_err(Failed::Read)?;
     for entry in pack.entries() {
         let entry = entry.map_err(Failed::Read)?;
+        if !keep(&entry.id) {
+            continue;
+        }
         read_whole(entry.kind)(&pack, &entry).map_err(Failed::Read)?;
         match out.add_stored(&pack, &entry) {
             // The copy's header, read again.

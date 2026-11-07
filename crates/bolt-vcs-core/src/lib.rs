@@ -34,6 +34,7 @@ pub mod status;
 pub mod store;
 pub mod switch;
 pub mod text;
+pub mod tidy;
 pub(crate) mod timeline;
 pub mod undo;
 pub mod verify;

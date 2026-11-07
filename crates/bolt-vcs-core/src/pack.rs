@@ -733,6 +733,15 @@ impl PackReader {
         &self.path
     }
 
+    /// The pack's version: 1 or 2.
+    #[must_use]
+    pub fn version(&self) -> u32 {
+        match self.index {
+            Index::Whole(_) => 1,
+            Index::OnDisk(_) => 2,
+        }
+    }
+
     /// The index line of `id`, if the pack holds it.
     pub fn find(&self, id: &Id) -> Result<Option<IndexEntry>, PackError> {
         match &self.index {

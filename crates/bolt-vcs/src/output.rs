@@ -11,6 +11,7 @@ use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::shelf::ShelfInfo;
 use bolt_core::text::{escape, thousands};
+use bolt_core::tidy::TidyReport;
 use bolt_core::undo::{Effect, Taken};
 use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
@@ -779,6 +780,34 @@ impl<W: Write> Progress<W> {
     }
 }
 
+/// What `bolt tidy` did, for people.
+pub fn tidied(report: &TidyReport) -> String {
+    let freed = report.bytes_before.saturating_sub(report.bytes_after);
+    let removed = match report.packs_removed {
+        1 => "1 pack".to_owned(),
+        n => format!("{n} packs"),
+    };
+    let mut text = format!(
+        "Freed {} ({removed} removed, {} written).\n",
+        format_size(freed),
+        report.packs_written
+    );
+    match report.packs_young {
+        0 => {}
+        1 => {
+            text += "Left 1 pack changed in the last 24 hours as it is: a later bolt tidy frees \
+                     what it holds that nothing needs.\n";
+        }
+        n => {
+            text += &format!(
+                "Left {n} packs changed in the last 24 hours as they are: a later bolt tidy \
+                 frees what they hold that nothing needs.\n"
+            );
+        }
+    }
+    text
+}
+
 /// 1024-based size: bytes below 1 KiB, else KB, MB or GB with one decimal.
 #[allow(clippy::cast_precision_loss)]
 pub fn format_size(bytes: u64) -> String {
@@ -993,6 +1022,28 @@ mod tests {
             ]
         );
         assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
+    }
+
+    #[test]
+    fn tidy_says_what_it_freed_and_what_it_left_young() {
+        let report = TidyReport {
+            to_free: 3000,
+            bytes_before: 5000,
+            bytes_after: 2000,
+            packs_removed: 1,
+            packs_written: 1,
+            packs_young: 1,
+        };
+        assert_eq!(
+            tidied(&report),
+            "Freed 2.9 KB (1 pack removed, 1 written).\nLeft 1 pack changed in the last 24 hours \
+             as it is: a later bolt tidy frees what it holds that nothing needs.\n"
+        );
+        let nothing = TidyReport::default();
+        assert_eq!(
+            tidied(&nothing),
+            "Freed 0 B (0 packs removed, 0 written).\n"
+        );
     }
 
     #[test]

@@ -124,6 +124,14 @@ pub enum SwitchError {
         step.short_hex()
     )]
     StepGone { step: Id, detail: String },
+    /// The saves of the entry `undo --to` would go back to can't be read: `tidy` removed them, or
+    /// they were lost.
+    #[error(
+        "Things can't be made as they were right after diary entry {}: its saves can't be read \
+         ({detail}).",
+        entry.short_hex()
+    )]
+    EntryGone { entry: Id, detail: String },
     /// `label` is the shelf asked for, if one was.
     #[error("{}", no_shelf(label.as_deref()))]
     NoShelf { label: Option<String> },
@@ -236,6 +244,12 @@ impl SwitchError {
                 "bolt tidy removes what steps older than the undo window changed, and a damaged \
                  store can lose it too, so undo and redo can't go past this step. To get back to \
                  an older save, find it with bolt history and go to it with bolt goto."
+                    .to_owned(),
+            ),
+            SwitchError::EntryGone { .. } => Some(
+                "bolt tidy removes the saves only entries older than the undo window needed, and \
+                 a damaged store can lose them too, so undo --to can't go back to this entry. To \
+                 get back to an older save, find it with bolt history and go to it with bolt goto."
                     .to_owned(),
             ),
             SwitchError::NoShelf { label: None } => {

@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use bolt_core::changes::{Lines, save_changes, unsaved_changes};
 use bolt_core::config::{
     ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
-    load_identity, now_person,
+    load_identity, now_person, undo_window_days,
 };
 use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{count_changes, for_each_change};
@@ -32,6 +32,7 @@ use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
 use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
+use bolt_core::tidy;
 use bolt_core::undo::{self, StepInfo, StepRequest};
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
@@ -127,6 +128,9 @@ enum Command {
         #[arg(value_name = "NUMBER")]
         number: Option<String>,
     },
+    /// Free the space nothing needs any more: saves no line, shelf or tag reaches, and what only
+    /// steps older than the undo window (undo-window-days in your settings, 30 by default) needed.
+    Tidy,
 }
 
 #[derive(clap::Args)]
@@ -1529,6 +1533,43 @@ fn unshelf_command(
     output::print_quietly(&text, &warnings)
 }
 
+/// `bolt tidy`.
+fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let window = undo_window_days()?;
+    let terminal = std::io::stderr().is_terminal();
+    let done = tidy::tidy(
+        repo,
+        window,
+        now_ms(),
+        &mut |_| eprintln!("Waiting for another Bolt command to finish..."),
+        &mut |to_free| {
+            if terminal {
+                eprintln!("Tidying: about {} to free", output::format_size(to_free));
+            }
+        },
+    )?;
+    let warnings = repo.store().warnings();
+    let text = if json {
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "to_free": done.to_free,
+            "bytes_before": done.bytes_before,
+            "bytes_after": done.bytes_after,
+            "packs_removed": done.packs_removed,
+            "packs_written": done.packs_written,
+            "packs_young": done.packs_young,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
+    } else {
+        output::tidied(&done)
+    };
+    output::print_quietly(&text, &warnings)
+}
+
 /// How many of the steps undo can take `bolt undo --list` shows.
 const UNDO_LIST: usize = 20;
 
@@ -1823,6 +1864,7 @@ fn main() -> ExitCode {
         Command::Shelf { list: true, .. } => shelf_list_command(cli.json, &mut opened),
         Command::Shelf { message, .. } => shelf_command(cli.json, message.as_deref(), &mut opened),
         Command::Unshelf { number } => unshelf_command(cli.json, number.as_deref(), &mut opened),
+        Command::Tidy => tidy_command(cli.json, &mut opened),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

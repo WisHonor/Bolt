@@ -2246,7 +2246,8 @@ mod tests {
     fn a_misplaced_safe_folders_line_is_what_the_user_is_told() {
         let dir = tempdir();
         let misplaced = || -> Result<Vec<PathBuf>, ConfigError> {
-            Err(ConfigError::SafeFoldersNotAtTop {
+            Err(ConfigError::NotAtTop {
+                key: "safe-folders",
                 path: PathBuf::from("config.toml"),
             })
         };

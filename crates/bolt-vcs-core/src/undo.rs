@@ -640,6 +640,8 @@ fn jump(
         shelves: now.state.shelves.clone(),
         ..entry.state.clone()
     };
+    let gone = |detail| SwitchError::EntryGone { entry: to, detail };
+    put_back_readable(repo, &now.state, &state, None, gone)?;
     let drive = repo.drive()?;
     let mut plan = writeout::plan(repo, current, target, None, false, drive, req.git_excludes)?;
     let (mut from, mut shelf) = (current, None);
@@ -743,6 +745,8 @@ fn take_one(
     let before_step = parent.as_ref().map_or(&[][..], |p| p.shelves.as_slice());
     restore_shelves(&mut state.shelves, before_step, &entry.state.shelves, redo);
     within_limit(state.shelves.len())?;
+    let gone = |detail| SwitchError::StepGone { step, detail };
+    put_back_readable(repo, &now.state, &state, entry.folder_change, gone)?;
 
     let action = if redo {
         Action::Redo(step)
@@ -752,7 +756,6 @@ fn take_one(
     let command = command(redo);
     let (mut shelf, mut planned, mut folder_change) = (None, None, None);
     if let Some(change) = entry.folder_change {
-        saves_readable(repo, step, change)?;
         // Undo switches from what the step wrote back to what the folder held, redo the other
         // way, and each records that switch: the step's two saves picture the folder before and
         // after it, at exactly its paths.
@@ -970,29 +973,54 @@ fn restore_shelves(
     }
 }
 
-/// Reads the two saves of a step's folder change before anything is planned. One the store
-/// lacks, can't decode or holds only damaged copies of is gone (`tidy` removed it, or it was
-/// lost), and the step can't be taken; any other failure is told as itself.
-fn saves_readable(repo: &Repository, step: Id, change: FolderChange) -> Result<(), SwitchError> {
-    for save in [change.from, change.to] {
-        let Err(e) = repo.store().save(&save, repo.signatures_allowed()) else {
-            continue;
-        };
-        let gone = match &e {
-            StoreError::Missing(_) | StoreError::Decode(_) | StoreError::WrongKind { .. } => true,
-            StoreError::Pack(e) => is_damage(e),
-            StoreError::SaveTooLarge { .. } => false,
-        };
-        return Err(if gone {
-            SwitchError::StepGone {
-                step,
-                detail: e.to_string(),
-            }
-        } else {
-            e.into()
-        });
-    }
-    Ok(())
+/// Reads what a step would put back before anything is planned: each save `state` names that
+/// `now` doesn't, its tag list and server lines where they differ, and both saves of `change`.
+/// One the store lacks, can't decode or holds only damaged copies of is gone (`tidy` removed it,
+/// or it was lost), and `gone` says so; any other failure is told as itself.
+fn put_back_readable(
+    repo: &Repository,
+    now: &State,
+    state: &State,
+    change: Option<FolderChange>,
+    gone: impl FnOnce(String) -> SwitchError,
+) -> Result<(), SwitchError> {
+    let read = || -> Result<(), StoreError> {
+        let store = repo.store();
+        let had: HashSet<&Id> = saves_named(now).collect();
+        let new = saves_named(state).filter(|id| !had.contains(id)).copied();
+        for save in new.chain(change.into_iter().flat_map(|c| [c.from, c.to])) {
+            store.save(&save, repo.signatures_allowed())?;
+        }
+        if let Some(id) = state.tags.filter(|_| state.tags != now.tags) {
+            store.read_record(&id, ObjectKind::TagList)?;
+        }
+        if let Some(id) = state
+            .server_lines
+            .filter(|_| state.server_lines != now.server_lines)
+        {
+            store.read_record(&id, ObjectKind::ServerLines)?;
+        }
+        Ok(())
+    };
+    let Err(e) = read() else {
+        return Ok(());
+    };
+    let lost = match &e {
+        StoreError::Missing(_) | StoreError::Decode(_) | StoreError::WrongKind { .. } => true,
+        StoreError::Pack(e) => is_damage(e),
+        StoreError::SaveTooLarge { .. } => false,
+    };
+    Err(if lost { gone(e.to_string()) } else { e.into() })
+}
+
+/// The saves `state` names: its lines', the one it is at, and its shelves'.
+fn saves_named(state: &State) -> impl Iterator<Item = &Id> {
+    let at = match &state.position {
+        Position::AtSave(id) => Some(id),
+        Position::OnLine(_) => None,
+    };
+    let shelved = state.shelves.iter().map(|(_, id)| id);
+    state.lines.values().chain(at).chain(shelved)
 }
 
 #[cfg(test)]
