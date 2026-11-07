@@ -1190,7 +1190,8 @@ fn walk_folders(
                 // A Windows reparse point that isn't a link (a cloud placeholder, say): reading it
                 // says that Bolt can't save it yet.
                 EntryType::Other if cfg!(windows) => Kind::File,
-                // shortcut: sockets, pipes and devices are skipped silently; revisit with `bolt status`.
+                // shortcut: sockets, pipes and devices are skipped silently; revisit with
+                // `bolt status`.
                 EntryType::Other => return Ok(None),
             };
             limits.add(1).map_err(too_large)?;
@@ -3167,8 +3168,8 @@ mod tests {
         let saved = saved_top(repo);
         let took = started.elapsed();
         eprintln!("{what}: saved in {took:?}");
-        // A debug build takes about 8 s, more on a busy runner; quadratic work (a path copied per
-        // folder, gigabytes here) takes many minutes, so a minute still tells the two apart.
+        // A debug build takes about 8 s, more on a busy runner; work that grows with the square of
+        // the folders side by side takes many minutes, so a minute still tells the two apart.
         assert!(
             took < std::time::Duration::from_secs(60),
             "{what}: {took:?}"
@@ -3177,7 +3178,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deep_chain_of_gone_folders_comes_back_in_linear_time() {
+    fn a_chain_of_gone_folders_as_deep_as_a_path_allows_comes_back_whole() {
         let (dir, mut repo) = project();
         // 2,046 folders with a link at the bottom, as deep as a path allows: `n/n/…/n/sub` is
         // 4,095 bytes. Planted from the bottom up, so planting isn't quadratic.
@@ -3193,6 +3194,8 @@ mod tests {
             add_listing(packs, vec![entry(name, EntryKind::Folder, id)]).0
         });
         write(dir.path(), "new.txt", b"x");
+        // Behind the path limit no cost per folder can grow, so the time bound only guards
+        // against a hang.
         let saved = timed_save(&mut repo, "2,046 gone folders deep");
         // The chain comes back whole, so it holds the link at the bottom.
         assert_eq!(saved.get(name).map(|e| e.id), first);
