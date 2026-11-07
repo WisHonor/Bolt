@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3, review of the merge's code)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 057](057-pack-index-on-disk-and-merging.md) (when a merge runs, and which packs it takes)
+- **Refined by:** [decision 077](077-tidy-and-the-undo-window.md) (`tidy` rewrites the packs merging leaves, and version 1 ones)
 
 ## Context
 

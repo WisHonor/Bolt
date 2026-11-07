@@ -183,7 +183,7 @@ varint  parent count (0 for the first entry, otherwise 1)
 id      parent entry (if any)
 u8      action (1 = command, 2 = undo, 3 = redo)
 id      target entry (only for undo and redo: the command entry being undone or redone)
-string  command, as typed (values that look like secrets are redacted)
+string  command: its name, such as `save` (what else was typed is not recorded, so nothing secret is)
 person  who and when (as in §4)
 string  Bolt version
 state:
@@ -192,17 +192,21 @@ state:
   u8      position (1 = on a line, 2 = at a save), then string line name or id save
   varint  shelf count;   shelves, newest first:   string label (unique), id save
   bool    has server lines; if true: id of the server-lines list
-varint  safety-copy count
-safety copies, sorted by path:
-  string  path
-  u8      kind (as in §3)
-  id      id
-  varint  size
+bool    has a folder change; if true:
+  id      the save the folder was switched from
+  id      the save it was switched to (not the same save)
 ```
+
+**The folder change** ([decision 071](decisions/071-a-step-records-its-change-to-the-folder.md)) says what the command did to the project folder, as a switch between two saves. Both start from the save the folder was on before the command, so they agree everywhere it wrote nothing; at each path it wrote, the "from" save holds what the folder held there just before (a file or link, a folder, or nothing) and the "to" save what the command wrote (or nothing where it removed something). Where one of them is exactly a save that exists already (the save the folder was on, or the save it was switched to), that save is named; otherwise it is a kept save (below). `goto` records the save it left and the save it went to (a kept save instead where unsaved work already matched the target, holding the left save's version there); `discard` and `shelf` record the kept save of what they throw away, then the current save; `unshelf` records the current save, then a kept save of the current save with what it wrote; `undo`, `redo` and `undo --to` record what they wrote the same way. Commands that change no file (`start`, `import`, `save`, `save --amend`) record none. Undo switches from the "to" save back to the "from" save and redo from the "from" save to the "to" save, carrying all other unsaved work along, as `goto` does ([decision 070](decisions/070-undo-and-redo-step-through-the-diary.md)).
+
+**Kept saves.** A save made only for a folder change is an ordinary save (§4). What `discard` and `shelf` throw away (the safety copies of decision 050) is one: its parent is the save the folder was on, its folder listings are that save's with the folder's own version of each path thrown away (a changed, new or deleted file or link, or a new folder). Every kept save's parent is the save the folder was on; its message names the command and the paths or shelf it was given (`discard art/hero.psd`), or is the shelf's message; its author and saver are the user, its change ID is new, and it has a `line` field when it was made on a line. Only the entry's folder change names it, or the state's shelves for a shelf.
+
+**Undo and redo** (decision 070): an entry with action 2 or 3 names its target, a command entry (action 1) earlier on the diary. Its lines, position, tags and server lines are the target's parent's for an undo and the target's own for a redo. Its shelves are the ones before it, except that undoing a `shelf` takes off the shelf that step added and undoing an `unshelf` puts back the one it removed (keeping its label unless another shelf has it, else the smallest number free), redoing them does the opposite, and `--shelve` adds the shelf it made, first. An entry made by `undo --to` for an entry outside the undo order is a command entry (action 1): its lines, position, tags and server lines are that entry's, and its shelves the ones before it.
 
 Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case: a reader compares the two names after Unicode's lowercase mapping (Rust's `str::to_lowercase`, which also lowercases a final capital sigma as `ς`), not after full case folding, so `ß` and `SS` are two different names, and so are `ΑΣ` and `ασ`. A position "on a line" must name one of the lines. Shelf labels are unique.
 
-- **Limits:** line and shelf names at most 255 bytes; the recorded command at most 64 KiB; the Bolt version at most 256 bytes; safety-copy paths at most 4 KiB. At most 100,000 lines, 10,000 shelves and 1,000,000 safety copies. Safety copies must be strictly sorted by path; readers reject anything else.
+- **Limits:** line and shelf names at most 255 bytes; the recorded command at most 64 KiB; the Bolt version at most 256 bytes. At most 100,000 lines and 10,000 shelves. A folder change whose two saves are the same is rejected.
+- **Shelf labels** are the numbers Bolt gives shelves, written in decimal: the smallest from 1 that no other shelf has ([decision 073](decisions/073-shelves.md)). A reader accepts any unique label.
 
 **Tag list** (decision 034). Never empty: an entry without tags has none.
 
@@ -399,6 +403,8 @@ Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at mos
 
 **Merging.** A pack is small when it is a regular file under 64 MiB on disk and the uncompressed sizes its index records total at most 256 MiB, which is judged from the index alone, without decompressing anything. Once a command has committed (moved `state/head`, and for `start` and `import` written `.bolt/format`) and more than 32 packs are small, it merges the small ones, still under the change lock ([decisions 057](decisions/057-pack-index-on-disk-and-merging.md) and [062](decisions/062-when-packs-are-merged.md)). Every other pack is left as it is, and isn't counted. The packs are taken in order of name, and each object in order of ID; each is read and checked as a reader checks it (header, size, fingerprint), and then its stored bytes and compression are copied as they are into new version 2 packs, written as any command writes its packs (so a merge rewrites version 1 packs as version 2). A pack with a copy that fails its check, or that can't be opened or read (damage, an I/O error, too little memory), is left as it is, a `pack_not_merged` warning names it, and the merge carries on; only a failure to write the new packs stops it. A damaged pack that is kept is read again at each merge, and the 256 MiB bound limits that cost. Only once every new pack is durable and renamed into the store are the old packs removed, one at a time, never one with a new pack's name. A pack that can't be removed stays as a second copy of its objects, with a warning. A stop at any point leaves every object readable: before the rename, the old packs are untouched; after it, objects in two packs are one object. A merge that fails doesn't fail the command, which has happened; it is a warning, and the next command that commits tries again.
 
+**Tidying** ([decision 077](decisions/077-tidy-and-the-undo-window.md)). `bolt tidy`, under the change lock, first marks what must be kept: everything the current diary entry's state reaches (lines, the save the project is at, shelves, tags and server lines, each save with all its parents, its folder listings, contents, project links and the records those name), every diary entry from `state/head` back along parents, and, for every such entry whose `who` time is within the undo window, everything the states of that entry and of its parent reach and both saves of its folder change, and for an undo or redo entry the same for its target (the states of the target and of its parent, and the target's folder change). A pack whose file was modified less than 24 hours ago is left as it is. Of the others, a pack with nothing to keep is removed without being read; a version 2 pack that isn't small and holds only what is kept stays; every other pack (one holding something not kept, a small one, or one in version 1) is rewritten: each kept object in it is read and checked as merging checks it and its stored bytes copied as they are into new version 2 packs, written as any command writes its packs. Only once every new pack is durable and renamed into the store are the old ones removed, one at a time, never one with a new pack's name. If anything that must be kept can't be read, tidying stops before it removes anything. A pack it can't open or read is left as it is.
+
 **Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). In version 2 the index of a pack with `count` objects is exactly `1,032 + 57 × count` bytes. In version 1 an index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
@@ -448,6 +454,8 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `change_ids.json`: a sealed `cache/change-ids` (§10) with two lines, its key, its body and the sealed bytes.
   - `file_cache.json`: a sealed `cache/files` (§10) with two files, one racy and one from before 1970, its key, its body and the sealed bytes.
   - `journal.json`: a `state/journal` (§10) with one action of each kind but "write executable", and its checksum.
+- **Milestone 4:**
+  - `diary.json`: the safety-copy list became the folder change ([decision 071](decisions/071-a-step-records-its-change-to-the-folder.md)), so the `full` entry (an undo), which held two safety copies, now records a folder change, and its bytes and ID changed; the `minimal` entry, which records none, is byte for byte what milestone 1 wrote. The diary's tests reject a folder change from a save to itself.
 
 ## 14. Open points
 
