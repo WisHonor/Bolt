@@ -165,7 +165,7 @@ pub struct ShelfCollisions {
     pub base: Id,
     /// `bolt goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
     /// save the project is on changed something in the way.
-    pub base_on_a_line: bool,
+    pub goto_reaches_base: bool,
     /// Unsaved work, or files Bolt ignores.
     pub unsaved: Vec<String>,
     /// What the save the project is on changed since `base`.
@@ -263,7 +263,7 @@ impl SwitchError {
                 let unshelf = format!("bolt unshelf {}", escape(&c.label, false));
                 let not_yet = "Bolt can't yet bring a shelf back onto changes saved since it was \
                                made";
-                let (elsewhere, newest) = if c.base_on_a_line {
+                let (elsewhere, newest) = if c.goto_reaches_base {
                     let goto = format!("bolt goto {}", c.base.short_hex());
                     let there = format!(
                         "go to the save it was made on with {goto}, then run {unshelf} there"

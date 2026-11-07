@@ -9,7 +9,7 @@ use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::repo::Repository;
 use crate::save::Save;
-use crate::snapshot::{SaveError, read_folder};
+use crate::snapshot::{SaveError, kept_in_the_way, read_folder};
 use crate::text::escape;
 use crate::warning::Warning;
 use crate::writeout;
@@ -68,13 +68,9 @@ impl From<FileChange<'_>> for PathChange {
 pub fn why_stopped(e: &SaveError) -> String {
     let why = match e {
         SaveError::InvalidName { path, reason } => format!("{}: {reason}", escape(path, false)),
-        SaveError::InTheWay { path, kept } => format!(
-            "{}: the last save has a folder there holding {}, which every save keeps as it was \
-             because this computer can't hold it as it is, and a save can't hold both under one \
-             name",
-            escape(path, false),
-            escape(kept, false)
-        ),
+        SaveError::InTheWay { path, kept } => {
+            format!("{}: {}", escape(path, false), kept_in_the_way(kept))
+        }
         SaveError::TooLarge { detail } => format!("this project is too large for Bolt: {detail}"),
         other => return other.to_string(),
     };
@@ -92,7 +88,8 @@ pub fn status(
     let (_, entry) = repo.current()?;
     let save_id = tip_of(&entry)?;
     let save = repo.store().save(&save_id, repo.signatures_allowed())?;
-    let now = read_folder(repo, save.root, full, git_excludes).map_err(|e| e.in_save(save_id))?;
+    let now =
+        read_folder(repo, save.root, full, git_excludes).map_err(|e| e.in_save(save_id, true))?;
     let mut warnings = now.warnings;
     let unfinished = writeout::unfinished_warning(repo);
     let unfinished_switch = unfinished.as_ref().map(|w| w.message.clone());
@@ -108,7 +105,7 @@ pub fn status(
             Ok::<(), SaveError>(())
         },
     )
-    .map_err(|e| e.in_save(save_id))?;
+    .map_err(|e| e.in_save(save_id, true))?;
     Ok(Status {
         position: entry.state.position,
         save_id,

@@ -16,7 +16,7 @@ use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackSet};
 use bolt_core::repo::Repository;
 use bolt_platform::dir::Dir;
-use support::{Env, add_listing, plant_save, text};
+use support::{Env, add_listing, listings, plant_save, text};
 use tempfile::TempDir;
 
 use EntryKind::{Executable, File, Symlink};
@@ -191,52 +191,6 @@ fn holds(bytes: &[u8], wanted: &[u8]) -> bool {
     bytes.windows(wanted.len()).any(|w| w == wanted)
 }
 
-/// Stores the folder listings that hold `entries` and returns the top one's ID.
-fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
-    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
-    for &(path, kind, bytes) in entries {
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
-        folders.entry(up.to_owned()).or_default().push(Entry {
-            name: name.to_owned(),
-            kind,
-            id: pack.add_content(bytes).unwrap(),
-            size: bytes.len() as u64,
-        });
-        // Every folder above, even one that holds only folders.
-        let mut at = up;
-        while let Some((above, _)) = at.rsplit_once('/') {
-            folders.entry(above.to_owned()).or_default();
-            at = above;
-        }
-        folders.entry(at.to_owned()).or_default();
-    }
-    // Longest path first, so a folder's listing is stored before the folder that holds it.
-    loop {
-        let path = folders.keys().max_by_key(|p| p.len()).cloned().unwrap();
-        let entries = folders.remove(&path).unwrap();
-        let id = pack
-            .add_record(
-                ObjectKind::FolderListing,
-                &Listing::new(entries).unwrap().encode(),
-            )
-            .unwrap();
-        if path.is_empty() {
-            return id;
-        }
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
-        let folder = Entry {
-            name: name.to_owned(),
-            kind: EntryKind::Folder,
-            id,
-            size: 0,
-        };
-        let held = folders.entry(up.to_owned()).or_default();
-        if !held.iter().any(|e| e.name == folder.name) {
-            held.push(folder);
-        }
-    }
-}
-
 fn strings(v: &serde_json::Value) -> Vec<String> {
     v.as_array()
         .unwrap_or_else(|| panic!("not a list: {v}"))
@@ -377,25 +331,30 @@ fn the_short_name_of_gitmodules_is_never_written() {
     case.assert_nothing_escaped();
 }
 
+/// Stores a listing holding the folder `.BOLT`, with `inside` in it. No listing Bolt makes holds
+/// one, so it is spelled `-BOLT`, then the bytes are changed.
+fn holding_bolt_spelling(pack: &mut PackSet, inside: Id) -> Id {
+    let listing = Listing::new(vec![Entry {
+        name: "-BOLT".into(),
+        kind: EntryKind::Folder,
+        id: inside,
+        size: 0,
+    }])
+    .unwrap()
+    .encode();
+    let at = listing.windows(5).position(|w| w == b"-BOLT").unwrap();
+    let mut hostile = listing;
+    hostile[at] = b'.';
+    pack.add_record(ObjectKind::FolderListing, &hostile)
+        .unwrap()
+}
+
 #[test]
 fn a_save_naming_a_spelling_of_bolt_is_refused_whole() {
     let case = Case::new();
-    // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
     plant_save(case.root(), |pack| {
         let inner = listings(pack, &[("pwned", File, PAYLOAD)]);
-        let top = Listing::new(vec![Entry {
-            name: "-BOLT".into(),
-            kind: EntryKind::Folder,
-            id: inner,
-            size: 0,
-        }])
-        .unwrap()
-        .encode();
-        let at = top.windows(5).position(|w| w == b"-BOLT").unwrap();
-        let mut hostile = top.clone();
-        hostile[at] = b'.';
-        pack.add_record(ObjectKind::FolderListing, &hostile)
-            .unwrap()
+        holding_bolt_spelling(pack, inner)
     });
     let planted = Repository::open(case.root())
         .unwrap()
@@ -424,6 +383,69 @@ fn a_save_naming_a_spelling_of_bolt_is_refused_whole() {
     assert!(project_entries(&case.env).is_empty());
     case.assert_nothing_escaped();
     assert!(!case.root().join(".bolt/state/journal").exists());
+}
+
+#[test]
+fn a_spelling_of_bolt_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_that_saves() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let shown = [
+        (".boltignore", File, b"ignored/\n" as &[u8]),
+        ("a.txt", File, b"a\n"),
+    ];
+    // The save to go to, then the save the project is on: its folder `ignored`, which its own
+    // `.boltignore` keeps out, holds a spelling of `.bolt`.
+    plant_save(env.root(), |pack| listings(pack, &shown));
+    let target = env.state().1.lines["main"];
+    plant_save(env.root(), |pack| {
+        let inner = listings(pack, &[("pwned", File, PAYLOAD)]);
+        let hostile = holding_bolt_spelling(pack, inner);
+        let mut top: Vec<Entry> = shown
+            .iter()
+            .map(|&(name, kind, bytes)| Entry {
+                name: name.into(),
+                kind,
+                id: pack.add_content(bytes).unwrap(),
+                size: bytes.len() as u64,
+            })
+            .collect();
+        top.push(Entry {
+            name: "ignored".into(),
+            kind: EntryKind::Folder,
+            id: hostile,
+            size: 0,
+        });
+        let top = Listing::new(top).unwrap().encode();
+        pack.add_record(ObjectKind::FolderListing, &top).unwrap()
+    });
+    let on = env.state().1.lines["main"];
+    for &(name, _, bytes) in &shown {
+        std::fs::write(env.root().join(name), bytes).unwrap();
+    }
+    std::fs::create_dir(env.root().join("ignored")).unwrap();
+    let out = env
+        .bolt()
+        .args(["goto", &target.to_hex(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        doc["error"]["message"],
+        format!(
+            "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+             writes, so it can't be used.",
+            on.short_hex()
+        ),
+        "{doc}"
+    );
+    // Every switch away from it reads it first, so going on from another save isn't offered.
+    assert_eq!(
+        doc["error"]["hint"],
+        "Bolt never makes such a save, so another program put it there. Nothing was changed: ask \
+         for help before trying to repair it.",
+        "{doc}"
+    );
 }
 
 /// Writes `actions` as the journal of a switch from where the project is to the diary entry

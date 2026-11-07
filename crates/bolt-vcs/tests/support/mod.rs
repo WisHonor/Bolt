@@ -261,6 +261,68 @@ pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id
         .unwrap()
 }
 
+/// Stores the folder listings that hold `entries` (a path, a kind, and a file's bytes or a link's
+/// target) and returns the top one's ID.
+pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
+    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
+    for &(path, kind, bytes) in entries {
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind,
+            id: pack.add_content(bytes).unwrap(),
+            size: bytes.len() as u64,
+        });
+        // Every folder above, even one that holds only folders.
+        let mut at = up;
+        while let Some((above, _)) = at.rsplit_once('/') {
+            folders.entry(above.to_owned()).or_default();
+            at = above;
+        }
+        folders.entry(at.to_owned()).or_default();
+    }
+    // Longest path first, so a folder's listing is stored before the folder that holds it.
+    loop {
+        let path = folders.keys().max_by_key(|p| p.len()).cloned().unwrap();
+        let entries = folders.remove(&path).unwrap();
+        let id = pack
+            .add_record(
+                ObjectKind::FolderListing,
+                &Listing::new(entries).unwrap().encode(),
+            )
+            .unwrap();
+        if path.is_empty() {
+            return id;
+        }
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        let folder = Entry {
+            name: name.to_owned(),
+            kind: EntryKind::Folder,
+            id,
+            size: 0,
+        };
+        let held = folders.entry(up.to_owned()).or_default();
+        if !held.iter().any(|e| e.name == folder.name) {
+            held.push(folder);
+        }
+    }
+}
+
+/// A started project at its first save, not on a line, with `saves` planted on `main` one after
+/// another, each holding its entries as for [`listings`]; their IDs. `bolt goto` then writes each.
+pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = main_tip(&env).to_hex();
+    env.bolt().args(["goto", &first]).assert().success();
+    let mut ids = Vec::new();
+    for entries in saves {
+        plant_save(env.root(), |pack| listings(pack, entries));
+        ids.push(main_tip(&env));
+    }
+    (env, ids)
+}
+
 /// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
 pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     let mut repo = Repository::open(root).unwrap();
@@ -405,6 +467,26 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
             };
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A stdout every write to fails, for a reason other than its reader going: a file opened only
+/// to read on Windows, the full device on Linux.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn failing_stdout(env: &Env) -> std::fs::File {
+    #[cfg(windows)]
+    {
+        let path = env.config().join("out");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::File::open(path).unwrap()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = env;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
     }
 }
 

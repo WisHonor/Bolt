@@ -1261,3 +1261,41 @@ fn a_file_held_open_keeps_the_switch_unfinished_until_let_go() {
     assert_eq!(repo.head().unwrap(), journal.target);
     assert_holds(dir.path(), NEW);
 }
+
+#[test]
+fn a_spelling_of_bolt_the_plan_meets_is_told_as_the_save_holding_it() {
+    let (_dir, mut repo) = project();
+    let (good, _) = planted(&mut repo, &files(&[("a.txt", b"a")]));
+    // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
+    crate::test_support::plant_root(&mut repo, |packs| {
+        let id = packs.add_content(b"x").unwrap();
+        let named = |name: &str| Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id,
+            size: 1,
+        };
+        let listing = Listing::new(vec![named("-BOLT")]).unwrap().encode();
+        let at = listing.windows(5).position(|w| w == b"-BOLT").unwrap();
+        let mut hostile = listing;
+        hostile[at] = b'.';
+        packs
+            .add_record(ObjectKind::FolderListing, &hostile)
+            .unwrap()
+    });
+    let hostile = current_save(&repo).unwrap();
+    let told = |from, to| {
+        let met = SaveError::Repo(RepoError::BoltName {
+            save: None,
+            current: false,
+        });
+        match told_whose(&repo, met, from, to) {
+            SaveError::Repo(RepoError::BoltName { save, current }) => (save, current),
+            other => panic!("{other:?}"),
+        }
+    };
+    // The target's tree holds it; else it is the save the folder is on.
+    assert_eq!(told(good, hostile), (Some(hostile), false));
+    assert_eq!(told(hostile, good), (Some(hostile), true));
+    assert_eq!(told(good, good), (Some(good), true));
+}

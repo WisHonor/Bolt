@@ -532,12 +532,29 @@ pub struct Stdout {
     pub closed: bool,
 }
 
-/// The first write to stdout that failed for another reason than its reader going away. Nothing
-/// more is written there after it, so what was printed is cut off rather than spliced.
-static FAILED: OnceLock<(io::ErrorKind, String)> = OnceLock::new();
+/// A write that failed for another reason than its reader going away: its kind and the message.
+type Failed = OnceLock<(io::ErrorKind, String)>;
 
-fn failed_write((kind, why): &(io::ErrorKind, String)) -> io::Error {
-    io::Error::new(*kind, why.clone())
+/// The first write to stdout that failed so. Nothing more is written there after it, so what was
+/// printed is cut off rather than spliced.
+static FAILED: Failed = OnceLock::new();
+
+/// `write` done, unless a write kept in `failed` came before it; a failure of its own is kept,
+/// but not a reader gone, nor an interrupted write, which `write_all` tries again.
+fn guarded<T>(failed: &Failed, write: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let refused = |(kind, why): &(io::ErrorKind, String)| io::Error::new(*kind, why.clone());
+    if let Some(earlier) = failed.get() {
+        return Err(refused(earlier));
+    }
+    let passing = [io::ErrorKind::BrokenPipe, io::ErrorKind::Interrupted];
+    match write() {
+        Err(e) if passing.contains(&e.kind()) => Err(e),
+        Err(e) => {
+            let why = (e.kind(), format!("Bolt couldn't write its output: {e}"));
+            Err(refused(failed.get_or_init(|| why)))
+        }
+        done => done,
+    }
 }
 
 impl Stdout {
@@ -549,34 +566,23 @@ impl Stdout {
     }
 
     fn noting<T>(&mut self, done: io::Result<T>) -> io::Result<T> {
-        match done {
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
-                self.closed = true;
-                Err(e)
-            }
-            Err(e) => {
-                let why = (e.kind(), format!("Bolt couldn't write its output: {e}"));
-                Err(failed_write(FAILED.get_or_init(|| why)))
-            }
-            done => done,
+        if let Err(e) = &done
+            && e.kind() == io::ErrorKind::BrokenPipe
+        {
+            self.closed = true;
         }
+        done
     }
 }
 
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(failed) = FAILED.get() {
-            return Err(failed_write(failed));
-        }
-        let done = self.inner.write(buf);
+        let done = guarded(&FAILED, || self.inner.write(buf));
         self.noting(done)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if let Some(failed) = FAILED.get() {
-            return Err(failed_write(failed));
-        }
-        let done = self.inner.flush();
+        let done = guarded(&FAILED, || self.inner.flush());
         self.noting(done)
     }
 }
@@ -591,6 +597,19 @@ pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
     done?;
     print_warnings(warnings);
     Ok(())
+}
+
+/// [`print_quietly`], for a command that changed the project: if printing fails, the hint says
+/// the change stands.
+pub fn print_done(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+    print_quietly(text, warnings).map_err(|failure| Failure {
+        hint: Some(
+            "The command did its work all the same: only what Bolt printed was lost. bolt status \
+             and bolt undo --list show where the project stands."
+                .into(),
+        ),
+        ..failure
+    })
 }
 
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
@@ -840,9 +859,14 @@ pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
     let nothing = n == 0 && done.folders == 0;
     // The warning that follows names what stayed and says why.
     let said = match (nothing, everywhere) {
-        (true, _) if !done.applied.changed_since_plan.is_empty() => {
+        (true, true) if !done.applied.changed_since_plan.is_empty() => {
             "Nothing was discarded: your files changed while Bolt was discarding them. Run bolt \
              discard again."
+                .to_owned()
+        }
+        (true, false) if !done.applied.changed_since_plan.is_empty() => {
+            "Nothing was discarded there: your files changed while Bolt was discarding them. Run \
+             the same bolt discard again."
                 .to_owned()
         }
         (true, _) if done.links_left.len() == 1 => {
@@ -1125,6 +1149,32 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_write_is_kept_and_refuses_the_writes_after_it() {
+        let failed = Failed::new();
+        let fine = || Ok(1);
+        // A reader gone, or a write interrupted and tried again, isn't kept.
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Interrupted] {
+            let gone = guarded(&failed, || Err::<usize, _>(io::Error::from(kind)));
+            assert_eq!(gone.unwrap_err().kind(), kind);
+            assert_eq!(guarded(&failed, fine).unwrap(), 1);
+        }
+        // Any other failure is, and a write that would go through after it is refused with it.
+        let full = guarded(&failed, || {
+            Err::<usize, _>(io::Error::other("the disk is full"))
+        });
+        let full = full.unwrap_err();
+        assert_eq!(
+            full.to_string(),
+            "Bolt couldn't write its output: the disk is full"
+        );
+        let refused = guarded(&failed, fine).unwrap_err();
+        assert_eq!(
+            (refused.kind(), refused.to_string()),
+            (full.kind(), full.to_string())
+        );
+    }
+
+    #[test]
     fn a_discard_whose_files_all_changed_again_says_nothing_was_discarded() {
         use bolt_core::writeout::Applied;
         let nothing = DiscardOutcome {
@@ -1148,13 +1198,17 @@ mod tests {
             },
             ..nothing
         };
-        for everywhere in [true, false] {
-            assert_eq!(
-                discarded(&changed_again, everywhere),
-                "Nothing was discarded: your files changed while Bolt was discarding them. Run \
-                 bolt discard again.\n"
-            );
-        }
+        assert_eq!(
+            discarded(&changed_again, true),
+            "Nothing was discarded: your files changed while Bolt was discarding them. Run bolt \
+             discard again.\n"
+        );
+        // Given paths, it says the same of them, so running it again throws away no more.
+        assert_eq!(
+            discarded(&changed_again, false),
+            "Nothing was discarded there: your files changed while Bolt was discarding them. Run \
+             the same bolt discard again.\n"
+        );
     }
 
     #[test]

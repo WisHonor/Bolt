@@ -189,12 +189,12 @@ pub fn unshelf(
             // Each kind of path in the way has its own way out.
             let (changed, unsaved) = changed_since(repo, base, current, plan.collisions)?;
             // `goto` finds only the saves a line reaches.
-            let base_on_a_line = !changed.is_empty()
+            let goto_reaches_base = !changed.is_empty()
                 && matches!(resolve(repo, &base.short_hex()), Ok(found) if found == base);
             return Err(SwitchError::ShelfInTheWay(Box::new(ShelfCollisions {
                 label: name,
                 base,
-                base_on_a_line,
+                goto_reaches_base,
                 unsaved,
                 changed,
             })));

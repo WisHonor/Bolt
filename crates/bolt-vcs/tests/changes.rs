@@ -265,29 +265,10 @@ fn a_pair_of_lines_that_differ_only_in_their_ending_is_marked() {
     assert_eq!(doc["changes"][0]["only_line_endings"], false);
 }
 
-/// A stdout every write to fails, for a reason other than its reader going: a file opened only
-/// to read on Windows, the full device on Linux.
-#[cfg(any(windows, target_os = "linux"))]
-fn failing_stdout(env: &Env) -> fs::File {
-    #[cfg(windows)]
-    {
-        let path = env.config().join("out");
-        fs::write(&path, b"").unwrap();
-        fs::File::open(path).unwrap()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = env;
-        fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/full")
-            .unwrap()
-    }
-}
-
 #[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn a_stdout_that_fails_mid_document_ends_it_with_the_error_on_stderr() {
+    use support::failing_stdout;
     // A first change small enough to sit whole in stdout's buffer, then one that overflows it.
     let env = project(&[("a.txt", b"a\n"), ("b.txt", numbered(1..=2000).as_bytes())]);
     env.overwrite("a.txt", "A\n");

@@ -326,7 +326,7 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         }
         text
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -379,7 +379,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         };
         import_output::import_text(&report, &standing)
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 /// Asks in the terminal for the new line's name; `None` if there is no terminal to ask in.
@@ -575,7 +575,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
     if !json && let Some(ignored) = &ignored {
         text += &format!("{}\n", ignored_identity_note(ignored, repo.root()));
     }
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 /// `change_id` at its shortest or, if the line can't be read to work that out, whole, with a
@@ -1111,7 +1111,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         }
         text
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 fn discard_command(
@@ -1154,7 +1154,7 @@ fn discard_command(
     } else {
         output::discarded(&done, paths.is_empty())
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 /// `bolt undo`, `bolt redo`, and `bolt undo --to <entry>` (`to`).
@@ -1227,7 +1227,7 @@ fn undo_command(
             document["finished"] = finished.into();
             document["position"] = position.map_or(json!(null), |p| output::position_json(&p));
             document["warnings"] = output::warnings_json(&warnings);
-            return output::print_quietly(&format!("{document}\n"), &warnings);
+            return output::print_done(&format!("{document}\n"), &warnings);
         };
         let document = output::failed_document(document, &failure, &warnings);
         output::print_quietly(&format!("{document}\n"), &[])?;
@@ -1297,7 +1297,7 @@ fn undo_command(
     match failure {
         None => {
             warnings.extend(repo.store().warnings());
-            output::print_quietly(&text, &told_once(warnings))
+            output::print_done(&text, &told_once(warnings))
         }
         Some(failure) => {
             output::print_quietly(&text, &told_once(warnings))?;
@@ -1370,7 +1370,7 @@ fn shelf_command(
             }
         }
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 /// `bolt shelf --list`.
@@ -1491,7 +1491,7 @@ fn unshelf_command(
         }
         text
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 /// `bolt tidy`.
@@ -1528,7 +1528,7 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     } else {
         output::tidied(&done)
     };
-    output::print_quietly(&text, &warnings)
+    output::print_done(&text, &warnings)
 }
 
 /// How many of the steps undo can take `bolt undo --list` shows.

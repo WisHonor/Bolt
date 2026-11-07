@@ -467,8 +467,7 @@ fn a_save_holding_a_spelling_of_bolt_is_named() {
         format!(
             "error: Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
              writes, so it can't be used.\nhint: Bolt never makes such a save, so another program \
-             put it there. Nothing was changed: go on from another save, and ask for help before \
-             trying to repair this one.\n",
+             put it there. Nothing was changed: ask for help before trying to repair it.\n",
             planted.short_hex()
         )
     );

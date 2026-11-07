@@ -12,7 +12,7 @@ use std::time::Duration;
 use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
 use crate::diary::DiaryEntry;
-use crate::diff::{for_each_change_in, for_each_entry_change_in};
+use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
 use crate::fsio::{self, Done};
@@ -91,8 +91,25 @@ pub fn plan(
     drive: Drive,
     git_excludes: Option<&Path>,
 ) -> Result<Plan, SaveError> {
-    // A name no save of Bolt's holds is the target's, unless reading the folder met it in `from`.
-    planned(repo, from, to, only, remove_new, drive, git_excludes).map_err(|e| e.in_save(to))
+    planned(repo, from, to, only, remove_new, drive, git_excludes)
+        .map_err(|e| told_whose(repo, e, from, to))
+}
+
+/// `e`, a spelling of `.bolt` the plan met past reading the folder against `from`, told as the
+/// save that holds it: `to` if its whole tree meets one, else `from`, the one the folder is on.
+fn told_whose(repo: &Repository, e: SaveError, from: Id, to: Id) -> SaveError {
+    if !matches!(e, SaveError::Repo(RepoError::BoltName { save: None, .. })) {
+        return e;
+    }
+    let holds = || -> Result<(), RepoError> {
+        let root = repo.store().save(&to, repo.signatures_allowed())?.root;
+        for_each_change(repo.store(), None, root, |_| Ok::<(), RepoError>(()))
+    };
+    if from != to && matches!(holds(), Err(RepoError::BoltName { .. })) {
+        e.in_save(to, false)
+    } else {
+        e.in_save(from, true)
+    }
 }
 
 fn planned(
@@ -107,7 +124,8 @@ fn planned(
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
-    let now = read_folder(repo, from_root, false, git_excludes).map_err(|e| e.in_save(from))?;
+    let now =
+        read_folder(repo, from_root, false, git_excludes).map_err(|e| e.in_save(from, true))?;
     let mut unsaved = BTreeSet::new();
     for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
         unsaved.insert(c.path.to_owned());
@@ -1075,10 +1093,8 @@ impl Run<'_> {
         };
         let os = OsStr::new(name);
         match &found {
-            // A placeholder written before counts as done.
-            Some(f) if f.is_content(EntryKind::Symlink, c) || f.is_content(EntryKind::File, c) => {
-                return Ok(Outcome::Nothing);
-            }
+            // The link, or a placeholder written before, counts as done.
+            Some(f) if f.is_content(EntryKind::Symlink, c) => return Ok(Outcome::Nothing),
             None => {}
             Some(f) if !f.is(a.expected) => return Ok(Outcome::Changed),
             Some(f) => {
@@ -1238,10 +1254,14 @@ impl Found {
     }
 }
 
-/// Windows has no executable bit, so there a file is either.
-fn same_kind(a: EntryKind, b: EntryKind) -> bool {
+/// Whether an entry `found` of one kind can be one `expected` of another. Windows has no
+/// executable bit, so there a file is either; and a file holding a link's target is that link's
+/// placeholder, as a save reads it, but a link is never a file.
+fn same_kind(found: EntryKind, expected: EntryKind) -> bool {
     let file = |k| matches!(k, EntryKind::File | EntryKind::Executable);
-    a == b || (cfg!(windows) && file(a) && file(b))
+    found == expected
+        || (cfg!(windows) && file(found) && file(expected))
+        || (expected == EntryKind::Symlink && file(found))
 }
 
 fn removes(change: Change) -> bool {

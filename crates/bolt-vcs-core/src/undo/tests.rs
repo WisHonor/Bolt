@@ -374,9 +374,9 @@ fn a_step_stopped_by_a_file_in_use_shares_the_placeholders_warning_of_the_steps_
         ..one_step(&who)
     };
     undo(&mut repo, &two, &mut |_| {}).unwrap();
-    // Gone again, so that redoing the gotos writes them where nothing is.
+    // Undoing the gotos took both placeholders away.
     for link in ["l1", "l2"] {
-        fs::remove_file(dir.path().join(link)).unwrap();
+        assert!(!dir.path().join(link).exists(), "{link}");
     }
     // Old enough for the file-state cache to vouch for, so nothing has to read it while held.
     let x = dir.path().join("x");

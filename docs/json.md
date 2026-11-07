@@ -432,7 +432,7 @@ A command that fails before it has printed anything gives a document of just thi
 
 `history`, `show`, `changes` and `undo --list --all` print their documents as they read, so they can fail after output has begun. They then end the document instead of cutting it off: the list that was open is closed with what was read so far, and `error` (the same object) and `warnings` are added, with `save` too for `show` and `changes`. The exit code is 1, and the output is still one valid document. **A document with `error` is incomplete:** check for `error` before using `saves`, `changes` or `entries`.
 
-Stdout itself can fail (a full disk, say). A document can't be ended on a stdout that fails, so the command then stops printing it, and exits with 1, the error on stderr as text: `Bolt couldn't write its output:`, and why. What it had printed is cut off. A reader that went away (`bolt history --json | head -c 100`) is no failure: the command stops printing, says nothing on stderr, and exits as it would have.
+Stdout itself can fail (a full disk, say). A document can't be ended on a stdout that fails, so the command then stops printing it, and exits with 1, the error on stderr as text: `Bolt couldn't write its output:`, and why. What it had printed is cut off. A command that changes the project did its work all the same, and the hint says so. A reader that went away (`bolt history --json | head -c 100`) is no failure: the command stops printing, says nothing on stderr, and exits as it would have.
 
 ```text
 {"bolt_json":1,"line":"main","saves":[ …the saves read so far… ],"error":{"hint":null,"message":"…"},"warnings":[]}

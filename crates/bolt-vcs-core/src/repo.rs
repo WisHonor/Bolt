@@ -106,14 +106,15 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
-    /// A folder of a save holds a spelling of `.bolt`, which no listing Bolt makes holds; `save`
-    /// once the command knows which save it was reading.
+    /// A folder of a save holds a spelling of `.bolt`, which no listing Bolt makes holds: of
+    /// `save` once the command knows which save it was reading, the one the project is on when
+    /// `current`.
     #[error(
         "{} holds a name spelled like Bolt's own folder (.bolt), which Bolt never writes, so it \
          can't be used.",
         save.map_or_else(|| "A save".to_owned(), |id| format!("Save {}", id.short_hex()))
     )]
-    BoltName { save: Option<Id> },
+    BoltName { save: Option<Id>, current: bool },
     /// `tidy` found a kind of object it doesn't follow, so it can't tell what that one keeps.
     #[error(
         "Bolt can't tidy this project: pack {} holds {what}, which this version of Bolt doesn't \
@@ -218,6 +219,11 @@ impl RepoError {
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
                 }
+                // Every switch away from the save the project is on reads it first.
+                RepoError::BoltName { current: true, .. } => {
+                    "Bolt never makes such a save, so another program put it there. Nothing was \
+                     changed: ask for help before trying to repair it."
+                }
                 RepoError::BoltName { .. } => {
                     "Bolt never makes such a save, so another program put it there. Nothing was \
                      changed: go on from another save, and ask for help before trying to repair \
@@ -267,12 +273,15 @@ impl RepoError {
         )
     }
 
-    /// This error, met reading the folders of the save `save`: a spelling of `.bolt` is told as
-    /// that save's.
+    /// This error, met reading the folders of the save `save`, the one the project is on when
+    /// `current`: a spelling of `.bolt` is told as that save's.
     #[must_use]
-    pub(crate) fn in_save(self, save: Id) -> RepoError {
+    pub(crate) fn in_save(self, save: Id, current: bool) -> RepoError {
         match self {
-            RepoError::BoltName { save: None } => RepoError::BoltName { save: Some(save) },
+            RepoError::BoltName { save: None, .. } => RepoError::BoltName {
+                save: Some(save),
+                current,
+            },
             other => other,
         }
     }
@@ -299,7 +308,10 @@ impl From<StoreError> for RepoError {
             StoreError::SaveTooLarge { .. } => damaged(e.to_string()),
             // Only a listing's names are held to the rules that refuse it.
             StoreError::Decode(DecodeError::InvalidName(NameError::BoltSpelling)) => {
-                RepoError::BoltName { save: None }
+                RepoError::BoltName {
+                    save: None,
+                    current: false,
+                }
             }
             other => RepoError::Store(other),
         }

@@ -2074,18 +2074,16 @@ fn paths_are_relative_to_the_current_folder() {
 }
 
 /// `bolt <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
-/// could write: how it ended, and what it said on stderr.
+/// starts: how it ended, and what it said on stderr.
 fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) {
-    use std::process::Stdio;
-    let mut child = env
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = env
         .bolt_process_in(env.root())
         .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stdout(writer)
+        .output()
         .unwrap();
-    drop(child.stdout.take());
-    let out = child.wait_with_output().unwrap();
     (out.status.code(), text(&out.stderr))
 }
 
@@ -2120,4 +2118,34 @@ fn every_command_ends_quietly_when_its_reader_has_gone() {
         quiet(&env, &with(&["discard"]));
     }
     assert!(loud.is_empty(), "{loud:#?}");
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn a_command_that_did_its_work_but_couldnt_print_says_so() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    env.overwrite("a.txt", "a\n");
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["save", "Add a"])
+        .stdout(support::failing_stdout(&env))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    assert!(
+        said.starts_with("error: Bolt couldn't write its output: "),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(
+            "\nhint: The command did its work all the same: only what Bolt printed was lost. \
+             bolt status and bolt undo --list show where the project stands.\n"
+        ),
+        "{said}"
+    );
+    // It did: the save is made.
+    let history = env.bolt().arg("history").output().unwrap();
+    assert!(text(&history.stdout).contains("Add a"));
 }

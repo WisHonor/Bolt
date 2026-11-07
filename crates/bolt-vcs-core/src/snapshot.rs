@@ -154,13 +154,7 @@ pub enum SaveError {
     Ignore { detail: String },
     #[error("This project is too large to save: {detail}.")]
     TooLarge { detail: String },
-    #[error(
-        "Bolt can't save {}: the last save has a folder there holding {}, which every save keeps \
-         as it was because this computer can't hold it as it is, and a save can't hold both \
-         under one name.",
-        escape(path, false),
-        escape(kept, false)
-    )]
+    #[error("Bolt can't save {}: {}.", escape(path, false), kept_in_the_way(kept))]
     InTheWay { path: String, kept: String },
     #[error("{}", line_endings_changed(*count, first))]
     LineEndingsChanged {
@@ -242,6 +236,16 @@ impl From<PackError> for SaveError {
     }
 }
 
+/// Why a path holds something a save can't take: the last save keeps a folder there, holding
+/// `kept`, as it was.
+pub(crate) fn kept_in_the_way(kept: &str) -> String {
+    format!(
+        "the last save has a folder there holding {}, which every save keeps as it was because \
+         this computer can't hold it as it is, and a save can't hold both under one name",
+        escape(kept, false)
+    )
+}
+
 /// One line for each problem; the names in the problems are escaped by their own messages.
 fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     let mut text = "Some new names would not work on every system:".to_owned();
@@ -321,12 +325,12 @@ impl SaveError {
         self.next_step(false)
     }
 
-    /// This error, met reading the folders of the save `save`: a spelling of `.bolt` is told as
-    /// that save's.
+    /// This error, met reading the folders of the save `save`, the one the project is on when
+    /// `current`: a spelling of `.bolt` is told as that save's.
     #[must_use]
-    pub(crate) fn in_save(self, save: Id) -> SaveError {
+    pub(crate) fn in_save(self, save: Id, current: bool) -> SaveError {
         match self {
-            SaveError::Repo(e) => SaveError::Repo(e.in_save(save)),
+            SaveError::Repo(e) => SaveError::Repo(e.in_save(save, current)),
             other => other,
         }
     }

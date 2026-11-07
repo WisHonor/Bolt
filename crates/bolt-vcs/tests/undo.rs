@@ -1004,3 +1004,31 @@ fn the_lists_escape_what_the_diary_holds() {
         assert!(said.contains(&shelf), "{said}");
     }
 }
+
+#[test]
+fn undo_writes_back_the_placeholders_its_steps_removed() {
+    // Links leading out of the project, so each is written as a placeholder on every system.
+    use bolt_core::listing::EntryKind::{File, Symlink};
+    let (env, saves) = support::planted_saves(&[
+        &[("one", Symlink, b"../one"), ("x", File, b"x\n")],
+        &[("two", Symlink, b"../two"), ("x", File, b"x\n")],
+        &[("x", File, b"x\n")],
+    ]);
+    for save in &saves {
+        ok(&env, &["goto", &save.to_hex()]);
+    }
+    // Each goto removed the placeholder the one before it wrote.
+    assert_eq!(files(env.root()), holding(&[("x", "x\n")]));
+    let doc = json(&env, &["undo", "2"]);
+    assert_eq!(doc["undone"].as_array().unwrap().len(), 2, "{doc}");
+    let warnings = doc["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{doc}");
+    assert_eq!(warnings[0]["kind"], "placeholders_written");
+    let message = warnings[0]["message"].as_str().unwrap();
+    assert!(message.ends_with("\n  one\n  two"), "{message}");
+    assert_eq!(
+        files(env.root()),
+        holding(&[("one", "../one"), ("x", "x\n")])
+    );
+    assert!(changed(&env).is_empty());
+}
