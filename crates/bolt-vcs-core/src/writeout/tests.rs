@@ -980,13 +980,14 @@ fn assert_holds(dir: &Path, wanted: &[(&str, &[u8])]) {
 fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveError> {
     let who = who();
     let req = crate::snapshot::SaveRequest {
-        message: "next",
+        message: Some("next"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     crate::snapshot::save_folder(repo, &req, &mut |_| {}, &mut |_| true)
 }

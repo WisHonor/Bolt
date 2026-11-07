@@ -21,13 +21,14 @@ fn saved(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
     }
     let me = who();
     let req = SaveRequest {
-        message: "saved",
+        message: Some("saved"),
         who: &me,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     let done = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
     assert!(matches!(done, SaveOutcome::Saved { .. }));

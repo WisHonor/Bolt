@@ -24,7 +24,9 @@ use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
-use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, Person, Save};
+use crate::save::{
+    EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, EXTRA_LINE, Person, Save,
+};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
@@ -38,7 +40,8 @@ mod walk;
 use walk::{Base, Handles, Scan, walk};
 
 pub struct SaveRequest<'a> {
-    pub message: &'a str,
+    /// `None` keeps the message of the save an amend replaces.
+    pub message: Option<&'a str>,
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
@@ -51,6 +54,9 @@ pub struct SaveRequest<'a> {
     pub new_line: Option<&'a str>,
     /// Save only the changes at these paths and patterns (decision 054); `None` saves all.
     pub only: Option<&'a [Given]>,
+    /// Replace the newest save of the current line, keeping its change ID, instead of saving on
+    /// top of it.
+    pub amend: bool,
 }
 
 // Made once per command, so boxing the save would buy nothing.
@@ -68,8 +74,11 @@ pub enum SaveOutcome {
         /// What went wrong with the save's own results; the save is made all the same. Problems
         /// the store found are `Store::warnings`.
         warnings: Vec<Warning>,
+        /// The save an amend replaced, which stays stored.
+        replaced: Option<Id>,
     },
-    /// The folder matches the line's current save, which is `current`.
+    /// The folder matches the line's current save, which is `current`; for an amend, the message
+    /// matches too.
     NothingChanged {
         current: Id,
         /// What the walk found wrong, such as a `.gitignore` it skipped.
@@ -211,6 +220,13 @@ pub enum SaveError {
     /// The save adds unusually much, and no one said to go on.
     #[error("{0}")]
     LargeSave(LargeSave),
+    #[error("You're at a save, not on a line, so there is no newest save of a line to amend.")]
+    AmendAtSave,
+    #[error("{}", shown_too(by))]
+    AmendShared {
+        /// Who else shows the save: `line x`, `server line y@origin` or `tag v1`.
+        by: Vec<String>,
+    },
 }
 
 // Through `RepoError`, so a damaged pack is reported as damage.
@@ -270,6 +286,24 @@ fn line_endings_changed(count: u64, first: &[String]) -> String {
         )
     };
     text + &listed(first, count)
+}
+
+/// Names the first few of those that show the save an amend would replace, and counts the rest.
+fn shown_too(by: &[String]) -> String {
+    let mut named: Vec<String> = by.iter().take(NAMED).map(|b| escape(b, false)).collect();
+    let more = by.len().saturating_sub(NAMED);
+    if more > 0 {
+        named.push(format!("{more} more"));
+    }
+    let who = match named.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => named.concat(),
+    };
+    let show = if by.len() == 1 { "shows" } else { "show" };
+    format!(
+        "Bolt can't amend this save: {who} {show} it too, and two saves you can see would then \
+         share one change ID."
+    )
 }
 
 impl SaveError {
@@ -342,6 +376,12 @@ impl SaveError {
             SaveError::LargeSave(_) => "To save them, run the save again with --yes; to leave \
                                         some out, list them in .boltignore."
                 .into(),
+            SaveError::AmendAtSave => {
+                "To amend a line's newest save, go to the line first: bolt goto <line>".into()
+            }
+            SaveError::AmendShared { .. } => {
+                "Save your changes as a new save instead: bolt save \"describe your change\"".into()
+            }
         };
         Some(if saving {
             format!("Nothing was saved. {step}")
@@ -351,9 +391,10 @@ impl SaveError {
     }
 }
 
-/// Saves the project folder on the current line. Nothing is written unless every file was read
-/// and every name passed its checks. A save that adds unusually much goes on only if
-/// `confirm_large` says so; it is asked before anything new is read or stored.
+/// Saves the project folder on the current line, or in place of its newest save for an amend.
+/// Nothing is written unless every file was read and every name passed its checks. A save that
+/// adds unusually much goes on only if `confirm_large` says so; it is asked before anything new
+/// is read or stored.
 pub fn save_folder(
     repo: &mut Repository,
     req: &SaveRequest,
@@ -369,8 +410,24 @@ pub fn save_folder(
         }
     }
     let (head, entry) = repo.current()?;
+    if req.amend && matches!(entry.state.position, Position::AtSave(_)) {
+        return Err(SaveError::AmendAtSave);
+    }
     let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
+    let key = *repo.cache_key();
+    // An amend needs the change-ID cache before the walk; a save, only once it has its save.
+    let mut early_cache = None;
+    if req.amend
+        && let Some(line) = &line
+    {
+        let mut cache = ChangeIds::load(repo, &key);
+        let by = shown_elsewhere(repo, &mut cache, &entry.state, line, parent_id, &parent)?;
+        if !by.is_empty() {
+            return Err(SaveError::AmendShared { by });
+        }
+        early_cache = Some(cache);
+    }
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
     let trusted = now.map(|_| FileCache::load(repo)).unwrap_or_default();
@@ -445,7 +502,12 @@ pub fn save_folder(
     if !built.taken_back.is_empty() {
         warnings.push(gitignored_files_saved(built.taken_back));
     }
-    if root == parent.root {
+    let message = req.message.unwrap_or(if req.amend {
+        parent.message.as_str()
+    } else {
+        ""
+    });
+    if root == parent.root && (!req.amend || message == parent.message) {
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
         if !packs.is_empty() {
             packs.finish()?;
@@ -460,30 +522,52 @@ pub fn save_folder(
     let Some(line) = &line else {
         return Err(SaveError::NeedsLineName);
     };
-    let save = Save {
-        root,
-        parents: vec![parent_id],
-        author: req.who.clone(),
-        saver: req.who.clone(),
-        message: req.message.to_owned(),
-        change_id: ChangeId::random()
-            .map_err(io::Error::other)
-            .map_err(RepoError::from)?,
-        move_notes: vec![],
-        signature: vec![],
-        extra: BTreeMap::from([(EXTRA_LINE.to_owned(), line.as_bytes().to_vec())]),
+    let save = if req.amend {
+        // They describe the Git commit the old save came from, which the new one isn't.
+        let mut extra = parent.extra.clone();
+        for field in [
+            EXTRA_GIT_COMMIT,
+            EXTRA_GIT_HEADER,
+            EXTRA_GIT_ORIGINAL_MESSAGE,
+        ] {
+            extra.remove(field);
+        }
+        Save {
+            root,
+            parents: parent.parents.clone(),
+            author: parent.author.clone(),
+            saver: req.who.clone(),
+            message: message.to_owned(),
+            change_id: parent.change_id,
+            move_notes: parent.move_notes.clone(),
+            signature: vec![],
+            extra,
+        }
+    } else {
+        Save {
+            root,
+            parents: vec![parent_id],
+            author: req.who.clone(),
+            saver: req.who.clone(),
+            message: message.to_owned(),
+            change_id: ChangeId::random()
+                .map_err(io::Error::other)
+                .map_err(RepoError::from)?,
+            move_notes: vec![],
+            signature: vec![],
+            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), line.as_bytes().to_vec())]),
+        }
     };
     let encoded = save.encode();
     // Refuse a save that would not read back (an over-long message, say) before storing it.
     Save::decode(&encoded, false).map_err(StoreError::from)?;
     let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
     // Worked out before the commit, so that nothing after it can fail the save. The line's
-    // change IDs come from the cache, which then learns this one.
-    let key = *repo.cache_key();
-    let mut cache = ChangeIds::load(repo, &key);
+    // change IDs come from the cache, which then learns this one; an amend keeps the same IDs.
+    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo, &key));
     let shortened = cache
         .line(repo, line, parent_id)
-        .map(|ids| history::short_among(ids, &save.change_id, false));
+        .map(|ids| history::short_among(ids, &save.change_id, req.amend));
     let short_change_id = shortened.unwrap_or_else(|why| {
         warnings.push(Warning::new(
             warning::CHANGE_ID_NOT_SHORTENED,
@@ -507,11 +591,24 @@ pub fn save_folder(
         folder_change: None,
     };
     repo.commit(&lock, packs, &diary)?;
-    cache.add(line, parent_id, save_id, save.change_id);
+    if req.amend {
+        cache.replace(line, parent_id, save_id);
+    } else {
+        cache.add(line, parent_id, save_id, save.change_id);
+    }
     cache.store(repo, &key, &diary.state);
     keep_file_cache(repo, seen, now, &mut warnings);
+    // Counted from the save before it, which for an amend is the first parent it took over.
+    let before = match (req.amend, save.parents.first()) {
+        (false, _) => Ok(Some(parent.root)),
+        (true, Some(first)) => repo
+            .store()
+            .save(first, repo.signatures_allowed())
+            .map(|s| Some(s.root)),
+        (true, None) => Ok(None),
+    };
     // The save is committed now; failing to count its files must not make it look failed.
-    let changed_files = match count_changes(repo.store(), Some(parent.root), root) {
+    let changed_files = match before.and_then(|before| count_changes(repo.store(), before, root)) {
         Ok(count) => Some(count),
         Err(why) => {
             warnings.push(Warning::new(
@@ -530,7 +627,45 @@ pub fn save_folder(
         changed_files,
         short_change_id,
         warnings,
+        replaced: req.amend.then_some(parent_id),
     })
+}
+
+/// Who else shows `id`, the newest save of `line`, as `AmendShared` names them: a line that holds
+/// it or reaches its change ID along first parents, a server line or a tag that names it.
+fn shown_elsewhere(
+    repo: &Repository,
+    cache: &mut ChangeIds,
+    state: &State,
+    line: &str,
+    id: Id,
+    save: &Save,
+) -> Result<Vec<String>, SaveError> {
+    let mut by = Vec::new();
+    for (name, &tip) in &state.lines {
+        if name != line
+            && (tip == id
+                || cache
+                    .line(repo, name, tip)?
+                    .binary_search(&save.change_id)
+                    .is_ok())
+        {
+            by.push(format!("line {name}"));
+        }
+    }
+    for (server, lines) in &repo.server_lines(state)?.servers {
+        for (name, &tip) in lines {
+            if tip == id {
+                by.push(format!("server line {name}@{server}"));
+            }
+        }
+    }
+    for (name, tag) in &repo.tag_list(state)?.tags {
+        if tag.save == id {
+            by.push(format!("tag {name}"));
+        }
+    }
+    Ok(by)
 }
 
 /// The base save's file named `name` in a folder it lists as `before`, if it holds a file there.
@@ -1356,13 +1491,14 @@ mod tests {
     ) -> Result<SaveOutcome, SaveError> {
         let who = who();
         let req = SaveRequest {
-            message: "Change things",
+            message: Some("Change things"),
             who: &who,
             command: "save",
             accept_crlf: false,
             git_excludes,
             new_line: None,
             only: None,
+            amend: false,
         };
         save_folder(repo, &req, &mut |_| {}, &mut |_| true)
     }
@@ -1374,13 +1510,14 @@ mod tests {
     ) -> Result<SaveOutcome, SaveError> {
         let who = who();
         let req = SaveRequest {
-            message: "Some things",
+            message: Some("Some things"),
             who: &who,
             command: "save",
             accept_crlf: false,
             git_excludes: None,
             new_line: None,
             only: Some(only),
+            amend: false,
         };
         save_folder(repo, &req, &mut |_| {}, &mut |_| true)
     }
@@ -1531,10 +1668,12 @@ mod tests {
             changed_files,
             short_change_id,
             warnings,
+            replaced,
         } = save_now(&mut repo).unwrap()
         else {
             panic!("nothing was saved");
         };
+        assert_eq!(replaced, None);
         assert_eq!(changed_files, Some(1));
         assert_eq!(
             short_change_id,
@@ -2039,6 +2178,9 @@ mod tests {
                 count: 2,
                 first: vec!["fine".into(), hostile()],
             },
+            SaveError::AmendShared {
+                by: vec!["line fine".into(), format!("tag {HOSTILE}")],
+            },
         ] {
             assert_hostile_text_escaped(&e.to_string());
         }
@@ -2102,6 +2244,16 @@ mod tests {
         // A link, a pipe, a huge file or one Bolt can't read has no pattern to fix.
         let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
         assert!(!hint.contains("pattern"), "{hint}");
+    }
+
+    #[test]
+    fn a_refused_amend_names_the_first_five_that_show_the_save() {
+        let shown = |by: Vec<String>| SaveError::AmendShared { by }.to_string();
+        let one = shown(vec!["line b".into()]);
+        assert!(one.contains(": line b shows it too,"), "{one}");
+        let many = shown((1..=7).map(|n| format!("tag v{n}")).collect());
+        let named = ": tag v1, tag v2, tag v3, tag v4, tag v5 and 2 more show it too,";
+        assert!(many.contains(named), "{many}");
     }
 
     #[test]
@@ -2794,13 +2946,14 @@ mod tests {
     ) -> (Result<SaveOutcome, SaveError>, Option<LargeSave>) {
         let who = who();
         let req = SaveRequest {
-            message: "Add much",
+            message: Some("Add much"),
             who: &who,
             command: "save",
             accept_crlf: false,
             git_excludes: None,
             new_line: None,
             only,
+            amend: false,
         };
         let mut asked = None;
         let result = save_folder(repo, &req, &mut |_| {}, &mut |large| {

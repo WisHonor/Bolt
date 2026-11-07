@@ -44,13 +44,14 @@ fn saved(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
     write_all(dir.path(), files);
     let who = who();
     let req = SaveRequest {
-        message: "next",
+        message: Some("next"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     let saved = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
     assert!(matches!(saved, SaveOutcome::Saved { .. }));

@@ -34,13 +34,14 @@ fn save(repo: &mut Repository) {
         tz_offset_min: 0,
     };
     let req = SaveRequest {
-        message: "Big",
+        message: Some("Big"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap();
 }

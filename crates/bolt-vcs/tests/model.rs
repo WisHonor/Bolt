@@ -462,13 +462,14 @@ fn save(repo: &mut Repository, m: &mut Model) {
     // A save made at a save starts a line.
     let new_line = m.line.is_none().then(|| format!("line-{}", m.new_lines));
     let req = SaveRequest {
-        message: "Save",
+        message: Some("Save"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: new_line.as_deref(),
         only: None,
+        amend: false,
     };
     match save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
         SaveOutcome::Saved { save_id, .. } => {

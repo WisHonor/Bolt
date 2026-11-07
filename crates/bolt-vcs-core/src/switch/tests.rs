@@ -21,13 +21,14 @@ fn who() -> Person {
 fn save_now(repo: &mut Repository) -> SaveOutcome {
     let who = who();
     let req = SaveRequest {
-        message: "next",
+        message: Some("next"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap()
 }

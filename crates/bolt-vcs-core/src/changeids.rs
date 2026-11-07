@@ -182,6 +182,16 @@ impl ChangeIds {
         line.tip = tip;
         self.changed = true;
     }
+
+    /// Records that `tip`, with the change ID of `old`, took the place of `old` as the newest save
+    /// of `name`. Nothing changes unless the cache knows the line at `old`.
+    pub(crate) fn replace(&mut self, name: &str, old: Id, tip: Id) {
+        let Some(line) = self.lines.get_mut(name).filter(|l| l.tip == old) else {
+            return;
+        };
+        line.tip = tip;
+        self.changed = true;
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +271,19 @@ mod tests {
         assert_eq!(tip, Id([8; 32]));
         assert_eq!(got.iter().map(|c| c.0[0]).collect::<Vec<_>>(), [3, 3, 5, 9]);
         ids.add("new", Id([1; 32]), Id([8; 32]), ChangeId([5; 16]));
+        assert!(ids.get("new").is_none());
+    }
+
+    #[test]
+    fn a_replaced_save_keeps_the_line_s_ids() {
+        let mut ids = sample();
+        ids.replace("main", Id([7; 32]), Id([8; 32]));
+        assert_eq!(ids.get("main").unwrap().0, Id([1; 32]));
+        ids.replace("main", Id([1; 32]), Id([8; 32]));
+        let (tip, got) = ids.get("main").unwrap();
+        assert_eq!(tip, Id([8; 32]));
+        assert_eq!(got.iter().map(|c| c.0[0]).collect::<Vec<_>>(), [3, 3, 9]);
+        ids.replace("new", Id([1; 32]), Id([8; 32]));
         assert!(ids.get("new").is_none());
     }
 }

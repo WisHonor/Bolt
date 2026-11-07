@@ -328,13 +328,14 @@ mod tests {
         for i in 0..33 {
             std::fs::write(dir.path().join("a.txt"), format!("version {i}\n")).unwrap();
             let req = SaveRequest {
-                message: "Change a",
+                message: Some("Change a"),
                 who: &who,
                 command: "save",
                 accept_crlf: false,
                 git_excludes: None,
                 new_line: None,
                 only: None,
+                amend: false,
             };
             match save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
                 SaveOutcome::Saved {

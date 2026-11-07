@@ -61,20 +61,7 @@ enum Command {
     Import,
     /// Save the current state of your files: all of them, or only these files, folders and
     /// patterns (such as "*.png" or "art/**/*.png").
-    Save {
-        message: Option<String>,
-        #[arg(value_name = "PATH")]
-        paths: Vec<PathBuf>,
-        /// After an import, save files Git wrote with CRLF line endings as they are.
-        #[arg(long)]
-        accept_crlf: bool,
-        /// At a save rather than on a line, the name of the new line this save starts.
-        #[arg(long, value_name = "NAME")]
-        line: Option<String>,
-        /// Save without asking, however much the save adds.
-        #[arg(long)]
-        yes: bool,
-    },
+    Save(SaveArgs),
     /// Show what changed since your last save.
     Status {
         /// Read every file, not only those that look changed.
@@ -140,6 +127,26 @@ enum Command {
         #[arg(value_name = "NUMBER")]
         number: Option<String>,
     },
+}
+
+#[derive(clap::Args)]
+struct SaveArgs {
+    message: Option<String>,
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+    /// After an import, save files Git wrote with CRLF line endings as they are.
+    #[arg(long)]
+    accept_crlf: bool,
+    /// At a save rather than on a line, the name of the new line this save starts.
+    #[arg(long, value_name = "NAME")]
+    line: Option<String>,
+    /// Save without asking, however much the save adds.
+    #[arg(long)]
+    yes: bool,
+    /// Replace your line's newest save with one holding your changes too, keeping its change ID;
+    /// leave out the message, or give "", to keep its message.
+    #[arg(long, conflicts_with = "line")]
+    amend: bool,
 }
 
 #[derive(clap::Args)]
@@ -407,17 +414,18 @@ fn ask_large(large: &LargeSave) -> Option<bool> {
     Some(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
-fn save(
-    json: bool,
-    message: Option<String>,
-    given: &[PathBuf],
-    accept_crlf: bool,
-    line: Option<String>,
-    yes: bool,
-    opened: &mut Option<Repository>,
-) -> Result<(), Failure> {
-    let message = message.unwrap_or_default();
-    if message.trim().is_empty() {
+fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let SaveArgs {
+        message,
+        paths: given,
+        accept_crlf,
+        line,
+        yes,
+        amend,
+    } = args;
+    // A blank message is none: a save needs one, and an amend then keeps the one it has.
+    let message = message.filter(|m| !m.trim().is_empty());
+    if message.is_none() && !amend {
         return Err(Failure {
             message: "A save needs a message.".into(),
             hint: Some("Say what you changed: bolt save \"describe your change\"".into()),
@@ -442,13 +450,14 @@ fn save(
     let ignored = ignored_project_identity(repo);
     let git_excludes = git_excludes_file(repo.root())?;
     let mut req = SaveRequest {
-        message: &message,
+        message: message.as_deref(),
         who: &who,
         command: "save",
         accept_crlf,
         git_excludes: git_excludes.as_deref(),
         new_line: line.as_deref(),
         only: only.as_deref(),
+        amend,
     };
     let mut on_wait = |_: &str| eprintln!("Waiting for another Bolt command to finish...");
     // With --json nothing is asked, so a large save stops and names --yes.
@@ -488,6 +497,7 @@ fn save(
             changed_files,
             short_change_id: short,
             mut warnings,
+            replaced,
         } => {
             // The save is made, so nothing from here on may fail the command.
             warnings.extend(repo.store().warnings());
@@ -498,17 +508,23 @@ fn save(
                     "paths": paths,
                     "save": output::save_json(&save_id, &save, &short),
                     "changed_files": changed_files,
+                    "replaced": replaced.map(|id| id.to_hex()),
                     "warnings": output::warnings_json(&warnings),
                 });
                 println!("{}", with_ignored(document, ignored.as_ref()));
             } else {
-                let title = escape(message.lines().next().unwrap_or_default(), false);
+                let title = escape(save.message.lines().next().unwrap_or_default(), false);
                 let counted = match changed_files {
                     Some(1) => "(1 file)".to_owned(),
                     Some(n) => format!("({n} files)"),
                     None => "(couldn't count the changed files)".to_owned(),
                 };
-                println!("Saved {short}  \"{title}\"  {counted}");
+                let made = if replaced.is_some() {
+                    "Amended"
+                } else {
+                    "Saved"
+                };
+                output::print_quietly(&format!("{made} {short}  \"{title}\"  {counted}\n"), &[])?;
                 if let Some(line) = req.new_line {
                     println!("You're on the new line {}.", escape(line, false));
                 }
@@ -532,7 +548,20 @@ fn save(
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
-                if paths.is_empty() {
+                if amend {
+                    let what = if paths.is_empty() {
+                        "your files match"
+                    } else {
+                        "what you named matches"
+                    };
+                    output::print_quietly(
+                        &format!(
+                            "Nothing to amend: {what} your last save ({short}), and so does the \
+                             message.\n"
+                        ),
+                        &[],
+                    )?;
+                } else if paths.is_empty() {
                     println!("Nothing to save: no changes since your last save ({short}).");
                 } else {
                     println!("Nothing to save there: it matches your last save ({short}).");
@@ -1691,21 +1720,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Start => start(cli.json, &mut opened),
         Command::Import => import(cli.json, &mut opened),
-        Command::Save {
-            message,
-            paths,
-            accept_crlf,
-            line,
-            yes,
-        } => save(
-            cli.json,
-            message,
-            &paths,
-            accept_crlf,
-            line,
-            yes,
-            &mut opened,
-        ),
+        Command::Save(args) => save(cli.json, args, &mut opened),
         Command::Line => line_command(cli.json, &mut opened),
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::Changes { save, paths } => {
