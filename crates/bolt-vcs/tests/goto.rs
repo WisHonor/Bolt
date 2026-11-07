@@ -143,46 +143,13 @@ fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
 
 // `bolt goto` itself.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use bolt_core::diary::{Action, DiaryEntry, FolderChange, Position};
 use bolt_core::id::ChangeId;
 use bolt_core::pack::ObjectKind;
 use bolt_core::save::Save;
-
-/// Every file below `dir` but `.git` and `.bolt`, by path, with what it holds.
-fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        for e in std::fs::read_dir(&at).unwrap() {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && (name == ".git" || name == ".bolt") {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            if e.file_type().unwrap().is_dir() {
-                folders.push((e.path(), path));
-            } else {
-                found.insert(path, std::fs::read(e.path()).unwrap());
-            }
-        }
-    }
-    found
-}
-
-fn holding(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
-    entries
-        .iter()
-        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
-        .collect()
-}
+use support::{changed, files, holding};
 
 const MAIN: &[(&str, &str)] = &[
     ("a.txt", "a\n"),
@@ -238,17 +205,6 @@ fn goto_json(env: &Env, target: &str) -> serde_json::Value {
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
-}
-
-/// What `bolt status` finds changed.
-fn changed(env: &Env) -> Vec<String> {
-    let (_, doc) = warning_kinds(env, &["status"]);
-    doc["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["path"].as_str().unwrap().to_owned())
-        .collect()
 }
 
 #[test]

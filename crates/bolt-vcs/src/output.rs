@@ -2,14 +2,16 @@
 
 use std::fmt::{self, Write as _};
 use std::io::{self, IsTerminal, Write};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use bolt_core::changes::{Endings, Lines, Tag, only_line_endings};
+use bolt_core::changes::{Endings, Lines, Tag, eol_only, only_line_endings};
 use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::shelf::ShelfInfo;
+use bolt_core::switch::DiscardOutcome;
 use bolt_core::text::{escape, thousands};
 use bolt_core::tidy::TidyReport;
 use bolt_core::undo::{Effect, Taken};
@@ -273,7 +275,11 @@ pub fn entry_line(
     named: &mut dyn FnMut(&Id) -> (String, Option<String>),
     files: &mut dyn FnMut(Id, Id) -> Option<usize>,
 ) -> String {
-    let mut line = escape(&entry.command, false);
+    let mut line = match (&entry.action, entry.command.as_str()) {
+        // `undo --to` records the steps it makes as `undo`; the step line names them so too.
+        (Action::Command, "undo") => "undo --to".to_owned(),
+        _ => escape(&entry.command, false),
+    };
     if let Action::Undo(step) | Action::Redo(step) = &entry.action {
         let _ = write!(line, " of {}", step.short_hex());
     }
@@ -414,12 +420,13 @@ impl fmt::Display for LinesJson<'_> {
                 h.old_lines,
                 h.old_start
             )?;
-            for (j, (tag, line)) in h.lines.iter().enumerate() {
+            for (j, ((tag, line), eol)) in h.lines.iter().zip(eol_only(h)).enumerate() {
                 let text = Value::from(String::from_utf8_lossy(line).as_ref());
                 write!(
                     f,
-                    "{}{{\"tag\":\"{}\",\"text\":{text}}}",
+                    "{}{{{}\"tag\":\"{}\",\"text\":{text}}}",
                     if j == 0 { "" } else { "," },
+                    if eol { "\"eol_only\":true," } else { "" },
                     tag_name(*tag)
                 )?;
             }
@@ -486,7 +493,7 @@ pub fn write_lines(
             h.old_start, h.old_lines, h.new_start, h.new_lines
         );
         writeln!(out, "{}", paint("36", &at))?;
-        for (tag, line) in &h.lines {
+        for ((tag, line), eol) in h.lines.iter().zip(eol_only(h)) {
             let (mark, code) = match tag {
                 Tag::Same => (' ', ""),
                 Tag::Removed => ('-', "31"),
@@ -500,7 +507,11 @@ pub fn write_lines(
                 .split('\t')
                 .map(|piece| escape(piece, false))
                 .collect();
-            let shown = format!("{mark}{}", shown.join("\t"));
+            let mut shown = format!("{mark}{}", shown.join("\t"));
+            // Of a pair that differs only in its ending, the line that ends in CRLF says so.
+            if eol && line.ends_with(b"\r\n") {
+                shown.push_str(" (CRLF)");
+            }
             if code.is_empty() {
                 writeln!(out, "{shown}")?;
             } else {
@@ -521,6 +532,14 @@ pub struct Stdout {
     pub closed: bool,
 }
 
+/// The first write to stdout that failed for another reason than its reader going away. Nothing
+/// more is written there after it, so what was printed is cut off rather than spliced.
+static FAILED: OnceLock<(io::ErrorKind, String)> = OnceLock::new();
+
+fn failed_write((kind, why): &(io::ErrorKind, String)) -> io::Error {
+    io::Error::new(*kind, why.clone())
+}
+
 impl Stdout {
     pub fn new() -> Stdout {
         Stdout {
@@ -530,22 +549,33 @@ impl Stdout {
     }
 
     fn noting<T>(&mut self, done: io::Result<T>) -> io::Result<T> {
-        if let Err(e) = &done
-            && e.kind() == io::ErrorKind::BrokenPipe
-        {
-            self.closed = true;
+        match done {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                self.closed = true;
+                Err(e)
+            }
+            Err(e) => {
+                let why = (e.kind(), format!("Bolt couldn't write its output: {e}"));
+                Err(failed_write(FAILED.get_or_init(|| why)))
+            }
+            done => done,
         }
-        done
     }
 }
 
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(failed) = FAILED.get() {
+            return Err(failed_write(failed));
+        }
         let done = self.inner.write(buf);
         self.noting(done)
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if let Some(failed) = FAILED.get() {
+            return Err(failed_write(failed));
+        }
         let done = self.inner.flush();
         self.noting(done)
     }
@@ -671,23 +701,29 @@ pub fn stream_document<W: Write>(
 
 /// Prints `failure`: to stdout as JSON with `--json`, else to stderr as text. `warnings` are what
 /// the command had found before it failed; only the JSON document lists them. A failure the
-/// command's own document already ends with is not printed again.
+/// command's own document already ends with is not printed again. A document can't be written
+/// to a stdout that fails, so the failure goes to stderr as text then; a reader that went away
+/// hears nothing.
 pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
     if failure.printed {
         return;
     }
     if json {
-        println!("{}", error_document(failure, warnings));
-    } else {
-        for w in warnings.iter().filter(|w| warning::told_on_failure(w.kind)) {
-            eprintln!("warning: {}", w.message);
+        let mut out = Stdout::new();
+        let done =
+            writeln!(out, "{}", error_document(failure, warnings)).and_then(|()| out.flush());
+        if done.is_ok() || out.closed {
+            return;
         }
-        // Escaped once more, so that a piece nobody thought of escaping still can't drive the
-        // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
-        eprintln!("error: {}", escape(&failure.message, true));
-        if let Some(hint) = &failure.hint {
-            eprintln!("hint: {}", escape(hint, true));
-        }
+    }
+    for w in warnings.iter().filter(|w| warning::told_on_failure(w.kind)) {
+        eprintln!("warning: {}", w.message);
+    }
+    // Escaped once more, so that a piece nobody thought of escaping still can't drive the
+    // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
+    eprintln!("error: {}", escape(&failure.message, true));
+    if let Some(hint) = &failure.hint {
+        eprintln!("hint: {}", escape(hint, true));
     }
 }
 
@@ -778,6 +814,48 @@ impl<W: Write> Progress<W> {
         let _ = self.out.flush();
         self.shown = true;
     }
+}
+
+/// What `bolt discard` did, for people; `everywhere` when it was given no paths.
+pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
+    let n = done.restored.len() + done.removed.len();
+    let count = |n: usize, one: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {one}s"),
+    };
+    // Folders count only where no file does.
+    let what = if n == 0 {
+        count(done.folders, "folder")
+    } else {
+        count(n, "file")
+    };
+    // A deleted file put back loses nothing, so it needs no copy.
+    let copies = match done.safety_copies {
+        0 => String::new(),
+        k if k == n && n == 1 => " (a safety copy of it was kept)".into(),
+        k if k == n => " (a safety copy of each was kept)".into(),
+        1 => " (a safety copy of the 1 that held unsaved work was kept)".into(),
+        k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
+    };
+    let nothing = n == 0 && done.folders == 0;
+    // The warning that follows names what stayed and says why.
+    let said = match (nothing, everywhere) {
+        (true, _) if !done.applied.changed_since_plan.is_empty() => {
+            "Nothing was discarded: your files changed while Bolt was discarding them. Run bolt \
+             discard again."
+                .to_owned()
+        }
+        (true, _) if done.links_left.len() == 1 => {
+            "Nothing was discarded: the unsaved link stays as it is.".to_owned()
+        }
+        (true, _) if !done.links_left.is_empty() => {
+            "Nothing was discarded: the unsaved links stay as they are.".to_owned()
+        }
+        (true, true) => "Nothing to discard: your files match your last save.".to_owned(),
+        (true, false) => "Nothing to discard there: it matches your last save.".to_owned(),
+        _ => format!("Threw away your unsaved changes in {what}{copies}."),
+    };
+    said + "\n"
 }
 
 /// What `bolt tidy` did, for people.
@@ -1044,6 +1122,39 @@ mod tests {
             tidied(&nothing),
             "Freed 0 B (0 packs removed, 0 written).\n"
         );
+    }
+
+    #[test]
+    fn a_discard_whose_files_all_changed_again_says_nothing_was_discarded() {
+        use bolt_core::writeout::Applied;
+        let nothing = DiscardOutcome {
+            restored: vec![],
+            removed: vec![],
+            folders: 0,
+            applied: Applied::default(),
+            safety_copies: 0,
+            folder_change: None,
+            links_left: vec![],
+        };
+        assert_eq!(
+            discarded(&nothing, true),
+            "Nothing to discard: your files match your last save.\n"
+        );
+        // Every file it planned to throw away changed before it was written: they don't match.
+        let changed_again = DiscardOutcome {
+            applied: Applied {
+                changed_since_plan: vec!["a.txt".into()],
+                ..Applied::default()
+            },
+            ..nothing
+        };
+        for everywhere in [true, false] {
+            assert_eq!(
+                discarded(&changed_again, everywhere),
+                "Nothing was discarded: your files changed while Bolt was discarding them. Run \
+                 bolt discard again.\n"
+            );
+        }
     }
 
     #[test]

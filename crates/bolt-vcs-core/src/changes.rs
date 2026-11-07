@@ -108,27 +108,18 @@ pub enum Endings {
     Both,
 }
 
-/// How line endings changed, if the hunks change nothing else: each line a hunk removes comes
-/// back as the line it adds in the same place, with `\r\n` for `\n` or the other way round.
+/// How line endings changed, if the hunks change nothing else: every line they remove or add is
+/// one of a pair [`eol_only`] marks.
 #[must_use]
 pub fn only_line_endings(hunks: &[Hunk<'_>]) -> Option<Endings> {
     let mut found = None;
     for h in hunks {
-        let side = |tag| {
-            h.lines
-                .iter()
-                .filter(move |(t, _)| *t == tag)
-                .map(|(_, l)| *l)
-        };
-        if side(Tag::Removed).count() != side(Tag::Added).count() {
+        let pairs = ending_pairs(&h.lines);
+        let changed = h.lines.iter().filter(|(t, _)| *t != Tag::Same).count();
+        if pairs.len() * 2 != changed {
             return None;
         }
-        for (old, new) in side(Tag::Removed).zip(side(Tag::Added)) {
-            let way = match (ending(old), ending(new)) {
-                ((a, b"\r\n"), (b, b"\n")) if a == b => Endings::CrlfToLf,
-                ((a, b"\n"), (b, b"\r\n")) if a == b => Endings::LfToCrlf,
-                _ => return None,
-            };
+        for (_, _, way) in pairs {
             found = match found {
                 Some(seen) if seen != way => Some(Endings::Both),
                 _ => Some(way),
@@ -136,6 +127,58 @@ pub fn only_line_endings(hunks: &[Hunk<'_>]) -> Option<Endings> {
         }
     }
     found
+}
+
+/// For each line of `hunk`, whether it is one of a removed and an added line that differ only in
+/// their ending, `\r\n` for `\n` or the other way round. The pairs are the diff's own: the i-th of
+/// a run of removed lines with the i-th of the added lines right after it.
+#[must_use]
+pub fn eol_only(hunk: &Hunk<'_>) -> Vec<bool> {
+    let mut marked = vec![false; hunk.lines.len()];
+    for (old, new, _) in ending_pairs(&hunk.lines) {
+        for at in [old, new] {
+            if let Some(m) = marked.get_mut(at) {
+                *m = true;
+            }
+        }
+    }
+    marked
+}
+
+/// The pairs [`eol_only`] marks, by where they are among `lines`, with the way each changed.
+fn ending_pairs(lines: &[(Tag, &[u8])]) -> Vec<(usize, usize, Endings)> {
+    let run = |from: usize, tag| {
+        lines
+            .iter()
+            .skip(from)
+            .take_while(|(t, _)| *t == tag)
+            .count()
+    };
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < lines.len() {
+        let removed = run(at, Tag::Removed);
+        let added = run(at + removed, Tag::Added);
+        for k in 0..removed.min(added) {
+            let (old, new) = (at + k, at + removed + k);
+            let way = match (lines.get(old), lines.get(new)) {
+                (Some((_, a)), Some((_, b))) => ending_change(a, b),
+                _ => None,
+            };
+            found.extend(way.map(|way| (old, new, way)));
+        }
+        at += (removed + added).max(1);
+    }
+    found
+}
+
+/// How `old` became `new`, if only its ending changed.
+fn ending_change(old: &[u8], new: &[u8]) -> Option<Endings> {
+    match (ending(old), ending(new)) {
+        ((a, b"\r\n"), (b, b"\n")) if a == b => Some(Endings::CrlfToLf),
+        ((a, b"\n"), (b, b"\r\n")) if a == b => Some(Endings::LfToCrlf),
+        _ => None,
+    }
 }
 
 /// A line split into what it holds and its ending.
@@ -162,7 +205,7 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     let (_, entry) = repo.current().map_err(SaveError::from)?;
     let tip = tip_of(&entry).map_err(SaveError::from)?;
     let save = store.save(&tip, repo.signatures_allowed())?;
-    let now = read_folder(repo, save.root, false, git_excludes)?;
+    let now = read_folder(repo, save.root, false, git_excludes).map_err(|e| e.in_save(tip))?;
     for w in now
         .warnings
         .into_iter()
@@ -503,6 +546,26 @@ mod tests {
         assert_eq!(way("a\r\n", "b\n"), None);
         assert_eq!(way("a", "a\n"), None);
         assert_eq!(way("a\n", "a\n"), None);
+        // The endings changed, and a line moved too.
+        assert_eq!(way("a\r\nb\r\ns\n", "a\ns\nb\n"), None);
+    }
+
+    #[test]
+    fn a_pair_that_differs_only_in_its_ending_is_marked() {
+        let marked =
+            |old, new| -> Vec<Vec<bool>> { hunks_of(old, new).iter().map(eol_only).collect() };
+        assert_eq!(
+            marked("one\r\ntwo\nthree\n", "one\ntwo\nTHREE\n"),
+            [[true, true, false, false, false]]
+        );
+        // The i-th line of each run of removed lines goes with the i-th of the added lines after it.
+        assert_eq!(
+            marked("a\r\nb\r\ns\n", "a\ns\nb\n"),
+            [[true, false, true, false, false]]
+        );
+        // A line without an ending, or two that are the same, aren't such a pair.
+        assert_eq!(marked("a\r\n", "a"), [[false, false]]);
+        assert_eq!(marked("a\n", "b\n"), [[false, false]]);
     }
 
     #[test]

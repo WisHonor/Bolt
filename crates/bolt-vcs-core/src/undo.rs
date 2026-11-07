@@ -126,6 +126,8 @@ pub struct UndoOutcome {
     pub shelved: Vec<(String, Id)>,
     /// `head` was lost, so `undo --to` made its entry current by one step that changed no file.
     pub head_lost: bool,
+    /// The steps' warnings, as one command's (see [`UndoError::warnings`]).
+    pub warnings: Vec<Warning>,
 }
 
 /// Why `undo`, `redo` or `undo --to` stopped, with the steps taken, and shelves made, before it
@@ -134,7 +136,11 @@ pub struct UndoOutcome {
 pub struct UndoError {
     pub taken: Vec<Taken>,
     pub shelved: Vec<(String, Id)>,
-    pub error: SwitchError,
+    /// The steps' warnings, as one command's: each told once, with one for every entry left
+    /// unwritten and one for every link written as a file, whichever step they came from, the one
+    /// a file in use stopped included.
+    pub warnings: Vec<Warning>,
+    pub error: Box<SwitchError>,
 }
 
 impl fmt::Display for UndoError {
@@ -149,11 +155,10 @@ impl std::error::Error for UndoError {
     }
 }
 
-/// The warnings of the steps taken, as one command's: each told once, with one for every entry
-/// left unwritten and one for every link written as a file, whichever step they came from.
-#[must_use]
-pub fn warnings(taken: &[Taken]) -> Vec<Warning> {
-    let (mut not_written, mut placeholders) = (BTreeSet::new(), BTreeSet::new());
+/// The warnings of the steps taken and of the one that `stopped` partway, as one command's.
+fn warnings(taken: &[Taken], stopped: Earlier) -> Vec<Warning> {
+    let mut not_written: BTreeSet<String> = stopped.not_written.into_iter().collect();
+    let mut placeholders: BTreeSet<String> = stopped.placeholders.into_iter().collect();
     let mut told: Vec<Warning> = Vec::new();
     for t in taken {
         not_written.extend(t.applied.not_written.iter().cloned());
@@ -240,9 +245,10 @@ pub fn undo_to(
         return Err(UndoError {
             taken: Vec::new(),
             shelved: Vec::new(),
-            error: SwitchError::NotAnEntry {
+            warnings: Vec::new(),
+            error: Box::new(SwitchError::NotAnEntry {
                 text: entry.to_owned(),
-            },
+            }),
         });
     }
     let mut head_lost = false;
@@ -288,7 +294,7 @@ pub fn undo_to(
     match went {
         Ok(done) => Ok(UndoOutcome { head_lost, ..done }),
         Err(e) => Err(UndoError {
-            error: aimed(e.error, &text),
+            error: Box::new(aimed(*e.error, &text)),
             ..e
         }),
     }
@@ -399,25 +405,30 @@ fn stepping(
         &mut Vec<Shelf>,
     ) -> Result<(), SwitchError>,
 ) -> Result<UndoOutcome, UndoError> {
-    let (mut taken, mut shelved) = (Vec::new(), Vec::new());
+    let (mut taken, mut shelved, mut stopped) = (Vec::new(), Vec::new(), Earlier::default());
     let done = switch::locked(repo, command, on_wait, |repo, lock, earlier, finished| {
         // Running the command again after a stop finishes it, and no more.
         if !finished {
-            steps(repo, lock, earlier, &mut taken, &mut shelved)?;
+            let stepped = steps(repo, lock, earlier, &mut taken, &mut shelved);
+            stopped = std::mem::take(earlier);
+            stepped?;
         }
         Ok(finished)
     });
+    let warnings = warnings(&taken, stopped);
     match done {
         Ok(finished) => Ok(UndoOutcome {
             taken,
             finished,
             shelved,
             head_lost: false,
+            warnings,
         }),
         Err(error) => Err(UndoError {
             taken,
             shelved,
-            error,
+            warnings,
+            error: Box::new(error),
         }),
     }
 }

@@ -11,11 +11,7 @@ use bolt_core::pack::PackReader;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, text};
-
-fn write(env: &Env, path: &str, bytes: &str) {
-    fs::write(env.root().join(path), bytes).unwrap();
-}
+use support::{Env, head, text, write};
 
 fn read(env: &Env, path: &str) -> Vec<u8> {
     fs::read(env.root().join(path)).unwrap()
@@ -52,11 +48,6 @@ fn json(env: &Env, args: &[&str]) -> serde_json::Value {
 
 fn head_file(env: &Env) -> PathBuf {
     env.root().join(".bolt/state/head")
-}
-
-/// The newest diary entry, with its ID.
-fn head(env: &Env) -> (Id, DiaryEntry) {
-    Repository::open(env.root()).unwrap().current().unwrap()
 }
 
 fn entry(env: &Env, id: Id) -> DiaryEntry {

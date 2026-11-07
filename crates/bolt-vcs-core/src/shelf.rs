@@ -278,8 +278,9 @@ pub(crate) fn within_limit(count: usize) -> Result<(), SwitchError> {
 }
 
 /// `paths` parted into those the save `now` changed since the save `then`, and the rest. A path
-/// counts as changed where the two saves differ at it, or where a folder above it is a folder in
-/// only one of them: a collision below a folder a save turned into a file is named below it.
+/// counts as changed where the two saves differ at it, or where `now` holds a file or link above
+/// it that `then` didn't hold there: a collision below a folder a save turned into a file is named
+/// below it, and work of the user's own below a folder the save made or removed is not the save's.
 fn changed_since(
     repo: &Repository,
     then: Id,
@@ -311,7 +312,9 @@ fn changed_since(
             if differ {
                 break;
             }
-            differ = before.folder(up)?.is_some() != after.folder(up)?.is_some();
+            let now = held(after.entry(up)?);
+            differ = now.is_some_and(|(kind, _)| kind != EntryKind::Folder)
+                && now != held(before.entry(up)?);
         }
         if differ {
             changed.push(path);

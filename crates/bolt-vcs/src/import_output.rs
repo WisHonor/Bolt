@@ -22,15 +22,15 @@ fn and_the_rest(mut listed: Vec<String>, count: u64) -> Vec<String> {
     listed
 }
 
-/// Prints `heading` and `items` after it: one on the same line, more on a line each.
-fn print_list(heading: &str, items: &[String]) {
+/// `heading` and `items` after it, added to `text`: one on the same line, more on a line each.
+fn list(text: &mut String, heading: &str, items: &[String]) {
     match items {
         [] => {}
-        [one] => println!("{heading}: {one}"),
+        [one] => *text += &format!("{heading}: {one}\n"),
         _ => {
-            println!("{heading}:");
+            *text += &format!("{heading}:\n");
             for item in items {
-                println!("  {item}");
+                *text += &format!("  {item}\n");
             }
         }
     }
@@ -38,7 +38,7 @@ fn print_list(heading: &str, items: &[String]) {
 
 /// What `bolt import` tells people it did: what came in, where they stand, and what was renamed
 /// or left out.
-pub fn print_import(report: &ImportReport, standing: &str) {
+pub fn import_text(report: &ImportReport, standing: &str) -> String {
     let mut parts = vec![counted(report.lines, "line", "lines")];
     if report.servers > 0 {
         let lines = counted(report.server_lines, "server line", "server lines");
@@ -49,8 +49,10 @@ pub fn print_import(report: &ImportReport, standing: &str) {
     }
     parts.push(counted(report.tags, "tag", "tags"));
     let commits = counted(report.commits, "commit", "commits");
-    println!("Imported {commits} from Git: {}.", parts.join(", "));
-    println!("{standing}");
+    let mut text = format!(
+        "Imported {commits} from Git: {}.\n{standing}\n",
+        parts.join(", ")
+    );
     let renamed: Vec<String> = report
         .renamed
         .iter()
@@ -69,7 +71,8 @@ pub fn print_import(report: &ImportReport, standing: &str) {
         })
         .collect();
     let count = report.renamed.len() as u64;
-    print_list(
+    list(
+        &mut text,
         &format!(
             "Renamed {} that Bolt's names don't allow",
             counted(count, "name", "names")
@@ -81,7 +84,8 @@ pub fn print_import(report: &ImportReport, standing: &str) {
         "Didn't import {} (only branches, server branches and tags come in)",
         counted(report.skipped_ref_count, "ref", "refs")
     );
-    print_list(
+    list(
+        &mut text,
         &heading,
         &and_the_rest(refs.collect(), report.skipped_ref_count),
     );
@@ -93,7 +97,7 @@ pub fn print_import(report: &ImportReport, standing: &str) {
         .collect();
     let count = report.skipped_tags.len() as u64;
     let heading = format!("Didn't import {}", counted(count, "tag", "tags"));
-    print_list(&heading, &and_the_rest(tags, count));
+    list(&mut text, &heading, &and_the_rest(tags, count));
     let entries: Vec<String> = report
         .skipped_entries
         .iter()
@@ -121,19 +125,22 @@ pub fn print_import(report: &ImportReport, standing: &str) {
             thousands(report.skipped_entry_count)
         )
     };
-    print_list(&heading, &entries);
+    list(&mut text, &heading, &entries);
     match report.inexact_commits {
         0 => {}
-        1 => println!(
-            "1 commit can't be recreated exactly by a later export: it holds a folder in a form \
-             Git no longer writes, or an entry Bolt left out."
-        ),
-        n => println!(
-            "{} commits can't be recreated exactly by a later export: they hold folders in a form \
-             Git no longer writes, or entries Bolt left out.",
-            thousands(n)
-        ),
+        1 => {
+            text += "1 commit can't be recreated exactly by a later export: it holds a folder in a \
+                     form Git no longer writes, or an entry Bolt left out.\n";
+        }
+        n => {
+            text += &format!(
+                "{} commits can't be recreated exactly by a later export: they hold folders in a \
+                 form Git no longer writes, or entries Bolt left out.\n",
+                thousands(n)
+            );
+        }
     }
+    text
 }
 
 /// The `--json` document of `bolt import` (docs/json.md).

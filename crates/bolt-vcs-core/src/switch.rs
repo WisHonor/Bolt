@@ -163,7 +163,8 @@ pub struct ShelfCollisions {
     pub label: String,
     /// The save the shelf was made on.
     pub base: Id,
-    /// A line still reaches `base`, so `bolt goto` finds it.
+    /// `bolt goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
+    /// save the project is on changed something in the way.
     pub base_on_a_line: bool,
     /// Unsaved work, or files Bolt ignores.
     pub unsaved: Vec<String>,
@@ -269,7 +270,7 @@ impl SwitchError {
                     );
                     (there, " (a new shelf would be the newest)")
                 } else {
-                    let gone = "the save it was made on is no longer on any line, and bolt undo \
+                    let gone = "bolt goto can't reach the save it was made on, and bolt undo \
                                 --list shows the steps that can bring it back";
                     (gone.to_owned(), "")
                 };
@@ -665,12 +666,12 @@ fn go(
     })
 }
 
-/// What finishing a stopped switch left unwritten or wrote as placeholders, told together with
-/// what the command itself does.
+/// What finishing a stopped switch, or a switch a file in use stopped, left unwritten or wrote as
+/// placeholders, told together with what the command itself does.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Earlier {
-    placeholders: Vec<String>,
-    not_written: Vec<String>,
+    pub(crate) placeholders: Vec<String>,
+    pub(crate) not_written: Vec<String>,
 }
 
 impl Earlier {
@@ -727,7 +728,8 @@ pub(crate) struct Switch {
 /// Makes a planned switch in decision 049's order: its packs and diary entry are stored, then
 /// the journal written, the folder changed, `head` moved and the journal removed. A crash at any
 /// step leaves what the next changing command finishes, and so do files another program holds,
-/// which stop it with `SwitchInUse` after its warnings are noted. Gives what was done.
+/// which stop it with `SwitchInUse` after its warnings are noted, but for what it left unwritten
+/// or wrote as placeholders, which goes back to `earlier`. Gives what was done.
 pub(crate) fn switch(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -762,8 +764,13 @@ pub(crate) fn switch(
             .find(|w| w.kind == warning::FILES_IN_USE)
             .map(|w| w.message.clone())
             .unwrap_or_default();
+        // Told once with the rest of the command's, the steps an `undo 2` took before included.
+        earlier.placeholders = applied.placeholders;
+        earlier.not_written = applied.not_written;
         for w in applied.warnings {
-            repo.store().note(w);
+            if !LISTED.contains(&w.kind) {
+                repo.store().note(w);
+            }
         }
         return Err(RepoError::SwitchInUse { detail }.into());
     }

@@ -353,9 +353,13 @@ impl Store {
         warnings
     }
 
-    /// Keeps `warning` to come with the others.
+    /// Keeps `warning` to come with the others, once however often it is given: a command that
+    /// tries again (a save asking for a line's name) meets what it met the first time.
     pub fn note(&self, warning: Warning) {
-        self.checked().notes.push(warning);
+        let notes = &mut self.checked().notes;
+        if !notes.contains(&warning) {
+            notes.push(warning);
+        }
     }
 
     /// Closes every pack kept open, so they can be removed; they are opened again when searched.
@@ -838,6 +842,19 @@ mod tests {
                 prop_assert_eq!(&out, c);
             }
         }
+    }
+
+    #[test]
+    fn a_note_is_kept_once_however_often_it_is_given() {
+        let (_root, _tmp, packs) = dirs();
+        let store = Store::open(&packs).unwrap();
+        let finished = Warning::new(warning::SWITCH_FINISHED, "Finished a switch.");
+        let unflushed = Warning::new(warning::HEAD_NOT_FLUSHED, "Couldn't flush.");
+        // A save the command line tries again meets what the first try met.
+        store.note(finished.clone());
+        store.note(unflushed.clone());
+        store.note(finished.clone());
+        assert_eq!(store.warnings(), [finished, unflushed]);
     }
 
     #[test]

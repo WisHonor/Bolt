@@ -1047,6 +1047,7 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
 }
 
 /// Every path below `dir`, `.bolt` aside, `/` between names.
+#[cfg(feature = "fault-injection")]
 fn all_paths(dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut folders = vec![(dir.to_path_buf(), String::new())];
@@ -1073,6 +1074,7 @@ fn all_paths(dir: &Path) -> Vec<String> {
 }
 
 /// Every file of the switch wholly old or wholly new, and nothing else anywhere in the folder.
+#[cfg(feature = "fault-injection")]
 fn assert_wholly_old_or_new(dir: &Path, n: u64) {
     for (path, _) in OLD.iter().chain(NEW) {
         let now = held(dir, path);
@@ -1091,6 +1093,7 @@ fn assert_wholly_old_or_new(dir: &Path, n: u64) {
 }
 
 /// The switch done: `head` on its entry, no journal, the folder exactly the new save.
+#[cfg(feature = "fault-injection")]
 fn assert_switched(repo: &Repository, dir: &Path, journal: &Journal, n: u64) {
     assert_eq!(repo.head().unwrap(), journal.target, "fault {n}");
     assert_eq!(Journal::read(repo).unwrap(), None, "fault {n}");

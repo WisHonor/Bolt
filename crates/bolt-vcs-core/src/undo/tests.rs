@@ -229,7 +229,7 @@ fn a_step_whose_saves_are_gone_is_named_and_nothing_changes() {
     let who = who();
     let failed = undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap_err();
     assert!(failed.taken.is_empty());
-    match &failed.error {
+    match &*failed.error {
         SwitchError::StepGone { step: named, .. } => assert_eq!(*named, step),
         other => panic!("{other:?}"),
     }
@@ -276,7 +276,7 @@ fn a_missing_diary_entry_is_damage_that_names_it() {
     drop(lock);
     let who = who();
     let failed = undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap_err();
-    match failed.error {
+    match *failed.error {
         SwitchError::Repo(RepoError::Damaged { detail }) => {
             assert!(detail.contains(&missing.to_hex()), "{detail}");
         }
@@ -323,11 +323,87 @@ fn the_steps_warnings_are_told_as_one_commands() {
             applied,
         }
     };
-    let both = ["a".to_owned(), "b".to_owned()];
+    let both = ["a".to_owned(), "b".to_owned(), "c".to_owned()];
     let one_warning = writeout::placeholders_warning(&both);
+    // The step a file in use stopped wrote some too.
+    let stopped = Earlier {
+        placeholders: vec!["c".to_owned()],
+        not_written: vec![],
+    };
     assert_eq!(
-        warnings(&[step("a"), step("b")]),
+        warnings(&[step("a"), step("b")], stopped),
         [skipped.clone(), one_warning]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_step_stopped_by_a_file_in_use_shares_the_placeholders_warning_of_the_steps_before() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::{Duration, SystemTime};
+    const FILE: EntryKind = EntryKind::File;
+    const LINK: EntryKind = EntryKind::Symlink;
+    let (dir, mut repo) = saved(&[("x", b"x0")]);
+    repo.set_cache_key([7; 32]);
+    let start = tip_of(&repo.current().unwrap().1).unwrap();
+    // Links that lead out of the project, so each is written as a placeholder.
+    let mut tips = Vec::new();
+    for entries in [
+        &[("l1", LINK, b"/out1" as &[u8]), ("x", FILE, b"x0")][..],
+        &[
+            ("l1", LINK, b"/out1"),
+            ("l2", LINK, b"/out2"),
+            ("x", FILE, b"xb"),
+        ],
+    ] {
+        plant_save(&mut repo, entries);
+        tips.push(tip_of(&repo.current().unwrap().1).unwrap());
+    }
+    plant(&mut repo, "test", |state| {
+        state.lines.insert("main".into(), start);
+        state.lines.insert("a".into(), tips[0]);
+        state.lines.insert("b".into(), tips[1]);
+    });
+    for line in ["a", "b"] {
+        let to = Target::Line(line.into());
+        goto(&mut repo, &to, &who(), "goto", None, &mut |_| {}).unwrap();
+    }
+    let who = who();
+    let two = StepRequest {
+        n: 2,
+        ..one_step(&who)
+    };
+    undo(&mut repo, &two, &mut |_| {}).unwrap();
+    // Gone again, so that redoing the gotos writes them where nothing is.
+    for link in ["l1", "l2"] {
+        fs::remove_file(dir.path().join(link)).unwrap();
+    }
+    // Old enough for the file-state cache to vouch for, so nothing has to read it while held.
+    let x = dir.path().join("x");
+    let file = fs::File::options().write(true).open(&x).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+    drop(file);
+    crate::status::status(&repo, false, None).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&x)
+        .unwrap();
+    // The redo of `goto a` writes l1; the redo of `goto b` writes l2, then stops at x.
+    let failed = redo(&mut repo, &two, &mut |_| {}).unwrap_err();
+    drop(held);
+    assert_eq!(failed.taken.len(), 1, "{:?}", failed.error);
+    let mut told = failed.warnings;
+    told.extend(repo.store().warnings());
+    let placeholders: Vec<&Warning> = told
+        .iter()
+        .filter(|w| w.kind == warning::PLACEHOLDERS_WRITTEN)
+        .collect();
+    assert_eq!(placeholders.len(), 1, "{told:?}");
+    assert!(
+        placeholders[0].message.ends_with("\n  l1\n  l2"),
+        "{told:?}"
     );
 }
 
@@ -496,7 +572,7 @@ fn shelve_stores_nothing_when_a_link_it_must_leave_is_in_the_way() {
         ..one_step(&who)
     };
     let failed = undo(&mut repo, &shelve, &mut |_| {}).unwrap_err();
-    match failed.error {
+    match *failed.error {
         SwitchError::InTheWayOfStep {
             paths,
             shelve: true,

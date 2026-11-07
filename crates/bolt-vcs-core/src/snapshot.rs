@@ -255,10 +255,11 @@ fn not_portable(problems: &[(String, PortabilityProblem)]) -> String {
     text
 }
 
-/// How many paths, or lines, server lines and tags, a message names; it counts the rest.
+/// How many paths, lines, server lines, tags or diary entries a message names; it counts the rest.
 pub(crate) const NAMED: usize = 5;
 
-/// The paths `first` of `count`, escaped, one to a line, and how many more there are.
+/// The paths `first` of `count` (or other names, such as diary entries' IDs), escaped, one to a
+/// line, and how many more there are.
 pub(crate) fn listed<S: AsRef<str>>(first: impl IntoIterator<Item = S>, count: u64) -> String {
     let mut text = String::new();
     let mut shown = 0;
@@ -318,6 +319,16 @@ impl SaveError {
     #[must_use]
     pub fn hint_when_reading(&self) -> Option<String> {
         self.next_step(false)
+    }
+
+    /// This error, met reading the folders of the save `save`: a spelling of `.bolt` is told as
+    /// that save's.
+    #[must_use]
+    pub(crate) fn in_save(self, save: Id) -> SaveError {
+        match self {
+            SaveError::Repo(e) => SaveError::Repo(e.in_save(save)),
+            other => other,
+        }
     }
 
     fn next_step(&self, saving: bool) -> Option<String> {

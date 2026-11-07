@@ -7,6 +7,7 @@ mod vs_git;
 #[allow(unused_imports)]
 pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -136,6 +137,96 @@ pub fn top_folder(dir: &Path) -> Listing {
         .save(&current_save(&repo).unwrap(), false)
         .unwrap();
     repo.store().listing(&save.root).unwrap()
+}
+
+/// Files by path, with what each holds.
+pub type Files = BTreeMap<String, Vec<u8>>;
+
+/// Every file below `dir` but `.bolt` and `.git` at the top, by path, with what it holds.
+pub fn files(dir: &Path) -> Files {
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = folders.pop() {
+        for e in std::fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if rel.is_empty() && (name == ".bolt" || name == ".git") {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                folders.push((e.path(), path));
+            } else {
+                found.insert(path, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    found
+}
+
+pub fn holding(entries: &[(&str, &str)]) -> Files {
+    entries
+        .iter()
+        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
+        .collect()
+}
+
+/// Writes the file `path` of the project, and the folders above it.
+pub fn write(env: &Env, path: &str, bytes: impl AsRef<[u8]>) {
+    let at = env.root().join(path);
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    std::fs::write(at, bytes).unwrap();
+}
+
+/// What `bolt status` finds changed.
+pub fn changed(env: &Env) -> Vec<String> {
+    let out = env.bolt().args(["status", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+pub fn main_tip(env: &Env) -> Id {
+    env.state().1.lines["main"]
+}
+
+/// The newest diary entry, with its ID.
+pub fn head(env: &Env) -> (Id, DiaryEntry) {
+    Repository::open(env.root()).unwrap().current().unwrap()
+}
+
+/// Every file of the save `save`, by path, with what it holds.
+pub fn saved_files(env: &Env, save: Id) -> Files {
+    let repo = Repository::open(env.root()).unwrap();
+    let store = repo.store();
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = folders.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                folders.push((e.id, path));
+            } else {
+                let mut bytes = Vec::new();
+                store.copy_content(&e.id, &mut bytes).unwrap();
+                found.insert(path, bytes);
+            }
+        }
+    }
+    found
 }
 
 /// Copies the folder `from`, everything in it, to `to`.

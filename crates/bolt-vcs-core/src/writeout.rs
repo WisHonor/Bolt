@@ -91,10 +91,23 @@ pub fn plan(
     drive: Drive,
     git_excludes: Option<&Path>,
 ) -> Result<Plan, SaveError> {
+    // A name no save of Bolt's holds is the target's, unless reading the folder met it in `from`.
+    planned(repo, from, to, only, remove_new, drive, git_excludes).map_err(|e| e.in_save(to))
+}
+
+fn planned(
+    repo: &Repository,
+    from: Id,
+    to: Id,
+    only: Option<&[String]>,
+    remove_new: bool,
+    drive: Drive,
+    git_excludes: Option<&Path>,
+) -> Result<Plan, SaveError> {
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
-    let now = read_folder(repo, from_root, false, git_excludes)?;
+    let now = read_folder(repo, from_root, false, git_excludes).map_err(|e| e.in_save(from))?;
     let mut unsaved = BTreeSet::new();
     for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
         unsaved.insert(c.path.to_owned());

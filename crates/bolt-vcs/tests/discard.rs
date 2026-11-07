@@ -1,7 +1,6 @@
 //! `bolt discard`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -12,70 +11,7 @@ use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, plant_save, text};
-
-/// Every file below `dir` but `.bolt`, by path, with what it holds.
-fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        for e in fs::read_dir(&at).unwrap() {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && name == ".bolt" {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            if e.file_type().unwrap().is_dir() {
-                folders.push((e.path(), path));
-            } else {
-                found.insert(path, fs::read(e.path()).unwrap());
-            }
-        }
-    }
-    found
-}
-
-/// Every file of the save `save`, by path, with what it holds.
-fn saved_files(repo: &Repository, save: bolt_core::id::Id) -> BTreeMap<String, Vec<u8>> {
-    let store = repo.store();
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
-    while let Some((id, rel)) = folders.pop() {
-        for e in store.listing(&id).unwrap().entries() {
-            let path = if rel.is_empty() {
-                e.name.clone()
-            } else {
-                format!("{rel}/{}", e.name)
-            };
-            if e.kind == EntryKind::Folder {
-                folders.push((e.id, path));
-            } else {
-                let mut bytes = Vec::new();
-                store.copy_content(&e.id, &mut bytes).unwrap();
-                found.insert(path, bytes);
-            }
-        }
-    }
-    found
-}
-
-fn holding(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
-    entries
-        .iter()
-        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
-        .collect()
-}
-
-fn write(env: &Env, path: &str, bytes: &[u8]) {
-    let at = env.root().join(path);
-    fs::create_dir_all(at.parent().unwrap()).unwrap();
-    fs::write(at, bytes).unwrap();
-}
+use support::{Env, changed, files, holding, plant_save, saved_files, text, write};
 
 /// A project with `entries` saved.
 fn project(entries: &[(&str, &str)]) -> Env {
@@ -116,19 +52,6 @@ fn refused(env: &Env, args: &[&str]) -> String {
     let out = env.bolt().arg("discard").args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     text(&out.stderr)
-}
-
-/// What `bolt status` finds changed.
-fn changed(env: &Env) -> Vec<String> {
-    let out = env.bolt().args(["status", "--json"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    doc["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["path"].as_str().unwrap().to_owned())
-        .collect()
 }
 
 fn strings(v: &serde_json::Value) -> Vec<String> {
@@ -244,7 +167,7 @@ fn discard_keeps_a_safety_copy_of_everything_it_throws_away() {
     for (path, bytes) in mine {
         held.insert((*path).to_owned(), bytes.to_vec());
     }
-    assert_eq!(saved_files(&repo, change.from), held);
+    assert_eq!(saved_files(&env, change.from), held);
     assert_eq!(files(env.root()), holding(SAVED));
 }
 
@@ -438,7 +361,7 @@ fn a_file_where_a_saved_empty_folder_was_is_reported_removed() {
     let repo = Repository::open(env.root()).unwrap();
     let kept = repo.current().unwrap().1.folder_change.unwrap().from;
     assert_eq!(
-        saved_files(&repo, kept),
+        saved_files(&env, kept),
         holding(&[("a.txt", "a"), ("e", "mine")])
     );
 }

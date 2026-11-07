@@ -225,3 +225,87 @@ fn changes_json_matches_its_snapshot() {
     }
     insta::assert_json_snapshot!(doc);
 }
+
+#[test]
+fn a_pair_of_lines_that_differ_only_in_their_ending_is_marked() {
+    let env = project(&[("a.txt", b"one\r\ntwo\nthree\n")]);
+    env.overwrite("a.txt", "one\ntwo\nTHREE\n");
+    let out = changes(&env, &[]);
+    assert!(
+        out.contains("\n-one (CRLF)\n+one\n two\n-three\n+THREE\n"),
+        "{out}"
+    );
+    // In JSON both lines of the pair say so, and no other line has the field.
+    let out = env.bolt().args(["--json", "changes"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let marked: Vec<(&str, &str, Option<bool>)> = doc["changes"][0]["hunks"][0]["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            let s = |k: &str| l[k].as_str().unwrap();
+            (
+                s("tag"),
+                s("text"),
+                l.get("eol_only").map(|v| v.as_bool().unwrap()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            ("removed", "one\r\n", Some(true)),
+            ("added", "one\n", Some(true)),
+            ("same", "two\n", None),
+            ("removed", "three\n", None),
+            ("added", "THREE\n", None),
+        ]
+    );
+    assert_eq!(doc["changes"][0]["only_line_endings"], false);
+}
+
+/// A stdout every write to fails, for a reason other than its reader going: a file opened only
+/// to read on Windows, the full device on Linux.
+#[cfg(any(windows, target_os = "linux"))]
+fn failing_stdout(env: &Env) -> fs::File {
+    #[cfg(windows)]
+    {
+        let path = env.config().join("out");
+        fs::write(&path, b"").unwrap();
+        fs::File::open(path).unwrap()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = env;
+        fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn a_stdout_that_fails_mid_document_ends_it_with_the_error_on_stderr() {
+    // A first change small enough to sit whole in stdout's buffer, then one that overflows it.
+    let env = project(&[("a.txt", b"a\n"), ("b.txt", numbered(1..=2000).as_bytes())]);
+    env.overwrite("a.txt", "A\n");
+    env.overwrite("b.txt", &numbered(1..=2000).replace("line ", "LINE "));
+    for args in [&["--json", "changes"][..], &["changes"]] {
+        let out = env
+            .bolt_process_in(env.root())
+            .args(args)
+            .stdout(failing_stdout(&env))
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {said}");
+        assert!(
+            said.starts_with("error: Bolt couldn't write its output: "),
+            "{args:?}: {said}"
+        );
+        assert_eq!(said.lines().count(), 1, "{args:?}: {said}");
+    }
+}

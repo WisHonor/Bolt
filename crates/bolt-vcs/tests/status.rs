@@ -421,6 +421,60 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
 }
 
 #[test]
+fn status_says_in_its_own_words_why_it_stops() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    write_old(&env.root().join("a.txt"), b"a");
+    plant_links(env.root());
+    // The save keeps deps/lib as it is, so deps can't be a file.
+    write_old(&env.root().join("deps"), b"a file");
+    let out = env.bolt().arg("status").output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert_eq!(
+        text(&out.stderr),
+        "error: Bolt can't show the status: deps: the last save has a folder there holding \
+         deps/lib, which every save keeps as it was because this computer can't hold it as it \
+         is, and a save can't hold both under one name.\nhint: Rename or move deps.\n"
+    );
+}
+
+#[test]
+fn a_save_holding_a_spelling_of_bolt_is_named() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
+    plant_save(env.root(), |pack| {
+        let id = pack.add_content(b"x").unwrap();
+        let top = Listing::new(vec![Entry {
+            name: "-BOLT".into(),
+            kind: EntryKind::File,
+            id,
+            size: 1,
+        }])
+        .unwrap()
+        .encode();
+        let at = top.windows(5).position(|w| w == b"-BOLT").unwrap();
+        let mut hostile = top.clone();
+        hostile[at] = b'.';
+        pack.add_record(ObjectKind::FolderListing, &hostile)
+            .unwrap()
+    });
+    let planted = env.state().1.lines["main"];
+    let out = env.bolt().arg("status").output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "error: Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+             writes, so it can't be used.\nhint: Bolt never makes such a save, so another program \
+             put it there. Nothing was changed: go on from another save, and ask for help before \
+             trying to repair this one.\n",
+            planted.short_hex()
+        )
+    );
+}
+
+#[test]
 fn status_json_matches_its_snapshot() {
     let env = project(&[("a.txt", "a"), ("b.txt", "b")]);
     fs::write(env.root().join("a.txt"), "changed").unwrap();

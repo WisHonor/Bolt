@@ -2072,3 +2072,52 @@ fn paths_are_relative_to_the_current_folder() {
     std::fs::write(env.root().join("a.txt"), "f").unwrap();
     assert_eq!(saved(&["save", "F"]), serde_json::json!([]));
 }
+
+/// `bolt <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
+/// could write: how it ended, and what it said on stderr.
+fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) {
+    use std::process::Stdio;
+    let mut child = env
+        .bolt_process_in(env.root())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    (out.status.code(), text(&out.stderr))
+}
+
+#[test]
+fn every_command_ends_quietly_when_its_reader_has_gone() {
+    let mut loud = Vec::new();
+    let mut quiet = |env: &support::Env, args: &[&str]| {
+        let (code, said) = with_reader_gone(env, args);
+        if (code, said.as_str()) != (Some(0), "") {
+            loud.push(format!("{args:?} ended with {code:?}: {said}"));
+        }
+    };
+    for json in [false, true] {
+        let with = |args: &[&'static str]| -> Vec<&'static str> {
+            let mut args = args.to_vec();
+            if json {
+                args.push("--json");
+            }
+            args
+        };
+        let git = support::Env::new();
+        git.commit("a.txt", "a\n", "First");
+        quiet(&git, &with(&["import"]));
+        let env = support::Env::empty();
+        quiet(&env, &with(&["start"]));
+        env.overwrite("a.txt", "a\n");
+        quiet(&env, &with(&["save", "Add a"]));
+        quiet(&env, &with(&["save", "Nothing new"]));
+        quiet(&env, &with(&["goto", "main"]));
+        env.overwrite("a.txt", "mine\n");
+        quiet(&env, &with(&["discard"]));
+        quiet(&env, &with(&["discard"]));
+    }
+    assert!(loud.is_empty(), "{loud:#?}");
+}

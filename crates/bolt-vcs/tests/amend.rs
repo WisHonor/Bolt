@@ -1,59 +1,15 @@
 //! `bolt save --amend`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
 
-use bolt_core::diary::DiaryEntry;
 use bolt_core::id::Id;
 use bolt_core::repo::Repository;
 use bolt_core::save::{GIT_FIELDS, Save};
 use serde_json::{Value, json};
 
 mod support;
-use support::{Env, text};
-
-type Files = BTreeMap<String, Vec<u8>>;
-
-/// Every file below `dir` but `.bolt` and `.git`, by path, with what it holds.
-fn files(dir: &Path) -> Files {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        for e in fs::read_dir(&at).unwrap() {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && (name == ".bolt" || name == ".git") {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            if e.file_type().unwrap().is_dir() {
-                folders.push((e.path(), path));
-            } else {
-                found.insert(path, fs::read(e.path()).unwrap());
-            }
-        }
-    }
-    found
-}
-
-fn holding(entries: &[(&str, &str)]) -> Files {
-    entries
-        .iter()
-        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
-        .collect()
-}
-
-fn write(env: &Env, path: &str, bytes: &str) {
-    let at = env.root().join(path);
-    fs::create_dir_all(at.parent().unwrap()).unwrap();
-    fs::write(at, bytes).unwrap();
-}
+use support::{Env, changed, files, head, holding, main_tip, saved_files, text, write};
 
 /// A project with `entries` saved on `main` as "Files".
 fn project(entries: &[(&str, &str)]) -> Env {
@@ -97,54 +53,9 @@ fn json(env: &Env, args: &[&str]) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// What `bolt status` finds changed.
-fn changed(env: &Env) -> Vec<String> {
-    let doc = json(env, &["status"]);
-    doc["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["path"].as_str().unwrap().to_owned())
-        .collect()
-}
-
-fn main_tip(env: &Env) -> Id {
-    env.state().1.lines["main"]
-}
-
 fn save_of(env: &Env, id: Id) -> Save {
     let repo = Repository::open(env.root()).unwrap();
     repo.store().save(&id, false).unwrap()
-}
-
-/// The newest diary entry, with its ID.
-fn head(env: &Env) -> (Id, DiaryEntry) {
-    Repository::open(env.root()).unwrap().current().unwrap()
-}
-
-/// Every file of the save `save`, by path, with what it holds.
-fn saved_files(env: &Env, save: Id) -> Files {
-    let repo = Repository::open(env.root()).unwrap();
-    let store = repo.store();
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
-    while let Some((id, rel)) = folders.pop() {
-        for e in store.listing(&id).unwrap().entries() {
-            let path = if rel.is_empty() {
-                e.name.clone()
-            } else {
-                format!("{rel}/{}", e.name)
-            };
-            if e.kind == bolt_core::listing::EntryKind::Folder {
-                folders.push((e.id, path));
-            } else {
-                let mut bytes = Vec::new();
-                store.copy_content(&e.id, &mut bytes).unwrap();
-                found.insert(path, bytes);
-            }
-        }
-    }
-    found
 }
 
 #[test]
@@ -398,6 +309,30 @@ fn undo_of_an_amend_puts_the_old_save_back_and_keeps_the_files() {
     assert_eq!(main_tip(&env), new_id);
     assert_eq!(files(env.root()), edited);
     assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn an_undone_amend_names_the_amended_save_by_its_fingerprint() {
+    let env = project(&[("a.txt", "a\n")]);
+    write(&env, "a.txt", "A\n");
+    ok(&env, &["save", "--amend", "Changed a"]);
+    let amended = main_tip(&env);
+    let change_id = save_of(&env, amended).change_id.to_letters();
+    // Once the amend is undone, the save on the line has the amended save's change ID too.
+    let said = ok(&env, &["undo"]);
+    let fingerprint = &amended.to_hex()[..12];
+    assert!(
+        said.starts_with(&format!("Undid save {fingerprint} \"Changed a\": ")),
+        "{said}"
+    );
+    let listed = ok(&env, &["undo", "--list"]);
+    assert!(
+        listed.contains(&format!("save: main moved to {fingerprint} \"Changed a\"")),
+        "{listed}"
+    );
+    for shown in [said, listed] {
+        assert!(!shown.contains(&change_id), "{shown}");
+    }
 }
 
 #[test]

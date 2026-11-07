@@ -84,7 +84,7 @@ fn step(repo: &mut Repository, days: i64, redo: bool) -> Result<(), SwitchError>
     } else {
         undo::undo(repo, &req, &mut |_| {})
     };
-    let done = done.map_err(|e| e.error)?;
+    let done = done.map_err(|e| *e.error)?;
     assert_eq!(done.taken.len(), 1, "no step was taken");
     Ok(())
 }
@@ -377,7 +377,7 @@ fn undo_to_an_entry_whose_saves_were_tidied_away_names_it() {
     };
     let failed = undo::undo_to(&mut repo, &entry.to_hex()[..12], &req, &mut |_| {}).unwrap_err();
     assert!(failed.taken.is_empty());
-    match &failed.error {
+    match &*failed.error {
         SwitchError::EntryGone { entry: named, .. } => assert_eq!(*named, entry),
         other => panic!("{other:?}"),
     }

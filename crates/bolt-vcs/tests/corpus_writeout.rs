@@ -397,11 +397,28 @@ fn a_save_naming_a_spelling_of_bolt_is_refused_whole() {
         pack.add_record(ObjectKind::FolderListing, &hostile)
             .unwrap()
     });
+    let planted = Repository::open(case.root())
+        .unwrap()
+        .current()
+        .unwrap()
+        .1
+        .state
+        .lines["main"];
     let (code, doc, _) = case.goto_main();
     assert_eq!(code, Some(1), "{doc}");
-    let said = doc["error"]["message"].as_str().unwrap();
     assert_eq!(
-        said, "invalid name: a name cannot be spelled like Bolt's own folder (.bolt)",
+        doc["error"]["message"],
+        format!(
+            "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+             writes, so it can't be used.",
+            planted.short_hex()
+        ),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "Bolt never makes such a save, so another program put it there. Nothing was changed: go \
+         on from another save, and ask for help before trying to repair this one.",
         "{doc}"
     );
     assert!(project_entries(&case.env).is_empty());

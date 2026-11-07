@@ -28,7 +28,7 @@ use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
 use bolt_core::shelf::{self, Shelved};
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
-use bolt_core::status::{PathChange, status};
+use bolt_core::status::{PathChange, status, why_stopped};
 use bolt_core::store::StoreError;
 use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
@@ -304,31 +304,29 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         }
     };
     warnings.extend(repo.store().warnings());
-    if json {
+    let text = if json {
         let save = first.as_ref().map_or(json!(null), |(id, save, short)| {
             output::save_json(id, save, short)
         });
-        println!(
-            "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "root": root.display().to_string(),
-                "line": "main",
-                "save": save,
-                "warnings": output::warnings_json(&warnings),
-            })
-        );
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "root": root.display().to_string(),
+            "line": "main",
+            "save": save,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
     } else {
         // The folder's name came from outside Bolt, like any name in a project.
         let shown = escape(&root.display().to_string(), false);
-        println!("Started a Bolt project in {shown}.");
+        let mut text = format!("Started a Bolt project in {shown}.\n");
         if let Some((_, _, short)) = &first {
-            println!("Your first save is {short}, on line main.");
-            println!("Next: change some files, then run: bolt save \"describe your change\"");
+            text += &format!("Your first save is {short}, on line main.\n");
+            text += "Next: change some files, then run: bolt save \"describe your change\"\n";
         }
-    }
-    output::print_warnings(&warnings);
-    Ok(())
+        text
+    };
+    output::print_quietly(&text, &warnings)
 }
 
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -361,8 +359,8 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         .into_iter()
         .collect();
     warnings.extend(report.warnings.iter().cloned());
-    if json {
-        println!("{}", import_output::import_json(&report, &warnings));
+    let text = if json {
+        format!("{}\n", import_output::import_json(&report, &warnings))
     } else {
         let standing = match &report.position {
             Position::OnLine(line) => format!("You're on line {}.", escape(line, false)),
@@ -379,10 +377,9 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
                 )
             }
         };
-        import_output::print_import(&report, &standing);
-    }
-    output::print_warnings(&warnings);
-    Ok(())
+        import_output::import_text(&report, &standing)
+    };
+    output::print_quietly(&text, &warnings)
 }
 
 /// Asks in the terminal for the new line's name; `None` if there is no terminal to ask in.
@@ -492,7 +489,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
         }
         done => done?,
     };
-    let warnings = match outcome {
+    let (mut text, warnings) = match outcome {
         SaveOutcome::Saved {
             save_id,
             save,
@@ -503,7 +500,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
         } => {
             // The save is made, so nothing from here on may fail the command.
             warnings.extend(repo.store().warnings());
-            if json {
+            let text = if json {
                 let document = json!({
                     "bolt_json": BOLT_JSON,
                     "result": "saved",
@@ -513,7 +510,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     "replaced": replaced.map(|id| id.to_hex()),
                     "warnings": output::warnings_json(&warnings),
                 });
-                println!("{}", with_ignored(document, ignored.as_ref()));
+                format!("{}\n", with_ignored(document, ignored.as_ref()))
             } else {
                 let title = escape(save.message.lines().next().unwrap_or_default(), false);
                 let counted = match changed_files {
@@ -526,18 +523,19 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 } else {
                     "Saved"
                 };
-                output::print_quietly(&format!("{made} {short}  \"{title}\"  {counted}\n"), &[])?;
+                let mut text = format!("{made} {short}  \"{title}\"  {counted}\n");
                 if let Some(line) = req.new_line {
-                    println!("You're on the new line {}.", escape(line, false));
+                    text += &format!("You're on the new line {}.\n", escape(line, false));
                 }
-            }
-            warnings
+                text
+            };
+            (text, warnings)
         }
         SaveOutcome::NothingChanged {
             current,
             mut warnings,
         } => {
-            if json {
+            let text = if json {
                 warnings.extend(repo.store().warnings());
                 let document = json!({
                     "bolt_json": BOLT_JSON,
@@ -545,43 +543,39 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     "paths": paths,
                     "warnings": output::warnings_json(&warnings),
                 });
-                println!("{}", with_ignored(document, ignored.as_ref()));
+                format!("{}\n", with_ignored(document, ignored.as_ref()))
             } else {
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
-                if amend {
+                let mut text = if amend {
                     let what = if paths.is_empty() {
                         "your files match"
                     } else {
                         "what you named matches"
                     };
-                    output::print_quietly(
-                        &format!(
-                            "Nothing to amend: {what} your last save ({short}), and so does the \
-                             message.\n"
-                        ),
-                        &[],
-                    )?;
+                    format!(
+                        "Nothing to amend: {what} your last save ({short}), and so does the \
+                         message.\n"
+                    )
                 } else if paths.is_empty() {
-                    println!("Nothing to save: no changes since your last save ({short}).");
+                    format!("Nothing to save: no changes since your last save ({short}).\n")
                 } else {
-                    println!("Nothing to save there: it matches your last save ({short}).");
-                }
+                    format!("Nothing to save there: it matches your last save ({short}).\n")
+                };
                 if req.new_line.is_some() {
-                    println!(
-                        "No line was made: a new line starts with a save, so change a file first."
-                    );
+                    text += "No line was made: a new line starts with a save, so change a file \
+                             first.\n";
                 }
-            }
-            warnings
+                text
+            };
+            (text, warnings)
         }
     };
     if !json && let Some(ignored) = &ignored {
-        println!("{}", ignored_identity_note(ignored, repo.root()));
+        text += &format!("{}\n", ignored_identity_note(ignored, repo.root()));
     }
-    output::print_warnings(&warnings);
-    Ok(())
+    output::print_quietly(&text, &warnings)
 }
 
 /// `change_id` at its shortest or, if the line can't be read to work that out, whole, with a
@@ -645,7 +639,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     // Status only reads, so its hints never say that nothing was saved.
     let found = status(repo, full, git_excludes.as_deref()).map_err(|e| Failure {
         hint: e.hint_when_reading(),
-        message: e.to_string(),
+        message: why_stopped(&e),
         printed: false,
     })?;
     let mut warnings = found.warnings.clone();
@@ -1082,43 +1076,42 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         .map(|(_, e)| e.state.lines)
         .unwrap_or_default();
     warnings.extend(repo.store().warnings());
-    if json {
-        println!(
-            "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "position": output::position_json(&done.position),
-                "save": save.map(|s| output::save_json(&done.save, &s, &short)),
-                "written": done.applied.written,
-                "removed": done.applied.removed,
-                "not_written": done.applied.not_written,
-                "placeholders": done.applied.placeholders,
-                "files_in_use": done.applied.in_use,
-                "safety_copies": done.safety_copies,
-                "warnings": output::warnings_json(&warnings),
-            })
-        );
+    let text = if json {
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "position": output::position_json(&done.position),
+            "save": save.map(|s| output::save_json(&done.save, &s, &short)),
+            "written": done.applied.written,
+            "removed": done.applied.removed,
+            "not_written": done.applied.not_written,
+            "placeholders": done.applied.placeholders,
+            "files_in_use": done.applied.in_use,
+            "safety_copies": done.safety_copies,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
     } else {
-        match done.carried {
-            0 => {}
-            1 => println!("Your unsaved changes in 1 file came along."),
-            n => println!("Your unsaved changes in {n} files came along."),
-        }
+        let mut text = match done.carried {
+            0 => String::new(),
+            1 => "Your unsaved changes in 1 file came along.\n".to_owned(),
+            n => format!("Your unsaved changes in {n} files came along.\n"),
+        };
         match &done.position {
-            Position::OnLine(line) => println!("You're on line {}.", escape(line, false)),
+            Position::OnLine(line) => text += &format!("You're on line {}.\n", escape(line, false)),
             Position::AtSave(id) => {
-                println!(
-                    "You're at save {short}, not on a line. Saving here asks for a new line's name."
+                text += &format!(
+                    "You're at save {short}, not on a line. Saving here asks for a new line's \
+                     name.\n"
                 );
                 if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
                     let line = escape(line, false);
-                    println!("To keep saving on {line}: bolt goto {line}");
+                    text += &format!("To keep saving on {line}: bolt goto {line}\n");
                 }
             }
         }
-    }
-    output::print_warnings(&warnings);
-    Ok(())
+        text
+    };
+    output::print_quietly(&text, &warnings)
 }
 
 fn discard_command(
@@ -1145,57 +1138,23 @@ fn discard_command(
     )?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
-    if json {
-        println!(
-            "{}",
-            json!({
-                "bolt_json": BOLT_JSON,
-                "restored": done.restored,
-                "removed": done.removed,
-                "folders": done.folders,
-                "not_written": done.applied.not_written,
-                "placeholders": done.applied.placeholders,
-                "files_in_use": done.applied.in_use,
-                "safety_copies": done.safety_copies,
-                "warnings": output::warnings_json(&warnings),
-            })
-        );
+    let text = if json {
+        let document = json!({
+            "bolt_json": BOLT_JSON,
+            "restored": done.restored,
+            "removed": done.removed,
+            "folders": done.folders,
+            "not_written": done.applied.not_written,
+            "placeholders": done.applied.placeholders,
+            "files_in_use": done.applied.in_use,
+            "safety_copies": done.safety_copies,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
     } else {
-        let n = done.restored.len() + done.removed.len();
-        let count = |n: usize, one: &str| match n {
-            1 => format!("1 {one}"),
-            n => format!("{n} {one}s"),
-        };
-        // Folders count only where no file does.
-        let what = if n == 0 {
-            count(done.folders, "folder")
-        } else {
-            count(n, "file")
-        };
-        // A deleted file put back loses nothing, so it needs no copy.
-        let copies = match done.safety_copies {
-            0 => String::new(),
-            k if k == n && n == 1 => " (a safety copy of it was kept)".into(),
-            k if k == n => " (a safety copy of each was kept)".into(),
-            1 => " (a safety copy of the 1 that held unsaved work was kept)".into(),
-            k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
-        };
-        let nothing = n == 0 && done.folders == 0;
-        // The warning that follows names the links left and says why.
-        match (nothing, paths.is_empty()) {
-            (true, _) if done.links_left.len() == 1 => {
-                println!("Nothing was discarded: the unsaved link stays as it is.");
-            }
-            (true, _) if !done.links_left.is_empty() => {
-                println!("Nothing was discarded: the unsaved links stay as they are.");
-            }
-            (true, true) => println!("Nothing to discard: your files match your last save."),
-            (true, false) => println!("Nothing to discard there: it matches your last save."),
-            _ => println!("Threw away your unsaved changes in {what}{copies}."),
-        }
-    }
-    output::print_warnings(&warnings);
-    Ok(())
+        output::discarded(&done, paths.is_empty())
+    };
+    output::print_quietly(&text, &warnings)
 }
 
 /// `bolt undo`, `bolt redo`, and `bolt undo --to <entry>` (`to`).
@@ -1223,12 +1182,13 @@ fn undo_command(
         None if redo => undo::redo(repo, &req, on_wait),
         None => undo::undo(repo, &req, on_wait),
     };
-    let (taken, shelved, finished, head_lost, failure) = match done {
+    let (taken, shelved, finished, head_lost, mut warnings, failure) = match done {
         Ok(done) => (
             done.taken,
             done.shelved,
             done.finished,
             done.head_lost,
+            done.warnings,
             None,
         ),
         Err(e) => (
@@ -1236,7 +1196,8 @@ fn undo_command(
             e.shelved,
             false,
             false,
-            Some(Failure::from(e.error)),
+            e.warnings,
+            Some(Failure::from(*e.error)),
         ),
     };
     let (verb, list, command) = if redo {
@@ -1244,7 +1205,6 @@ fn undo_command(
     } else {
         ("Undid", "undone", "undo")
     };
-    let mut warnings = undo::warnings(&taken);
     if json {
         warnings.extend(repo.store().warnings());
         let warnings = told_once(warnings);
@@ -1768,6 +1728,7 @@ fn names(
     let mut known = HashMap::new();
     let named = move |id: &Id| {
         let short = |change_id: &ChangeId| match &line {
+            Some(line) if line.shared(id, change_id) => id.short_hex(),
             Some(line) => line.short(id, change_id),
             None => change_id.to_letters(),
         };
@@ -1802,10 +1763,15 @@ fn told_once(warnings: Vec<Warning>) -> Vec<Warning> {
 }
 
 /// A save as messages name it: its change ID at its shortest, and the first line of its
-/// message; 12 hex digits of its fingerprint if it can't be read.
+/// message; 12 hex digits of its fingerprint if it can't be read, or if another save on the line
+/// has its change ID.
 fn named_save(repo: &Repository, id: &Id, warnings: &mut Vec<Warning>) -> (String, Option<String>) {
     named_by(repo, id, |change_id| {
-        short_or_whole(repo, id, change_id, warnings)
+        let short = short_or_whole(repo, id, change_id, warnings);
+        // Only a change ID given whole can be another save's too, so only then is the line read.
+        let shared = short == change_id.to_letters()
+            && LineIds::read(repo).is_ok_and(|line| line.shared(id, change_id));
+        if shared { id.short_hex() } else { short }
     })
 }
 

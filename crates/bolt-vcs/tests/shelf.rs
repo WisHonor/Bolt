@@ -1,54 +1,17 @@
 //! `bolt shelf`, `bolt shelf --list` and `bolt unshelf`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use bolt_core::diary::{Action, DiaryEntry, Position, State};
+use bolt_core::diary::{Action, Position, State};
 use bolt_core::id::{Id, hash_content};
 use bolt_core::journal::{self, Change, Expected, Journal};
 use bolt_core::listing::EntryKind;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, text};
-
-/// Files by path, with what each holds.
-type Files = BTreeMap<String, Vec<u8>>;
-
-/// Every file below `dir` but `.bolt`.
-fn files(dir: &Path) -> Files {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        for e in fs::read_dir(&at).unwrap() {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && name == ".bolt" {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            if e.file_type().unwrap().is_dir() {
-                folders.push((e.path(), path));
-            } else {
-                found.insert(path, fs::read(e.path()).unwrap());
-            }
-        }
-    }
-    found
-}
-
-fn holding(entries: &[(&str, &str)]) -> Files {
-    entries
-        .iter()
-        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
-        .collect()
-}
+use support::{Env, Files, changed, files, head, holding, main_tip, saved_files, text, write};
 
 /// `files` with `changes` made: a path set to what it holds, or removed with `None`.
 fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
@@ -60,12 +23,6 @@ fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
         };
     }
     changed
-}
-
-fn write(env: &Env, path: &str, bytes: &str) {
-    let at = env.root().join(path);
-    fs::create_dir_all(at.parent().unwrap()).unwrap();
-    fs::write(at, bytes).unwrap();
 }
 
 /// A project with `entries` saved on `main`.
@@ -108,58 +65,13 @@ fn json(env: &Env, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// What `bolt status` finds changed.
-fn changed(env: &Env) -> Vec<String> {
-    let doc = json(env, &["status"]);
-    doc["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["path"].as_str().unwrap().to_owned())
-        .collect()
-}
-
 fn state(env: &Env) -> State {
     env.state().1
-}
-
-fn main_tip(env: &Env) -> Id {
-    state(env).lines["main"]
 }
 
 /// The shelves' numbers, newest first.
 fn labels(env: &Env) -> Vec<String> {
     state(env).shelves.into_iter().map(|(l, _)| l).collect()
-}
-
-/// The newest diary entry, with its ID.
-fn head(env: &Env) -> (Id, DiaryEntry) {
-    Repository::open(env.root()).unwrap().current().unwrap()
-}
-
-/// Every file of the save `save`, by path, with what it holds.
-fn saved_files(env: &Env, save: Id) -> Files {
-    let repo = Repository::open(env.root()).unwrap();
-    let store = repo.store();
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
-    while let Some((id, rel)) = folders.pop() {
-        for e in store.listing(&id).unwrap().entries() {
-            let path = if rel.is_empty() {
-                e.name.clone()
-            } else {
-                format!("{rel}/{}", e.name)
-            };
-            if e.kind == EntryKind::Folder {
-                folders.push((e.id, path));
-            } else {
-                let mut bytes = Vec::new();
-                store.copy_content(&e.id, &mut bytes).unwrap();
-                found.insert(path, bytes);
-            }
-        }
-    }
-    found
 }
 
 #[cfg(feature = "fault-injection")]
@@ -488,6 +400,44 @@ fn a_folder_the_save_made_a_file_counts_as_changed_by_the_save() {
 }
 
 #[test]
+fn work_of_your_own_below_a_folder_the_save_removed_or_made_is_unsaved_work() {
+    let env = project(SAVED);
+    write(&env, "dir/new.txt", "shelved\n");
+    write(&env, "fresh/new.txt", "shelved\n");
+    ok(&env, &["shelf"]);
+    // The save it comes back onto removed `dir`, and made `fresh` with a file of its own.
+    fs::remove_dir_all(env.root().join("dir")).unwrap();
+    write(&env, "fresh/other.txt", "theirs\n");
+    ok(&env, &["save", "Remove dir, make fresh"]);
+    write(&env, "dir/new.txt", "mine\n");
+    write(&env, "fresh/new.txt", "mine\n");
+    let (_, said) = refused(&env, &["unshelf"]);
+    assert!(
+        said.contains("are where it would write:\n  dir/new.txt\n  fresh/new.txt\n"),
+        "{said}"
+    );
+    assert!(!said.contains("since the shelf was made"), "{said}");
+}
+
+#[test]
+fn a_file_the_save_changed_where_the_shelf_made_a_folder_counts_as_changed_by_the_save() {
+    let env = project(SAVED);
+    fs::remove_file(env.root().join("b.txt")).unwrap();
+    write(&env, "b.txt/inside.txt", "shelved\n");
+    ok(&env, &["shelf"]);
+    write(&env, "b.txt", "theirs\n");
+    ok(&env, &["save", "Change b"]);
+    let (_, said) = refused(&env, &["unshelf"]);
+    assert!(
+        said.contains(
+            "changed what is there since the shelf was made:\n  b.txt\n  b.txt/inside.txt\n"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("Your unsaved changes"), "{said}");
+}
+
+#[test]
 fn a_save_no_line_reaches_any_more_is_not_offered_to_goto() {
     let env = project(SAVED);
     write(&env, "b.txt", "B\n");
@@ -510,9 +460,12 @@ fn a_save_no_line_reaches_any_more_is_not_offered_to_goto() {
         said.contains("changed what is there since the shelf was made:\n  c.txt"),
         "{said}"
     );
-    assert!(said.contains("is no longer on any line"), "{said}");
+    assert!(
+        said.contains("bolt goto can't reach the save it was made on"),
+        "{said}"
+    );
     assert!(said.contains("bolt undo --list"), "{said}");
-    assert!(!said.contains("bolt goto"), "{said}");
+    assert!(!said.contains(&goto), "{said}");
 }
 
 #[test]

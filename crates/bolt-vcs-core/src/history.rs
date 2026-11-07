@@ -204,6 +204,18 @@ impl LineIds {
     pub fn short(&self, id: &Id, change_id: &ChangeId) -> String {
         short_among(&self.change_ids, change_id, self.saves.contains(id))
     }
+
+    /// Whether another save on the line has `change_id`, the change ID of the save `id`, so that
+    /// no form of it tells them apart: an amended save does, once the amend is undone.
+    #[must_use]
+    pub fn shared(&self, id: &Id, change_id: &ChangeId) -> bool {
+        let at = self.change_ids.partition_point(|c| c < change_id);
+        let copies = self.change_ids[at..]
+            .iter()
+            .take_while(|c| *c == change_id)
+            .count();
+        copies > usize::from(self.saves.contains(id))
+    }
 }
 
 /// `short_change_id`, by reading the line from `tip`.
@@ -942,6 +954,10 @@ mod tests {
                     let walked = walk_short(&repo, tip, id, &change_id).unwrap();
                     prop_assert_eq!(&short_change_id(&repo, id, &change_id).unwrap(), &walked);
                     prop_assert_eq!(line.short(id, &change_id), walked);
+                    let another = chain(&repo, tip)
+                        .map(Result::unwrap)
+                        .any(|(other, save)| other != *id && save.change_id == change_id);
+                    prop_assert_eq!(line.shared(id, &change_id), another);
                 }
             }
         }

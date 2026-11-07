@@ -3,56 +3,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
 
 use bolt_core::diary::{Action, DiaryEntry, Position, State};
 use bolt_core::id::Id;
-use bolt_core::listing::EntryKind;
 use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_core::text::escape;
 
 mod support;
-use support::{Env, text};
-
-/// Every file below `dir` but `.bolt`, by path, with what it holds.
-fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        for e in fs::read_dir(&at).unwrap() {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && name == ".bolt" {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            if e.file_type().unwrap().is_dir() {
-                folders.push((e.path(), path));
-            } else {
-                found.insert(path, fs::read(e.path()).unwrap());
-            }
-        }
-    }
-    found
-}
-
-fn holding(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
-    entries
-        .iter()
-        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
-        .collect()
-}
-
-fn write(env: &Env, path: &str, bytes: &str) {
-    let at = env.root().join(path);
-    fs::create_dir_all(at.parent().unwrap()).unwrap();
-    fs::write(at, bytes).unwrap();
-}
+use support::{Env, changed, files, head, holding, main_tip, saved_files, text, write};
 
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
@@ -94,28 +53,8 @@ fn json(env: &Env, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// What `bolt status` finds changed.
-fn changed(env: &Env) -> Vec<String> {
-    let doc = json(env, &["status"]);
-    doc["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["path"].as_str().unwrap().to_owned())
-        .collect()
-}
-
 fn state(env: &Env) -> State {
     env.state().1
-}
-
-fn main_tip(env: &Env) -> Id {
-    state(env).lines["main"]
-}
-
-/// The newest diary entry, with its ID.
-fn head(env: &Env) -> (Id, DiaryEntry) {
-    Repository::open(env.root()).unwrap().current().unwrap()
 }
 
 fn entry(env: &Env, id: Id) -> DiaryEntry {
@@ -125,31 +64,6 @@ fn entry(env: &Env, id: Id) -> DiaryEntry {
         .read_record(&id, ObjectKind::DiaryEntry)
         .unwrap();
     DiaryEntry::decode(&bytes).unwrap()
-}
-
-/// Every file of the save `save`, by path, with what it holds.
-fn saved_files(env: &Env, save: Id) -> BTreeMap<String, Vec<u8>> {
-    let repo = Repository::open(env.root()).unwrap();
-    let store = repo.store();
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
-    while let Some((id, rel)) = folders.pop() {
-        for e in store.listing(&id).unwrap().entries() {
-            let path = if rel.is_empty() {
-                e.name.clone()
-            } else {
-                format!("{rel}/{}", e.name)
-            };
-            if e.kind == EntryKind::Folder {
-                folders.push((e.id, path));
-            } else {
-                let mut bytes = Vec::new();
-                store.copy_content(&e.id, &mut bytes).unwrap();
-                found.insert(path, bytes);
-            }
-        }
-    }
-    found
 }
 
 fn journal_exists(env: &Env) -> bool {
@@ -731,7 +645,7 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
     // The first entry and 19 saves: 20 steps, every one shown.
     let env = project(&[("a.txt", "0\n")]);
     for i in 1..19 {
-        write(&env, "a.txt", &format!("{i}\n"));
+        write(&env, "a.txt", format!("{i}\n"));
         ok(&env, &["save", &format!("Save {i}")]);
     }
     let said = ok(&env, &["undo", "--list"]);
@@ -821,6 +735,14 @@ fn undo_to_a_cleared_step_is_one_new_step_that_undo_takes_back() {
     assert_eq!(made.state.position, Position::AtSave(one));
     assert_eq!(files(env.root()), holding(ONE));
     assert!(changed(&env).is_empty());
+    // The list calls it what the step line does.
+    let listed = ok(&env, &["undo", "--list"]);
+    let first = listed.lines().next().unwrap();
+    assert!(
+        first.contains(&format!("  {}  ", jump.short_hex())),
+        "{listed}"
+    );
+    assert!(first.contains("  undo --to: main moved to "), "{listed}");
     // Undo takes it back.
     let said = ok(&env, &["undo"]);
     let undid = format!("Undid undo --to {}:", goto.short_hex());
