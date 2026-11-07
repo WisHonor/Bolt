@@ -1,7 +1,7 @@
 # Bolt — Design Spec
 
 > **Living document.** It always describes the *current* design; the reasons behind each choice live in [`decisions/`](decisions/).
-> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, with both its red-team sessions and its whole-branch review done, and merged and done the same day, once the owner had approved its `unsafe` code; milestone 4 ("Undo everything") planned on 2026-11-06 after decisions 070 to 077 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 77
+> **Phase:** building; milestone 1 done 2026-11-01, with the fixes from its two red-team sessions and its final review ([decisions 024](decisions/024-red-team-gate.md) to [029](decisions/029-red-team-m1-final-review-rulings.md)); milestone 2 ("Coming from Git") built on 2026-11-03, with both its red-team sessions and its final review done, and merged and done on 2026-11-04, once the owner had tried it on their own repository and in a OneDrive folder ([milestones.md](milestones.md)); milestone 3 ("Working folder") built on 2026-11-06, with both its red-team sessions and its whole-branch review done, and merged and done the same day, once the owner had approved its `unsafe` code; milestone 4 ("Undo everything") planned on 2026-11-06 after decisions 070 to 077 (design signed off by the owner on 2026-10-31) · **Started:** 2026-10-31 · **Decisions recorded:** 78
 > **Companion documents:** [storage-format.md](storage-format.md) · [security.md](security.md) · [testing.md](testing.md) · [milestones.md](milestones.md)
 
 ## 1. Vision
@@ -177,6 +177,7 @@ Questions 2 to 12 were decided by Claude on 2026-11-05 at the owner's request to
 - [x] Crash recovery, and a lost `head` → [decision 075](decisions/075-crash-recovery.md)
 - [x] Renames that reach the disk on Windows (a must-do follow-up from milestone 1) → [decision 076](decisions/076-renames-reach-the-disk-on-windows.md)
 - [x] `tidy` and the undo window → [decision 077](decisions/077-tidy-and-the-undo-window.md)
+- [x] A pack Bolt can't open for another reason gets a warning of its own (building the store's follow-ups; supersedes decision 066 in part) → [decision 078](decisions/078-a-pack-bolt-cant-open-gets-its-own-warning.md)
 
 ## 5. Design
 
