@@ -6,7 +6,8 @@ use std::fs;
 use std::path::Path;
 
 use bolt_core::diary::{Action, DiaryEntry, Position, State};
-use bolt_core::id::Id;
+use bolt_core::id::{Id, hash_content};
+use bolt_core::journal::{self, Change, Expected, Journal};
 use bolt_core::listing::EntryKind;
 use bolt_core::repo::Repository;
 
@@ -439,7 +440,7 @@ fn unshelf_tells_unsaved_work_from_what_the_save_changed() {
     );
     let goto = goto_hint(shelved_on);
     assert!(
-        said.contains(&format!("{goto} and run bolt unshelf 1 there")),
+        said.contains(&format!("{goto}, then run bolt unshelf 1 there")),
         "{said}"
     );
     // As the hint says: the work set aside, then the shelf brought back on its own save.
@@ -453,6 +454,111 @@ fn unshelf_tells_unsaved_work_from_what_the_save_changed() {
     );
     assert_eq!(files(env.root()), both);
     assert_eq!(labels(&env), ["2"]);
+}
+
+#[test]
+fn a_folder_the_save_made_a_file_counts_as_changed_by_the_save() {
+    let env = project(SAVED);
+    let shelved_on = main_tip(&env);
+    write(&env, "dir/new.txt", "new\n");
+    ok(&env, &["shelf"]);
+    // The save it comes back onto has a file where the shelf's folder is.
+    fs::remove_dir_all(env.root().join("dir")).unwrap();
+    write(&env, "dir", "a file\n");
+    ok(&env, &["save", "dir is a file"]);
+    assert!(changed(&env).is_empty());
+    let (_, said) = refused(&env, &["unshelf"]);
+    assert!(
+        said.contains("changed what is there since the shelf was made:\n  dir/new.txt"),
+        "{said}"
+    );
+    assert!(!said.contains("Your unsaved changes"), "{said}");
+    let goto = goto_hint(shelved_on);
+    assert!(
+        said.contains(&format!("{goto}, then run bolt unshelf 1 there")),
+        "{said}"
+    );
+    let words: Vec<&str> = goto.split(' ').collect();
+    ok(&env, &words[1..]);
+    ok(&env, &["unshelf", "1"]);
+    assert_eq!(
+        files(env.root()),
+        with(&holding(SAVED), &[("dir/new.txt", Some("new\n"))])
+    );
+}
+
+#[test]
+fn a_save_no_line_reaches_any_more_is_not_offered_to_goto() {
+    let env = project(SAVED);
+    write(&env, "b.txt", "B\n");
+    ok(&env, &["save", "Change b"]);
+    let changed_b = head(&env).0;
+    ok(&env, &["undo"]);
+    write(&env, "c.txt", "C\n");
+    ok(&env, &["save", "Change b and add c"]);
+    let left_behind = main_tip(&env);
+    // Going back to the save of b alone takes c.txt away: the edit there goes on a shelf made
+    // on a save the jump leaves no line on.
+    write(&env, "c.txt", "mine\n");
+    ok(&env, &["undo", "--to", &changed_b.to_hex(), "--shelve"]);
+    assert_eq!(labels(&env), ["1"]);
+    let goto = goto_hint(left_behind);
+    let words: Vec<&str> = goto.split(' ').collect();
+    refused(&env, &words[1..]);
+    let (_, said) = refused(&env, &["unshelf"]);
+    assert!(
+        said.contains("changed what is there since the shelf was made:\n  c.txt"),
+        "{said}"
+    );
+    assert!(said.contains("is no longer on any line"), "{said}");
+    assert!(said.contains("bolt undo --list"), "{said}");
+    assert!(!said.contains("bolt goto"), "{said}");
+}
+
+#[test]
+fn a_change_a_finished_switch_met_is_not_told_as_one_the_shelf_met() {
+    let env = project(SAVED);
+    // A stopped switch whose journal would remove a file Bolt ignores, which changed since.
+    write(&env, "build.log", "changed\n");
+    {
+        let mut repo = Repository::open(env.root()).unwrap();
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let (head, mut entry) = repo.current().unwrap();
+        entry.parent = Some(head);
+        let packs = repo.new_packs().unwrap();
+        let target = repo.store_entry(&lock, packs, &entry).unwrap();
+        let planned = b"planned\n";
+        let remove = journal::Action {
+            path: "build.log".into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::File,
+                id: hash_content(planned),
+                size: planned.len() as u64,
+            }),
+        };
+        let journal = Journal {
+            target,
+            from: head,
+            actions: vec![remove],
+        };
+        journal.write(&repo, &lock).unwrap();
+    }
+    let out = env.bolt().arg("shelf").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "Nothing to shelve: your files match your last save.\n"
+    );
+    let warned = text(&out.stderr);
+    assert!(
+        warned.contains("changed while Bolt was switching"),
+        "{warned}"
+    );
+    assert_eq!(
+        fs::read(env.root().join("build.log")).unwrap(),
+        b"changed\n"
+    );
 }
 
 #[test]

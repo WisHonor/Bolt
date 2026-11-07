@@ -26,7 +26,7 @@ use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
-use bolt_core::shelf;
+use bolt_core::shelf::{self, Shelved};
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status};
 use bolt_core::store::StoreError;
@@ -1303,13 +1303,16 @@ fn shelf_command(
     let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut |_| {
         eprintln!("Waiting for another Bolt command to finish...")
     })?;
-    let applied = done.as_ref().map(|d| d.applied.clone()).unwrap_or_default();
+    let made = match &done {
+        Shelved::Made(made) => Some(made),
+        Shelved::Nothing { .. } => None,
+    };
+    let applied = made.map(|d| d.applied.clone()).unwrap_or_default();
     let mut warnings = applied.warnings.clone();
     warnings.extend(repo.store().warnings());
     let text = if json {
-        let shelf = done
-            .as_ref()
-            .map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
+        let shelf =
+            made.map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
         let document = json!({
             "bolt_json": BOLT_JSON,
             "shelf": shelf,
@@ -1323,7 +1326,7 @@ fn shelf_command(
         format!("{document}\n")
     } else {
         match &done {
-            Some(d) => {
+            Shelved::Made(d) => {
                 let files = match d.files {
                     0 => String::new(),
                     1 => " in 1 file".to_owned(),
@@ -1336,18 +1339,18 @@ fn shelf_command(
                 )
             }
             // The warnings that follow name what stayed, and say why.
-            None if warnings
-                .iter()
-                .any(|w| w.kind == warning::CHANGED_SINCE_PLAN) =>
-            {
-                "Nothing was shelved: your files changed while Bolt was reading them. Run bolt \
-                 shelf again.\n"
-                    .to_owned()
-            }
-            None if warnings.iter().any(|w| w.kind == warning::LINKS_LEFT) => {
+            Shelved::Nothing {
+                changed_again: true,
+                ..
+            } => "Nothing was shelved: your files changed while Bolt was reading them. Run bolt \
+                  shelf again.\n"
+                .to_owned(),
+            Shelved::Nothing { links_left, .. } if !links_left.is_empty() => {
                 "Nothing was shelved.\n".to_owned()
             }
-            None => "Nothing to shelve: your files match your last save.\n".to_owned(),
+            Shelved::Nothing { .. } => {
+                "Nothing to shelve: your files match your last save.\n".to_owned()
+            }
         }
     };
     output::print_quietly(&text, &warnings)

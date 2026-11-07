@@ -120,7 +120,8 @@ pub enum SwitchError {
     #[error("{}", shelf_in_the_way(.0))]
     ShelfInTheWay(Box<ShelfCollisions>),
     #[error(
-        "That would make more than {} shelves, the most a project keeps, so nothing was changed.",
+        "That would make more than {} shelves, the most a project keeps, so that step changed \
+         nothing.",
         thousands(MAX_SHELVES)
     )]
     TooManyShelves,
@@ -144,6 +145,8 @@ pub struct ShelfCollisions {
     pub label: String,
     /// The save the shelf was made on.
     pub base: Id,
+    /// A line still reaches `base`, so `bolt goto` finds it.
+    pub base_on_a_line: bool,
     /// Unsaved work, or files Bolt ignores.
     pub unsaved: Vec<String>,
     /// What the save the project is on changed since `base`.
@@ -223,22 +226,28 @@ impl SwitchError {
             }
             SwitchError::ShelfInTheWay(c) => {
                 let unshelf = format!("bolt unshelf {}", escape(&c.label, false));
-                let goto = format!("bolt goto {}", c.base.short_hex());
                 let not_yet = "Bolt can't yet bring a shelf back onto changes saved since it was \
                                made";
+                let (elsewhere, newest) = if c.base_on_a_line {
+                    let goto = format!("bolt goto {}", c.base.short_hex());
+                    let there = format!(
+                        "go to the save it was made on with {goto}, then run {unshelf} there"
+                    );
+                    (there, " (a new shelf would be the newest)")
+                } else {
+                    let gone = "the save it was made on is no longer on any line, and bolt undo \
+                                --list shows the steps that can bring it back";
+                    (gone.to_owned(), "")
+                };
                 Some(match (c.unsaved.is_empty(), c.changed.is_empty()) {
                     (false, true) => format!(
                         "Save, shelve or discard your changes there, and move ignored files \
                          somewhere else, then run {unshelf} (a new shelf would be the newest)."
                     ),
-                    (true, _) => format!(
-                        "{not_yet}: go to the save it was made on with {goto}, then run {unshelf} \
-                         there."
-                    ),
+                    (true, _) => format!("{not_yet}: {elsewhere}."),
                     (false, false) => format!(
                         "Save, shelve or discard your unsaved changes there, and move ignored files \
-                         somewhere else. Then go to the save the shelf was made on with {goto} and \
-                         run {unshelf} there (a new shelf would be the newest). {not_yet}."
+                         somewhere else. {not_yet}: {elsewhere}{newest}."
                     ),
                 })
             }

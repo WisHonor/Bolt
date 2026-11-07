@@ -84,7 +84,11 @@ fn files_that_change_before_they_are_kept_stay_and_nothing_is_shelved() {
     fault::act_at("shelf:planned", move || fs::write(at, b"edited").unwrap());
     let (head, packs) = (repo.head().unwrap(), repo.store().pack_count());
     let done = shelf(&mut repo, None, &who(), None, &mut |_| {}).unwrap();
-    assert_eq!(done, None);
+    let nothing = Shelved::Nothing {
+        changed_again: true,
+        links_left: vec![],
+    };
+    assert_eq!(done, nothing);
     assert_eq!(
         (repo.head().unwrap(), repo.store().pack_count()),
         (head, packs)

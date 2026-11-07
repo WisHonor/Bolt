@@ -22,7 +22,7 @@ use crate::writeout::{self, Folders, Plan, Tree};
 const MAX_MESSAGE: usize = 1024;
 
 /// Names compared byte for byte: what a save holds, not what a drive takes for one name.
-const EXACT: Drive = Drive {
+pub(crate) const EXACT: Drive = Drive {
     ignores_case: false,
     composes_unicode: false,
 };

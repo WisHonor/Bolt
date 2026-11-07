@@ -6,13 +6,13 @@ use std::path::Path;
 
 use crate::diary::{Action, MAX_SHELVES};
 use crate::diff::{count_changes, for_each_change};
-use crate::drive::Drive;
-use crate::history::tip_of;
+use crate::history::{resolve, tip_of};
 use crate::id::Id;
 use crate::kept;
 use crate::listing::{Entry, EntryKind};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Person;
+use crate::scope::ancestors;
 use crate::snapshot::{NAMED, listed};
 use crate::store::StoreError;
 use crate::switch::{self, Away, Earlier, ShelfCollisions, Switch, SwitchError};
@@ -34,6 +34,20 @@ pub struct ShelfOutcome {
     pub applied: Applied,
     /// Unsaved links left as they are, since they could come back only as files.
     pub links_left: Vec<String>,
+}
+
+/// What `shelf` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shelved {
+    /// The unsaved changes went on a new shelf.
+    Made(ShelfOutcome),
+    /// No shelf and no step: nothing unsaved could go on one, or (`changed_again`) every file
+    /// changed again while Bolt was reading it.
+    Nothing {
+        changed_again: bool,
+        /// Unsaved links left as they are, since they could come back only as files.
+        links_left: Vec<String>,
+    },
 }
 
 /// What `unshelf` did.
@@ -66,15 +80,15 @@ pub struct ShelfInfo {
 
 /// Sets every unsaved change aside on a new shelf, the newest, then puts the folder back to the
 /// save the project is on as `discard` does, with the same rules; `message` says what it holds.
-/// `None` when there is nothing to set aside: no step is made, and what reading the folder found
-/// is noted with the store's warnings. `git_excludes` is read as `goto` reads it.
+/// When nothing is set aside no step is made, and what reading the folder found is noted with the
+/// store's warnings. `git_excludes` is read as `goto` reads it.
 pub fn shelf(
     repo: &mut Repository,
     message: Option<&str>,
     who: &Person,
     git_excludes: Option<&Path>,
     on_wait: &mut dyn FnMut(&str),
-) -> Result<Option<ShelfOutcome>, SwitchError> {
+) -> Result<Shelved, SwitchError> {
     let message = message
         .filter(|m| !m.trim().is_empty())
         .unwrap_or(DEFAULT_MESSAGE);
@@ -89,7 +103,7 @@ pub fn shelf(
             links_left,
         } = away;
         if plan.actions.is_empty() {
-            return Ok(set_aside_nothing(repo, plan, earlier));
+            return Ok(set_aside_nothing(repo, plan, earlier, false, links_left));
         }
         within_limit(entry.state.shelves.len() + 1)?;
         crate::fsio::act_point("shelf:planned");
@@ -107,7 +121,7 @@ pub fn shelf(
                 .map(|a| a.path.clone())
                 .collect();
             plan.warnings.push(writeout::changed_warning(&changed));
-            return Ok(set_aside_nothing(repo, plan, earlier));
+            return Ok(set_aside_nothing(repo, plan, earlier, true, links_left));
         };
         // Stored first so that the shelf can be counted before the step: once the folder is put
         // back, a count that fails mustn't fail the command.
@@ -126,7 +140,7 @@ pub fn shelf(
             packs: repo.new_packs()?,
         };
         let applied = switch::switch(repo, lock, to_make, who, "shelf", earlier)?;
-        Ok(Some(ShelfOutcome {
+        Ok(Shelved::Made(ShelfOutcome {
             label,
             save: change.from,
             files,
@@ -173,10 +187,14 @@ pub fn unshelf(
         let plan = writeout::plan(repo, base, shelf, None, false, drive, git_excludes)?;
         if !plan.collisions.is_empty() {
             // Each kind of path in the way has its own way out.
-            let (changed, unsaved) = changed_since(repo, base, current, plan.collisions, drive)?;
+            let (changed, unsaved) = changed_since(repo, base, current, plan.collisions)?;
+            // `goto` finds only the saves a line reaches.
+            let base_on_a_line = !changed.is_empty()
+                && matches!(resolve(repo, &base.short_hex()), Ok(found) if found == base);
             return Err(SwitchError::ShelfInTheWay(Box::new(ShelfCollisions {
                 label: name,
                 base,
+                base_on_a_line,
                 unsaved,
                 changed,
             })));
@@ -259,39 +277,66 @@ pub(crate) fn within_limit(count: usize) -> Result<(), SwitchError> {
     Ok(())
 }
 
-/// `paths` parted into those where the save `now` differs from the save `then`, and the rest.
+/// `paths` parted into those the save `now` changed since the save `then`, and the rest. A path
+/// counts as changed where the two saves differ at it, or where a folder above it is a folder in
+/// only one of them: a collision below a folder a save turned into a file is named below it.
 fn changed_since(
     repo: &Repository,
     then: Id,
     now: Id,
     paths: Vec<String>,
-    drive: Drive,
 ) -> Result<(Vec<String>, Vec<String>), StoreError> {
     if then == now {
         return Ok((Vec::new(), paths));
     }
     let (store, signed) = (repo.store(), repo.signatures_allowed());
     let unstored = HashMap::new();
-    let mut before = Tree::new(store, &unstored, store.save(&then, signed)?.root, drive);
-    let mut after = Tree::new(store, &unstored, store.save(&now, signed)?.root, drive);
+    let mut before = Tree::new(
+        store,
+        &unstored,
+        store.save(&then, signed)?.root,
+        kept::EXACT,
+    );
+    let mut after = Tree::new(
+        store,
+        &unstored,
+        store.save(&now, signed)?.root,
+        kept::EXACT,
+    );
     let held = |e: Option<Entry>| e.map(|e| (e.kind, e.id));
     let (mut changed, mut rest) = (Vec::new(), Vec::new());
     for path in paths {
-        if held(before.entry(&path)?) == held(after.entry(&path)?) {
-            rest.push(path);
-        } else {
+        let mut differ = held(before.entry(&path)?) != held(after.entry(&path)?);
+        for up in ancestors(&path) {
+            if differ {
+                break;
+            }
+            differ = before.folder(up)?.is_some() != after.folder(up)?.is_some();
+        }
+        if differ {
             changed.push(path);
+        } else {
+            rest.push(path);
         }
     }
     Ok((changed, rest))
 }
 
-/// `None`, with what reading the folder found noted with the store's warnings.
-fn set_aside_nothing(repo: &Repository, plan: Plan, earlier: &mut Earlier) -> Option<ShelfOutcome> {
+/// Nothing set aside, with what reading the folder found noted with the store's warnings.
+fn set_aside_nothing(
+    repo: &Repository,
+    plan: Plan,
+    earlier: &mut Earlier,
+    changed_again: bool,
+    links_left: Vec<String>,
+) -> Shelved {
     for w in switch::switch_warnings(plan, Applied::default(), earlier).warnings {
         repo.store().note(w);
     }
-    None
+    Shelved::Nothing {
+        changed_again,
+        links_left,
+    }
 }
 
 /// How many files differ between the saves `from` and `to`.
