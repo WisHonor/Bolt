@@ -187,20 +187,25 @@ impl ChunkList {
     /// Decodes a list by storage-format.md section 6's rules, refusing anything else.
     pub fn decode(bytes: &[u8]) -> Result<ChunkList, DecodeError> {
         let mut rest = bytes;
-        ChunkList::read_from(&mut rest, bytes.len() as u64)
+        ChunkList::read_from(&mut rest, bytes.len() as u64).map_err(|e| match e {
+            ReadListError::Damaged(why) => why,
+            // Reading a slice can only run out, which is damage already.
+            ReadListError::Io(_) => DecodeError::UnexpectedEnd,
+            ReadListError::OutOfMemory => {
+                DecodeError::Invalid("there is not enough memory for the chunk list")
+            }
+        })
     }
 
-    /// The same rules, decoding `len` bytes as they are read, never holding them whole. A read
-    /// that fails ends it as `UnexpectedEnd`: a caller that must tell that from damage watches its
-    /// reader.
-    pub fn read_from(reader: &mut dyn Read, len: u64) -> Result<ChunkList, DecodeError> {
+    /// The same rules, decoding `len` bytes as they are read, never holding them whole.
+    pub fn read_from(reader: &mut dyn Read, len: u64) -> Result<ChunkList, ReadListError> {
         let mut r = Pieces {
             src: BufReader::new(reader.take(len)),
             left: len,
         };
         let [version] = r.array()?;
         if version != 1 {
-            return Err(DecodeError::Invalid("unknown chunk list version"));
+            return Err(DecodeError::Invalid("unknown chunk list version").into());
         }
         let file = Id(r.array()?);
         let size = r.varint()?;
@@ -209,43 +214,59 @@ impl ChunkList {
             return Err(DecodeError::LimitExceeded {
                 field: "chunk count",
                 limit: MAX_CHUNKS,
-            });
+            }
+            .into());
         }
         if count == 0 {
-            return Err(DecodeError::Invalid(
-                "a chunk list holds at least one chunk",
-            ));
+            return Err(DecodeError::Invalid("a chunk list holds at least one chunk").into());
         }
         // Checked before anything is allocated for them.
         if count.saturating_mul(LEAST_PER_CHUNK) > r.left {
-            return Err(DecodeError::Invalid(
-                "the chunk count is more than the record holds",
-            ));
+            return Err(
+                DecodeError::Invalid("the chunk count is more than the record holds").into(),
+            );
         }
-        let mut chunks = Vec::with_capacity(usize::try_from(count).unwrap_or_default());
+        let mut chunks = Vec::new();
+        chunks
+            .try_reserve_exact(usize::try_from(count).unwrap_or(usize::MAX))
+            .map_err(|_| ReadListError::OutOfMemory)?;
+        let wrong_sizes = || DecodeError::Invalid("the chunk sizes don't add up to the file size");
+        let mut total = 0u64;
         for _ in 0..count {
-            chunks.push(Chunk {
+            let chunk = Chunk {
                 id: Id(r.array()?),
                 size: r.varint()?,
-            });
+            };
+            if chunk.size == 0 {
+                return Err(DecodeError::Invalid("a chunk is at least one byte").into());
+            }
+            total = total
+                .checked_add(chunk.size)
+                .filter(|total| *total <= size)
+                .ok_or_else(wrong_sizes)?;
+            // Within the room reserved above, so this never allocates.
+            chunks.push(chunk);
         }
-        if chunks.iter().any(|chunk| chunk.size == 0) {
-            return Err(DecodeError::Invalid("a chunk is at least one byte"));
-        }
-        if chunks
-            .iter()
-            .try_fold(0u64, |sum, c| sum.checked_add(c.size))
-            != Some(size)
-        {
-            return Err(DecodeError::Invalid(
-                "the chunk sizes don't add up to the file size",
-            ));
+        if total != size {
+            return Err(wrong_sizes().into());
         }
         if r.left != 0 {
-            return Err(DecodeError::TrailingBytes);
+            return Err(DecodeError::TrailingBytes.into());
         }
         Ok(ChunkList { file, size, chunks })
     }
+}
+
+/// Why a chunk list couldn't be read. The store tells damage from a failed read and from too
+/// little memory, after which the same list may read fine.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadListError {
+    #[error("the chunk list is damaged: {0}")]
+    Damaged(#[from] DecodeError),
+    #[error(transparent)]
+    Io(io::Error),
+    #[error("Bolt ran out of memory while reading a chunk list")]
+    OutOfMemory,
 }
 
 /// A record's bytes as they are read, counting how many of its length are left.
@@ -255,17 +276,22 @@ struct Pieces<'a> {
 }
 
 impl Pieces<'_> {
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], ReadListError> {
         let mut out = [0; N];
-        self.src
-            .read_exact(&mut out)
-            .map_err(|_| DecodeError::UnexpectedEnd)?;
+        self.src.read_exact(&mut out).map_err(|e| {
+            if e.kind() == ErrorKind::UnexpectedEof {
+                // The bytes ended before the record did.
+                ReadListError::Damaged(DecodeError::UnexpectedEnd)
+            } else {
+                ReadListError::Io(e)
+            }
+        })?;
         self.left = self.left.saturating_sub(N as u64);
         Ok(out)
     }
 
     /// A varint, gathered a byte at a time and read by the format's one rule for them.
-    fn varint(&mut self) -> Result<u64, DecodeError> {
+    fn varint(&mut self) -> Result<u64, ReadListError> {
         let mut bytes = [0; 10];
         let mut len = 0_usize;
         for slot in &mut bytes {
@@ -276,7 +302,7 @@ impl Pieces<'_> {
                 break;
             }
         }
-        Reader::new(bytes.get(..len).unwrap_or_default()).varint()
+        Ok(Reader::new(bytes.get(..len).unwrap_or_default()).varint()?)
     }
 }
 
@@ -427,16 +453,66 @@ mod tests {
             ChunkList::decode(&header(MAX_CHUNKS + 1)),
             Err(over_the_limit())
         );
-        // Read as a stream whose length holds one byte too few, or enough: nothing is read past
-        // the header.
+        // Read as a stream whose length holds one byte too few, far too few, or enough: nothing
+        // is read past the header, so nothing is allocated for the chunks it claims.
         for (count, room, refused) in [
             (MAX_CHUNKS, MAX_CHUNKS * 33 - 1, past_the_bytes()),
+            (5_000_000, 10 * 33, past_the_bytes()),
             (MAX_CHUNKS + 1, (MAX_CHUNKS + 1) * 33, over_the_limit()),
         ] {
             let bytes = header(count);
             let len = bytes.len() as u64 + room;
             let mut once = Once(Some(bytes));
-            assert_eq!(ChunkList::read_from(&mut once, len), Err(refused));
+            match ChunkList::read_from(&mut once, len) {
+                Err(ReadListError::Damaged(why)) => assert_eq!(why, refused),
+                other => panic!("{count}: {other:?}"),
+            }
+        }
+    }
+
+    /// A disk that fails every read.
+    struct Failing;
+
+    impl Read for Failing {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the disk said no",
+            ))
+        }
+    }
+
+    #[test]
+    fn a_read_that_fails_part_way_is_a_read_error_not_damage() {
+        let bytes = ChunkList {
+            file: Id([1; 32]),
+            size: 3,
+            chunks: vec![
+                Chunk {
+                    id: Id([2; 32]),
+                    size: 1,
+                },
+                Chunk {
+                    id: Id([3; 32]),
+                    size: 2,
+                },
+            ],
+        }
+        .encode();
+        let len = bytes.len() as u64;
+        // The reader fails after 50 bytes: its own error comes back.
+        match ChunkList::read_from(&mut (&bytes[..50]).chain(Failing), len) {
+            Err(ReadListError::Io(e)) => {
+                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(e.to_string(), "the disk said no");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Bytes that end before the length says are damage: the record is cut short.
+        let mut short = &bytes[..50];
+        match ChunkList::read_from(&mut short, len) {
+            Err(ReadListError::Damaged(DecodeError::UnexpectedEnd)) => {}
+            other => panic!("{other:?}"),
         }
     }
 
@@ -466,7 +542,11 @@ mod tests {
             let mut longer = bytes.clone();
             longer.push(0);
             for mut reader in uneven(&longer) {
-                let read = ChunkList::read_from(&mut reader, bytes.len() as u64);
+                let read =
+                    ChunkList::read_from(&mut reader, bytes.len() as u64).map_err(|e| match e {
+                        ReadListError::Damaged(why) => why,
+                        other => panic!("{other:?}"),
+                    });
                 assert_eq!(read, decoded);
             }
         }
