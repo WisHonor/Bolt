@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 5
+- **Refined by:** [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (a big file's chunk list is stored under the file's own ID)
 
 ## Context
 

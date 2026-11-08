@@ -4,7 +4,7 @@
 - **Date:** 2026-10-31
 - **Agenda topic:** 18 (design review)
 - **Supersedes:** the last consequence of [decision 002](002-git-compatibility.md) ("LFS files whose content isn't available locally must import as 'known but not downloaded'")
-- **Refined by:** [decision 037](037-lfs-waits-for-milestone-5.md) (until milestone 5 builds this, an import stops at any LFS pointer)
+- **Refined by:** [decision 037](037-lfs-waits-for-milestone-5.md) (until milestone 5 builds this, an import stops at any LFS pointer); [decision 085](085-importing-git-lfs-files.md) (what counts as a Git LFS file, and when the check that every one is on disk runs)
 
 ## Context
 

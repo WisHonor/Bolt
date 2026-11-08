@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 4 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 009](009-storage-engine.md) (cleanup), [decision 010](010-operation-log.md) (the undo window), [decision 057](057-pack-index-on-disk-and-merging.md) and [decision 062](062-when-packs-are-merged.md) (packs left for `tidy`)
-- **Refined by:** [decision 079](079-red-team-m4-rulings.md) (diary ends in the window are kept); [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built)
+- **Refined by:** [decision 079](079-red-team-m4-rulings.md) (diary ends in the window are kept); [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built); [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (`tidy` follows chunk lists, and stops at a pack it can't read); [decision 088](088-benchmarks-and-the-speed-gates.md) (compressing again waits for its numbers)
 
 ## Context
 

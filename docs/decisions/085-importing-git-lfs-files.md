@@ -1,0 +1,42 @@
+# 085 — Importing Git LFS files
+
+- **Status:** Accepted
+- **Date:** 2026-11-08
+- **Agenda topic:** none (milestone 5 planning)
+- **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
+- **Supersedes:** [decision 037](037-lfs-waits-for-milestone-5.md) (an import stops at any Git LFS pointer until milestone 5)
+- **Refines:** [decision 020](020-lfs-import.md) (when the check that every Git LFS file is on disk runs, and what counts as one) and [decision 039](039-first-save-after-import.md) (the first save after an import also stops at pointer files)
+
+## Context
+
+Git LFS keeps a small text file, a pointer, in Git for each big file: the real file's SHA-256 and size. The real file lives in `.git/lfs/objects/<first two hex digits>/<next two>/<SHA-256>`, and a normal clone downloads only the versions it checks out. Decision 020 says an import reads the real files from there, checks each against its pointer, and stops before writing anything when any is missing, saying to run `git lfs fetch --all`. Decision 037 made the import stop at any pointer until milestone 5, using Git LFS's own test for one, and stop at files that merely look like one too. Left open: which files count as Git LFS files, how the "before writing anything" check runs, and what happens to look-alikes, to pointers that need Git LFS to run a program, and to a folder holding pointers instead of the real files.
+
+## Options
+
+Which files count:
+- **A. Every file whose contents Git LFS's own pointer parser accepts,** wherever it sits: exactly the files `git lfs fetch --all` downloads, since it finds them the same way. A file's conversion then depends on its contents alone, as every other file's does.
+- **B. Only pointers at paths a `filter=lfs` line in that commit's `.gitattributes` covers:** exactly what a Git checkout with Git LFS writes. But it needs a full `.gitattributes` reader (patterns, macros, nested files, `.git/info/attributes`), and a folder's conversion would then depend on the attribute files above it, so the import could no longer convert each Git folder once.
+
+When the check that every file is on disk runs:
+- **A. In the first pass,** before `.bolt` is made: walk every folder of every commit the import brings in, each distinct one once, reading every file of at most 1,024 bytes. It costs a walk of the whole history before anything is written.
+- **B. During the second pass,** stopping at the first missing file: no extra walk, but a user missing many files learns of them one run at a time, after waiting for each.
+
+## Decision
+
+**A, and A.**
+
+- **What counts as a Git LFS file:** a file of at most 1,024 bytes that Git LFS's own pointer parser accepts (decision 037's test: the version line, then `oid sha256:` with 64 hex digits, then `size`, in that order, with only extension lines between). Its path doesn't matter. Known limit: where a commit's `.gitattributes` doesn't mark such a file for Git LFS, Git checks out the pointer text and Bolt brings in the file it points to; Git LFS itself calls that a broken repository (`git lfs fsck --pointers`).
+- **Where the contents come from:** only `.git/lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`, opened as every file in `.git` is, without following a link, and only if it is a regular file whose length is the pointer's size. It is streamed into the store as any file is, chunked from 1 MiB, while its SHA-256 is computed; the SHA-256 must be the pointer's at the end, or the import stops, naming the file, the commit and the object, with a hint to fetch it again (`git lfs fetch --all`, then `git lfs fsck`). Bolt never fetches and never runs Git LFS. A pointer of size 0 stands for an empty file, and no object is read. A repository whose `.git/config` sets `lfs.storage` keeps its objects elsewhere, so the import refuses it, saying so, before writing anything (Bolt reads that line only to refuse, as it reads `core.sparseCheckout`).
+- **The check before writing:** when the repository shows a sign of Git LFS (decision 037's: a `.git/lfs` folder, or `filter=lfs` on a line of the top `.gitattributes` of `HEAD` that isn't a comment), the first pass walks every folder of every commit the import brings in, each distinct folder once and within the import's limits, reads each file of at most 1,024 bytes, and checks that each Git LFS file's object is there with its pointer's size (not reading it yet). If any is missing, the import stops before `.bolt` is made, listing the first 20 (path, commit, size), how many are missing in all and their total size, and says to run `git lfs fetch --all` and import again. Without a sign, a missing object stops the second pass at the first one met, naming it; nothing is committed, and the next run reuses what was stored.
+- **Look-alikes:** a file that looks like a pointer (decision 037's description) but that Git LFS's parser refuses is an ordinary file to Git LFS, which checks it out as it is, so the import brings it in as it is, with an `lfs_lookalikes` warning naming the first few and counting them all.
+- **Pointers with extensions** (`ext-` lines) need Git LFS to run a program to rebuild the file, which Bolt never does: the import stops at the first, naming it.
+- **Exactness:** an imported Git LFS file is an ordinary Bolt file, its ID the BLAKE3 hash of its contents (decision 020). A later export (before 1.0) can give back its pointer only in the exact form Git LFS writes (`version https://git-lfs.github.com/spec/v1`, `oid sha256:<oid>`, `size <n>`, each line ending in LF), so the import counts the pointers that weren't in that form, as it counts trees not in Git's standard form.
+- **The first save after an import** stops where the folder holds a pointer instead of the file the import brought in (Git LFS wasn't installed when the folder was checked out, or it was told to skip): a file stops it when it differs from the imported version, Git LFS's parser accepts it, and its size line is the imported version's size. The message names the first few, counts them, and says to run `git lfs checkout` and save again. There is no flag to save the pointers anyway: saving pointer text over every big file is never what a user meant, and once the files are right the stop is gone.
+- **Writing such files out** ([follow-ups](../plans/2026-11-01-milestone-1-follow-ups.md), CVE-2025-26625, where Git LFS wrote through a link or into a hard-linked file outside the working tree): an imported Git LFS file is an ordinary file, and write-out already writes each file into `.bolt/tmp` and renames it into place, through folders opened a name at a time without following a link (decisions 048 and 049). Tests pin both lessons: a hard link at a path a switch writes leaves the other name's file unchanged, and a link at a folder above it is never followed.
+
+## Consequences
+
+- Repositories that use Git LFS, Unity projects among them, can be imported once their history's Git LFS files are fetched; the usual first stop names what's missing before anything is written.
+- An import of a repository with a sign of Git LFS walks its whole history once more before writing, and reads every small file twice; measured with decision 088's benchmarks.
+- Each Git LFS file's versions share chunks in Bolt, where Git LFS keeps every version whole.
+- The import's first pass now keeps, for each distinct folder and small file it has seen, a mark that it has (a Git ID), so its memory grows with the history's size, like the second pass's.

@@ -4,6 +4,7 @@
 - **Date:** 2026-11-02
 - **Agenda topic:** none (milestone 2 planning, question 7)
 - **Refines:** [decision 020](020-lfs-import.md) (how LFS files are imported, which milestone 5 builds)
+- **Superseded by:** [decision 085](085-importing-git-lfs-files.md) (milestone 5 imports Git LFS files)
 
 ## Context
 

@@ -5,7 +5,7 @@
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md); report: [redteam/2026-11-02-milestone-1-session-2.md](../redteam/2026-11-02-milestone-1-session-2.md))
 - **Decided by:** Claude, while the owner was away, under the owner's instruction of 2026-11-01 to finish the milestone and merge. The owner can reverse any part.
 - **Reviewed:** 2026-11-02 with the owner, who left the call to Claude; kept whole.
-- **Refined by:** [decision 029](029-red-team-m1-final-review-rulings.md) (stored copies are tried cheapest first; a `.boltignore` line Bolt can't yet read like Git stops the save); [decision 041](041-several-packs-per-command.md) (#2's open question: a command writes several packs); [decision 053](053-file-state-cache.md) (the file-state cache); [decision 057](057-pack-index-on-disk-and-merging.md) (pack indexes searched on disk; packs opened when needed and merged)
+- **Refined by:** [decision 029](029-red-team-m1-final-review-rulings.md) (stored copies are tried cheapest first; a `.boltignore` line Bolt can't yet read like Git stops the save); [decision 041](041-several-packs-per-command.md) (#2's open question: a command writes several packs); [decision 053](053-file-state-cache.md) (the file-state cache); [decision 057](057-pack-index-on-disk-and-merging.md) (pack indexes searched on disk; packs opened when needed and merged); [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (#1: when a stored chunk list counts as a good copy)
 
 ## Context
 
