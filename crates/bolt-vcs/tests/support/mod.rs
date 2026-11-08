@@ -2,6 +2,7 @@
 // Each test file uses only some of them.
 #![allow(dead_code)]
 
+pub mod corpus;
 mod vs_git;
 
 #[allow(unused_imports)]
@@ -366,33 +367,41 @@ pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
     (env, ids)
 }
 
+/// Stores a save of the folder whose top listing is `root`, made on the save `parent` by its
+/// author; its ID.
+pub fn add_save(repo: &Repository, pack: &mut PackSet, root: Id, parent: Id) -> Id {
+    let made_on = repo.store().save(&parent, false).unwrap();
+    let save = Save {
+        root,
+        parents: vec![parent],
+        author: made_on.author,
+        saver: made_on.saver,
+        message: "Planted".into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: made_on.extra,
+    };
+    pack.add_record(ObjectKind::Save, &save.encode()).unwrap()
+}
+
 /// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
 pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     let mut repo = Repository::open(root).unwrap();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     let (head, entry) = repo.current().unwrap();
     let parent_id = entry.state.lines["main"];
-    let parent = repo.store().save(&parent_id, false).unwrap();
+    let author = repo.store().save(&parent_id, false).unwrap().author;
     let mut pack = repo.new_packs().unwrap();
-    let save = Save {
-        root: build(&mut pack),
-        parents: vec![parent_id],
-        author: parent.author.clone(),
-        saver: parent.saver.clone(),
-        message: "Planted".into(),
-        change_id: ChangeId::random().unwrap(),
-        move_notes: vec![],
-        signature: vec![],
-        extra: parent.extra.clone(),
-    };
-    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let top = build(&mut pack);
+    let save_id = add_save(&repo, &mut pack, top, parent_id);
     let mut state = entry.state.clone();
     state.lines.insert("main".into(), save_id);
     let diary = DiaryEntry {
         parent: Some(head),
         action: Action::Command,
         command: "save".into(),
-        who: parent.author.clone(),
+        who: author,
         bolt_version: "0.1.0".into(),
         state,
         folder_change: None,
