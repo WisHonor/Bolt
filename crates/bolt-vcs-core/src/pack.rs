@@ -304,13 +304,12 @@ impl PackWriter {
         if self.contains(&list.file) {
             return Ok(());
         }
-        let raw = Prepared {
-            id: list.file,
-            size: list.size,
-            zstd: false,
-            stored: list.encode(),
-        };
-        self.add_prepared(ObjectKind::ChunkList, &raw)
+        // Written as it is encoded, so a long list is never held twice.
+        self.add_entry(ObjectKind::ChunkList, list.file, |file| {
+            list.write_to(file)?;
+            Ok((list.size, NO_COMPRESSION, list.file))
+        })?;
+        Ok(())
     }
 
     #[must_use]
@@ -880,6 +879,19 @@ impl PackReader {
     /// chunks nor the file they build are checked here.
     pub fn read_chunk_list(&self, entry: &IndexEntry) -> Result<ChunkList, PackError> {
         self.read_chunk_list_hashed(entry).map(|(list, _)| list)
+    }
+
+    /// Whether the chunk list `entry` holds is `list`, byte for byte, compared as it is read so a
+    /// long list is never held twice. Any other, damaged or not, isn't.
+    pub(crate) fn holds_chunk_list(
+        &self,
+        entry: &IndexEntry,
+        list: &ChunkList,
+    ) -> Result<bool, PackError> {
+        let (compression, mut data) = self.stored(entry)?;
+        Ok(entry.kind == ObjectKind::ChunkList
+            && compression == NO_COMPRESSION
+            && list.is_record(&mut data, entry.stored_size)?)
     }
 
     /// `read_chunk_list`, with the plain BLAKE3 hash of the list's bytes, which tells lists apart.

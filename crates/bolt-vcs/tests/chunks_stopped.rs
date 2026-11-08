@@ -12,6 +12,7 @@ use bolt_core::pack::set_test_pack_limit;
 use bolt_core::repo::Repository;
 use bolt_core::snapshot::SaveError;
 use bolt_core::verify::verify_store;
+use bolt_core::workers::set_test_workers;
 
 mod support;
 use support::{ada, id_of, save_here, top_folder, write_noise};
@@ -89,4 +90,42 @@ fn a_save_stopped_between_chunks_leaves_the_project_as_it_was() {
         between_chunks,
         "no stop fell between two of the file's chunks"
     );
+}
+
+/// Where a save of the big file and some small ones stops when its `n`th fault point fails, with
+/// `count` workers, and how many packs it leaves in the store; `None` once nothing stops it.
+fn stopped_at(n: u64, count: usize) -> (Option<String>, usize) {
+    let (dir, _) = with_a_big_file();
+    for i in 0..40 {
+        let text = format!("small file {i}\n").repeat(i + 1);
+        std::fs::write(dir.path().join(format!("f{i:02}.txt")), text).unwrap();
+    }
+    set_test_workers(Some(count));
+    fault::arm(n);
+    let saved = save_here(dir.path(), "Big");
+    fault::disarm();
+    set_test_workers(None);
+    let packs = std::fs::read_dir(dir.path().join(".bolt/store/packs")).unwrap();
+    // The point it stopped at, not the project's folder, which each run has its own of.
+    let place = saved.err().map(|e| {
+        let said = format!("{e:?}");
+        match said.split_once("injected fault at ") {
+            Some((_, at)) => at.split('"').next().unwrap_or(at).to_owned(),
+            None => said,
+        }
+    });
+    (place, packs.count())
+}
+
+#[test]
+fn a_crash_sweep_of_a_threaded_save_stops_at_the_same_places() {
+    for n in 1.. {
+        assert!(n < 300, "the save never finished");
+        let one = stopped_at(n, 1);
+        assert_eq!(one, stopped_at(n, 8), "fault {n}");
+        if one.0.is_none() {
+            assert!(n > 10, "only {n} fault points");
+            break;
+        }
+    }
 }

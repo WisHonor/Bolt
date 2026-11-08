@@ -123,6 +123,18 @@ impl Handles {
         self.dir(Path::new(rel)).map_err(|e| folder_problem(rel, e))
     }
 
+    /// `folder`, as a handle a job can hold while this set moves on.
+    pub(super) fn shared(&mut self, rel: &str) -> Result<Arc<Dir>, SaveError> {
+        self.held(Path::new(rel))
+            .map(Arc::clone)
+            .map_err(|e| folder_problem(rel, e))
+    }
+
+    /// Leaves room for `held` folders held open elsewhere, by jobs that read their files.
+    pub(super) fn lend(&mut self, held: usize) {
+        self.most = MOST_HELD.saturating_sub(held);
+    }
+
     fn deepest(&self) -> &Arc<Dir> {
         self.down.last().map_or(&self.top, |(_, dir)| dir)
     }

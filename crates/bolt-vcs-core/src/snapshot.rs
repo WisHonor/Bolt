@@ -7,6 +7,7 @@ use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
@@ -20,7 +21,7 @@ use crate::filecache::{self, FileCache};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
-use crate::ingest::{self, IngestError};
+use crate::ingest::{self, IngestError, Ready};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
@@ -31,6 +32,7 @@ use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
 use crate::warning::{self, Warning};
+use crate::workers::{WINDOW, with_workers};
 use crate::writeout;
 
 mod endings;
@@ -506,8 +508,9 @@ pub fn save_folder(
         trusted,
         seen: FileCache::default(),
     };
-    let built = build_with(
+    let built = build_reading(
         &mut storing,
+        Some(repo.store()),
         &mut handles,
         &folders,
         &old,
@@ -979,21 +982,23 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
 }
 
 /// Where `build` puts what it reads: the store, for a save, or nowhere, for a look at what changed.
-/// Folders are opened through `handles`, by project path, only for what is read.
+/// What the workers read comes in `read`, in `build_with`'s order, one result for each file the
+/// cache doesn't vouch for and each link.
 trait Contents {
-    /// The ID and size of the file `c` in the folder `folder`, which the base save holds as `was`.
+    /// The ID and size the file-state cache gives the file `c`, which the base save holds as
+    /// `was`, if it vouches for it: then it isn't read.
+    fn vouched(&self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)>;
+    /// The ID and size of the file `c`, which the base save holds as `was`.
     fn file(
         &mut self,
-        handles: &mut Handles,
-        folder: &str,
+        read: &mut dyn Iterator<Item = Done>,
         c: &Child,
         was: Option<&Entry>,
     ) -> Result<(Id, u64), SaveError>;
-    /// The ID and size of the link `c`'s target, in the folder `folder`.
+    /// The ID and size of the link `c`'s target.
     fn link(
         &mut self,
-        handles: &mut Handles,
-        folder: &str,
+        read: &mut dyn Iterator<Item = Done>,
         c: &Child,
     ) -> Result<(Id, u64), SaveError>;
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
@@ -1010,35 +1015,25 @@ struct Storing<'a> {
 }
 
 impl Contents for Storing<'_> {
+    fn vouched(&self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
+        // The cache never names content to a save: it only says the base save's entry still holds.
+        let known = self.trusted.matches(&c.rel, c.meta.as_ref()?)?;
+        was.filter(|e| (e.id, e.size) == (known.id, known.size))
+            .map(|_| (known.id, known.size))
+    }
+
     fn file(
         &mut self,
-        handles: &mut Handles,
-        folder: &str,
+        read: &mut dyn Iterator<Item = Done>,
         c: &Child,
         was: Option<&Entry>,
     ) -> Result<(Id, u64), SaveError> {
-        let meta = c.meta.as_ref();
-        // The cache never names content to a save: it only says the base save's entry still holds.
-        if let Some(meta) = meta
-            && let Some(known) = self.trusted.matches(&c.rel, meta)
-            && was.is_some_and(|e| (e.id, e.size) == (known.id, known.size))
-        {
-            let (id, size) = (known.id, known.size);
-            self.seen.record(&c.rel, meta, id);
-            return Ok((id, size));
-        }
-        let dir = handles.folder(folder)?;
-        let (id, size) = store_file(
-            self.packs,
-            self.store,
-            dir,
-            &c.name,
-            &c.rel,
-            meta,
-            &mut || {},
-        )?;
-        // The walk's details: the read found the file still had them.
-        if let Some(meta) = meta {
+        let (id, size) = match self.vouched(c, was) {
+            Some(known) => known,
+            None => self.store_read(read, &c.rel)?,
+        };
+        // The walk's details, which the cache vouched for or the read found the file still had.
+        if let Some(meta) = &c.meta {
             self.seen.record(&c.rel, meta, id);
         }
         Ok((id, size))
@@ -1046,22 +1041,271 @@ impl Contents for Storing<'_> {
 
     fn link(
         &mut self,
-        handles: &mut Handles,
-        folder: &str,
+        read: &mut dyn Iterator<Item = Done>,
         c: &Child,
     ) -> Result<(Id, u64), SaveError> {
-        store_link(
-            self.packs,
-            self.store,
-            handles.folder(folder)?,
-            &c.name,
-            &c.rel,
-        )
+        self.store_read(read, &c.rel)
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
         store_listing(self.store, self.packs, &listing)
     }
+}
+
+impl Storing<'_> {
+    /// Stores what the workers made of `rel`, the next file or link in the order. A big file
+    /// they leave to this thread.
+    fn store_read(
+        &mut self,
+        read: &mut dyn Iterator<Item = Done>,
+        rel: &str,
+    ) -> Result<(Id, u64), SaveError> {
+        match read.next() {
+            Some(Done::Read { rel: of, got }) if of == rel => {
+                let ready = got?;
+                ingest::add_ready(self.packs, &ready).map_err(|e| ingest_failed(e, rel))?;
+                Ok((ready.id, ready.size))
+            }
+            Some(Done::Big(at)) if at.rel == rel => {
+                let seen = at.meta.as_ref();
+                store_file(
+                    self.packs,
+                    self.store,
+                    &at.dir,
+                    &at.name,
+                    rel,
+                    seen,
+                    &mut || {},
+                )
+            }
+            _ => Err(out_of_order()),
+        }
+    }
+}
+
+/// What the workers made of the next file or link in the order, which isn't stored: its ID and
+/// size, if `rel` is the one it is.
+fn hashed_read(read: &mut dyn Iterator<Item = Done>, rel: &str) -> Result<(Id, u64), SaveError> {
+    match read.next() {
+        Some(Done::Read { rel: of, got }) if of == rel => got.map(|ready| (ready.id, ready.size)),
+        _ => Err(out_of_order()),
+    }
+}
+
+/// A result that isn't the one `build_with` asked for, which no input can cause.
+fn out_of_order() -> SaveError {
+    RepoError::from(io::Error::other(
+        "the project's files were read out of order",
+    ))
+    .into()
+}
+
+/// A file or link to read, through the handle of its folder, held open until it is read.
+struct At {
+    dir: Arc<Dir>,
+    name: String,
+    rel: String,
+    /// What the walk saw of it.
+    meta: Option<EntryMeta>,
+}
+
+impl At {
+    fn size(&self) -> u64 {
+        self.meta.map_or(0, |m| m.size)
+    }
+}
+
+/// A job for the workers, for a file or link `build_with` needs read.
+enum Job {
+    /// A file: a save's small one read whole and made ready for a pack, a status's only hashed.
+    File(At),
+    /// A link's target.
+    Link(At),
+    /// A big file a save stores on the writer's thread, its chunks on workers of their own.
+    Big(At),
+    /// One whose folder couldn't be opened.
+    Failed { rel: String, why: SaveError },
+}
+
+/// What a worker made of a job.
+enum Done {
+    Read {
+        rel: String,
+        got: Result<Ready, SaveError>,
+    },
+    Big(At),
+}
+
+impl Job {
+    /// The most the job holds from when it is handed out until its result is taken.
+    fn cost(&self, storing: bool) -> usize {
+        match self {
+            Job::File(at) if storing => ingest::cost(at.size()),
+            // Hashed through one buffer, however long the file is.
+            Job::File(_) => READ_BUFFER,
+            Job::Link(at) => ingest::cost(at.size()),
+            // Nothing else goes out while the writer stores a big file.
+            Job::Big(_) => WINDOW,
+            Job::Failed { .. } => 0,
+        }
+    }
+
+    /// What a worker does: a save's (`store` given) reads a small file or a link whole and makes
+    /// it ready for a pack, a status's only hashes what it reads.
+    fn run(self, store: Option<&Store>) -> Done {
+        let (rel, got) = match self {
+            Job::Big(at) => return Done::Big(at),
+            Job::Failed { rel, why } => (rel, Err(why)),
+            Job::File(at) => {
+                let got = match store {
+                    Some(store) => read_small(store, &at),
+                    None => hash_scanned(&at.dir, &at.name, &at.rel, at.meta.as_ref(), &mut || {})
+                        .map(|(_, id, size)| Ready {
+                            id,
+                            size,
+                            stored: None,
+                        }),
+                };
+                (at.rel, got)
+            }
+            Job::Link(at) => {
+                let got = link_target(&at.dir, &at.name, &at.rel).and_then(|target| {
+                    let bytes = target.as_bytes();
+                    match store {
+                        Some(store) => {
+                            ingest::ready(store, bytes).map_err(|e| ingest_failed(e, &at.rel))
+                        }
+                        None => Ok(Ready {
+                            id: hash_content(bytes),
+                            size: bytes.len() as u64,
+                            stored: None,
+                        }),
+                    }
+                });
+                (at.rel, got)
+            }
+        };
+        Done::Read { rel, got }
+    }
+}
+
+/// The files and links `build_with` reads, in its order, as jobs: `todo` holds each with the
+/// project path of its folder, which is opened through `handles` when its job is made.
+struct Jobs<'a> {
+    handles: &'a mut Handles,
+    todo: std::vec::IntoIter<(&'a str, &'a Child)>,
+    storing: bool,
+}
+
+impl Iterator for Jobs<'_> {
+    type Item = Job;
+
+    fn next(&mut self) -> Option<Job> {
+        let (folder, c) = self.todo.next()?;
+        let dir = match self.handles.shared(folder) {
+            Ok(dir) => dir,
+            Err(why) => {
+                let rel = c.rel.clone();
+                return Some(Job::Failed { rel, why });
+            }
+        };
+        let at = At {
+            dir,
+            name: c.name.clone(),
+            rel: c.rel.clone(),
+            meta: c.meta,
+        };
+        Some(match c.kind {
+            Kind::Symlink => Job::Link(at),
+            _ if self.storing && c.meta.is_some_and(|m| !ingest::is_small(m.size)) => Job::Big(at),
+            // One the walk has no details of fails as it is opened, as any file does.
+            _ => Job::File(at),
+        })
+    }
+}
+
+/// Reads the small file `at` whole, as `store_file` does, and makes it ready for a pack.
+fn read_small(store: &Store, at: &At) -> Result<Ready, SaveError> {
+    let rel = at.rel.as_str();
+    let (mut file, opened) = open_scanned(&at.dir, &at.name, rel, at.meta.as_ref())?;
+    let ready = ingest::read_whole(&mut file, opened.size)
+        .and_then(|bytes| ingest::ready(store, &bytes))
+        .map_err(|e| ingest_failed(e, rel))?;
+    let now = stamp(&file).map_err(|source| SaveError::Unreadable {
+        path: rel.to_owned(),
+        source,
+    })?;
+    if now != stamp_of(&opened) {
+        return Err(SaveError::ChangedDuringSave {
+            path: rel.to_owned(),
+        });
+    }
+    Ok(ready)
+}
+
+/// What a save says when bytes of the project path `rel` couldn't be stored.
+pub(crate) fn ingest_failed(e: IngestError, rel: &str) -> SaveError {
+    match e {
+        IngestError::Changed => SaveError::ChangedDuringSave {
+            path: rel.to_owned(),
+        },
+        IngestError::Read(source) => SaveError::Unreadable {
+            path: rel.to_owned(),
+            source,
+        },
+        IngestError::Pack(e) => e.into(),
+        IngestError::Store(e) => e.into(),
+    }
+}
+
+/// `build_with`, its files and links read on the workers. For a save (`store` given) a small file
+/// is read whole and made ready for a pack there, and a big one is stored by this thread with
+/// its chunks on workers of their own; for a status every file is only hashed. Only this thread
+/// writes packs, in `build_with`'s order. Folders are opened through `handles`.
+fn build_reading(
+    contents: &mut dyn Contents,
+    store: Option<&Store>,
+    handles: &mut Handles,
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+    ignored: &HashSet<String>,
+    gitignored: &HashSet<String>,
+) -> Result<Built, SaveError> {
+    let mut todo = Vec::new();
+    for rel in build_order(folders) {
+        let before = old.get(rel).and_then(Option::as_ref);
+        for c in folders.get(rel).into_iter().flatten() {
+            let read = match c.kind {
+                Kind::File => contents
+                    .vouched(c, before.and_then(|l| l.get(&c.name)))
+                    .is_none(),
+                Kind::Symlink => true,
+                _ => false,
+            };
+            if read {
+                todo.push((rel.as_str(), c));
+            }
+        }
+    }
+    let storing = store.is_some();
+    with_workers(|workers| {
+        // Each job out holds its folder open.
+        handles.lend(workers.most_out());
+        let jobs = Jobs {
+            handles: &mut *handles,
+            todo: todo.into_iter(),
+            storing,
+        };
+        let built = workers.results(
+            jobs,
+            WINDOW,
+            |job| job.cost(storing),
+            |job| job.run(store),
+            |read| build_with(contents, read, folders, old, ignored, gitignored),
+        );
+        handles.lend(0);
+        built
+    })
 }
 
 /// What `build_with` found.
@@ -1096,21 +1340,21 @@ fn build(
         trusted: FileCache::default(),
         seen: FileCache::default(),
     };
-    let b = build_with(&mut storing, handles, folders, old, ignored, gitignored)?;
+    let b = build_reading(
+        &mut storing,
+        Some(store),
+        handles,
+        folders,
+        old,
+        ignored,
+        gitignored,
+    )?;
     let kept = b.kept.len() + b.kept_below_gone;
     Ok((b.root, kept, b.changed, b.taken_back))
 }
 
-/// The listings of `folders`, deepest first, with each file, link and listing handed to
-/// `contents`.
-fn build_with(
-    contents: &mut dyn Contents,
-    handles: &mut Handles,
-    folders: &Folders,
-    old: &HashMap<String, Option<Listing>>,
-    ignored: &HashSet<String>,
-    gitignored: &HashSet<String>,
-) -> Result<Built, SaveError> {
+/// The order `build_with` builds folders in: deepest first, and by path at one depth.
+fn build_order(folders: &Folders) -> Vec<&String> {
     let mut order: Vec<&String> = folders.keys().collect();
     order.sort_by_key(|rel| {
         Reverse(if rel.is_empty() {
@@ -1119,6 +1363,20 @@ fn build_with(
             rel.split('/').count()
         })
     });
+    order
+}
+
+/// The listings of `folders`, in `build_order`, with each file, link and listing handed to
+/// `contents`, and what was read of the files and links in `read`.
+fn build_with(
+    contents: &mut dyn Contents,
+    read: &mut dyn Iterator<Item = Done>,
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+    ignored: &HashSet<String>,
+    gitignored: &HashSet<String>,
+) -> Result<Built, SaveError> {
+    let order = build_order(folders);
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
     let (mut kept, mut kept_below_gone) = (Vec::new(), 0);
@@ -1134,7 +1392,7 @@ fn build_with(
                     (EntryKind::Folder, id, 0)
                 }
                 Kind::File => {
-                    let (id, size) = contents.file(handles, rel, c, was)?;
+                    let (id, size) = contents.file(read, c, was)?;
                     // Git writes a link it can't make as a file holding its target: the link
                     // stays (decision 039).
                     let links_target =
@@ -1156,7 +1414,7 @@ fn build_with(
                     }
                 }
                 Kind::Symlink => {
-                    let (id, size) = contents.link(handles, rel, c)?;
+                    let (id, size) = contents.link(read, c)?;
                     (EntryKind::Symlink, id, size)
                 }
                 Kind::Kept { kind, id, size } => {
@@ -1211,25 +1469,9 @@ pub(crate) fn store_listing(
     Ok(id)
 }
 
-/// Stores the target of the link `name` in `dir`, at the project path `rel`, as content with `/`
-/// between its parts (decision 045); the link itself is never followed.
-fn store_link(
-    packs: &mut PackSet,
-    store: &Store,
-    dir: &Dir,
-    name: &str,
-    rel: &str,
-) -> Result<(Id, u64), SaveError> {
-    let target = link_target(dir, name, rel)?;
-    let id = hash_content(target.as_bytes());
-    if !store.has_good_copy(&id, ObjectKind::Content, target.len() as u64)? {
-        packs.add_content(target.as_bytes())?;
-    }
-    Ok((id, target.len() as u64))
-}
-
-/// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it. One
-/// that is no longer a link changed since the walk.
+/// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it: with
+/// `/` between its parts (decision 045), the link itself never followed. One that is no longer a
+/// link changed since the walk.
 pub(crate) fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
@@ -1339,19 +1581,17 @@ pub(crate) fn store_file(
     let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
     let before = stamp_of(&opened);
     // Chunks stored before a change is found stay in the packs, which nothing names yet.
-    let id = match ingest::store_bytes(packs, store, &mut file, opened.size) {
-        Ok(id) => id,
-        Err(IngestError::Changed) => return Err(changed()),
-        Err(IngestError::Read(e)) => return Err(unreadable(e)),
-        Err(IngestError::Pack(e)) => return Err(e.into()),
-        Err(IngestError::Store(e)) => return Err(e.into()),
-    };
+    let id = ingest::store_bytes(packs, store, &mut file, opened.size)
+        .map_err(|e| ingest_failed(e, rel))?;
     after_read();
     if stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }
     Ok((id, opened.size))
 }
+
+/// What `hash_scanned` reads a file through.
+const READ_BUFFER: usize = 1 << 20;
 
 /// Reads the file `name` in `dir` through and gives it, still open, with its content ID and size:
 /// to know the ID, or as the first of two reads of a file too long to cut. It must stay the file
@@ -1373,7 +1613,7 @@ fn hash_scanned(
     let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
     let before = stamp_of(&opened);
     let mut hasher = ContentHasher::new();
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; READ_BUFFER];
     let mut size = 0u64;
     loop {
         let n = match file.read(&mut buf) {
@@ -1446,8 +1686,9 @@ pub(crate) fn read_folder(
     for listing in rebuilt {
         reading.listing(listing)?;
     }
-    let built = build_with(
+    let built = build_reading(
         &mut reading,
+        None,
         &mut handles,
         &folders,
         &old,
@@ -1475,23 +1716,23 @@ struct Reading {
 }
 
 impl Contents for Reading {
+    fn vouched(&self, c: &Child, _was: Option<&Entry>) -> Option<(Id, u64)> {
+        let meta = c.meta.as_ref()?;
+        let known = self.trusted.matches(&c.rel, meta)?;
+        Some((known.id, meta.size))
+    }
+
     fn file(
         &mut self,
-        handles: &mut Handles,
-        folder: &str,
+        read: &mut dyn Iterator<Item = Done>,
         c: &Child,
-        _was: Option<&Entry>,
+        was: Option<&Entry>,
     ) -> Result<(Id, u64), SaveError> {
-        if let Some(meta) = &c.meta
-            && let Some(known) = self.trusted.matches(&c.rel, meta)
-        {
-            let id = known.id;
-            self.seen.record(&c.rel, meta, id);
-            return Ok((id, meta.size));
-        }
-        let dir = handles.folder(folder)?;
-        let (_, id, size) = hash_scanned(dir, &c.name, &c.rel, c.meta.as_ref(), &mut || {})?;
-        // The walk's details: the read found the file still had them.
+        let (id, size) = match self.vouched(c, was) {
+            Some(known) => known,
+            None => hashed_read(read, &c.rel)?,
+        };
+        // The walk's details, which the cache vouched for or the read found the file still had.
         if let Some(meta) = &c.meta {
             self.seen.record(&c.rel, meta, id);
         }
@@ -1500,12 +1741,10 @@ impl Contents for Reading {
 
     fn link(
         &mut self,
-        handles: &mut Handles,
-        folder: &str,
+        read: &mut dyn Iterator<Item = Done>,
         c: &Child,
     ) -> Result<(Id, u64), SaveError> {
-        let target = link_target(handles.folder(folder)?, &c.name, &c.rel)?;
-        Ok((hash_content(target.as_bytes()), target.len() as u64))
+        hashed_read(read, &c.rel)
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
@@ -3310,5 +3549,174 @@ mod tests {
         let (result, asked) = save_answering(&mut repo, None, false);
         assert_eq!(asked, None);
         result.unwrap();
+    }
+
+    /// Bytes that look random, made from `seed`.
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut out = vec![0; len];
+        blake3::Hasher::new()
+            .update(&seed.to_le_bytes())
+            .finalize_xof()
+            .fill(&mut out);
+        out
+    }
+
+    /// Small files in a few folders, some of them alike, two big files, an empty one and, where
+    /// links can be made, a link.
+    fn lay_out_many(root: &Path) {
+        for i in 0..150u64 {
+            let bytes = match i % 3 {
+                0 => format!("file {i}\n").repeat(i as usize + 1).into_bytes(),
+                1 => noise(i, 100 + (i as usize * 97) % 5000),
+                _ => b"the same in many folders\n".to_vec(),
+            };
+            write(root, &format!("d{}/e{}/f{i:03}.txt", i % 4, i % 2), &bytes);
+        }
+        write(root, "d1/big.bin", &noise(1000, 3 << 20));
+        write(root, "d2/e0/big.bin", &noise(1001, (1 << 20) + 12_345));
+        write(root, "empty.txt", b"");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("e1/f003.txt", root.join("d3/link")).unwrap();
+    }
+
+    /// The packs `build` wrote, by name, with their bytes.
+    type Written = Vec<(std::ffi::OsString, Vec<u8>)>;
+
+    /// What `build` makes of a new project `lay_out` fills, with `count` workers and `after_walk`
+    /// run between the walk and the reading: the top listing, or the first problem, and the packs
+    /// it wrote, in sets of 7 objects so that the set rolls over many times.
+    fn built_with(
+        count: usize,
+        lay_out: impl Fn(&Path),
+        after_walk: impl Fn(&Path),
+    ) -> (Result<Id, String>, Written) {
+        let (dir, repo) = project();
+        lay_out(dir.path());
+        let Scan {
+            mut handles,
+            folders,
+            old,
+            ignored,
+            gitignored,
+            ..
+        } = walk_project(&repo, SaveLimits::default()).unwrap();
+        after_walk(dir.path());
+        let tmp = dir.path().join(".bolt/tmp");
+        let mut packs = PackSet::with_limit(&tmp, repo.packs_dir(), 7).unwrap();
+        crate::workers::set_test_workers(Some(count));
+        let built = build(
+            repo.store(),
+            &mut packs,
+            &mut handles,
+            &folders,
+            &old,
+            &ignored,
+            &gitignored,
+        );
+        crate::workers::set_test_workers(None);
+        let written = packs.finish().unwrap().into_iter().map(|p| {
+            let name = p.file_name().unwrap().to_owned();
+            (name, fs::read(&p).unwrap())
+        });
+        let built = built.map(|(root, ..)| root).map_err(|e| format!("{e:?}"));
+        (built, written.collect())
+    }
+
+    fn names(written: &Written) -> Vec<&std::ffi::OsString> {
+        written.iter().map(|(name, _)| name).collect()
+    }
+
+    #[test]
+    fn a_save_writes_the_same_packs_with_one_thread_or_eight() {
+        let one = built_with(1, lay_out_many, |_| {});
+        let eight = built_with(8, lay_out_many, |_| {});
+        assert!(one.0.is_ok(), "{:?}", one.0);
+        assert!(one.1.len() > 20, "{} packs", one.1.len());
+        assert_eq!(one.0, eight.0);
+        assert_eq!(names(&one.1), names(&eight.1));
+        assert!(one.1 == eight.1, "the packs hold other bytes");
+    }
+
+    #[test]
+    fn the_first_problem_is_the_same_with_one_thread_or_eight() {
+        // Gone after the walk. The first a save reads is the last file of the first folder it
+        // reads, so with eight workers a later one may well fail first.
+        let gone = |root: &Path| {
+            for rel in [
+                "d0/e0/f148.txt",
+                "d1/e1/f001.txt",
+                "d3/e1/f003.txt",
+                "d1/big.bin",
+            ] {
+                fs::remove_file(root.join(rel)).unwrap();
+            }
+        };
+        let one = built_with(1, lay_out_many, gone);
+        let eight = built_with(8, lay_out_many, gone);
+        let first = one.0.as_ref().unwrap_err();
+        assert!(
+            first.contains("Unreadable") && first.contains("\"d0/e0/f148.txt\""),
+            "{first}"
+        );
+        assert_eq!(one.0, eight.0);
+        // And what was stored before it, the same.
+        assert_eq!(names(&one.1), names(&eight.1));
+        assert!(one.1 == eight.1, "the packs hold other bytes");
+    }
+
+    /// Many files changed at once, read on eight workers: the hook this thread sets reaches them.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn an_unchanged_file_is_still_not_read_by_save() {
+        let (dir, mut repo) = project();
+        for i in 0..40 {
+            write_old(dir.path(), &format!("f{i:02}.txt"), b"old");
+        }
+        save_now(&mut repo).unwrap();
+        crate::workers::set_test_workers(Some(8));
+        crate::fsio::fault::unreadable(Some("f20.txt"));
+        for i in (0..40).filter(|&i| i != 20) {
+            write(
+                dir.path(),
+                &format!("f{i:02}.txt"),
+                format!("new {i}").as_bytes(),
+            );
+        }
+        let saved = save_now(&mut repo).map(saved_root);
+        // Changed, it must be read, and can't be.
+        write(dir.path(), "f20.txt", b"changed");
+        let refused = save_now(&mut repo);
+        crate::fsio::fault::unreadable(None);
+        crate::workers::set_test_workers(None);
+        let tree = saved_tree(repo.store(), saved.unwrap());
+        assert_eq!(tree["f20.txt"].1, b"old");
+        assert_eq!(tree["f21.txt"].1, b"new 21");
+        match refused {
+            Err(SaveError::Unreadable { path, .. }) => assert_eq!(path, "f20.txt"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn status_hashes_many_files_on_several_threads() {
+        let (dir, mut repo) = project();
+        lay_out_many(dir.path());
+        let (_, entry) = repo.current().unwrap();
+        let newest = entry.state.lines["main"];
+        let base = repo.store().save(&newest, false).unwrap().root;
+        let mut seen = Vec::new();
+        for count in [1, 8] {
+            crate::workers::set_test_workers(Some(count));
+            // Without the cache, so every file is read.
+            let now = read_folder(&repo, base, true, None);
+            crate::workers::set_test_workers(None);
+            let now = now.unwrap();
+            let mut listings: Vec<Id> = now.listings.keys().copied().collect();
+            listings.sort_by_key(|id| id.0);
+            seen.push((now.root, listings));
+        }
+        assert_eq!(seen[0], seen[1]);
+        // The same answer a save gives.
+        assert_eq!(saved_root(save_now(&mut repo).unwrap()), seen[0].0);
     }
 }

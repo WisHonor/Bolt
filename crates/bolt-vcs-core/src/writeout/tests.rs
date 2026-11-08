@@ -1473,3 +1473,52 @@ fn a_placeholder_swapped_in_for_an_unsaved_link_is_kept_before_it_goes() {
     repo.store().copy_content(&id, &mut kept).unwrap();
     assert_eq!(kept, target);
 }
+
+/// Bytes that look random, made from `seed`.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0; len];
+    blake3::Hasher::new()
+        .update(&seed.to_le_bytes())
+        .finalize_xof()
+        .fill(&mut out);
+    out
+}
+
+#[test]
+fn unsaved_work_changed_to_as_many_bytes_after_the_plan_is_left_alone() {
+    let mut big = noise(9, 3 << 20);
+    let small = (b"mine".to_vec(), b"MINE".to_vec());
+    let planned_big = big.clone();
+    big[1 << 20..(1 << 20) + 4].copy_from_slice(b"MINE");
+    for (name, mine, now) in [("small", small.0, small.1), ("big", planned_big, big)] {
+        let (dir, mut repo) = project();
+        let from = current_save(&repo).unwrap();
+        // What a discard plans for the unsaved file: to remove it, holding `mine`.
+        let actions = vec![Action {
+            path: name.into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::File,
+                id: hash_content(&mine),
+                size: mine.len() as u64,
+            }),
+        }];
+        // Then the user writes as many bytes over it.
+        fs::write(dir.path().join(name), &now).unwrap();
+        let (head, _) = repo.current().unwrap();
+        let lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let copies = keep_safety_copies(&repo, &actions, from, drive, &mut packs).unwrap();
+        assert!(copies.is_empty(), "{name}: {copies:?}");
+        repo.store_packs(&lock, packs).unwrap();
+        let journal = Journal {
+            target: head,
+            from: head,
+            actions,
+        };
+        let done = apply(&repo, &lock, &journal, drive).unwrap();
+        assert_eq!(done.changed_since_plan, [name]);
+        assert_eq!(fs::read(dir.path().join(name)).unwrap(), now, "{name}");
+    }
+}

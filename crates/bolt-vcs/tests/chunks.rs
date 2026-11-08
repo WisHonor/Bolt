@@ -66,8 +66,9 @@ fn chunking_changes_no_ids() {
         .collect();
     let on = tempfile::tempdir().unwrap();
     copy_dir(off.path(), on.path());
-    // The same project in two folders, saved with cutting turned off, then on.
-    set_test_cut_sizes(Some((1 << 30, 1 << 30)));
+    // The same project in two folders, saved with cutting turned off, then on. Off, every file is
+    // too long to cut, so it is stored whole as it is streamed.
+    set_test_cut_sizes(Some((u64::MAX, 0)));
     save_here(off.path(), "Big files").unwrap();
     set_test_cut_sizes(None);
     save_here(on.path(), "Big files").unwrap();

@@ -350,12 +350,17 @@ impl Store {
             {
                 return ControlFlow::Continue(());
             }
-            match self
-                .pack(c.n)
-                .and_then(|pack| pack.read_chunk_list(&c.entry))
-            {
-                Ok(stored) if stored == *list => return ControlFlow::Break(()),
-                Ok(_) => {}
+            let same = self.pack(c.n).and_then(|pack| {
+                // Compared as it is read, so a long list is never held twice. Another is read
+                // whole, so damage in it is told.
+                if pack.holds_chunk_list(&c.entry, list)? {
+                    return Ok(true);
+                }
+                pack.read_chunk_list(&c.entry).map(|stored| stored == *list)
+            });
+            match same {
+                Ok(true) => return ControlFlow::Break(()),
+                Ok(false) => {}
                 Err(e) => {
                     if is_damage(&e) {
                         self.note_damage(c.at(), self.pack_path(c.n), &e);

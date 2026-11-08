@@ -2,7 +2,7 @@
 //! of them, and a chunk list names the chunks that make a file (docs/storage-format.md section 6).
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use std::io::{self, BufReader, ErrorKind, Read, Take};
+use std::io::{self, BufReader, ErrorKind, Read, Take, Write};
 use std::sync::OnceLock;
 
 use crate::encoding::{DecodeError, Reader, Writer};
@@ -56,6 +56,12 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_test_cut_sizes(sizes: Option<(u64, u64)>) {
     TEST_CUT_SIZES.set(sizes);
+}
+
+/// What `set_test_cut_sizes` set on this thread.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn test_cut_sizes() -> Option<(u64, u64)> {
+    TEST_CUT_SIZES.get()
 }
 
 /// `CHUNK_FROM` and `CHUNK_UP_TO`, or what a test set on this thread.
@@ -202,16 +208,55 @@ pub struct ChunkList {
 impl ChunkList {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u8(1);
-        w.id(&self.file);
-        w.varint(self.size);
-        w.varint(self.chunks.len() as u64);
-        for chunk in &self.chunks {
-            w.id(&chunk.id);
-            w.varint(chunk.size);
+        self.pieces().fold(Vec::new(), |mut all, piece| {
+            all.extend_from_slice(&piece);
+            all
+        })
+    }
+
+    /// Writes what `encode` gives a piece at a time, so a long list is never held twice.
+    pub fn write_to(&self, out: &mut dyn Write) -> io::Result<()> {
+        self.pieces().try_for_each(|piece| out.write_all(&piece))
+    }
+
+    /// Whether the `len` bytes `reader` gives are what `encode` gives, compared as they are read,
+    /// so a long list is never held twice.
+    pub fn is_record(&self, reader: &mut dyn Read, len: u64) -> io::Result<bool> {
+        let mut left = len;
+        let mut got = Vec::new();
+        for piece in self.pieces() {
+            let Some(rest) = left.checked_sub(piece.len() as u64) else {
+                return Ok(false);
+            };
+            got.resize(piece.len(), 0);
+            match reader.read_exact(&mut got) {
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(false),
+                read => read?,
+            }
+            if got != piece {
+                return Ok(false);
+            }
+            left = rest;
         }
-        w.into_bytes()
+        Ok(left == 0)
+    }
+
+    /// The record's bytes: its head, then its chunks a thousand or so at a time.
+    fn pieces(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
+        let mut head = Writer::new();
+        head.u8(1);
+        head.id(&self.file);
+        head.varint(self.size);
+        head.varint(self.chunks.len() as u64);
+        let chunks = self.chunks.chunks(1024).map(|piece| {
+            let mut w = Writer::new();
+            for chunk in piece {
+                w.id(&chunk.id);
+                w.varint(chunk.size);
+            }
+            w.into_bytes()
+        });
+        std::iter::once(head.into_bytes()).chain(chunks)
     }
 
     /// Decodes a list by storage-format.md section 6's rules, refusing anything else.
@@ -411,6 +456,41 @@ mod tests {
             data = &data[n..];
         }
         out
+    }
+
+    #[test]
+    fn a_list_written_or_compared_in_pieces_is_its_record() {
+        // More chunks than one piece holds.
+        let chunks = (0..2500u32).map(|i| Chunk {
+            id: crate::id::hash_content(&i.to_le_bytes()),
+            size: u64::from(i % 300) + 1,
+        });
+        let chunks: Vec<Chunk> = chunks.collect();
+        let size = chunks.iter().map(|c| c.size).sum();
+        let list = ChunkList {
+            file: Id([7; 32]),
+            size,
+            chunks,
+        };
+        let record = list.encode();
+        let mut written = Vec::new();
+        list.write_to(&mut written).unwrap();
+        assert_eq!(written, record);
+        assert_eq!(ChunkList::decode(&record).unwrap(), list);
+        let len = record.len() as u64;
+        let is = |bytes: &[u8], len: u64| list.is_record(&mut &*bytes, len).unwrap();
+        assert!(is(&record, len));
+        // A byte off anywhere, one byte short or one more: another record.
+        for at in [0, 33, record.len() / 2, record.len() - 1] {
+            let mut other = record.clone();
+            other[at] ^= 1;
+            assert!(!is(&other, len), "{at}");
+        }
+        assert!(!is(&record[..record.len() - 1], len - 1));
+        assert!(!is(&record[..record.len() - 1], len));
+        let mut longer = record.clone();
+        longer.push(0);
+        assert!(!is(&longer, len + 1));
     }
 
     #[test]

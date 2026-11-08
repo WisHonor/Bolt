@@ -204,6 +204,29 @@ pub mod fault {
         UNREADABLE.set(path.map(str::to_owned));
     }
 
+    /// What a test set on a thread, for the workers it starts to set on themselves: the file it
+    /// made unreadable and the fault points it armed.
+    #[derive(Clone)]
+    pub(crate) struct Hooks {
+        unreadable: Option<String>,
+        armed: Option<u64>,
+        count: u64,
+    }
+
+    pub(crate) fn hooks() -> Hooks {
+        Hooks {
+            unreadable: UNREADABLE.with_borrow(Clone::clone),
+            armed: ARMED.get(),
+            count: COUNT.get(),
+        }
+    }
+
+    pub(crate) fn set_hooks(hooks: &Hooks) {
+        UNREADABLE.set(hooks.unreadable.clone());
+        ARMED.set(hooks.armed);
+        COUNT.set(hooks.count);
+    }
+
     /// `unreadable` for a command run in a process of its own.
     fn unreadable_in_process() -> Option<&'static str> {
         static AT: OnceLock<Option<String>> = OnceLock::new();

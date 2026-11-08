@@ -1,12 +1,13 @@
 //! How a file's bytes enter the store: read once, a small file whole and a big one cut into
-//! chunks as it is read.
+//! chunks as it is read, each chunk hashed, checked and compressed on the workers.
 
 use std::io::{self, Read};
 
 use crate::chunks::{Chunk, ChunkList, Cutter, is_cut, is_too_long_to_cut};
 use crate::id::{ContentHasher, Id, hash_content};
-use crate::pack::{self, ObjectKind, PackError, PackSet};
+use crate::pack::{self, ObjectKind, PackError, PackSet, Prepared};
 use crate::store::{Store, StoreError};
+use crate::workers::{WINDOW, with_workers};
 
 /// Why bytes couldn't be stored.
 #[derive(Debug)]
@@ -44,16 +45,8 @@ pub(crate) fn store_bytes(
     if is_too_long_to_cut(size) {
         return Err(PackError::TooLarge.into());
     }
-    let mut bytes = Vec::new();
-    // One byte past `size` is enough to tell that the file grew.
-    reader
-        .take(size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(IngestError::Read)?;
-    if bytes.len() as u64 != size {
-        return Err(IngestError::Changed);
-    }
-    store_whole(packs, store, &bytes)
+    let bytes = read_whole(reader, size)?;
+    add_ready(packs, &ready(store, &bytes)?)
 }
 
 /// `store_bytes` for bytes already held in memory, a big file cut where it lies.
@@ -66,20 +59,76 @@ pub(crate) fn store_held(
     if is_cut(size) {
         return cut(packs, store, &mut &*bytes, size);
     }
-    store_whole(packs, store, bytes)
+    add_ready(packs, &ready(store, bytes)?)
 }
 
-/// Stores `bytes`, a small file or a chunk, unless a good copy is held, and gives their ID.
-fn store_whole(packs: &mut PackSet, store: &Store, bytes: &[u8]) -> Result<Id, IngestError> {
-    let id = hash_content(bytes);
-    if !packs.contains(&id) && !store.has_good_copy(&id, ObjectKind::Content, bytes.len() as u64)? {
-        packs.add_prepared(ObjectKind::Content, &pack::prepare(id, bytes)?)?;
+/// Whether a file of `size` bytes is read whole: neither cut nor too long to cut.
+pub(crate) fn is_small(size: u64) -> bool {
+    !is_cut(size) && !is_too_long_to_cut(size)
+}
+
+/// The `size` bytes `reader` gives, read whole. Fewer or more is `Changed`.
+pub(crate) fn read_whole(reader: &mut dyn Read, size: u64) -> Result<Vec<u8>, IngestError> {
+    let mut bytes = Vec::new();
+    // One byte past `size` is enough to tell that the file grew.
+    let room = usize::try_from(size.saturating_add(1)).unwrap_or(usize::MAX);
+    bytes
+        .try_reserve_exact(room)
+        .map_err(|_| PackError::OutOfMemory)?;
+    reader
+        .take(size.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(IngestError::Read)?;
+    if bytes.len() as u64 != size {
+        return Err(IngestError::Changed);
     }
-    Ok(id)
+    Ok(bytes)
+}
+
+/// A small file, a link's target or a chunk, as a worker leaves it: its ID and size, and the
+/// bytes a pack stores for it, unless the store holds a good copy.
+pub(crate) struct Ready {
+    pub(crate) id: Id,
+    pub(crate) size: u64,
+    pub(crate) stored: Option<Prepared>,
+}
+
+/// Hashes `bytes` and, unless the store holds a good copy, compresses them for a pack. Any
+/// thread can.
+pub(crate) fn ready(store: &Store, bytes: &[u8]) -> Result<Ready, IngestError> {
+    let id = hash_content(bytes);
+    let size = bytes.len() as u64;
+    let held = store.has_good_copy(&id, ObjectKind::Content, size)?;
+    let stored = if held {
+        None
+    } else {
+        Some(pack::prepare(id, bytes)?)
+    };
+    Ok(Ready { id, size, stored })
+}
+
+/// Adds what `ready` made ready, unless the pack being built holds it already, and gives its ID.
+/// Only the thread writing the packs does.
+pub(crate) fn add_ready(packs: &mut PackSet, ready: &Ready) -> Result<Id, IngestError> {
+    if let Some(stored) = &ready.stored
+        && !packs.contains(&ready.id)
+    {
+        packs.add_prepared(ObjectKind::Content, stored)?;
+    }
+    Ok(ready.id)
+}
+
+/// The most a job that reads `len` bytes holds: them, a copy if they don't compress, and what
+/// compressing them may make.
+pub(crate) fn cost(len: u64) -> usize {
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    len.saturating_mul(2)
+        .saturating_add(zstd::zstd_safe::compress_bound(len))
 }
 
 /// Cuts the `size` bytes `reader` gives into chunks, storing each one the store doesn't hold,
-/// then the file's chunk list unless the store holds that same list.
+/// then the file's chunk list unless the store holds that same list. The chunks are read here,
+/// in order, and hashed, checked and compressed on the workers.
 fn cut(
     packs: &mut PackSet,
     store: &Store,
@@ -88,14 +137,44 @@ fn cut(
 ) -> Result<Id, IngestError> {
     let mut cutter = Cutter::new(reader.take(size.saturating_add(1)));
     let mut whole = ContentHasher::new();
-    let (mut chunks, mut total) = (Vec::new(), 0u64);
-    while let Some(bytes) = cutter.next_chunk().map_err(IngestError::Read)? {
-        let id = store_whole(packs, store, bytes)?;
-        whole.update(bytes);
-        let len = bytes.len() as u64;
-        total = total.saturating_add(len);
-        chunks.push(Chunk { id, size: len });
-    }
+    let (mut total, mut failed) = (0u64, false);
+    let pieces = std::iter::from_fn(|| {
+        if failed {
+            return None;
+        }
+        match cutter.next_chunk() {
+            Ok(Some(bytes)) => {
+                whole.update(bytes);
+                total = total.saturating_add(bytes.len() as u64);
+                Some(Ok(bytes.to_vec()))
+            }
+            Ok(None) => None,
+            // Nothing more is read once a read fails.
+            Err(e) => {
+                failed = true;
+                Some(Err(IngestError::Read(e)))
+            }
+        }
+    });
+    let mut chunks = Vec::new();
+    with_workers(|workers| {
+        workers.in_order(
+            pieces,
+            WINDOW,
+            |piece| piece.as_ref().map_or(0, |bytes| cost(bytes.len() as u64)),
+            |piece| piece.and_then(|bytes| ready(store, &bytes)),
+            |done| {
+                let done = done?;
+                add_ready(packs, &done)?;
+                chunks.try_reserve(1).map_err(|_| PackError::OutOfMemory)?;
+                chunks.push(Chunk {
+                    id: done.id,
+                    size: done.size,
+                });
+                Ok::<_, IngestError>(())
+            },
+        )
+    })?;
     if total != size {
         return Err(IngestError::Changed);
     }

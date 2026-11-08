@@ -26,7 +26,7 @@ use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, w
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
-use crate::snapshot::{NAMED, SaveError, listed, read_folder, same_file};
+use crate::snapshot::{NAMED, SaveError, ingest_failed, listed, read_folder, same_file};
 use crate::store::{Store, StoreError};
 use crate::warning::{self, Warning};
 
@@ -433,7 +433,8 @@ fn copy_in(
         let Some(target) = link_in(dir, name, path, e)? else {
             return Ok(false);
         };
-        packs.add_content(target.as_bytes())?;
+        ingest::store_held(packs, store, target.as_bytes())
+            .map_err(|err| ingest_failed(err, path))?;
         return Ok(true);
     }
     let os = OsStr::new(name);
@@ -461,9 +462,7 @@ fn copy_in(
     match ingest::store_bytes(packs, store, &mut file, e.size) {
         Ok(id) => Ok(id == e.id),
         Err(IngestError::Changed) => Ok(false),
-        Err(IngestError::Read(err)) => Err(unreadable(path, err)),
-        Err(IngestError::Pack(err)) => Err(err.into()),
-        Err(IngestError::Store(err)) => Err(err.into()),
+        Err(err) => Err(ingest_failed(err, path)),
     }
 }
 
