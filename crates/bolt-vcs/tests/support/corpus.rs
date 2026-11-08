@@ -194,6 +194,17 @@ pub fn sorted(paths: &[&str]) -> Vec<String> {
     paths
 }
 
+/// Says a link that should have been made here is a placeholder because this account can't make
+/// links (Windows without Developer Mode). That fails in CI, whose runners can, so a test that
+/// proves nothing there can't pass for one that ran.
+pub fn no_link_right_here(path: &str) {
+    assert!(
+        cfg!(windows) && std::env::var_os("CI").is_none(),
+        "{path} should be a link: CI must be able to make links, so the link checks run there"
+    );
+    println!("Skipped the link checks: this account can't make links, so {path} is a file.");
+}
+
 /// Whether this drive takes names in other letter case for one, as `bolt` probes it.
 pub fn ignores_case(root: &Path) -> bool {
     let probe = root.join("Case-Probe");

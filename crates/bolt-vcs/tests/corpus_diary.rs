@@ -6,7 +6,7 @@
 
 mod support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Debug;
 
@@ -16,14 +16,16 @@ use bolt_core::listing::EntryKind;
 use bolt_core::pack::PackSet;
 use bolt_core::repo::Repository;
 use support::corpus::{
-    Case, PAYLOAD, Seen, file, ignores_case, kinds, message, project_entries, sorted, strings,
+    Case, PAYLOAD, Seen, file, ignores_case, kinds, message, no_link_right_here, project_entries,
+    seen, sorted, strings,
 };
 use support::{add_save, holding_bolt_spelling, listings, text};
 
 use EntryKind::{Executable, File, Symlink};
 
 /// A save no real folder holds: spellings of `.git`, links whose targets climb out with `..`, a
-/// link named like a folder with a file below it, names Windows can't hold, and one plain file.
+/// link named like a folder with a file below it, names Windows can't hold; and one plain file,
+/// with a link to it that must stay a link.
 const HOSTILE: &[(&str, EntryKind, &[u8])] = &[
     (".git/hooks/post-checkout", Executable, PAYLOAD),
     (".GIT/hooks/pwned", File, PAYLOAD),
@@ -41,6 +43,7 @@ const HOSTILE: &[(&str, EntryKind, &[u8])] = &[
     ("C:pwned", File, PAYLOAD),
     ("a\\b/pwned", File, PAYLOAD),
     ("ok.txt", File, b"fine"),
+    ("near", Symlink, b"ok.txt"),
 ];
 
 fn hostile(pack: &mut PackSet) -> Id {
@@ -201,15 +204,30 @@ fn run(case: &Case, args: &[impl AsRef<OsStr>]) -> (Option<i32>, serde_json::Val
 
 /// Runs `bolt <args> --json`, which must fail having changed nothing; its document.
 fn refused(case: &Case, args: &[impl AsRef<OsStr> + Debug]) -> serde_json::Value {
-    let before = case.env.standing();
+    let before = bolt_folder(case);
     let (code, doc) = run(case, args);
     assert_eq!(code, Some(1), "{args:?}: {doc}");
-    assert_eq!(case.env.standing(), before, "{args:?}: {doc}");
-    let journal = case.root().join(".bolt/state/journal");
-    assert!(!journal.exists(), "{args:?}");
+    let changed = differing(&before, &bolt_folder(case));
+    assert!(changed.is_empty(), "{args:?} changed .bolt: {changed:?}");
     assert!(project_entries(&case.env).is_empty(), "{args:?}");
     case.assert_nothing_escaped();
     doc
+}
+
+/// Everything in `.bolt` but `cache`, which a command may write even when it changes nothing, and
+/// `state/lock-info`.
+fn bolt_folder(case: &Case) -> BTreeMap<String, Seen> {
+    let mut all = seen(&case.root().join(".bolt"));
+    // Only informational, and rewritten on taking the change lock, before a refusal is known.
+    all.retain(|path, _| path.split('/').next() != Some("cache") && path != "state/lock-info");
+    all
+}
+
+/// The paths where `a` and `b` differ.
+fn differing(a: &BTreeMap<String, Seen>, b: &BTreeMap<String, Seen>) -> Vec<String> {
+    let paths: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let differ = paths.into_iter().filter(|p| a.get(*p) != b.get(*p));
+    differ.cloned().collect()
 }
 
 /// What writing `HOSTILE` leaves on this system, as `goto` writes it: the project's entries, the
@@ -248,6 +266,14 @@ fn hostile_written(case: &Case) -> (BTreeMap<String, Seen>, Vec<String>, Vec<Str
         entries.insert("aux".into(), Seen::Folder);
         entries.insert("a\\b".into(), Seen::Folder);
     }
+    let near = std::fs::symlink_metadata(case.root().join("near")).unwrap();
+    if near.file_type().is_symlink() {
+        entries.insert("near".into(), Seen::Link("ok.txt".into()));
+    } else {
+        no_link_right_here("near");
+        entries.insert("near".into(), file(b"ok.txt"));
+        placeholders.push("near");
+    }
     (entries, sorted(&not_written), sorted(&placeholders))
 }
 
@@ -261,7 +287,7 @@ fn assert_written_as_goto_would(
 ) -> (Vec<String>, Vec<String>) {
     let (entries, not_written, placeholders) = hostile_written(case);
     assert_eq!(project_entries(&case.env), entries);
-    let files = entries.values().filter(|e| matches!(e, Seen::File(_)));
+    let files = entries.values().filter(|e| !matches!(e, Seen::Folder));
     assert_eq!(written.as_u64(), Some(files.count() as u64), "{doc}");
     assert_eq!(
         kinds(doc),
@@ -291,13 +317,27 @@ fn switched_to(step: &serde_json::Value) -> &serde_json::Value {
     &files.unwrap_or_else(|| panic!("no files effect: {step}"))["to"]
 }
 
-/// The refusal of a step whose saves can't be read: `step` names it.
-fn step_gone(step: Id) -> String {
-    format!(
-        "The step of diary entry {} can't be undone or redone: what it changed can't be read \
-         (object {MISSING} is not in the store).",
-        step.short_hex()
-    )
+/// The hint of every refusal for damage.
+const DAMAGED: &str = "Nothing was changed. Ask for help before trying to repair it.";
+
+/// Fails unless `doc` refuses the step of diary entry `step` because a save it names is missing.
+fn assert_step_gone(doc: &serde_json::Value, step: Id) {
+    assert_eq!(
+        doc["error"]["message"],
+        format!(
+            "The step of diary entry {} can't be undone or redone: what it changed can't be read \
+             (object {MISSING} is not in the store).",
+            step.short_hex()
+        ),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "bolt tidy removes what steps older than the undo window changed, and a damaged store \
+         can lose it too, so undo and redo can't go past this step. To get back to an older save, \
+         find it with bolt history and go to it with bolt goto.",
+        "{doc}"
+    );
 }
 
 // Saves a diary leads to, written out (T1 to T5, through T26).
@@ -382,32 +422,36 @@ fn a_save_holding_a_spelling_of_bolt_is_refused_whole_by_every_command() {
 
 #[test]
 fn an_undo_whose_target_is_no_command_entry_is_refused() {
-    let case = Case::new();
-    let first = plant(&case, |_, _, head, now| {
-        let mut made = step(head, now, "undo", None);
-        made.action = Action::Undo(head);
-        made
-    });
-    // An undo of that undo, which is no step.
-    let bad = plant(&case, |_, _, head, now| {
-        let mut made = step(head, now, "undo", None);
-        made.action = Action::Undo(first);
-        made
-    });
-    for command in ["undo", "redo"] {
-        let doc = refused(&case, &[command]);
-        assert_eq!(
-            doc["error"]["message"],
-            format!(
-                "This project's Bolt data looks damaged: diary entry {bad} undoes or redoes \
-                 {first}, which is not a step."
-            ),
-            "{command}: {doc}"
-        );
-        assert_eq!(
-            doc["error"]["hint"], "Nothing was changed. Ask for help before trying to repair it.",
-            "{command}: {doc}"
-        );
+    // An undo of an undo, which is no step, and an undo of a save, which is no entry at all.
+    for of_a_save in [false, true] {
+        let case = Case::new();
+        let save = case.env.state().1.lines["main"];
+        let first = plant(&case, |_, _, head, now| {
+            let mut made = step(head, now, "undo", None);
+            made.action = Action::Undo(head);
+            made
+        });
+        let target = if of_a_save { save } else { first };
+        let bad = plant(&case, |_, _, head, now| {
+            let mut made = step(head, now, "undo", None);
+            made.action = Action::Undo(target);
+            made
+        });
+        let why = if of_a_save {
+            format!("the diary has no entry {save}")
+        } else {
+            format!("diary entry {bad} undoes or redoes {first}, which is not a step")
+        };
+        let to = first.to_hex()[..12].to_owned();
+        for args in [vec!["undo"], vec!["redo"], vec!["undo", "--to", &to]] {
+            let doc = refused(&case, &args[..]);
+            assert_eq!(
+                doc["error"]["message"],
+                format!("This project's Bolt data looks damaged: {why}."),
+                "{args:?}: {doc}"
+            );
+            assert_eq!(doc["error"]["hint"], DAMAGED, "{args:?}: {doc}");
+        }
     }
 }
 
@@ -426,14 +470,14 @@ fn a_state_naming_a_save_the_store_lacks_is_refused() {
         made
     });
     let doc = refused(&case, &["undo"]);
-    assert_eq!(doc["error"]["message"], step_gone(done), "{doc}");
+    assert_step_gone(&doc, done);
     // Redo puts back the step's own.
     let case = Case::new();
     let before = case.env.state().1;
     let done = plant(&case, |_, _, head, now| gone(step(head, now, "save", None)));
     plant(&case, |_, _, head, now| undone(head, now, done, &before));
     let doc = refused(&case, &["redo"]);
-    assert_eq!(doc["error"]["message"], step_gone(done), "{doc}");
+    assert_step_gone(&doc, done);
     // A jump puts back the state of the entry it goes to.
     let case = Case::new();
     let before = case.env.state().1;
@@ -448,12 +492,26 @@ fn a_state_naming_a_save_the_store_lacks_is_refused() {
         ),
         "{doc}"
     );
+    assert_eq!(
+        doc["error"]["hint"],
+        "bolt tidy removes the saves only entries older than the undo window needed, and a \
+         damaged store can lose them too, so undo --to can't go back to this entry. To get back \
+         to an older save, find it with bolt history and go to it with bolt goto.",
+        "{doc}"
+    );
     // Unshelf brings back what a shelf names.
     let case = Case::new();
     let shelf = lead_to(&case, "unshelf", Named::Missing);
     let doc = refused(&case, &shelf.args);
-    let said = doc["error"]["message"].as_str().unwrap();
-    assert!(said.contains(&MISSING.to_hex()), "{doc}");
+    assert_eq!(
+        doc["error"]["message"],
+        format!(
+            "This project's Bolt data looks damaged: shelf 1 names save {MISSING}, which can't \
+             be read."
+        ),
+        "{doc}"
+    );
+    assert_eq!(doc["error"]["hint"], DAMAGED, "{doc}");
 }
 
 #[test]
@@ -462,10 +520,6 @@ fn a_folder_change_naming_a_save_the_store_lacks_is_refused() {
         let case = Case::new();
         let lead = lead_to(&case, command, Named::Missing);
         let doc = refused(&case, &lead.args);
-        assert_eq!(
-            doc["error"]["message"],
-            step_gone(lead.entry),
-            "{command}: {doc}"
-        );
+        assert_step_gone(&doc, lead.entry);
     }
 }

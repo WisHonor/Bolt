@@ -517,7 +517,7 @@ pub fn stopped_at(repo: &Repository) -> Result<Vec<StepInfo>, RepoError> {
         // An unreadable parent is often why this entry is an end at all; one naming a record of
         // another kind is no entry either.
         let before = match diary.parent.map(|p| repo.entry(&p)).transpose() {
-            Err(RepoError::Damaged { .. } | RepoError::Store(StoreError::WrongKind { .. })) => None,
+            Err(RepoError::Damaged { .. }) => None,
             read => read?,
         };
         let effects = did(before.as_ref(), &diary);

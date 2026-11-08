@@ -16,7 +16,8 @@ use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_platform::dir::Dir;
 use support::corpus::{
-    Case, PAYLOAD, Seen, file, ignores_case, kinds, message, project_entries, sorted, strings,
+    Case, PAYLOAD, Seen, file, ignores_case, kinds, message, no_link_right_here, project_entries,
+    sorted, strings,
 };
 use support::{
     Env, add_listing, holding_bolt_spelling, listings, plant_save, text,
@@ -43,17 +44,6 @@ impl Case {
             .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stdout)));
         (out.status.code(), doc, text(&out.stderr))
     }
-}
-
-/// Says a link that should have been made here is a placeholder because this account can't make
-/// links (Windows without Developer Mode). That fails in CI, whose runners can, so a test that
-/// proves nothing there can't pass for one that ran.
-fn no_link_right_here(path: &str) {
-    assert!(
-        cfg!(windows) && std::env::var_os("CI").is_none(),
-        "{path} should be a link: CI must be able to make links, so the link checks run there"
-    );
-    println!("Skipped the link checks: this account can't make links, so {path} is a file.");
 }
 
 // `.git` and `.bolt` spellings (T2).

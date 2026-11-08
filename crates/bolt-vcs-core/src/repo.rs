@@ -1338,11 +1338,12 @@ impl Repository {
         Ok((id, entry))
     }
 
-    /// The diary entry `id`. One the store lacks, or can't decode, is damage to the diary, named.
+    /// The diary entry `id`. One the store lacks, holds as another kind of record, or can't
+    /// decode, is damage to the diary, named.
     pub fn entry(&self, id: &Id) -> Result<DiaryEntry, RepoError> {
         let bytes = match self.store.read_record(id, ObjectKind::DiaryEntry) {
             Ok(bytes) => bytes,
-            Err(StoreError::Missing(_)) => {
+            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
                 return Err(damaged(format!("the diary has no entry {id}")));
             }
             Err(e) => return Err(e.into()),

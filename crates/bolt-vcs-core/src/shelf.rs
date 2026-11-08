@@ -350,9 +350,17 @@ fn changed_files(repo: &Repository, from: Id, to: Id) -> Result<usize, StoreErro
     count_changes(repo.store(), Some(root(&from)?), root(&to)?)
 }
 
-/// The save the shelf `shelf`, labelled `label`, was made on: its save's first parent.
+/// The save the shelf `shelf`, labelled `label`, was made on: its save's first parent. A shelf
+/// whose save the store lacks or can't decode is damage, named.
 fn shelved_on(repo: &Repository, label: &str, shelf: Id) -> Result<Id, SwitchError> {
-    let save = repo.store().save(&shelf, repo.signatures_allowed())?;
+    let save = match repo.store().save(&shelf, repo.signatures_allowed()) {
+        Ok(save) => save,
+        Err(StoreError::Missing(_) | StoreError::Decode(_) | StoreError::WrongKind { .. }) => {
+            let why = format!("shelf {label} names save {shelf}, which can't be read");
+            return Err(damaged(why).into());
+        }
+        Err(e) => return Err(e.into()),
+    };
     match save.parents.first() {
         Some(base) => Ok(*base),
         None => Err(damaged(format!("the save of shelf {label} has no parent")).into()),
