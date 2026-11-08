@@ -1657,6 +1657,7 @@ fn cant_link(e: &io::Error) -> bool {
 
 /// Whether another program holds the file open: a sharing or lock violation on Windows.
 fn in_use(e: &io::Error) -> bool {
+    // Narrower than `fsio::held`: what counts here is reported as in use; 5 may be a real refusal.
     cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
 }
 

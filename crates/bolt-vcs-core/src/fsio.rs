@@ -34,10 +34,10 @@ pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result
     replace(tmp, to, name, bytes, true, rename_durable)
 }
 
-/// `write_atomic` for `head` in the folder `state`: once it is renamed into place the command has
-/// happened, so a flush that fails after that is told apart from an error.
-pub(crate) fn write_head(tmp: &Dir, state: &Dir, bytes: &[u8]) -> io::Result<Done> {
-    replace(tmp, state, "head", bytes, true, rename_reported)
+/// `write_atomic` for the head, `name` in the folder `state`: once it is renamed into place the
+/// command has happened, so a flush that fails after that is told apart from an error.
+pub(crate) fn write_head(tmp: &Dir, state: &Dir, name: &str, bytes: &[u8]) -> io::Result<Done> {
+    replace(tmp, state, name, bytes, true, rename_reported)
 }
 
 /// `write_atomic` for a cache, which is no part of what a command did, so crash tests don't
@@ -122,7 +122,8 @@ fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<
 
 /// Whether a rename failed because another program, such as a virus scanner or indexer, has
 /// the file open: refused, in use, or deleted but not yet closed (Windows only).
-fn held(e: &io::Error) -> bool {
+pub(crate) fn held(e: &io::Error) -> bool {
+    // Wider than write-out's `in_use`: here a real refusal (5) only fails a little later.
     const DELETE_PENDING: i32 = 303;
     cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | DELETE_PENDING))
 }

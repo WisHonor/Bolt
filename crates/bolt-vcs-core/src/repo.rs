@@ -268,10 +268,14 @@ impl RepoError {
                     "Close that program, then run the command again: Bolt finishes the switch \
                      before anything else."
                 }
-                RepoError::CantWrite { .. } => {
+                RepoError::CantWrite { source, .. } if fsio::held(source) => {
                     "Another program, such as a virus scanner or sync tool, may have it open: run \
                      the command again in a moment. If it keeps failing, check that Bolt can write \
                      to the .bolt folder."
+                }
+                RepoError::CantWrite { .. } => {
+                    "Check that Bolt can write to the .bolt folder and that its drive has free \
+                     space, then run the command again."
                 }
                 RepoError::Config(e) => return e.hint(),
                 RepoError::CacheKey { .. } => {
@@ -1081,9 +1085,9 @@ impl Repository {
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
         let id = self.move_head(lock, packs, entry)?;
-        let held = &self.held;
-        write_atomic(&held.tmp, &held.bolt, "format", FORMAT_TEXT.as_bytes())
-            .map_err(|e| cant_write(self.bolt.join("format"), e))?;
+        let (held, name) = (&self.held, "format");
+        write_atomic(&held.tmp, &held.bolt, name, FORMAT_TEXT.as_bytes())
+            .map_err(|e| cant_write(self.bolt.join(name), e))?;
         // Only once it is a project, so a stopped merge never leaves it unfinished.
         crate::merge::merge_after_commit(self, lock);
         Ok(id)
@@ -1426,9 +1430,9 @@ impl Repository {
             "pid {}\ncommand {command}\nstarted {started}\n",
             std::process::id()
         );
-        let held = &self.held;
-        write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())
-            .map_err(|e| cant_write(self.state_dir().join("lock-info"), e))?;
+        let (held, name) = (&self.held, "lock-info");
+        write_atomic(&held.tmp, &held.state, name, info.as_bytes())
+            .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         // Another command may have committed since this handle was opened. A lost head stops
         // the command at `current`, unless it is the `undo --to` that picks one up.
         self.head = read_head(&self.held.state, &self.bolt)?.id();
@@ -1502,9 +1506,9 @@ impl Repository {
     /// Points `state/head` at `id`, a diary entry already stored: how a command takes effect.
     /// Once the new head is in place, a flush of `state/` that fails is only a warning.
     pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
-        let head = format!("{id}\n");
-        let done = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())
-            .map_err(|e| cant_write(self.state_dir().join("head"), e))?;
+        let (name, head) = ("head", format!("{id}\n"));
+        let done = fsio::write_head(&self.held.tmp, &self.held.state, name, head.as_bytes())
+            .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         self.head = Some(id);
         if let Done::NotFlushed(e) = done {
             self.store.note(Warning::new(
@@ -3275,6 +3279,25 @@ mod tests {
     }
 
     #[test]
+    fn a_file_bolt_cant_replace_is_named_with_what_to_do() {
+        let failed = |source| RepoError::CantWrite {
+            path: PathBuf::from("/srv/work/.bolt/state/head"),
+            source,
+        };
+        let full = failed(io::Error::other("no space left"));
+        assert_eq!(
+            full.to_string(),
+            "Bolt couldn't write /srv/work/.bolt/state/head: no space left"
+        );
+        assert!(full.hint().unwrap().contains("free space"), "{full:?}");
+        // Code 32 means another program has the file open only on Windows.
+        let held = failed(io::Error::from_raw_os_error(32));
+        let hint = held.hint().unwrap();
+        assert_eq!(hint.contains("virus scanner"), cfg!(windows), "{hint}");
+        assert_eq!(hint.contains("free space"), !cfg!(windows), "{hint}");
+    }
+
+    #[test]
     fn the_refusal_names_the_group_and_both_ways_on() {
         let root = Path::new("/srv/work");
         let e = RepoError::AdminsNotElevated {
@@ -3614,7 +3637,8 @@ mod tests {
         let e = repo.move_head_to(&lock, a).unwrap_err();
         let took = started.elapsed();
         drop(held);
-        assert!(took >= fsio::BETWEEN_TRIES * (fsio::TRIES - 1), "{took:?}");
+        // Ten tries, 100 ms apart.
+        assert!(took >= Duration::from_millis(900), "{took:?}");
         let shown = escape(&head.display().to_string(), false);
         let said = e.to_string();
         assert!(
