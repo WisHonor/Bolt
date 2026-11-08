@@ -748,6 +748,33 @@ fn undo_of_a_jump_leaves_an_empty_folder_it_only_wrote_inside() {
 }
 
 #[test]
+fn undo_of_a_shelved_jump_brings_back_no_file_the_user_had_moved() {
+    let (dir, mut repo) = saved(&[("e/a", b"e")]);
+    let root = dir.path();
+    let first = repo.head().unwrap();
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    write_all(root, &[("d/a", b"a")]);
+    save_now(&mut repo);
+    // Moved within `d`, which the jump removes, so the move is set aside.
+    fs::rename(root.join("d/a"), root.join("d/c")).unwrap();
+    let shelve = StepRequest {
+        shelve: true,
+        ..one_step(&who)
+    };
+    let done = undo_to(&mut repo, &first.to_hex(), &shelve, &mut |_| {}).unwrap();
+    assert_eq!(done.taken[0].action, Action::Command);
+    assert_eq!(done.shelved.len(), 1);
+    assert!(!root.join("d").exists());
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"a");
+    assert!(
+        !root.join("d/a").exists(),
+        "the undo brought back the moved file"
+    );
+}
+
+#[test]
 fn undo_of_a_goto_leaves_a_folder_the_user_made_in_place_of_a_saved_file() {
     let (dir, mut repo) = saved(&[("d", b"file")]);
     let root = dir.path();

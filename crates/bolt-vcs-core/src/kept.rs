@@ -63,7 +63,8 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 /// wherever it touched. The "from" save is that with what the folder held at each path the plan
 /// writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too, except inside a
 /// folder the plan makes where the folder held a file, a link or nothing: there "to" holds only
-/// what the plan writes or finds already there. A folder above a path the plan writes, which it
+/// what the plan writes or finds already there; and inside a folder the plan writes, both
+/// hold `from`'s version wherever it differs from the base's. A folder above a path the plan writes, which it
 /// neither makes nor removes, is a folder on both sides: it was one before and after. A held
 /// file or link the store lacks is stored first; one that couldn't be, having changed since the
 /// plan, is left out of both sides with what is planned below it, and the folders above it, which
@@ -101,6 +102,18 @@ pub(crate) fn switch_saves(
             Ok::<(), SaveError>(())
         };
         for_each_entry_change_in(store, &unstored, Some(from_root), target_root, changes)?;
+    }
+    // Inside a folder the plan writes, the folder held what `from` holds, not the base: where
+    // `--shelve` set work aside, the step is planned from a save holding that work.
+    if from_root != base_root {
+        let below = |path: &str| held.keys().any(|h| path != h && within(path, h));
+        let aside = |path: &str, _: Option<&Entry>, f: Option<&Entry>| {
+            if below(path) {
+                after.entry(path.to_owned()).or_insert(f.map(put));
+            }
+            Ok::<(), SaveError>(())
+        };
+        for_each_entry_change_in(store, &unstored, Some(base_root), from_root, aside)?;
     }
     // The base's entries in such a folder went with it when the user removed or replaced it: they
     // stay gone. Only a rename in letter case or Unicode form makes a folder over a folder.
