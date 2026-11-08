@@ -853,6 +853,32 @@ fn undo_of_an_unshelf_onto_another_save_brings_back_no_file_the_user_had_deleted
 }
 
 #[test]
+fn an_unshelf_onto_another_save_records_only_what_it_writes_in_a_folder_it_makes() {
+    let (dir, mut repo) = started(&[("d/a", b"a")]);
+    let root = dir.path();
+    let empty = save_on(&repo);
+    save_now(&mut repo);
+    write_all(root, &[("d/c", b"c")]);
+    let who = who();
+    crate::shelf::shelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    // The empty save has no `d`: the unshelf makes it for `d/c` alone.
+    goto_save(&mut repo, empty);
+    crate::shelf::unshelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    assert!(!root.join("d/a").exists());
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    assert_eq!(change.from, empty);
+    let to = tree_of(&repo, change.to);
+    assert_eq!(to.keys().collect::<Vec<_>>(), ["d", "d/c"]);
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+    assert!(
+        !root.join("d/a").exists(),
+        "the redo wrote a file the shelf didn't change"
+    );
+}
+
+#[test]
 fn an_entry_is_named_by_digits_no_other_entry_starts_with() {
     // Two entries whose IDs share their first 8 hex digits, the newer one after the older.
     let older = Id([0xab; 32]);
