@@ -2,9 +2,11 @@
 //! them takes their results in the jobs' order and is the only one that writes packs, so a command
 //! writes the same packs, and stops at the same first problem, whatever the timing.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::iter::Fuse;
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, Scope};
 
 /// The most workers, however many threads the machine runs at once.
@@ -54,6 +56,17 @@ pub fn set_test_workers(count: Option<usize>) {
     TEST_COUNT.set(count);
 }
 
+thread_local! {
+    /// On a worker: set once the results it works for are no longer wanted.
+    static STOP: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Whether the job this thread is on is no longer wanted, so one that reads a long file can end
+/// early. Never so on a thread that isn't a worker.
+pub(crate) fn stopped() -> bool {
+    STOP.with_borrow(|stop| stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)))
+}
+
 impl Workers {
     /// The most jobs out at once.
     pub(crate) fn most_out(&self) -> usize {
@@ -100,6 +113,7 @@ impl Workers {
             }),
             job: Condvar::new(),
             result: Condvar::new(),
+            stop: Arc::default(),
         };
         thread::scope(|scope| {
             let mut out = Out {
@@ -129,6 +143,8 @@ struct Shared<J, T> {
     job: Condvar,
     /// Wakes the thread taking results: one came in, or a worker stopped part way.
     result: Condvar,
+    /// Set once the results are no longer wanted (`stopped`).
+    stop: Arc<AtomicBool>,
 }
 
 struct State<J, T> {
@@ -242,8 +258,9 @@ where
         let (shared, work, hooks): (&'scope Shared<J, T>, &'scope W, _) =
             (self.shared, self.work, self.hooks.clone());
         let started = thread::Builder::new().spawn_scoped(self.scope, move || {
-            hooks.set();
             let _lost = Lost(shared);
+            hooks.set();
+            STOP.set(Some(Arc::clone(&shared.stop)));
             while let Some((at, job)) = shared.next_job() {
                 shared.put(at, work(job));
             }
@@ -310,6 +327,8 @@ where
     W: Fn(J) -> T + Sync,
 {
     fn drop(&mut self) {
+        // Jobs still running end early, so a stop doesn't wait for long reads.
+        self.shared.stop.store(true, Ordering::Relaxed);
         let mut state = self.shared.lock();
         state.closed = true;
         let left = (
@@ -498,10 +517,12 @@ mod tests {
     #[test]
     fn the_first_error_stops_the_jobs() {
         set_test_workers(Some(8));
+        let pulled = Cell::new(0);
+        let jobs = (0..1000).inspect(|_| pulled.set(pulled.get() + 1));
         let mut taken = Vec::new();
         let stopped = with_workers(|w| {
             w.in_order(
-                0..1000,
+                jobs,
                 WINDOW,
                 |_| 1,
                 |i| i,
@@ -513,6 +534,54 @@ mod tests {
         });
         assert_eq!(stopped, Err(10));
         assert_eq!(taken, (0..=10).collect::<Vec<_>>());
+        // None is taken from the list past those out when it stopped.
+        assert!(pulled.get() <= 11 + 4 * 8, "{} pulled", pulled.get());
         set_test_workers(None);
+    }
+
+    #[test]
+    fn jobs_still_running_stop_once_their_results_are_not_wanted() {
+        set_test_workers(Some(4));
+        let started = Instant::now();
+        // A long read, which looks between its pieces whether it is still wanted.
+        let long = |i: usize| {
+            while i > 0 && !stopped() {
+                assert!(started.elapsed() < Duration::from_secs(30), "never told");
+                thread::sleep(Duration::from_millis(1));
+            }
+            i
+        };
+        let first = with_workers(|w| {
+            w.in_order(
+                0..8,
+                WINDOW,
+                |_| 1,
+                long,
+                |i| {
+                    if i == 0 { Err(i) } else { Ok(()) }
+                },
+            )
+        });
+        assert_eq!(first, Err(0));
+        assert!(started.elapsed() < Duration::from_secs(10), "it waited");
+        set_test_workers(None);
+    }
+
+    #[test]
+    fn a_worker_that_panics_ends_in_a_panic_here_never_a_hang() {
+        let (done, told) = std::sync::mpsc::channel();
+        // On a thread of its own, so a hang fails this test instead of stopping the run.
+        thread::spawn(move || {
+            set_test_workers(Some(2));
+            let run = std::panic::AssertUnwindSafe(|| {
+                with_workers(|w| {
+                    let work = |i: usize| if i == 3 { panic!("a bug in a job") } else { i };
+                    w.in_order(0..10, WINDOW, |_| 1, work, |_| Ok::<_, ()>(()))
+                })
+            });
+            let _ = done.send(std::panic::catch_unwind(run).is_err());
+        });
+        let panicked = told.recv_timeout(Duration::from_secs(20)).expect("it hung");
+        assert!(panicked);
     }
 }

@@ -170,6 +170,36 @@ pub(crate) fn plant_root(repo: &mut Repository, build: impl FnOnce(&mut PackSet)
     repo.commit(&lock, packs, &diary).expect("commit");
 }
 
+/// Bytes that look random, made from `seed`.
+pub(crate) fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0; len];
+    blake3::Hasher::new()
+        .update(&seed.to_le_bytes())
+        .finalize_xof()
+        .fill(&mut out);
+    out
+}
+
+/// The packs a command wrote, by name, with their bytes.
+pub(crate) type Written = Vec<(std::ffi::OsString, Vec<u8>)>;
+
+/// Moves the packs of `packs` into the store, and gives what they hold.
+pub(crate) fn written(packs: PackSet) -> Written {
+    let paths = packs.finish().expect("finish the packs");
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path.file_name().expect("a pack's name").to_owned();
+            (name, std::fs::read(&path).expect("read a pack"))
+        })
+        .collect()
+}
+
+/// The names of the packs in `written`.
+pub(crate) fn names(written: &Written) -> Vec<&std::ffi::OsString> {
+    written.iter().map(|(name, _)| name).collect()
+}
+
 /// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte
 /// flipped so it fails its fingerprint. The name sorts before every pack Bolt names.
 pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]) {

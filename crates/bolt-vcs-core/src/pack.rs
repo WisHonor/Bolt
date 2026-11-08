@@ -673,6 +673,9 @@ pub struct PackReader {
     file: File,
     path: PathBuf,
     index: Index,
+    /// What counts this pack while it is open, for a store's tests.
+    #[cfg(test)]
+    counted: Option<Arc<open_files::Count>>,
 }
 
 enum Index {
@@ -788,7 +791,16 @@ impl PackReader {
             file,
             path: path.to_path_buf(),
             index,
+            #[cfg(test)]
+            counted: None,
         })
+    }
+
+    /// Counts this pack in `count` until it is closed, whichever thread closes it.
+    #[cfg(test)]
+    pub(crate) fn count_in(&mut self, count: &Arc<open_files::Count>) {
+        count.opened();
+        self.counted = Some(Arc::clone(count));
     }
 
     /// Every index line, sorted by id. A version 2 pack's are read from disk as they are handed
@@ -1017,6 +1029,7 @@ impl PackReader {
 #[cfg(test)]
 pub(crate) mod open_files {
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     thread_local! {
         static OPENED: Cell<usize> = const { Cell::new(0) };
@@ -1042,12 +1055,38 @@ pub(crate) mod open_files {
     pub(crate) fn most_since_last() -> usize {
         MOST.replace(OPEN.get())
     }
+
+    /// Packs counted together while they are open, whichever threads open and close them.
+    #[derive(Default)]
+    pub(crate) struct Count {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    impl Count {
+        pub(super) fn opened(&self) {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+        }
+
+        pub(super) fn closed(&self) {
+            self.now.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        /// The most open at once so far.
+        pub(crate) fn most(&self) -> usize {
+            self.most.load(Ordering::SeqCst)
+        }
+    }
 }
 
 #[cfg(test)]
 impl Drop for PackReader {
     fn drop(&mut self) {
         open_files::closed();
+        if let Some(count) = &self.counted {
+            count.closed();
+        }
     }
 }
 

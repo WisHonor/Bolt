@@ -46,7 +46,7 @@ pub(crate) fn store_bytes(
         return Err(PackError::TooLarge.into());
     }
     let bytes = read_whole(reader, size)?;
-    add_ready(packs, &ready(store, &bytes)?)
+    store_whole(packs, store, &bytes)
 }
 
 /// `store_bytes` for bytes already held in memory, a big file cut where it lies.
@@ -59,7 +59,17 @@ pub(crate) fn store_held(
     if is_cut(size) {
         return cut(packs, store, &mut &*bytes, size);
     }
-    add_ready(packs, &ready(store, bytes)?)
+    store_whole(packs, store, bytes)
+}
+
+/// Stores `bytes`, a small file, unless the pack being built or the store holds them, and gives
+/// their ID. Only the thread writing the packs does.
+fn store_whole(packs: &mut PackSet, store: &Store, bytes: &[u8]) -> Result<Id, IngestError> {
+    let id = hash_content(bytes);
+    if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, bytes.len() as u64)? {
+        return Ok(id);
+    }
+    add_ready(packs, &ready_new(id, bytes)?)
 }
 
 /// Whether a file of `size` bytes is read whole: neither cut nor too long to cut.
@@ -98,13 +108,24 @@ pub(crate) struct Ready {
 pub(crate) fn ready(store: &Store, bytes: &[u8]) -> Result<Ready, IngestError> {
     let id = hash_content(bytes);
     let size = bytes.len() as u64;
-    let held = store.has_good_copy(&id, ObjectKind::Content, size)?;
-    let stored = if held {
-        None
-    } else {
-        Some(pack::prepare(id, bytes)?)
-    };
-    Ok(Ready { id, size, stored })
+    if store.has_good_copy(&id, ObjectKind::Content, size)? {
+        return Ok(Ready {
+            id,
+            size,
+            stored: None,
+        });
+    }
+    ready_new(id, bytes)
+}
+
+/// `bytes`, whose ID is `id` and which the store doesn't hold, compressed for a pack. Any thread
+/// can.
+pub(crate) fn ready_new(id: Id, bytes: &[u8]) -> Result<Ready, IngestError> {
+    Ok(Ready {
+        id,
+        size: bytes.len() as u64,
+        stored: Some(pack::prepare(id, bytes)?),
+    })
 }
 
 /// Adds what `ready` made ready, unless the pack being built holds it already, and gives its ID.
@@ -198,6 +219,7 @@ mod tests {
     use super::*;
     use crate::chunks::{MAX_CHUNK, set_test_cut_sizes};
     use crate::pack::{IndexEntry, PackReader, WRITER_PACK_OBJECTS};
+    use crate::test_support::noise;
     use bolt_platform::dir::Dir;
     use std::ffi::OsStr;
     use std::path::PathBuf;
@@ -258,16 +280,6 @@ mod tests {
         }
         entries.sort_by_key(|e| e.id.0);
         entries
-    }
-
-    /// Bytes that look random, made from `seed`.
-    fn noise(seed: u64, len: usize) -> Vec<u8> {
-        let mut out = vec![0; len];
-        blake3::Hasher::new()
-            .update(&seed.to_le_bytes())
-            .finalize_xof()
-            .fill(&mut out);
-        out
     }
 
     /// Hands out `data`, counting the bytes it gave.

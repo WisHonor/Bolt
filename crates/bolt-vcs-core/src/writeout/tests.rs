@@ -5,7 +5,7 @@ use crate::history::{current_save, tip_of};
 use crate::journal::{Change, Content, Expected};
 use crate::listing::EntryKind;
 use crate::save::Person;
-use crate::test_support::plant_save;
+use crate::test_support::{Written, names, noise, plant_save, written};
 use crate::warning;
 use std::fs;
 
@@ -1474,16 +1474,6 @@ fn a_placeholder_swapped_in_for_an_unsaved_link_is_kept_before_it_goes() {
     assert_eq!(kept, target);
 }
 
-/// Bytes that look random, made from `seed`.
-fn noise(seed: u64, len: usize) -> Vec<u8> {
-    let mut out = vec![0; len];
-    blake3::Hasher::new()
-        .update(&seed.to_le_bytes())
-        .finalize_xof()
-        .fill(&mut out);
-    out
-}
-
 #[test]
 fn unsaved_work_changed_to_as_many_bytes_after_the_plan_is_left_alone() {
     let mut big = noise(9, 3 << 20);
@@ -1562,9 +1552,6 @@ fn unsaved_work() -> (tempfile::TempDir, Repository, Vec<Action>) {
     (dir, repo, actions)
 }
 
-/// The packs a command wrote, by name, with their bytes.
-type Written = Vec<(std::ffi::OsString, Vec<u8>)>;
-
 /// The safety copies `keep_safety_copies` keeps of `actions` with `count` workers, or the first
 /// problem, and the packs it wrote, 7 objects a pack so that the set rolls over many times.
 fn copied_with(
@@ -1580,11 +1567,7 @@ fn copied_with(
     crate::workers::set_test_workers(Some(count));
     let copies = keep_safety_copies(repo, actions, from, drive, &mut packs);
     crate::workers::set_test_workers(None);
-    let written = packs.finish().unwrap().into_iter().map(|p| {
-        let name = p.file_name().unwrap().to_owned();
-        (name, fs::read(&p).unwrap())
-    });
-    (copies.map_err(|e| format!("{e:?}")), written.collect())
+    (copies.map_err(|e| format!("{e:?}")), written(packs))
 }
 
 #[test]
@@ -1609,7 +1592,6 @@ fn safety_copies_of_many_files_are_the_same_on_one_thread_or_eight() {
         assert!(written.len() > 5, "{} packs", written.len());
         seen.push((copies, written));
     }
-    let names = |w: &Written| w.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
     assert_eq!(seen[0].0, seen[1].0);
     assert_eq!(names(&seen[0].1), names(&seen[1].1));
     assert!(seen[0].1 == seen[1].1, "the packs hold other bytes");
@@ -1630,4 +1612,41 @@ fn a_file_the_hook_makes_unreadable_is_caught_when_copies_run_on_workers() {
             "{count}: {said}"
         );
     }
+}
+
+/// The copies are kept in the actions' order, so an earlier entry's problem comes first: here a
+/// file that can't be read before a folder of the save that the store can't read.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_earlier_entrys_problem_comes_before_a_later_ones() {
+    let (dir, mut repo) = project();
+    // The save's folder `b` names a listing the store doesn't hold.
+    crate::test_support::plant_root(&mut repo, |packs| {
+        let lost = Entry {
+            name: "b".into(),
+            kind: EntryKind::Folder,
+            id: Id([9; 32]),
+            size: 0,
+        };
+        crate::test_support::add_listing(packs, vec![lost]).0
+    });
+    fs::write(dir.path().join("a.txt"), b"mine").unwrap();
+    let remove = |path: &str| Action {
+        path: path.into(),
+        change: Change::RemoveFile,
+        expected: Some(Expected {
+            kind: EntryKind::File,
+            id: hash_content(b"mine"),
+            size: 4,
+        }),
+    };
+    let actions = [remove("a.txt"), remove("b/c.txt")];
+    crate::fsio::fault::unreadable(Some("a.txt"));
+    let (copies, _) = copied_with(8, &mut repo, &actions);
+    crate::fsio::fault::unreadable(None);
+    let said = copies.unwrap_err();
+    assert!(
+        said.contains("Unreadable") && said.contains("\"a.txt\""),
+        "{said}"
+    );
 }

@@ -385,7 +385,7 @@ impl Pieces<'_> {
 mod tests {
     #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     use super::*;
-    use crate::test_support::unhex;
+    use crate::test_support::{noise, unhex};
     use proptest::prelude::*;
 
     const CHUNKING: &str = include_str!("../tests/vectors/chunking.json");
@@ -434,16 +434,6 @@ mod tests {
                 interrupted: false,
             })
             .collect()
-    }
-
-    /// Bytes that look random, made from `seed`.
-    fn noise(seed: u64, len: usize) -> Vec<u8> {
-        let mut out = vec![0; len];
-        blake3::Hasher::new()
-            .update(&seed.to_le_bytes())
-            .finalize_xof()
-            .fill(&mut out);
-        out
     }
 
     /// The lengths `chunk_len` gives, cutting `data` from its start.

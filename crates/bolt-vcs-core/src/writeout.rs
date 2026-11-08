@@ -389,20 +389,16 @@ pub fn keep_safety_copies(
     let mut saved = Tree::new(store, &stored, from_root, drive);
     let top = Dir::open_top(repo.root()).map_err(|e| unreadable("the project folder", e))?;
     let top = Arc::new(top);
-    let mut wanted = Vec::new();
-    for a in actions {
-        let Some(e) = a.expected else { continue };
-        if !matches!(
-            e.kind,
-            EntryKind::File | EntryKind::Executable | EntryKind::Symlink
-        ) || saved
-            .entry(&a.path)?
-            .is_some_and(|s| s.kind == e.kind && s.id == e.id)
-        {
-            continue;
+    // Looked up in turn, as each is reached, so a problem reading the save is that entry's.
+    let wanted = actions.iter().filter_map(|a| {
+        let kinds = [EntryKind::File, EntryKind::Executable, EntryKind::Symlink];
+        let e = a.expected.filter(|e| kinds.contains(&e.kind))?;
+        match saved.entry(&a.path) {
+            Ok(Some(s)) if s.kind == e.kind && s.id == e.id => None,
+            Ok(_) => Some(Ok((a.path.as_str(), e))),
+            Err(err) => Some(Err(SaveError::from(err))),
         }
-        wanted.push((a.path.as_str(), e));
-    }
+    });
     // A small file is read on the workers; a link, and a file too big to read whole, here.
     let on_worker = |e: Expected| e.kind != EntryKind::Symlink && ingest::is_small(e.size);
     let cost = |&(_, e): &(&str, Expected)| match e.kind {
@@ -417,15 +413,15 @@ pub fn keep_safety_copies(
         workers.in_order(
             wanted,
             WINDOW,
-            cost,
-            |(path, e)| {
-                (
-                    path,
-                    e,
-                    on_worker(e).then(|| read_copy(&top, path, e, store)),
-                )
+            |job| job.as_ref().map_or(0, cost),
+            |job| {
+                job.map(|(path, e)| {
+                    let read = on_worker(e).then(|| read_copy(&top, path, e, store));
+                    (path, e, read)
+                })
             },
-            |(path, e, read)| {
+            |done| {
+                let (path, e, read) = done?;
                 let kept = if packs.contains(&e.id) {
                     true
                 } else if let Some(read) = read {
@@ -482,13 +478,18 @@ fn read_copy(top: &Arc<Dir>, path: &str, e: Expected, store: &Store) -> Result<C
     let Some(mut file) = open_to_copy(disk.here(), name, path)? else {
         return Ok(Copied::Changed);
     };
-    let read = ingest::read_whole(&mut file, e.size).and_then(|bytes| ingest::ready(store, &bytes));
-    match read {
-        Ok(ready) if ready.id == e.id => Ok(Copied::Read(ready)),
-        // Not what the plan found any more: left as it is, like a changed one.
-        Ok(_) | Err(IngestError::Changed) => Ok(Copied::Changed),
-        Err(err) => Err(ingest_failed(err, path)),
+    let bytes = match ingest::read_whole(&mut file, e.size) {
+        Ok(bytes) => bytes,
+        Err(IngestError::Changed) => return Ok(Copied::Changed),
+        Err(err) => return Err(ingest_failed(err, path)),
+    };
+    // Not what the plan found any more: left as it is, like a changed one.
+    if hash_content(&bytes) != e.id {
+        return Ok(Copied::Changed);
     }
+    // The store was found not to hold it above.
+    let ready = ingest::ready_new(e.id, &bytes).map_err(|err| ingest_failed(err, path))?;
+    Ok(Copied::Read(ready))
 }
 
 /// Enters, through `disk`, the folder holding `path`, and gives `path`'s name there; `None` if

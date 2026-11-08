@@ -32,7 +32,7 @@ use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
 use crate::warning::{self, Warning};
-use crate::workers::{WINDOW, with_workers};
+use crate::workers::{self, WINDOW, with_workers};
 use crate::writeout;
 
 mod endings;
@@ -1470,8 +1470,8 @@ pub(crate) fn store_listing(
 }
 
 /// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it: with
-/// `/` between its parts (decision 045), the link itself never followed. One that is no longer a
-/// link changed since the walk.
+/// `/` between its parts, the link itself never followed. One that is no longer a link changed
+/// since the walk.
 pub(crate) fn link_target(dir: &Dir, name: &str, rel: &str) -> Result<String, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
@@ -1616,6 +1616,11 @@ fn hash_scanned(
     let mut buf = vec![0u8; READ_BUFFER];
     let mut size = 0u64;
     loop {
+        // A worker whose results are no longer wanted stops reading here.
+        if workers::stopped() {
+            let stopped = io::Error::new(io::ErrorKind::Interrupted, "the read was stopped");
+            return Err(RepoError::from(stopped).into());
+        }
         let n = match file.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
@@ -1764,7 +1769,10 @@ mod tests {
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
     use crate::save::Person;
-    use crate::test_support::{commit_records, plant_damaged_copies, plant_save, sample_records};
+    use crate::test_support::{
+        Written, commit_records, names, noise, plant_damaged_copies, plant_save, sample_records,
+        written,
+    };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -3551,16 +3559,6 @@ mod tests {
         result.unwrap();
     }
 
-    /// Bytes that look random, made from `seed`.
-    fn noise(seed: u64, len: usize) -> Vec<u8> {
-        let mut out = vec![0; len];
-        blake3::Hasher::new()
-            .update(&seed.to_le_bytes())
-            .finalize_xof()
-            .fill(&mut out);
-        out
-    }
-
     /// Small files in a few folders, some of them alike, two big files, an empty one and, where
     /// links can be made, a link.
     fn lay_out_many(root: &Path) {
@@ -3578,9 +3576,6 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("e1/f003.txt", root.join("d3/link")).unwrap();
     }
-
-    /// The packs `build` wrote, by name, with their bytes.
-    type Written = Vec<(std::ffi::OsString, Vec<u8>)>;
 
     /// What `build` makes of a new project `lay_out` fills, with `count` workers and `after_walk`
     /// run between the walk and the reading: the top listing, or the first problem, and the packs
@@ -3614,16 +3609,8 @@ mod tests {
             &gitignored,
         );
         crate::workers::set_test_workers(None);
-        let written = packs.finish().unwrap().into_iter().map(|p| {
-            let name = p.file_name().unwrap().to_owned();
-            (name, fs::read(&p).unwrap())
-        });
         let built = built.map(|(root, ..)| root).map_err(|e| format!("{e:?}"));
-        (built, written.collect())
-    }
-
-    fn names(written: &Written) -> Vec<&std::ffi::OsString> {
-        written.iter().map(|(name, _)| name).collect()
+        (built, written(packs))
     }
 
     #[test]

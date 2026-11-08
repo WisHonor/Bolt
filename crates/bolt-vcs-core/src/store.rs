@@ -1,5 +1,5 @@
 //! One view over every pack in the store. Packs are listed when the store opens, opened when first
-//! searched, and searched on disk; at most `MAX_OPEN` stay open.
+//! searched, and searched on disk; at most `MAX_OPEN` are open at once, however many threads read.
 use bolt_platform::dir::Dir;
 
 use crate::chunks::ChunkList;
@@ -98,6 +98,9 @@ pub struct Store {
     checked: Mutex<Checked>,
     #[cfg(test)]
     saves_read: std::sync::atomic::AtomicUsize,
+    /// This store's packs while they are open.
+    #[cfg(test)]
+    counted: Arc<crate::pack::open_files::Count>,
 }
 
 /// The packs listed, and those open.
@@ -109,6 +112,8 @@ struct Packs {
     by_name: Vec<usize>,
     /// Open packs, the most recently used first.
     open: Vec<(usize, Arc<PackReader>)>,
+    /// Packs being opened, which count as open.
+    opening: usize,
     /// The pack that held the last object read.
     last: usize,
     /// Packs that failed to open, with the error, until the packs are listed again.
@@ -142,6 +147,31 @@ impl Packs {
         self.by_name
             .sort_by_key(|n| names.get(*n).cloned().flatten());
     }
+
+    /// Pack `n` if it is open, made the most recently used.
+    fn take_open(&mut self, n: usize) -> Option<Arc<PackReader>> {
+        let i = self.open.iter().position(|(m, _)| *m == n)?;
+        let open = self.open.remove(i);
+        let pack = Arc::clone(&open.1);
+        self.open.insert(0, open);
+        Some(pack)
+    }
+
+    /// Closes the least recently used packs until one more can open. Only a pack no lookup is
+    /// reading closes: lookups take theirs from this list, under its lock, so one only the list
+    /// holds is free.
+    fn make_room(&mut self) {
+        while self.open.len() + self.opening >= MAX_OPEN {
+            let free = self
+                .open
+                .iter()
+                .rposition(|(_, p)| Arc::strong_count(p) == 1);
+            // shortcut: with every open pack being read, one more opens past `MAX_OPEN`; that
+            // takes more lookups at once than a command's workers and writer make.
+            let Some(i) = free else { break };
+            self.open.remove(i);
+        }
+    }
 }
 
 /// What reading copies has shown so far.
@@ -152,13 +182,13 @@ struct Checked {
     /// Copies that failed, each with the pack its problem was found in (its own, or for a chunk
     /// list a chunk's) and the problem. They are never read again.
     bad: HashMap<At, (PathBuf, String)>,
-    /// Each pack that held a bad copy, with the first problem found in it.
+    /// Each pack that held a bad copy, with the first problem found in it (`keep_first`).
     damaged: BTreeMap<PathBuf, String>,
     /// Each pack with a copy that couldn't be read for a reason other than damage, though another
-    /// copy of the same object could, with the first reason found.
+    /// copy of the same object could, with the first reason found (`keep_first`).
     unreadable: BTreeMap<PathBuf, String>,
     /// Each pack that couldn't be opened or searched for a reason other than damage, with the
-    /// first reason found and its kind.
+    /// first reason found (`keep_first`) and its kind.
     unreadable_packs: BTreeMap<PathBuf, (String, io::ErrorKind)>,
     /// Warnings about the store from the command itself, such as a merge that didn't finish.
     notes: Vec<Warning>,
@@ -203,6 +233,8 @@ impl Store {
             checked: Mutex::default(),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            counted: Arc::default(),
         };
         store.list()?;
         Ok(store)
@@ -663,7 +695,7 @@ impl Store {
                 checked.good.insert(c.at());
                 // Worth a warning only now: with no good copy the read fails, saying why.
                 for (path, reason) in tries.unreadable.drain(..) {
-                    checked.unreadable.entry(path).or_insert(reason);
+                    keep_first(&mut checked.unreadable, path, reason);
                 }
                 Ok(value)
             }
@@ -758,7 +790,7 @@ impl Store {
         let path = self.pack_path(n);
         if let PackError::Corrupt { reason, .. } = &e {
             let reason = reason.clone();
-            self.checked().damaged.entry(path).or_insert(reason);
+            keep_first(&mut self.checked().damaged, path, reason);
         } else if !is_damage(&e) && !is_gone(&e) {
             let kind = match &e {
                 PackError::Io(e) => e.kind(),
@@ -768,10 +800,7 @@ impl Store {
             let shown = escape(&path.display().to_string(), false);
             let said = format!("Bolt couldn't read pack {shown}: {e}");
             let reason = (e.to_string(), kind);
-            self.checked()
-                .unreadable_packs
-                .entry(path)
-                .or_insert(reason);
+            keep_first(&mut self.checked().unreadable_packs, path, reason);
             skipped.push(io::Error::new(kind, said).into());
             return;
         }
@@ -835,38 +864,49 @@ impl Store {
     }
 
     /// Pack `n`, kept open from an earlier lookup if it was, else opened and kept open, closing
-    /// the least recently used past `MAX_OPEN`. One that failed to open fails again unopened.
+    /// the least recently used that no lookup is reading. One that failed to open fails again
+    /// unopened.
     fn pack(&self, n: usize) -> Result<Arc<PackReader>, PackError> {
         let name = {
             let mut packs = self.packs();
-            if let Some(i) = packs.open.iter().position(|(m, _)| *m == n) {
-                let open = packs.open.remove(i);
-                let pack = Arc::clone(&open.1);
-                packs.open.insert(0, open);
+            if let Some(pack) = packs.take_open(n) {
                 return Ok(pack);
             }
             if let Some(e) = packs.failed.get(&n) {
                 return Err(again(e));
             }
-            // Closed first, so no more than `MAX_OPEN` are open even for a moment.
-            packs.open.truncate(MAX_OPEN - 1);
+            // Closed first, and counted while it opens, so no more than `MAX_OPEN` are open even
+            // for a moment, however many threads look things up.
+            packs.make_room();
+            packs.opening += 1;
             packs.names.get(n).cloned().flatten()
         };
-        let name = name.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        let path = self.path.join(&name);
-        let pack = match PackReader::open_in(&self.dir, &name, &path) {
-            Ok(pack) => Arc::new(pack),
-            Err(e) => {
-                if !is_gone(&e) {
-                    self.packs().failed.insert(n, again(&e));
-                }
-                return Err(e);
-            }
+        let opened = match name {
+            Some(name) => PackReader::open_in(&self.dir, &name, &self.path.join(&name)),
+            None => Err(io::Error::from(io::ErrorKind::NotFound).into()),
         };
         let mut packs = self.packs();
-        packs.open.insert(0, (n, Arc::clone(&pack)));
-        packs.open.truncate(MAX_OPEN);
-        Ok(pack)
+        packs.opening -= 1;
+        match opened {
+            #[cfg_attr(not(test), allow(unused_mut))]
+            Ok(mut pack) => {
+                #[cfg(test)]
+                pack.count_in(&self.counted);
+                // Another thread may have opened it meanwhile: the one kept is used.
+                if let Some(there) = packs.take_open(n) {
+                    return Ok(there);
+                }
+                let pack = Arc::new(pack);
+                packs.open.insert(0, (n, Arc::clone(&pack)));
+                Ok(pack)
+            }
+            Err(e) => {
+                if !is_gone(&e) {
+                    packs.failed.insert(n, again(&e));
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Where pack `n` is, to name it.
@@ -894,10 +934,7 @@ impl Store {
         };
         let mut checked = self.checked();
         checked.bad.insert(at, (path.clone(), reason.clone()));
-        checked
-            .damaged
-            .entry(path)
-            .or_insert_with(|| reason.clone());
+        keep_first(&mut checked.damaged, path, reason.clone());
         reason
     }
 
@@ -934,18 +971,37 @@ fn is_gone(e: &PackError) -> bool {
     matches!(e, PackError::Io(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
-/// The failure of `failed` that matters most, the first of its kind: one that says nothing
-/// about the copy, which may be fine (calling it damage would mislead), then damage, then a pack
-/// gone, which says nothing at all.
+/// The failure of `failed` that matters most: one that says nothing about the copy, which may be
+/// fine (calling it damage would mislead), then damage, then a pack gone, which says nothing at
+/// all. Of those alike, the first by what it says, which names its pack first: lookups on several
+/// threads meet copies in other orders, and still tell the same one.
 fn most(failed: impl IntoIterator<Item = PackError>) -> Option<PackError> {
     let rank = |e: &PackError| match e {
         e if is_gone(e) => 0,
         e if is_damage(e) => 1,
         _ => 2,
     };
-    failed
-        .into_iter()
-        .reduce(|kept, e| if rank(&e) > rank(&kept) { e } else { kept })
+    let told = failed.into_iter().map(|e| (rank(&e), e.to_string(), e));
+    told.reduce(|kept, e| {
+        if (e.0, &kept.1) > (kept.0, &e.1) {
+            e
+        } else {
+            kept
+        }
+    })
+    .map(|(_, _, e)| e)
+}
+
+/// Keeps `reason` for `path` unless one that comes first by what it says is kept, so which is
+/// kept doesn't hang on the order lookups on several threads meet them in.
+fn keep_first<T: Ord>(kept: &mut BTreeMap<PathBuf, T>, path: PathBuf, reason: T) {
+    match kept.get_mut(&path) {
+        Some(was) if reason < *was => *was = reason,
+        Some(_) => {}
+        None => {
+            kept.insert(path, reason);
+        }
+    }
 }
 
 /// `e` once more, for a pack that failed to open before.
@@ -1317,6 +1373,73 @@ mod tests {
             assert!(store.open_count() <= 16, "{} open", store.open_count());
         }
         assert_eq!(store.open_count(), 16);
+    }
+
+    /// Lookups on several threads at once keep at most 16 packs open too: none is closed while a
+    /// lookup still reads it, those being opened count, and none is open twice.
+    #[test]
+    fn lookups_on_several_threads_keep_at_most_16_packs_open() {
+        let (_root, tmp, packs) = dirs();
+        // Long enough that reading one holds its pack a while.
+        let contents: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i; 1 << 18]).collect();
+        for c in &contents {
+            pack_of(&tmp, &packs, std::slice::from_ref(c));
+        }
+        let store = Store::open(&packs).unwrap();
+        std::thread::scope(|scope| {
+            for t in 0..8u8 {
+                let (store, contents) = (&store, &contents);
+                scope.spawn(move || {
+                    for round in 0..3u8 {
+                        let from = usize::from(t) * 5;
+                        for c in contents.iter().cycle().skip(from).take(40) {
+                            let mut out = Vec::new();
+                            store.copy_content(&hash_content(c), &mut out).unwrap();
+                            assert!(out == *c);
+                        }
+                        // A miss looks in every pack.
+                        let missing = hash_content(&[t, round]);
+                        assert!(
+                            !store
+                                .has_good_copy(&missing, ObjectKind::Content, 2)
+                                .unwrap()
+                        );
+                    }
+                });
+            }
+        });
+        let most = store.counted.most();
+        assert!(most <= 16, "{most} packs open at once");
+        let packs = store.packs();
+        let mut open: Vec<usize> = packs.open.iter().map(|(n, _)| *n).collect();
+        open.sort_unstable();
+        open.dedup();
+        assert_eq!(open.len(), packs.open.len(), "a pack is open twice");
+    }
+
+    /// Lookups on several threads meet copies in another order: of two failures alike, the one
+    /// told is the same whatever the order.
+    #[test]
+    fn the_error_told_among_equals_is_the_same_whatever_their_order() {
+        let errors = || {
+            let corrupt = |p: &str| PackError::Corrupt {
+                path: p.into(),
+                reason: "bad".into(),
+            };
+            let unread =
+                |p: &str| PackError::Io(io::Error::other(format!("couldn't read pack {p}")));
+            vec![
+                corrupt("b.pack"),
+                unread("b.pack"),
+                corrupt("a.pack"),
+                unread("a.pack"),
+            ]
+        };
+        let mut backwards = errors();
+        backwards.reverse();
+        let (told, told_backwards) = (most(errors()).unwrap(), most(backwards).unwrap());
+        assert_eq!(told.to_string(), told_backwards.to_string());
+        assert!(told.to_string().contains("a.pack"), "{told}");
     }
 
     /// Makes the pack at `path` one Bolt may not open while what this gives is held; `None` where

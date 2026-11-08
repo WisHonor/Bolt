@@ -8,7 +8,7 @@ use std::io::Write;
 
 use bolt_core::fsio::fault;
 use bolt_core::id::Id;
-use bolt_core::pack::set_test_pack_limit;
+use bolt_core::pack::{IndexEntry, ObjectKind, PackReader, set_test_pack_limit};
 use bolt_core::repo::Repository;
 use bolt_core::snapshot::SaveError;
 use bolt_core::verify::verify_store;
@@ -93,8 +93,8 @@ fn a_save_stopped_between_chunks_leaves_the_project_as_it_was() {
 }
 
 /// Where a save of the big file and some small ones stops when its `n`th fault point fails, with
-/// `count` workers, and how many packs it leaves in the store; `None` once nothing stops it.
-fn stopped_at(n: u64, count: usize) -> (Option<String>, usize) {
+/// `count` workers, and the packs it leaves in the store; `None` once nothing stops it.
+fn stopped_at(n: u64, count: usize) -> (Option<String>, Vec<String>) {
     let (dir, _) = with_a_big_file();
     for i in 0..40 {
         let text = format!("small file {i}\n").repeat(i + 1);
@@ -105,7 +105,6 @@ fn stopped_at(n: u64, count: usize) -> (Option<String>, usize) {
     let saved = save_here(dir.path(), "Big");
     fault::disarm();
     set_test_workers(None);
-    let packs = std::fs::read_dir(dir.path().join(".bolt/store/packs")).unwrap();
     // The point it stopped at, not the project's folder, which each run has its own of.
     let place = saved.err().map(|e| {
         let said = format!("{e:?}");
@@ -114,7 +113,37 @@ fn stopped_at(n: u64, count: usize) -> (Option<String>, usize) {
             None => said,
         }
     });
-    (place, packs.count())
+    (place, packs_in(&dir.path().join(".bolt/store/packs")))
+}
+
+/// The packs in the folder `packs`, by name. One that holds a save, whose change ID is drawn at
+/// random, or a record naming one, is told by the files and folders it holds.
+fn packs_in(packs: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(packs).unwrap() {
+        let path = entry.unwrap().path();
+        let objects: Vec<IndexEntry> = PackReader::open(&path)
+            .unwrap()
+            .entries()
+            .map(Result::unwrap)
+            .collect();
+        let made = |e: &&IndexEntry| {
+            use ObjectKind::{ChunkList, Content, FolderListing};
+            matches!(e.kind, Content | ChunkList | FolderListing)
+        };
+        found.push(if objects.iter().all(|e| made(&e)) {
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        } else {
+            let ids: Vec<String> = objects
+                .iter()
+                .filter(made)
+                .map(|e| e.id.to_string())
+                .collect();
+            format!("with a save: {}", ids.join(","))
+        });
+    }
+    found.sort();
+    found
 }
 
 #[test]
