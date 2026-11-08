@@ -725,7 +725,7 @@ pub(crate) struct Switch {
     pub packs: PackSet,
 }
 
-/// Makes a planned switch in decision 049's order: its packs and diary entry are stored, then
+/// Makes a planned switch in this order: its packs and diary entry are stored, then
 /// the journal written, the folder changed, `head` moved and the journal removed. A crash at any
 /// step leaves what the next changing command finishes, and so do files another program holds,
 /// which stop it with `SwitchInUse` after its warnings are noted, but for what it left unwritten

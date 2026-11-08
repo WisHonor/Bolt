@@ -45,7 +45,7 @@ enum When {
     Now,
     /// A time long past that no earlier write had.
     Past,
-    /// The time the file had before: a change the file cache is allowed to miss (decision 011).
+    /// The time the file had before: a change the file cache is allowed to miss.
     Same,
 }
 
@@ -100,7 +100,7 @@ enum Act {
 enum Unsaved {
     Save,
     Discard,
-    /// Leaves it: it comes along, or stops the goto where it collides (decision 050).
+    /// Leaves it: it comes along, or stops the goto where it collides.
     Keep,
 }
 

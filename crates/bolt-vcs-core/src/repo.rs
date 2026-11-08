@@ -1442,7 +1442,7 @@ impl Repository {
 
     /// Stores `entry` in the last of `packs`, moves that pack into the store, registers all of
     /// them, then replaces `state/head`. The command has happened exactly when the head is
-    /// replaced (decision 010), so nothing after that fails it.
+    /// replaced, so nothing after that fails it.
     /// Then merges the small packs; problems doing so are only warnings, kept with the store's.
     pub fn commit(
         &mut self,

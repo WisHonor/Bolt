@@ -708,7 +708,7 @@ mod tests {
         let done = discarded(&mut repo, None);
         assert!(!root.join("n/x.txt").exists());
         assert_eq!(fs::read(root.join("n/keep.log")).unwrap(), b"log");
-        // `n` stays for the ignored file: after the discard the folder holds it, empty.
+        // `n` stays for the ignored file, so the "to" save holds it, empty.
         let change = done.folder_change.unwrap();
         let to = repo.store().save(&change.to, false).unwrap();
         assert_eq!(to.parents, [save]);
@@ -850,7 +850,7 @@ mod tests {
         assert!(!root.join("newdir/x.txt").exists());
         assert!(root.join("inside").symlink_metadata().is_err());
         let change = done.folder_change.unwrap();
-        // `newdir` stays for the link left in it: after the discard the folder holds it, empty.
+        // `newdir` stays for the link left in it, so the "to" save holds it, empty.
         let to = repo.store().save(&change.to, false).unwrap();
         assert_eq!(to.parents, [save]);
         let after = holding(&[("a.txt", FILE, b"a"), ("newdir", FOLDER, b"")]);

@@ -84,7 +84,7 @@ impl Dir {
 
     /// Opens the folder `name` in this one only to reach what is in it, which on Unix needs the
     /// right to search it but not to list it. Use it only to open or look at what it holds: on
-    /// Unix it can't be listed or synced, though on Windows, which opens it as `open_dir` does,
+    /// Unix it may not be listed or synced, though on Windows, which opens it as `open_dir` does,
     /// it can.
     pub fn open_dir_to_search(&self, name: &OsStr) -> io::Result<Dir> {
         one_name(name)?;

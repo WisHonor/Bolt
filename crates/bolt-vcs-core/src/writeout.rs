@@ -419,8 +419,10 @@ fn copy_in(
     packs: &mut PackSet,
 ) -> Result<bool, SaveError> {
     let (up, name) = split(path);
-    if disk.enter(up).is_err() {
-        return Ok(false);
+    match disk.enter(up) {
+        Ok(()) => {}
+        Err(err) if folder_changed(&err) => return Ok(false),
+        Err(err) => return Err(unreadable(path, err)),
     }
     let dir = disk.here();
     if e.kind == EntryKind::Symlink {
@@ -461,19 +463,20 @@ pub(crate) fn planned_link(
     let (up, name) = split(path);
     match disk.enter(up) {
         Ok(()) => {}
-        // Gone, a file now, or swapped for a link: the switch leaves what is there.
-        Err(err)
-            if is_link_refusal(&err)
-                || matches!(
-                    err.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-        {
-            return Ok(None);
-        }
+        Err(err) if folder_changed(&err) => return Ok(None),
         Err(err) => return Err(unreadable(path, err)),
     }
     link_in(disk.here(), name, path, e)
+}
+
+/// Whether entering the folder above a planned path failed because it changed since the plan
+/// (gone, a file now, or a link), so the switch leaves what is there. Any other error stops it.
+fn folder_changed(err: &io::Error) -> bool {
+    is_link_refusal(err)
+        || matches!(
+            err.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        )
 }
 
 /// The target of the link `name` in `dir`, at the project path `path`, if it is still the one
@@ -648,7 +651,7 @@ pub fn carry_out(
 }
 
 /// Finishes a switch that a crash or a stop left in `state/journal`, before a command changes
-/// anything (decision 049): never rolled back. `None` when there was none. When `head` already
+/// anything: never rolled back. `None` when there was none. When `head` already
 /// names its entry, only the journal was left: it is removed, and what was done is empty. A
 /// switch that still can't finish is an error, the journal kept, so no command builds on a
 /// half-switched folder. A lost `head` leaves the journal as it is, for the command to stop at.
@@ -735,7 +738,8 @@ pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
             .to_owned(),
         Ok(Some(false)) => "A switch between saves was stopped before it was done, so some files \
                             may still be as they were. Running `bolt goto` or `bolt discard` \
-                            again, or any command that changes the project, finishes it first."
+                            again, or any command that changes the project, finishes it first if \
+                            its journal reads whole, or else says how to go on."
             .to_owned(),
         Err(e) => format!(
             "{e} Commands that change the project won't run until it is dealt with. {}",
@@ -1156,7 +1160,7 @@ impl Run<'_> {
     }
 
     /// Removes the file or link at `name` in the folder entered unless it changed since it was
-    /// `seen`; whether it was removed. Reading it to check it can take long.
+    /// `seen` (a second look at its metadata, just before the removal); whether it was removed.
     fn remove_unchanged(&self, name: &OsStr, seen: EntryMeta) -> io::Result<bool> {
         fsio::act_point("switch:removing");
         if !self.unchanged(name, Some(seen))? {
@@ -1727,7 +1731,7 @@ fn cant_link(e: &io::Error) -> bool {
 
 /// Whether another program holds the file open: a sharing or lock violation on Windows.
 fn in_use(e: &io::Error) -> bool {
-    // Narrower than `fsio::held`: what counts here is reported as in use; 5 may be a real refusal.
+    // A project file in use (32) or locked (33) is left for the next run; a refusal (5) may be real.
     cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
 }
 

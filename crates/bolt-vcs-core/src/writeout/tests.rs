@@ -452,6 +452,16 @@ fn a_file_changed_after_the_plan_is_left_alone() {
     assert_eq!(fs::read(dir.path().join("gone")).unwrap(), b"mine too");
 }
 
+#[test]
+fn only_a_folder_gone_or_made_a_file_counts_as_changed_since_the_plan() {
+    use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    assert!(folder_changed(&io::Error::from(NotFound)));
+    assert!(folder_changed(&io::Error::from(NotADirectory)));
+    // A passing failure stops the command, so no copy is skipped for a file still there.
+    assert!(!folder_changed(&io::Error::from(PermissionDenied)));
+    assert!(!folder_changed(&io::Error::other("too many open files")));
+}
+
 /// Carries out the switch to `to`, while another program writes `bytes` to `path` as soon as
 /// the switch reaches `point`; what it left.
 #[cfg(feature = "fault-injection")]
@@ -516,6 +526,42 @@ fn a_file_saved_after_the_check_before_its_removal_is_left() {
     let done = raced(&mut repo, b.0, c, "switch:removing", "f", b"mine, edited");
     assert_eq!(done.changed_since_plan, ["f"]);
     assert_eq!(fs::read(dir.path().join("f")).unwrap(), b"mine, edited");
+}
+
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn a_link_changed_after_the_check_before_its_removal_is_left() {
+    use std::os::unix::fs::symlink;
+    let (dir, mut repo) = project();
+    let at = dir.path().join("l");
+    let empty = current_save(&repo).unwrap();
+    let a = planted(&mut repo, &[("l", EntryKind::Symlink, b"t1")]);
+    switch(&mut repo, empty, a);
+    assert_eq!(fs::read_link(&at).unwrap(), Path::new("t1"));
+    // Another link put in its place: re-pointed by another program just before.
+    let b = planted(&mut repo, &[("l", EntryKind::Symlink, b"t2")]);
+    let plan = planned(&mut repo, a.0, b.0, false);
+    let link = at.clone();
+    crate::fsio::fault::act_at("switch:removing", move || {
+        fs::remove_file(&link).unwrap();
+        symlink("theirs", &link).unwrap();
+    });
+    let done = applied(&mut repo, &journal(b.1, &plan));
+    assert_eq!(done.changed_since_plan, ["l"]);
+    assert_eq!(fs::read_link(&at).unwrap(), Path::new("theirs"));
+    // A file put in its place: swapped for a file just before.
+    fs::remove_file(&at).unwrap();
+    symlink("t2", &at).unwrap();
+    let c = planted(&mut repo, &files(&[("l", b"a file")]));
+    let plan = planned(&mut repo, b.0, c.0, false);
+    let link = at.clone();
+    crate::fsio::fault::act_at("switch:removing", move || {
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, b"mine").unwrap();
+    });
+    let done = applied(&mut repo, &journal(c.1, &plan));
+    assert_eq!(done.changed_since_plan, ["l"]);
+    assert_eq!(fs::read(&at).unwrap(), b"mine");
 }
 
 #[cfg(windows)]

@@ -120,10 +120,11 @@ fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<
     }
 }
 
-/// Whether a rename failed because another program, such as a virus scanner or indexer, has
-/// the file open: refused, in use, or deleted but not yet closed (Windows only).
+/// Whether a write of Bolt's own file failed because another program, such as a virus scanner
+/// or indexer, has the file open: refused, in use, or deleted but not yet closed (Windows only).
 pub(crate) fn held(e: &io::Error) -> bool {
-    // Wider than write-out's `in_use`: here a real refusal (5) only fails a little later.
+    // Refused (5), in use (32) or delete pending (303), all tried again: a real refusal only
+    // fails a little later.
     const DELETE_PENDING: i32 = 303;
     cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | DELETE_PENDING))
 }
