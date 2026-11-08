@@ -669,7 +669,7 @@ pub fn finish_interrupted(
         Journal::remove_before_head(repo, lock)?;
         return Ok(Some(Applied::default()));
     }
-    let journal = usable(repo, journal, head)?;
+    usable(repo, journal.target, journal.from, head)?;
     let drive = drive::probe(repo.tmp_folder())?;
     let mut done = carry_out(repo, lock, &journal, drive)?;
     if !done.in_use.is_empty() {
@@ -689,21 +689,21 @@ pub fn finish_interrupted(
     Ok(Some(done))
 }
 
-/// `journal` if it can be carried out on this project, whose `head` is `head`: made from that
-/// entry, to one that reads. Otherwise it is no switch of this folder to finish.
-fn usable(repo: &Repository, journal: Journal, head: Id) -> Result<Journal, RepoError> {
-    if head != journal.from {
+/// Whether the switch from `from` to `target` can be carried out on this project, whose `head` is
+/// `head`: made from that entry, to one that reads. Otherwise it is no switch of this folder to finish.
+fn usable(repo: &Repository, target: Id, from: Id, head: Id) -> Result<(), RepoError> {
+    if head != from {
         return Err(journal::unusable(
             "was made for another save than the one the project is on",
         ));
     }
     let entry = repo
         .store()
-        .read_record(&journal.target, ObjectKind::DiaryEntry)
+        .read_record(&target, ObjectKind::DiaryEntry)
         .map_err(RepoError::from)
         .and_then(|bytes| Ok(DiaryEntry::decode(&bytes)?));
     match entry {
-        Ok(_) => Ok(journal),
+        Ok(_) => Ok(()),
         Err(e) => Err(journal::unusable(format!(
             "names a diary entry that can't be read ({e})"
         ))),
@@ -715,13 +715,13 @@ fn usable(repo: &Repository, journal: Journal, head: Id) -> Result<Journal, Repo
 #[must_use]
 pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
     // Whether the switch took effect, when there is one.
-    let pending = Journal::read(repo).and_then(|found| match found {
+    let pending = Journal::read_front(repo).and_then(|found| match found {
         None => Ok(None),
-        Some(j) => {
+        Some((target, from)) => {
             let (head, _) = repo.current()?;
-            let took_effect = head == j.target;
+            let took_effect = head == target;
             if !took_effect {
-                usable(repo, j, head)?;
+                usable(repo, target, from, head)?;
             }
             Ok(Some(took_effect))
         }

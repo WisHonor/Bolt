@@ -144,7 +144,6 @@ fn rt6_2_a_file_saved_while_undo_writes_over_it_is_never_lost() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT6-4: a sparse 4 GiB journal makes every command, status included, read it all"]
 fn rt6_4_a_huge_journal_costs_status_little_time_and_memory() {
     let env = project();
     fs::write(env.root().join("a.txt"), "one\n").unwrap();

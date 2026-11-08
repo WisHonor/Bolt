@@ -1202,8 +1202,8 @@ fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
     let (dir, mut repo, journal) = stopped_switch();
     let on_disk = dir.path().join(".bolt/state/journal");
     let mut bytes = fs::read(&on_disk).unwrap();
-    let last = bytes.len() - 1;
-    bytes[last] ^= 1;
+    // At its front, where commands that only read look too.
+    bytes[0] ^= 1;
     fs::write(&on_disk, &bytes).unwrap();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     let e = finish_interrupted(&mut repo, &lock).unwrap_err();
