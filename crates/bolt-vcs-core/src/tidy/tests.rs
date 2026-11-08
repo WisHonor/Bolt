@@ -406,6 +406,33 @@ fn tidy_removes_entries_a_crash_left() {
 }
 
 #[test]
+fn tidy_keeps_a_diary_cut_off_from_head_while_its_end_is_in_the_window() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    let older = repo.head().unwrap();
+    let old = save_text(dir.path(), &mut repo, "old work", 40);
+    let recent = save_text(dir.path(), &mut repo, "recent work", 2);
+    let end = repo.head().unwrap();
+    // `head` put back, as a sync tool or a restore would.
+    let head = dir.path().join(".bolt").join("state").join("head");
+    fs::write(head, format!("{older}\n")).unwrap();
+    assert_eq!(repo.head().unwrap(), older);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    // The whole diary back from the end is kept, with what its states reach.
+    assert!(reads(&repo, &end, ObjectKind::DiaryEntry));
+    assert!(reads(&repo, &recent, ObjectKind::Save) && reads(&repo, &old, ObjectKind::Save));
+    assert!(text_reads(&repo, "recent work") && text_reads(&repo, "old work"));
+
+    // Once the end is older than the window, it goes.
+    let later = now() + 29 * DAY;
+    tidy(&mut repo, 30, later, &mut |_| {}, &mut |_| {}).unwrap();
+    assert!(!reads(&repo, &end, ObjectKind::DiaryEntry));
+    assert!(!reads(&repo, &recent, ObjectKind::Save) && !reads(&repo, &old, ObjectKind::Save));
+    assert!(!text_reads(&repo, "recent work"));
+}
+
+#[test]
 fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
     let (dir, mut repo) = project(50);
     save_text(dir.path(), &mut repo, "one", 40);
@@ -454,6 +481,13 @@ fn tidy_stops_before_removing_anything_when_something_to_keep_is_missing() {
     assert!(reads(&repo, &entry, ObjectKind::DiaryEntry));
 }
 
+/// What `tidy` would keep now, with a 30-day window.
+fn marked(repo: &Repository) -> HashSet<Id> {
+    let listed = packs(repo.packs_folder()).unwrap();
+    let entries = entries_in(repo.packs_folder(), repo.packs_dir(), &listed);
+    kept(repo, entries, 30, now()).unwrap()
+}
+
 /// Every object `keep` names, by kind, from the packs' indexes.
 #[cfg(feature = "fault-injection")]
 fn stored(repo: &Repository, keep: &HashSet<Id>) -> BTreeMap<Id, ObjectKind> {
@@ -482,10 +516,10 @@ fn tidy_stopped_at_every_step_loses_nothing() {
         save_text(dir.path(), &mut repo, "two", 40);
         step(&mut repo, 40, false).unwrap();
         discard_text(dir.path(), &mut repo, "thrown away", 40);
-        save_text(dir.path(), &mut repo, "three", 2);
         crash_leftover(&mut repo);
+        save_text(dir.path(), &mut repo, "three", 2);
         age_packs(&repo, 48);
-        let keep = kept(&repo, 30, now()).unwrap();
+        let keep = marked(&repo);
         let objects = stored(&repo, &keep);
         assert!(objects.len() > 10);
         fault::arm(n);
@@ -1107,14 +1141,14 @@ fn planted(without: Option<Ref>) -> (tempfile::TempDir, Repository, BTreeMap<Ref
 #[test]
 fn each_kind_of_reference_is_followed() {
     let (_dir, repo, named) = planted(None);
-    let keep = kept(&repo, 30, now()).unwrap();
+    let keep = marked(&repo);
     for (r, id) in &named {
         assert!(keep.contains(id), "{r:?} isn't followed");
     }
     // Each taken away in turn: what it named goes.
     for r in REFS {
         let (_dir, repo, named) = planted(Some(r));
-        let keep = kept(&repo, 30, now()).unwrap();
+        let keep = marked(&repo);
         assert!(
             !keep.contains(&named[&r]),
             "{r:?} taken away, but what it names is kept"

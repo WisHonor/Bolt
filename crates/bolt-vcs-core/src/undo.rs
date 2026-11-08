@@ -371,8 +371,16 @@ fn stored_entries(repo: &Repository) -> Result<HashSet<Id>, RepoError> {
 /// time: where the diary may have stopped, for a lost `head`. One that can't be read is left
 /// out, since it couldn't be made current either.
 pub fn diary_ends(repo: &Repository) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
+    ends_among(repo, stored_entries(repo)?)
+}
+
+/// [`diary_ends`] among the entries `ids`.
+pub(crate) fn ends_among(
+    repo: &Repository,
+    ids: HashSet<Id>,
+) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
     let (mut followed, mut found) = (HashSet::new(), Vec::new());
-    for id in stored_entries(repo)? {
+    for id in ids {
         match repo.entry(&id) {
             Ok(entry) => {
                 followed.extend(entry.parent);

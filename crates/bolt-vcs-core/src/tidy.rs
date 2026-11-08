@@ -19,6 +19,7 @@ use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Save;
 use crate::store::{StoreError, is_damage};
 use crate::text::{escape, thousands};
+use crate::undo;
 use crate::warning::{self, Warning};
 use crate::writeout;
 
@@ -74,10 +75,12 @@ pub fn tidy(
             repo.store().note(w);
         }
     }
-    let keep = kept(repo, window_days, now_ms)?;
+    let folder = Arc::clone(repo.packs_folder());
+    let listed = packs(&folder)?;
+    let entries = entries_in(&folder, repo.packs_dir(), &listed);
+    let keep = kept(repo, entries, window_days, now_ms)?;
     fault_point("tidy:marked")?;
 
-    let folder = Arc::clone(repo.packs_folder());
     let packs_dir = repo.packs_dir().to_owned();
     let now_ns = i128::from(now_ms).saturating_mul(1_000_000);
     let mut report = TidyReport::default();
@@ -85,7 +88,7 @@ pub fn tidy(
     let (mut moved, mut unfollowed) = (0u64, None);
     // An open file can't always be replaced or removed on Windows.
     repo.store().close_all();
-    for (name, meta) in packs(&folder)? {
+    for (name, meta) in listed {
         let path = packs_dir.join(&name);
         report.bytes_before = report.bytes_before.saturating_add(meta.size);
         let young = now_ns.saturating_sub(meta.modified_ns) < GRACE_NS;
@@ -223,6 +226,25 @@ fn packs(folder: &Dir) -> Result<Vec<(OsString, EntryMeta)>, RepoError> {
     Ok(found)
 }
 
+/// The diary entries the indexes of `packs` list. A pack whose index doesn't read whole is passed
+/// over: it is left as it is, and an entry in it can't be made current anyway.
+fn entries_in(folder: &Dir, packs_dir: &Path, packs: &[(OsString, EntryMeta)]) -> HashSet<Id> {
+    let mut ids = HashSet::new();
+    for (name, _) in packs {
+        let listed = PackReader::open_in(folder, name, &packs_dir.join(name)).and_then(|pack| {
+            pack.entries()
+                .filter(|e| {
+                    e.as_ref()
+                        .map_or(true, |e| e.kind == ObjectKind::DiaryEntry)
+                })
+                .map(|e| e.map(|e| e.id))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        ids.extend(listed.into_iter().flatten());
+    }
+    ids
+}
+
 /// What the index of the pack `name` says it holds, each line checked as it is read. With
 /// `judged`, the whole index is checked against its checksum too: reads check each object
 /// against its ID, but tidying deletes by the index alone.
@@ -286,9 +308,10 @@ fn not_tidied(repo: &Repository, path: &Path, e: &PackError) {
         .note(Warning::new(warning::PACK_NOT_TIDIED, said));
 }
 
-/// What must be kept: every object reached (fingerprints).
-pub(crate) fn kept(
+/// What must be kept: every object reached (fingerprints). `entries` are the diary entries stored.
+fn kept(
     repo: &Repository,
+    entries: HashSet<Id>,
     window_days: u32,
     now_ms: i64,
 ) -> Result<HashSet<Id>, RepoError> {
@@ -301,29 +324,13 @@ pub(crate) fn kept(
         saves: Vec::new(),
         listings: Vec::new(),
     };
-    // The head's own state is always kept; an older entry's when the one after it is within the
-    // window, since undoing that one puts it back.
-    let (mut at, mut after_within) = (Some(head), true);
-    while let Some(id) = at {
-        let entry = marks.entry(&id)?;
-        let within = entry.who.time_ms >= since;
-        if within || after_within {
-            marks.state(&entry.state)?;
+    let mut walked = HashSet::new();
+    marks.diary(head, since, &mut walked)?;
+    // A diary cut off from `head` (a rolled-back `head`, a crash's leftover) lives out the window.
+    for (end, entry) in undo::ends_among(repo, entries)? {
+        if entry.who.time_ms >= since {
+            marks.diary(end, since, &mut walked)?;
         }
-        if within {
-            marks.change(&entry);
-            if let Action::Undo(step) | Action::Redo(step) = entry.action {
-                let step = marks.entry(&step)?;
-                marks.state(&step.state)?;
-                marks.change(&step);
-                if let Some(before) = step.parent {
-                    let before = marks.entry(&before)?;
-                    marks.state(&before.state)?;
-                }
-            }
-        }
-        after_within = within;
-        at = entry.parent;
     }
     marks.follow()?;
     Ok(marks.kept)
@@ -340,6 +347,44 @@ struct Marks<'a> {
 }
 
 impl Marks<'_> {
+    /// Marks the diary back from `start`, as undo can reach it. `walked` holds the entries already
+    /// marked, with whether their state was kept, so that diaries sharing a past are read once.
+    fn diary(
+        &mut self,
+        start: Id,
+        since: i64,
+        walked: &mut HashSet<(Id, bool)>,
+    ) -> Result<(), RepoError> {
+        // The start's own state is always kept; an older entry's when the one after it is within
+        // the window, since undoing that one puts it back.
+        let (mut at, mut after_within) = (Some(start), true);
+        while let Some(id) = at {
+            if walked.contains(&(id, true)) || !walked.insert((id, after_within)) {
+                return Ok(());
+            }
+            let entry = self.entry(&id)?;
+            let within = entry.who.time_ms >= since;
+            if within || after_within {
+                self.state(&entry.state)?;
+            }
+            if within {
+                self.change(&entry);
+                if let Action::Undo(step) | Action::Redo(step) = entry.action {
+                    let step = self.entry(&step)?;
+                    self.state(&step.state)?;
+                    self.change(&step);
+                    if let Some(before) = step.parent {
+                        let before = self.entry(&before)?;
+                        self.state(&before.state)?;
+                    }
+                }
+            }
+            after_within = within;
+            at = entry.parent;
+        }
+        Ok(())
+    }
+
     /// Keeps `id`, and gives whether a record of `kind` with it is still to be followed.
     fn first(&mut self, kind: ObjectKind, id: Id) -> bool {
         self.kept.insert(id);

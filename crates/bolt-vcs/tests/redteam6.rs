@@ -52,7 +52,6 @@ fn age_packs(env: &Env, hours: u64) {
 }
 
 #[test]
-#[ignore = "RT6-1: tidy deletes every save made after the entry an older state/head names"]
 fn rt6_1_tidy_never_deletes_saves_made_after_an_older_head() {
     let env = project();
     fs::write(env.root().join("a.txt"), "one\n").unwrap();
