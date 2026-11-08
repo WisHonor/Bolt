@@ -939,18 +939,17 @@ impl Run<'_> {
             Err(e) => return classify(e),
         };
         let os = OsStr::new(name);
-        let dir = self.folders.here();
         match found {
             Some(f) if f.kind == Some(EntryKind::Folder) => return Ok(Outcome::Nothing),
             None => {}
-            Some(f) if f.is(a.expected) => {
-                if let Err(e) = retried(|| dir.remove_file(os)) {
-                    return classify(e);
-                }
-            }
+            Some(f) if f.is(a.expected) => match self.remove_unchanged(os, f.meta) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Outcome::Changed),
+                Err(e) => return classify(e),
+            },
             Some(_) => return Ok(Outcome::Changed),
         }
-        match dir.create_dir(os) {
+        match self.folders.here().create_dir(os) {
             Ok(()) => Ok(Outcome::Made),
             Err(e) => classify(e),
         }
@@ -998,7 +997,7 @@ impl Run<'_> {
             None => {}
             Some(f) if !ours(f) => return Ok(Outcome::Changed),
             Some(f) => {
-                if let Some(outcome) = self.clear(os, f.kind)? {
+                if let Some(outcome) = self.clear(os, f)? {
                     return Ok(outcome);
                 }
             }
@@ -1062,15 +1061,17 @@ impl Run<'_> {
 
     /// Removes what is at `name` before something else is put there: a link or folder, which a
     /// rename won't replace. A file stays, for the rename to replace in one step.
-    fn clear(&self, name: &OsStr, kind: Option<EntryKind>) -> Result<Option<Outcome>, RepoError> {
-        let dir = self.folders.here();
-        let cleared = match kind {
-            Some(EntryKind::Folder) => retried(|| dir.remove_dir(name)),
-            Some(EntryKind::Symlink) => retried(|| dir.remove_file(name)),
+    fn clear(&self, name: &OsStr, found: &Found) -> Result<Option<Outcome>, RepoError> {
+        let cleared = match found.kind {
+            Some(EntryKind::Folder) => {
+                retried(|| self.folders.here().remove_dir(name)).map(|()| true)
+            }
+            Some(EntryKind::Symlink) => self.remove_unchanged(name, found.meta),
             _ => return Ok(None),
         };
         match cleared {
-            Ok(()) => Ok(None),
+            Ok(true) => Ok(None),
+            Ok(false) => Ok(Some(Outcome::Changed)),
             Err(e) => classify(e).map(Some),
         }
     }
@@ -1142,15 +1143,27 @@ impl Run<'_> {
                     Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
                         return Ok(Outcome::Nothing);
                     }
-                    removed => removed,
+                    removed => removed.map(|()| true),
                 }
             }
-            Some(_) => retried(|| dir.remove_file(os)),
+            Some(f) => self.remove_unchanged(os, f.meta),
         };
         match removed {
-            Ok(()) => Ok(Outcome::Removed),
+            Ok(true) => Ok(Outcome::Removed),
+            Ok(false) => Ok(Outcome::Changed),
             Err(e) => classify(e),
         }
+    }
+
+    /// Removes the file or link at `name` in the folder entered unless it changed since it was
+    /// `seen`; whether it was removed. Reading it to check it can take long.
+    fn remove_unchanged(&self, name: &OsStr, seen: EntryMeta) -> io::Result<bool> {
+        fsio::act_point("switch:removing");
+        if !self.unchanged(name, Some(seen))? {
+            return Ok(false);
+        }
+        retried(|| self.folders.here().remove_file(name))?;
+        Ok(true)
     }
 
     fn link(&mut self, a: &Action, c: Content) -> Result<Outcome, RepoError> {
@@ -1171,13 +1184,16 @@ impl Run<'_> {
             None => {}
             Some(f) if !f.is(a.expected) => return Ok(Outcome::Changed),
             Some(f) => {
-                let dir = self.folders.here();
                 let cleared = match f.kind {
-                    Some(EntryKind::Folder) => retried(|| dir.remove_dir(os)),
-                    _ => retried(|| dir.remove_file(os)),
+                    Some(EntryKind::Folder) => {
+                        retried(|| self.folders.here().remove_dir(os)).map(|()| true)
+                    }
+                    _ => self.remove_unchanged(os, f.meta),
                 };
-                if let Err(e) = cleared {
-                    return classify(e);
+                match cleared {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(Outcome::Changed),
+                    Err(e) => return classify(e),
                 }
             }
         }

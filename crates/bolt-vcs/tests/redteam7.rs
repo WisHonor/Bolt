@@ -96,7 +96,6 @@ fn watch_reads(
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT7-1: a file edited while a switch reads it to check it is removed"]
 fn rt7_1_a_file_edited_while_undo_checks_it_is_never_removed() {
     use std::io::Write;
     let env = project();
