@@ -1,10 +1,11 @@
 //! Test vectors for the storage format (docs/storage-format.md).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use bolt_core::chunks::{Chunk, ChunkList, Cutter};
 use bolt_core::diary::{
     Action, DiaryEntry, FolderChange, Position, ServerLines, State, Tag, TagList,
 };
-use bolt_core::id::{ChangeId, Id};
+use bolt_core::id::{ChangeId, Id, hash_content};
 use bolt_core::link::ProjectLink;
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
@@ -824,4 +825,167 @@ fn the_journal_matches_its_vectors() {
     };
     assert_eq!(Journal::decode(&bytes).unwrap(), journal);
     assert_eq!(journal.encode(), bytes);
+}
+
+#[derive(Deserialize)]
+struct Chunking {
+    noise_context: String,
+    inputs: Vec<ChunkingInput>,
+}
+
+/// Noise or zeros, perhaps with one byte inserted, and the chunk sizes Bolt's cutter makes of it.
+#[derive(Deserialize)]
+struct ChunkingInput {
+    name: String,
+    noise: Option<usize>,
+    zeros: Option<usize>,
+    insert_at: Option<usize>,
+    insert_byte: Option<u8>,
+    file: String,
+    sizes: Vec<u64>,
+}
+
+fn chunking() -> Chunking {
+    let path = format!("{}/tests/vectors/chunking.json", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The bytes of the input `name` of chunking.json, checked against its file ID. The noise is
+/// BLAKE3's extendable output in key-derivation mode, with no key material.
+fn input_bytes(v: &Chunking, name: &str) -> Vec<u8> {
+    let input = v.inputs.iter().find(|i| i.name == name).unwrap();
+    let mut bytes = vec![0; input.noise.or(input.zeros).unwrap()];
+    if input.noise.is_some() {
+        blake3::Hasher::new_derive_key(&v.noise_context)
+            .finalize_xof()
+            .fill(&mut bytes);
+    }
+    if let Some(at) = input.insert_at {
+        bytes.insert(at, input.insert_byte.unwrap());
+    }
+    assert_eq!(blake3::hash(&bytes).to_hex().as_str(), input.file, "{name}");
+    bytes
+}
+
+/// The chunks Bolt's cutter makes of `bytes`.
+fn cut(bytes: &[u8]) -> Vec<Chunk> {
+    let mut cutter = Cutter::new(bytes);
+    let mut chunks = Vec::new();
+    while let Some(chunk) = cutter.next_chunk().unwrap() {
+        chunks.push(Chunk {
+            id: hash_content(chunk),
+            size: chunk.len() as u64,
+        });
+    }
+    chunks
+}
+
+#[test]
+fn the_cutter_cuts_the_vector_inputs_where_the_spec_says() {
+    let v = chunking();
+    assert_eq!(v.inputs.len(), 4);
+    for input in &v.inputs {
+        let sizes: Vec<u64> = cut(&input_bytes(&v, &input.name))
+            .iter()
+            .map(|c| c.size)
+            .collect();
+        assert_eq!(sizes, input.sizes, "{}", input.name);
+    }
+}
+
+#[test]
+fn one_inserted_byte_changes_one_chunk() {
+    let v = chunking();
+    let before = cut(&input_bytes(&v, "noise-3mib"));
+    let after = cut(&input_bytes(&v, "noise-3mib-one-byte-inserted"));
+    assert_eq!((before.len(), after.len()), (40, 40));
+    // The 12th chunk holds the inserted byte; every other is the same chunk as before.
+    assert_eq!(before[..11], after[..11]);
+    assert_ne!(before[11].id, after[11].id);
+    assert_eq!(before[11].size + 1, after[11].size);
+    assert_eq!(before[12..], after[12..]);
+}
+
+#[derive(Deserialize)]
+struct ChunkListVectors {
+    valid: Vec<ValidChunkList>,
+    invalid: Vec<InvalidChunkList>,
+}
+
+/// A file given by its text and the pieces it is cut into, or by an input of chunking.json.
+#[derive(Deserialize)]
+struct ValidChunkList {
+    name: String,
+    text: Option<String>,
+    chunks: Option<Vec<String>>,
+    input: Option<String>,
+    file: String,
+    size: u64,
+    hex: String,
+}
+
+#[derive(Deserialize)]
+struct InvalidChunkList {
+    name: String,
+    hex: String,
+}
+
+fn chunk_list_vectors() -> ChunkListVectors {
+    let path = format!(
+        "{}/tests/vectors/chunk_list.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn chunk_lists_match_their_vectors() {
+    let v = chunk_list_vectors();
+    assert_eq!(v.valid.len(), 2);
+    for vector in &v.valid {
+        let (file, chunks) = match (&vector.text, &vector.chunks, &vector.input) {
+            (Some(text), Some(pieces), None) => {
+                assert_eq!(pieces.concat(), *text, "{}", vector.name);
+                let chunks = pieces
+                    .iter()
+                    .map(|piece| Chunk {
+                        id: hash_content(piece.as_bytes()),
+                        size: piece.len() as u64,
+                    })
+                    .collect();
+                (text.as_bytes().to_vec(), chunks)
+            }
+            (None, None, Some(input)) => {
+                let name = input.strip_prefix("chunking.json ").unwrap();
+                let bytes = input_bytes(&chunking(), name);
+                let chunks = cut(&bytes);
+                (bytes, chunks)
+            }
+            _ => panic!("{}: a text and its chunks, or an input", vector.name),
+        };
+        let list = ChunkList {
+            file: hash_content(&file),
+            size: file.len() as u64,
+            chunks,
+        };
+        assert_eq!(list.file.to_hex(), vector.file, "{}", vector.name);
+        assert_eq!(list.size, vector.size, "{}", vector.name);
+        assert_eq!(hex(&list.encode()), vector.hex, "{}", vector.name);
+        assert_eq!(
+            ChunkList::decode(&unhex(&vector.hex)),
+            Ok(list),
+            "{}",
+            vector.name
+        );
+    }
+}
+
+#[test]
+fn chunk_lists_that_break_a_rule_are_refused() {
+    let v = chunk_list_vectors();
+    assert_eq!(v.invalid.len(), 8);
+    for vector in &v.invalid {
+        let refused = ChunkList::decode(&unhex(&vector.hex));
+        assert!(refused.is_err(), "{}: {refused:?}", vector.name);
+    }
 }
