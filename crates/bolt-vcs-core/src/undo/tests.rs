@@ -767,6 +767,7 @@ fn undo_of_a_goto_leaves_a_folder_the_user_made_in_place_of_a_saved_file() {
     assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
     // With --shelve, nothing is in the way to set aside.
     redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/a")).unwrap(), b"a");
     let shelve = StepRequest {
         shelve: true,
         ..one_step(&who)
@@ -775,6 +776,28 @@ fn undo_of_a_goto_leaves_a_folder_the_user_made_in_place_of_a_saved_file() {
     assert!(done.shelved.is_empty(), "{:?}", done.shelved);
     assert!(!root.join("d/a").exists());
     assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+}
+
+#[test]
+fn an_unshelf_onto_another_save_records_no_folder_above_what_it_only_matched() {
+    let (dir, mut repo) = saved(&[("d/x", b"x"), ("d/y", b"y"), ("z", b"z")]);
+    let root = dir.path();
+    let first = save_on(&repo);
+    fs::remove_dir_all(root.join("d")).unwrap();
+    write_all(root, &[("d", b"file")]);
+    let second = save_now(&mut repo);
+    goto_save(&mut repo, first);
+    fs::remove_file(root.join("d/x")).unwrap();
+    write_all(root, &[("z", b"mine")]);
+    let who = who();
+    crate::shelf::shelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    goto_main(&mut repo);
+    // On the second save the shelf's `d/x` is already gone, below a file: only `z` is written.
+    crate::shelf::unshelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("z")).unwrap(), b"mine");
+    assert_eq!(fs::read(root.join("d")).unwrap(), b"file");
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    assert_eq!(change.from, second);
 }
 
 #[test]

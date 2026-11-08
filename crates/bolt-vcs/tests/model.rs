@@ -236,8 +236,8 @@ fn switch(folder: &Tree, from: &Tree, into: &Tree) -> Result<Tree, BTreeSet<Stri
         .intersection(&changed_files(folder, into))
         .cloned()
         .collect();
-    // Decisions 050 and 065: a change unlike the target collides at, above or below a path
-    // where the target differs from the save and the folder isn't already as the target is.
+    // A change unlike the target collides at, above or below a path where the target differs
+    // from the save and the folder isn't already as the target is; matching work comes along.
     let in_the_way: BTreeSet<String> = differences(from, into)
         .intersection(&differences(folder, into))
         .filter(|s| unlike_target.iter().any(|u| within(u, s) || within(s, u)))
@@ -268,52 +268,49 @@ fn switch(folder: &Tree, from: &Tree, into: &Tree) -> Result<Tree, BTreeSet<Stri
 }
 
 /// [`switch`], with the unsaved work in its way set aside first if `shelve` says so: the folder
-/// after, and the shelf made on `tip`, the save the project is on. A stop gives the paths in
-/// the way, unless it was still in the way once set aside.
+/// after and the shelf made on `tip`, the save the project is on, or the paths still in the way.
 fn switch_or_shelve(
     folder: &Tree,
     from: &Tree,
     into: &Tree,
     tip: &Tree,
     shelve: bool,
-) -> Result<(Tree, Option<Tree>), Option<BTreeSet<String>>> {
+) -> Result<(Tree, Option<Tree>), BTreeSet<String>> {
     let paths = match switch(folder, from, into) {
         Ok(after) => return Ok((after, None)),
-        Err(paths) if !shelve => return Err(Some(paths)),
+        Err(paths) if !shelve => return Err(paths),
         Err(paths) => paths,
     };
-    let (shelf, from) = set_aside(folder, tip, from, &paths).ok_or(None)?;
-    let after = switch(folder, &from, into).map_err(|_| None)?;
+    let aside = set_aside(folder, tip, &paths);
+    // One with nothing set aside at, above or below it is still in the way.
+    let left: BTreeSet<String> = paths
+        .into_iter()
+        .filter(|c| !aside.iter().any(|p| within(p, c) || within(c, p)))
+        .collect();
+    if !left.is_empty() {
+        return Err(left);
+    }
+    let (mut shelf, mut from) = (tip.clone(), from.clone());
+    for p in &aside {
+        shelf.set(p, folder);
+        from.set(p, folder);
+    }
+    let after = switch(folder, &from, into)?;
     Ok((after, Some(shelf)))
 }
 
-/// The shelf `--shelve` makes on `tip` of the work at and below `paths`, and `from` with that work
-/// in it, to switch from instead: the folder's version wherever a discard of those paths changes
-/// it, folders above them that `tip` holds included. `None` when there is nothing to set aside.
-fn set_aside(
-    folder: &Tree,
-    tip: &Tree,
-    from: &Tree,
-    paths: &BTreeSet<String>,
-) -> Option<(Tree, Tree)> {
+/// What `--shelve` sets aside of the work at and below `paths`, on a shelf on `tip`: each path
+/// where a discard of those paths changes the folder, folders above them that `tip` holds included.
+fn set_aside(folder: &Tree, tip: &Tree, paths: &BTreeSet<String>) -> Vec<String> {
     let discarded = |p: &String| {
         paths
             .iter()
             .any(|c| within(p, c) || (tip.folders.contains(p) && within(c, p)))
     };
-    let held: Vec<String> = differences(folder, tip)
+    differences(folder, tip)
         .into_iter()
         .filter(discarded)
-        .collect();
-    if held.is_empty() {
-        return None;
-    }
-    let (mut shelf, mut from) = (tip.clone(), from.clone());
-    for p in &held {
-        shelf.set(p, folder);
-        from.set(p, folder);
-    }
-    Some((shelf, from))
+        .collect()
 }
 
 /// A save the model knows.
@@ -662,7 +659,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             } else {
                 undo(repo, &req, &mut |_| {})
             };
-            take_steps(repo, m, n, (again, shelve), done);
+            take_steps(repo, m, (n, None), (again, shelve), done);
             None
         }
         Act::UndoTo { pick, shelve } => {
@@ -1028,8 +1025,8 @@ enum Next {
     Took(Made),
     /// None left.
     Nothing,
-    /// Unsaved work in the way stopped it, at these paths when the model knows them.
-    Stopped(Option<BTreeSet<String>>),
+    /// Unsaved work in the way stopped it, at these paths.
+    Stopped(BTreeSet<String>),
 }
 
 /// Takes the next step back, or forward with `again`: the state from before it, or its own,
@@ -1103,11 +1100,11 @@ fn outcome(
 }
 
 /// Plays up to `n` steps of undo, or of redo with `again`, on the model, and holds `done`, what
-/// the engine did, to them.
+/// the engine did, to them; `to` is the entry `undo --to` was given.
 fn take_steps(
     repo: &Repository,
     m: &mut Model,
-    n: usize,
+    (n, to): (usize, Option<&str>),
     (again, shelve): (bool, bool),
     done: Result<UndoOutcome, UndoError>,
 ) {
@@ -1124,18 +1121,19 @@ fn take_steps(
             }
         }
     }
-    same_stop(stopped, error, (again, shelve));
+    same_stop(stopped, error, (again, shelve), to);
     assert_eq!(taken, made.len(), "steps taken");
     assert!(shelved.next().is_none(), "a shelf the model didn't make");
     settle(repo, m, made);
 }
 
-/// Holds the engine's error to the model's stop: none, or unsaved work in the way of a step, at
-/// the paths the model gives when it gives them.
+/// Holds the engine's error to the model's stop: none, or unsaved work in the way of a step at
+/// exactly the model's paths, naming the entry `undo --to` was given, if any.
 fn same_stop(
-    stopped: Option<Option<BTreeSet<String>>>,
+    stopped: Option<BTreeSet<String>>,
     error: Option<SwitchError>,
     (again, shelve): (bool, bool),
+    to: Option<&str>,
 ) {
     match (stopped, error) {
         (None, None) => {}
@@ -1145,13 +1143,12 @@ fn same_stop(
                 paths,
                 redo,
                 shelve: shelved,
-                ..
+                to: given,
             }),
         ) => {
-            assert_eq!((redo, shelved), (again, shelve), "{paths:?}");
-            if let Some(want) = want {
-                assert_eq!(paths, want.into_iter().collect::<Vec<_>>());
-            }
+            let want: Vec<String> = want.into_iter().collect();
+            let got = (paths, redo, shelved, given.as_deref());
+            assert_eq!(got, (want, again, shelve, to));
         }
         (stopped, error) => panic!("the model stops at {stopped:?}, the engine with {error:?}"),
     }
@@ -1168,7 +1165,9 @@ fn go_back_to(repo: &mut Repository, m: &mut Model, pick: usize, shelve: bool) {
         who: &who,
         git_excludes: None,
     };
-    let done = undo_to(repo, &id.to_hex(), &req, &mut |_| {});
+    let text = id.to_hex();
+    let done = undo_to(repo, &text, &req, &mut |_| {});
+    let to = Some(text.as_str());
     if id == m.head() {
         let (taken, shelved, error) = outcome(done);
         assert!(
@@ -1178,21 +1177,22 @@ fn go_back_to(repo: &mut Repository, m: &mut Model, pick: usize, shelve: bool) {
         settle(repo, m, Vec::new());
     } else if let Some(i) = m.undone.iter().position(|s| s.entry == id) {
         let n = m.undone.len() - i;
-        take_steps(repo, m, n, (true, shelve), done);
+        take_steps(repo, m, (n, to), (true, shelve), done);
     } else if let Some(i) = m.done.iter().position(|s| s.entry == id) {
         let n = m.done.len() - 1 - i;
-        take_steps(repo, m, n, (false, shelve), done);
+        take_steps(repo, m, (n, to), (false, shelve), done);
     } else {
-        jump(repo, m, target, shelve, done);
+        jump(repo, m, (target, &text), shelve, done);
     }
 }
 
-/// `undo --to` an entry neither undo nor redo reaches: one step to its lines and position, the
-/// shelves kept, switching the folder to its save as `goto` does. None if that is where things are.
+/// `undo --to` an entry neither undo nor redo reaches, given as `text`: one step to its lines and
+/// position, the shelves kept, switching the folder to its save as `goto` does. None if that is
+/// where things are.
 fn jump(
     repo: &Repository,
     m: &mut Model,
-    target: State,
+    (target, text): (State, &str),
     shelve: bool,
     done: Result<UndoOutcome, UndoError>,
 ) {
@@ -1212,12 +1212,12 @@ fn jump(
         }
         Err(paths) => {
             assert_eq!(taken, 0);
-            same_stop(Some(paths), error, (false, shelve));
+            same_stop(Some(paths), error, (false, shelve), Some(text));
             settle(repo, m, Vec::new());
         }
         Ok((folder, shelf)) => {
             assert_eq!(taken, 1);
-            same_stop(None, error, (false, shelve));
+            same_stop(None, error, (false, shelve), Some(text));
             if let Some(tree) = shelf {
                 let label = free_label(&state.shelves);
                 let save = new_shelf(
@@ -1247,12 +1247,18 @@ fn stepped(repo: &Repository, m: &mut Model, command: &'static str, was: State, 
     }
     let made = vec![(Made::Command(command), m.state.clone())];
     let entry = settle(repo, m, made)[0];
-    let switched = repo.entry(&entry).unwrap().folder_change.is_some();
+    let change = repo.entry(&entry).unwrap().folder_change;
     assert_eq!(
-        switched,
+        change.is_some(),
         m.folder != held,
         "{command} records a folder change"
     );
+    if let Some(FolderChange { from, to }) = change {
+        // Its two saves differ exactly where the step changed the folder.
+        let (from, to) = (saved_tree(repo.store(), from), saved_tree(repo.store(), to));
+        let want = differences(&held, &m.folder);
+        assert_eq!(differences(&from, &to), want, "{command} records");
+    }
     m.undone.clear();
     m.done.push(Step {
         entry,

@@ -63,8 +63,8 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 /// wherever it touched. The "from" save is that with what the folder held at each path the plan
 /// writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too, except inside a
 /// folder the plan makes where the folder held a file, a link or nothing: there "to" holds only
-/// what the plan writes or finds already there. A folder above a path either side sets, which the
-/// plan neither makes nor removes, is a folder on both sides: it was one before and after. A held
+/// what the plan writes or finds already there. A folder above a path the plan writes, which it
+/// neither makes nor removes, is a folder on both sides: it was one before and after. A held
 /// file or link the store lacks is stored first; one that couldn't be, having changed since the
 /// plan, is left out of both sides with what is planned below it, and the folders above it, which
 /// can't be emptied, are neither made nor removed. Each side is `kept.base`, `from` or
@@ -119,9 +119,9 @@ pub(crate) fn switch_saves(
             }
         }
     }
-    // A folder above these paths that the switch neither makes nor removes was one before and
-    // after it, even where the base holds none, or a file: so it is one on both sides.
-    let untouched: BTreeSet<String> = after
+    // A folder above a path the plan writes, which it neither makes nor removes, was one before
+    // and after it, even where the base holds none, or a file: so it is one on both sides.
+    let untouched: BTreeSet<String> = held
         .keys()
         .flat_map(|p| ancestors(p))
         .filter(|up| !held.contains_key(*up))
@@ -699,6 +699,40 @@ mod tests {
         assert_eq!(fs::read(root.join("g/z")).unwrap(), b"z");
     }
 
+    #[test]
+    fn a_new_folder_left_for_an_ignored_file_is_a_folder_on_both_sides() {
+        let ignore: &[u8] = b"*.log\n";
+        let (dir, mut repo, save) = saved(&[("a.txt", b"a"), (".gitignore", ignore)]);
+        let root = dir.path();
+        write_all(root, &[("n/x.txt", b"x"), ("n/keep.log", b"log")]);
+        let done = discarded(&mut repo, None);
+        assert!(!root.join("n/x.txt").exists());
+        assert_eq!(fs::read(root.join("n/keep.log")).unwrap(), b"log");
+        // `n` stays for the ignored file: after the discard the folder holds it, empty.
+        let change = done.folder_change.unwrap();
+        let to = repo.store().save(&change.to, false).unwrap();
+        assert_eq!(to.parents, [save]);
+        let after = holding(&[
+            (".gitignore", FILE, ignore),
+            ("a.txt", FILE, b"a"),
+            ("n", FOLDER, b""),
+        ]);
+        assert_eq!(tree_of(&repo, change.to), after);
+        let before = holding(&[
+            (".gitignore", FILE, ignore),
+            ("a.txt", FILE, b"a"),
+            ("n", FOLDER, b""),
+            ("n/x.txt", FILE, b"x"),
+        ]);
+        assert_eq!(tree_of(&repo, change.from), before);
+        // A shelf throws it away the same way.
+        write_all(root, &[("n/x.txt", b"x")]);
+        crate::shelf::shelf(&mut repo, None, &who(), None, &mut |_| {}).unwrap();
+        let change = repo.current().unwrap().1.folder_change.unwrap();
+        assert_eq!(tree_of(&repo, change.to), after);
+        assert_eq!(tree_of(&repo, change.from), before);
+    }
+
     #[cfg(feature = "fault-injection")]
     #[test]
     fn a_file_changed_after_the_plan_is_left_out_of_both_sides() {
@@ -816,7 +850,11 @@ mod tests {
         assert!(!root.join("newdir/x.txt").exists());
         assert!(root.join("inside").symlink_metadata().is_err());
         let change = done.folder_change.unwrap();
-        assert_eq!(change.to, save);
+        // `newdir` stays for the link left in it: after the discard the folder holds it, empty.
+        let to = repo.store().save(&change.to, false).unwrap();
+        assert_eq!(to.parents, [save]);
+        let after = holding(&[("a.txt", FILE, b"a"), ("newdir", FOLDER, b"")]);
+        assert_eq!(tree_of(&repo, change.to), after);
         let want = holding(&[
             ("a.txt", FILE, b"mine"),
             ("inside", EntryKind::Symlink, b"a.txt"),
