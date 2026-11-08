@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the review of the code that builds decision 047)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 047](047-git-personal-ignore-lists-read.md) (Bolt reads Git's personal ignore lists; includes in the user's settings aren't followed)
+- **Refined by:** [decision 085](085-importing-git-lfs-files.md) (the user's own Git settings are read for `lfs.storage` too, only to refuse)
 
 ## Context
 

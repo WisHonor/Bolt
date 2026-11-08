@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 13
+- **Refined by:** [decision 082](082-how-big-files-are-cut-into-chunks.md) (the chunking threshold is 1 MiB until the presets make it a `bolt.toml` setting)
 
 ## Context
 

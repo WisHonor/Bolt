@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 16
-- **Refined by:** [decision 056](056-question-before-large-saves.md) (a large save asks first from milestone 3)
+- **Refined by:** [decision 056](056-question-before-large-saves.md) (a large save asks first from milestone 3); [decision 082](082-how-big-files-are-cut-into-chunks.md) (the chunking threshold is 1 MiB until the presets make it a `bolt.toml` setting)
 
 ## Context
 

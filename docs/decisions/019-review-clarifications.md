@@ -4,6 +4,7 @@
 - **Date:** 2026-10-31
 - **Agenda topic:** 18
 - **Refined by:** [decision 031](031-own-git-reader.md) (#6: how import reads Git); [decision 032](032-exact-repeatable-commit-import.md) (#6–7: imported commits are kept exactly, with change IDs from the commit); [decision 033](033-git-branches-to-lines.md) (#6: which branches become lines, and how names are renamed); [decision 035](035-git-names-bolt-cant-take.md) (#7: other names in Git trees that Bolt can't take as they are); [decision 039](039-first-save-after-import.md) (#2: built in milestone 2, with Git's plain-file links); [decision 040](040-import-once-catch-up-later.md) (#6: one-time import confirmed for milestone 2); [decision 043](043-red-team-m2-rulings.md) (a save leaves out every name Git treats as `.git`, files included); [decision 051](051-names-this-computer-cant-write-and-length-limits.md) (names this computer can't write; names at most 765 bytes, paths 4,096)
+- **Superseded in part by:** [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (#10: a chunk list is stored under its file's ID, not found through a cache)
 
 ## Context
 

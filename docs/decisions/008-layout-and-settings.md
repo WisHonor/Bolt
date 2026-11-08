@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 8
+- **Refined by:** [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (`feature chunks` is added without `bolt setup`)
 - **Partly superseded by:** [decision 038](038-gitignore-and-saved-files.md) (Bolt reads `.gitignore` files as well, so a Git import copies nothing into `.boltignore`)
 
 ## Context
