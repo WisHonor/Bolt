@@ -9,11 +9,11 @@
 | 1 | **First save** ✅ | `bolt start`, `bolt save`, `bolt history` and `bolt show` work end to end on real projects, on the real formats, on all three systems |
 | 2 | **Coming from Git** ✅ | `bolt import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git; the owner has imported one of their own repositories and tried a project inside a OneDrive folder ([decision 026](decisions/026-ownership-check-details.md) #4) |
 | 3 | **Working folder** ✅ | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves, safety copies, and basic lines: saving after `goto` creates one, `line` lists them, `goto <line>` switches; merge small packs and open packs lazily before real use (each save adds a pack, and every pack stays open) |
-| 4 | **Undo everything** | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy`; `shelf`/`unshelf` and `save --amend` ([decision 021](decisions/021-v0.1-command-scope.md)) |
+| 4 | **Undo everything** ✅ | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy`; `shelf`/`unshelf` and `save --amend` ([decision 021](decisions/021-v0.1-command-scope.md)) |
 | 5 | **Big files** | Chunking, streaming, parallel hashing, Git LFS import (contents must be on disk, [decision 020](decisions/020-lfs-import.md)), and benchmarks against Git LFS |
 | 6 | **Presets and polish → v0.1** | The `bolt start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `bolt setup`; Git-word shortcuts; `--json`; `verify`; packaging |
 
-**Every milestone also ends with a red-team session** ([decision 024](decisions/024-red-team-gate.md)): a fresh agent attacks the milestone's code from an isolated sandbox, and every proven finding is fixed (or ruled on in writing) before the milestone is merged. Milestone 1 had two sessions, on 2026-11-01 and (on the fixes) 2026-11-02; every finding is fixed. Milestone 2 had two as well, both on 2026-11-03, the second on the fixes; every proven finding is fixed or ruled on in writing (decisions 043 and 044).
+**Every milestone also ends with a red-team session** ([decision 024](decisions/024-red-team-gate.md)): a fresh agent attacks the milestone's code from an isolated sandbox, and every proven finding is fixed (or ruled on in writing) before the milestone is merged. Milestone 1 had two sessions, on 2026-11-01 and (on the fixes) 2026-11-02; every finding is fixed. Milestone 2 had two as well, both on 2026-11-03, the second on the fixes; every proven finding is fixed or ruled on in writing (decisions 043 and 044). Milestone 3 had two, both on 2026-11-06 (decisions 067 to 069), and milestone 4 two, both on 2026-11-08 (decisions 079 and 080).
 
 **v0.1 ships when** every test passes on the three systems and both speed gates pass ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file uses at most about 500 MB of memory, and `status` on an unchanged 100,000-file project takes under 2 seconds on an SSD. Benchmark results against Git and Git LFS are published either way.
 
@@ -136,9 +136,9 @@ Each step ends with tests passing on Windows, macOS and Linux; the plan's task n
 
 ## Milestone 3: Working folder
 
-Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md) (the owner decided 048; Claude decided the rest at the owner's request). Plan: [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (2026-11-06); step 0 waits for the owner's review of the `unsafe` code. Decisions [060](decisions/060-user-git-settings-includes-and-paths.md) to [069](decisions/069-the-file-cache-matches-the-change-time.md) were made while building it.
+Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md) (the owner decided 048; Claude decided the rest at the owner's request). Plan: [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (2026-11-06). Decisions [060](decisions/060-user-git-settings-includes-and-paths.md) to [069](decisions/069-the-file-cache-matches-the-change-time.md) were made while building it.
 
-**0. Folder handles** (Task 1)
+**0. Folder handles** ✅ (Task 1)
 - Every read and write inside the project goes through a folder Bolt holds open, refusing a link at each name: `rustix` on macOS and Linux, Windows' own calls in the platform crate (decision 048).
 - *Done when:* the handle tests pass on all three systems, and the owner has reviewed the new `unsafe` code line by line.
 
@@ -181,13 +181,13 @@ Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-
 **10. Follow-ups and docs** ✅ (Task 22)
 - *Done when:* the follow-ups list and the docs match the code.
 
-**11. Red team, review and merge** (Tasks 23–24)
+**11. Red team, review and merge** ✅ (Tasks 23–24)
 - A red-team session from the sandbox (decision 024), a whole-branch review, the owner's review of the new `unsafe` code, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, and the owner has reviewed the `unsafe` code.
 
 ## Milestone 4: Undo everything
 
-Planned on 2026-11-06, after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (2026-11-07). [Decision 078](decisions/078-a-pack-bolt-cant-open-gets-its-own-warning.md) was made while building it.
+Planned on 2026-11-06, after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (2026-11-07; step 7 on 2026-11-08). [Decision 078](decisions/078-a-pack-bolt-cant-open-gets-its-own-warning.md) was made while building it.
 
 **0. Kept saves and the folder change** ✅ (Tasks 1–2)
 - What `discard` throws away is kept as a save of its own, and each diary entry records what its command did to the folder as a switch between two saves (decision 071).
@@ -217,6 +217,6 @@ Planned on 2026-11-06, after decisions [070](decisions/070-undo-and-redo-step-th
 - Hostile diaries written out, and undo, redo, shelves and amend in the model test.
 - *Done when:* both pass on all three systems.
 
-**7. Docs, red team, review and merge** (Tasks 16–18)
+**7. Docs, red team, review and merge** ✅ (Tasks 16–18)
 - The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, and every document matches the code.
