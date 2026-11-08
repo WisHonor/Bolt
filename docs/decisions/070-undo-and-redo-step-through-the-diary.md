@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 4 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 010](010-operation-log.md) (how undo and redo walk the diary, and what they put back) and [decision 017](017-commands-and-output.md) (`bolt undo 3`)
+- **Refined by:** [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built)
 
 ## Context
 

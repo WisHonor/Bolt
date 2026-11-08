@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 4 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 003](003-working-copy-model.md) (`bolt shelf` sets unsaved changes aside as a hidden save) and [decision 021](021-v0.1-command-scope.md) (`shelf` and `unshelf` in v0.1)
+- **Refined by:** [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built)
 
 ## Context
 

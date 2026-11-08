@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 4's red-team gate, [decision 024](024-red-team-gate.md))
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 077](077-tidy-and-the-undo-window.md) (what `tidy` keeps)
+- **Refined by:** [decision 080](080-red-team-m4-session-2-rulings.md) (the second look before every change)
 
 ## Context
 

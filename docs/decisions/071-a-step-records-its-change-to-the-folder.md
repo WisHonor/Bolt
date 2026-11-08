@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 4 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 010](010-operation-log.md) (what a diary entry records) and [decision 050](050-unsaved-work-in-goto-and-discard.md) (how safety copies are kept, and what `discard` leaves alone)
+- **Refined by:** [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built)
 
 ## Context
 
