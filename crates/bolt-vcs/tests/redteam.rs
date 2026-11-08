@@ -230,7 +230,7 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
         !end.timed_out && end.code == Some(0),
         "`bolt status` hung or failed after the save: {end:?}"
     );
-    // So does the check that reads every pack.
+    // The check that reads every pack passes over the FIFO too, naming it.
     let packs = env.root().join(".bolt/store/packs");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || tx.send(bolt_core::verify::verify_store(&packs).problems));

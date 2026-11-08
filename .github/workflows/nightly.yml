@@ -83,8 +83,8 @@ jobs:
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" sweep.txt
 
-  # The model test of edits, saves and switches (testing.md §3) with 1,024 cases, not the
-  # 64 of every push.
+  # The model test of edits, saves, switches, shelves and undos (testing.md §3) with 1,024
+  # cases, not the 64 of every push.
   model:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
