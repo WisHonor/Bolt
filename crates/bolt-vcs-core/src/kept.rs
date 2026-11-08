@@ -63,13 +63,14 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 /// wherever it touched. The "from" save is that with what the folder held at each path the plan
 /// writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too, except inside a
 /// folder the plan makes where the folder held a file, a link or nothing: there "to" holds only
-/// what the plan writes or finds already there; and inside a folder the plan writes, both
-/// hold `from`'s version wherever it differs from the base's. A folder above a path the plan writes, which it
-/// neither makes nor removes, is a folder on both sides: it was one before and after. A held
-/// file or link the store lacks is stored first; one that couldn't be, having changed since the
-/// plan, is left out of both sides with what is planned below it, and the folders above it, which
-/// can't be emptied, are neither made nor removed. Each side is `kept.base`, `from` or
-/// `target` when its folders are exactly that save's, otherwise a kept save stored in `packs`.
+/// what the plan writes or finds already there. Below a path the plan writes, where `from`
+/// differs from `kept.base`, both hold `from`'s version: the folder matched it there, or the plan
+/// would have collided. A folder above a path the plan writes, which it neither makes nor
+/// removes, is a folder on both sides: it was one before and after. A held file or link the store
+/// lacks is stored first; one that couldn't be, having changed since the plan, is left out of
+/// both sides with what is planned below it, and the folders above it, which can't be emptied,
+/// are neither made nor removed. Each side is `kept.base`, `from` or `target` when its folders
+/// are exactly that save's, otherwise a kept save stored in `packs`.
 /// `None` when the two sides are the same. Also gives how many safety copies it kept.
 pub(crate) fn switch_saves(
     repo: &Repository,
@@ -103,10 +104,10 @@ pub(crate) fn switch_saves(
         };
         for_each_entry_change_in(store, &unstored, Some(from_root), target_root, changes)?;
     }
-    // Inside a folder the plan writes, the folder held what `from` holds, not the base: where
-    // `--shelve` set work aside, the step is planned from a save holding that work.
+    // Below a path the plan writes, the folder held what `from` holds, not the base: where
+    // `--shelve` set work aside, or an unshelf is planned from the save shelved on.
     if from_root != base_root {
-        let below = |path: &str| held.keys().any(|h| path != h && within(path, h));
+        let below = |path: &str| ancestors(path).any(|up| held.contains_key(up));
         let aside = |path: &str, _: Option<&Entry>, f: Option<&Entry>| {
             if below(path) {
                 after.entry(path.to_owned()).or_insert(f.map(put));

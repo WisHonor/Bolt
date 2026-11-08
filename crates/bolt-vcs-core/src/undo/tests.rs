@@ -828,6 +828,31 @@ fn an_unshelf_onto_another_save_records_no_folder_above_what_it_only_matched() {
 }
 
 #[test]
+fn undo_of_an_unshelf_onto_another_save_brings_back_no_file_the_user_had_deleted() {
+    let (dir, mut repo) = saved(&[("d/a", b"a"), ("z", b"z")]);
+    let root = dir.path();
+    let first = save_on(&repo);
+    write_all(root, &[("d/b", b"b")]);
+    save_now(&mut repo);
+    goto_save(&mut repo, first);
+    // The shelf removes `d`.
+    fs::remove_dir_all(root.join("d")).unwrap();
+    let who = who();
+    crate::shelf::shelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    goto_main(&mut repo);
+    // Unsaved, the folder's `d` matches the save shelved on again, so nothing is in the way.
+    fs::remove_file(root.join("d/b")).unwrap();
+    crate::shelf::unshelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    assert!(!root.join("d").exists());
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/a")).unwrap(), b"a");
+    assert!(
+        !root.join("d/b").exists(),
+        "the undo brought back the deleted file"
+    );
+}
+
+#[test]
 fn an_entry_is_named_by_digits_no_other_entry_starts_with() {
     // Two entries whose IDs share their first 8 hex digits, the newer one after the older.
     let older = Id([0xab; 32]);
