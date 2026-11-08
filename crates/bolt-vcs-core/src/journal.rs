@@ -1,18 +1,19 @@
 //! The switch journal, `.bolt/state/journal` (storage-format.md section 10): every change a switch
 //! of the folder to another save will make, written before the first one so that the next command
 //! after a crash can finish it. It drives writes into the user's folder, so reading it trusts
-//! nothing: the checksum first, then every path against the name rules.
+//! nothing: the checksum first, then every path against the name rules. A command that only reads
+//! takes just its front.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
 
 use crate::encoding::{DecodeError, Reader, Writer};
-use crate::fsio;
+use crate::fsio::{self, Done};
 use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::names::{MAX_PATH_BYTES, validate_path};
-use crate::repo::{ChangeLock, RepoError, Repository, refused};
+use crate::repo::{ChangeLock, RepoError, Repository, cant_write, refused};
 use crate::safe_fs;
 
 const MAGIC: &[u8; 8] = b"BOLTJRNL";
@@ -25,6 +26,8 @@ pub const MAX_BYTES: u64 = 4 << 30;
 pub const MAX_ACTIONS: u64 = 10_000_000;
 /// The fewest bytes an action takes: a one-byte path and its length, the action and the flag.
 const MIN_ACTION: usize = 4;
+/// The magic, the version, the target and `from`: all a command that only reads needs.
+const FRONT_BYTES: u64 = 8 + 1 + 32 + 32;
 
 /// A switch of the folder from the save of one diary entry to another's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,15 +136,7 @@ impl Journal {
         if blake3::hash(body).as_bytes() != sum {
             return Err(DecodeError::Invalid("journal checksum"));
         }
-        let rest = body
-            .strip_prefix(MAGIC.as_slice())
-            .ok_or(DecodeError::Invalid("not a switch journal"))?;
-        let mut r = Reader::new(rest);
-        if r.u8()? != VERSION {
-            return Err(DecodeError::Invalid("journal version"));
-        }
-        let target = r.id()?;
-        let from = r.id()?;
+        let (mut r, target, from) = front(body)?;
         // Checked against what is left, and nothing allocated ahead for it.
         let fits = r.remaining().checked_div(MIN_ACTION).unwrap_or(0) as u64;
         let count = r.count(MAX_ACTIONS.min(fits), "action count")?;
@@ -206,7 +201,8 @@ impl Journal {
         }
         // One that wouldn't read back is refused before it can be relied on.
         Journal::decode(&bytes)?;
-        fsio::write_atomic(repo.tmp_folder(), repo.state_folder(), FILE, &bytes)?;
+        fsio::write_atomic(repo.tmp_folder(), repo.state_folder(), FILE, &bytes)
+            .map_err(|e| cant_write(repo.state_dir().join(FILE), e))?;
         Ok(())
     }
 
@@ -218,25 +214,76 @@ impl Journal {
             Ok(bytes) => Journal::decode(&bytes)
                 .map(Some)
                 .map_err(|e| unusable(format!("can't be read ({e})"))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(match refused(e) {
-                RepoError::Damaged { detail } => unusable(format!("can't be used ({detail})")),
-                other => other,
-            }),
+            Err(e) => not_read(e),
         }
     }
 
-    /// Removes `state/journal`, if it is there, for good.
-    pub fn remove(repo: &Repository, _lock: &ChangeLock) -> Result<(), RepoError> {
+    /// The target and `from` of the journal in `repo`, from its front alone, or `None` if no
+    /// switch is unfinished. For commands that only read: the rest is neither read nor checked.
+    pub fn read_front(repo: &Repository) -> Result<Option<(Id, Id)>, RepoError> {
+        let shown = repo.state_dir().join(FILE);
+        let read = safe_fs::open_regular_in(repo.state_folder(), OsStr::new(FILE), &shown)
+            .and_then(|file| {
+                let mut bytes = Vec::new();
+                file.take(FRONT_BYTES).read_to_end(&mut bytes)?;
+                Ok(bytes)
+            });
+        match read {
+            Ok(bytes) => front(&bytes)
+                .map(|(_, target, from)| Some((target, from)))
+                .map_err(|e| unusable(format!("can't be read ({e})"))),
+            Err(e) => not_read(e),
+        }
+    }
+
+    /// Removes `state/journal`, if it is there, for good. Once it is gone, a flush of `state/`
+    /// that fails comes back as `NotFlushed`.
+    pub(crate) fn remove(repo: &Repository, _lock: &ChangeLock) -> Result<Done, RepoError> {
         let state = repo.state_folder();
+        fsio::fault_point("journal:removing")?;
         match state.remove_file(OsStr::new(FILE)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
         }
-        fsio::fault_point("journal:removed")?;
-        state.sync()?;
-        Ok(())
+        Ok(fsio::flush_after(state, "journal:removed"))
     }
+
+    /// `remove`, by a command that hasn't moved its head yet and so can still stop: a flush that
+    /// fails is an error too.
+    pub(crate) fn remove_before_head(
+        repo: &Repository,
+        lock: &ChangeLock,
+    ) -> Result<(), RepoError> {
+        match Journal::remove(repo, lock)? {
+            Done::Flushed => Ok(()),
+            Done::NotFlushed(e) => Err(e.into()),
+        }
+    }
+}
+
+/// The magic, version, target and `from` that start a journal, with a reader of what follows.
+fn front(bytes: &[u8]) -> Result<(Reader<'_>, Id, Id), DecodeError> {
+    let rest = bytes
+        .strip_prefix(MAGIC.as_slice())
+        .ok_or(DecodeError::Invalid("not a switch journal"))?;
+    let mut r = Reader::new(rest);
+    if r.u8()? != VERSION {
+        return Err(DecodeError::Invalid("journal version"));
+    }
+    let target = r.id()?;
+    let from = r.id()?;
+    Ok((r, target, from))
+}
+
+/// `Ok(None)` for a journal that isn't there; otherwise why it couldn't be read.
+fn not_read<T>(e: io::Error) -> Result<Option<T>, RepoError> {
+    if e.kind() == io::ErrorKind::NotFound {
+        return Ok(None);
+    }
+    Err(match refused(e) {
+        RepoError::Damaged { detail } => unusable(format!("can't be used ({detail})")),
+        other => other,
+    })
 }
 
 /// The journal can't be used: an error of its own, so the user hears which file it is.
@@ -472,6 +519,42 @@ mod tests {
         Journal::remove(&repo, &lock).unwrap();
         assert_eq!(Journal::read(&repo).unwrap(), None);
         Journal::remove(&repo, &lock).unwrap();
+    }
+
+    #[test]
+    fn a_huge_journal_is_read_only_as_far_as_its_front() {
+        let (dir, repo) = project();
+        let on_disk = dir.path().join(".bolt/state/journal");
+        assert_eq!(Journal::read_front(&repo).unwrap(), None);
+        // A good front, then a hole far bigger than the front: only the front is read.
+        let mut front = sample().encode();
+        front.truncate(FRONT_BYTES as usize);
+        std::fs::write(&on_disk, &front).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&on_disk)
+            .unwrap();
+        file.set_len(64 << 20).unwrap();
+        drop(file);
+        let s = sample();
+        assert_eq!(
+            Journal::read_front(&repo).unwrap(),
+            Some((s.target, s.from))
+        );
+        // Read whole, it is refused.
+        assert!(Journal::read(&repo).is_err());
+        // All zeros, as a planted sparse file is: refused from its first bytes.
+        std::fs::write(&on_disk, []).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&on_disk)
+            .unwrap();
+        file.set_len(64 << 20).unwrap();
+        drop(file);
+        assert!(matches!(
+            Journal::read_front(&repo),
+            Err(RepoError::JournalUnusable { .. })
+        ));
     }
 
     fn id() -> impl Strategy<Value = Id> {

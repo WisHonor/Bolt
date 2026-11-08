@@ -9,7 +9,8 @@ use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::repo::Repository;
 use crate::save::Save;
-use crate::snapshot::{SaveError, read_folder};
+use crate::snapshot::{SaveError, kept_in_the_way, read_folder};
+use crate::text::escape;
 use crate::warning::Warning;
 use crate::writeout;
 
@@ -61,6 +62,21 @@ impl From<FileChange<'_>> for PathChange {
     }
 }
 
+/// Why `status` stopped, in its own words where the save's would talk of saving: a name a save
+/// can't hold, something in the way of an entry kept as it was, or a project past a save's limits.
+#[must_use]
+pub fn why_stopped(e: &SaveError) -> String {
+    let why = match e {
+        SaveError::InvalidName { path, reason } => format!("{}: {reason}", escape(path, false)),
+        SaveError::InTheWay { path, kept } => {
+            format!("{}: {}", escape(path, false), kept_in_the_way(kept))
+        }
+        SaveError::TooLarge { detail } => format!("this project is too large for Bolt: {detail}"),
+        other => return other.to_string(),
+    };
+    format!("Bolt can't show the status: {why}.")
+}
+
 /// Compares the project folder with the current save, walking it as a save would. Only files the
 /// file-state cache doesn't vouch for are read, every file with `full`. Nothing is stored; only
 /// the cache is written. `git_excludes` is the user's own Git ignore list, as for a save.
@@ -72,7 +88,8 @@ pub fn status(
     let (_, entry) = repo.current()?;
     let save_id = tip_of(&entry)?;
     let save = repo.store().save(&save_id, repo.signatures_allowed())?;
-    let now = read_folder(repo, save.root, full, git_excludes)?;
+    let now =
+        read_folder(repo, save.root, full, git_excludes).map_err(|e| e.in_save(save_id, true))?;
     let mut warnings = now.warnings;
     let unfinished = writeout::unfinished_warning(repo);
     let unfinished_switch = unfinished.as_ref().map(|w| w.message.clone());
@@ -87,7 +104,8 @@ pub fn status(
             changes.push(PathChange::from(c));
             Ok::<(), SaveError>(())
         },
-    )?;
+    )
+    .map_err(|e| e.in_save(save_id, true))?;
     Ok(Status {
         position: entry.state.position,
         save_id,
@@ -97,4 +115,34 @@ pub fn status(
         unfinished_switch,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_says_why_it_stops_without_talk_of_saving() {
+        let bad_name = SaveError::InvalidName {
+            path: "a/b\u{fffd}".into(),
+            reason: "its name is not valid UTF-8".into(),
+        };
+        assert_eq!(
+            why_stopped(&bad_name),
+            "Bolt can't show the status: a/b\u{fffd}: its name is not valid UTF-8."
+        );
+        let too_large = SaveError::TooLarge {
+            detail: "its folders nest more than 4096 levels deep".into(),
+        };
+        assert_eq!(
+            why_stopped(&too_large),
+            "Bolt can't show the status: this project is too large for Bolt: its folders nest \
+             more than 4096 levels deep."
+        );
+        // What says nothing of saving stays as it is.
+        let changing = SaveError::ChangedDuringSave {
+            path: "a.txt".into(),
+        };
+        assert_eq!(why_stopped(&changing), changing.to_string());
+    }
 }

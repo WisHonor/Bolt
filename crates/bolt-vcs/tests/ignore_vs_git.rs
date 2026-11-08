@@ -532,7 +532,7 @@ proptest! {
         let who = who();
         let mut repo = Repository::init(root, &who).unwrap();
         let req = SaveRequest {
-            message: "Save", who: &who, command: "save", accept_crlf: false, git_excludes: None, new_line: None, only: None,
+            message: Some("Save"), who: &who, command: "save", accept_crlf: false, git_excludes: None, new_line: None, only: None, amend: false,
         };
         save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
         let mut got: Vec<String> =
@@ -777,13 +777,14 @@ fn gits_personal_lists_keep_out_what_git_keeps_out() {
     let who = who();
     let mut repo = Repository::init(root, &who).unwrap();
     let req = SaveRequest {
-        message: "Save",
+        message: Some("Save"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: Some(&list),
         new_line: None,
         only: None,
+        amend: false,
     };
     save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
     let mut got: Vec<String> = saved_files(&repo)

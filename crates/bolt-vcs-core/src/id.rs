@@ -12,6 +12,14 @@ impl Id {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// The first 12 hex digits, as lists and messages show an ID.
+    #[must_use]
+    pub fn short_hex(&self) -> String {
+        let mut hex = self.to_hex();
+        hex.truncate(12);
+        hex
+    }
+
     /// Exactly 64 hex characters, either case.
     #[must_use]
     pub fn from_hex(s: &str) -> Option<Id> {
@@ -33,6 +41,11 @@ impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_hex())
     }
+}
+
+/// Whether `text` can be the start of an ID as people type one: at least 8 hex digits.
+pub(crate) fn is_hex_start(text: &str) -> bool {
+    text.len() >= 8 && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Domain-separation flavor for record fingerprints.

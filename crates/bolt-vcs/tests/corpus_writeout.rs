@@ -8,131 +8,25 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use bolt_core::id::Id;
 use bolt_core::journal::{Action, Change, Content, Journal};
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackSet};
+use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_platform::dir::Dir;
-use support::{Env, add_listing, plant_save, text};
-use tempfile::TempDir;
+use support::corpus::{
+    Case, PAYLOAD, Seen, file, ignores_case, kinds, message, no_link_right_here, project_entries,
+    sorted, strings,
+};
+use support::{
+    Env, add_listing, holding_bolt_spelling, listings, plant_save, text,
+    with_bolt_spelling_under_git,
+};
 
 use EntryKind::{Executable, File, Symlink};
 
-/// What every planted file holds, so a stray copy of it is easy to find.
-const PAYLOAD: &[u8] = b"PWNED by a hostile save";
-
-/// An entry as `seen` finds it, links never followed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Seen {
-    Folder,
-    File(Vec<u8>),
-    Link(PathBuf),
-}
-
-/// Everything below `dir`, by path with `/` between names; empty if there is no `dir`.
-fn seen(dir: &Path) -> BTreeMap<String, Seen> {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        let Ok(entries) = std::fs::read_dir(&at) else {
-            continue;
-        };
-        for e in entries {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            let kind = e.file_type().unwrap();
-            let what = if kind.is_symlink() {
-                Seen::Link(std::fs::read_link(e.path()).unwrap())
-            } else if kind.is_dir() {
-                folders.push((e.path(), path.clone()));
-                Seen::Folder
-            } else {
-                Seen::File(std::fs::read(e.path()).unwrap())
-            };
-            found.insert(path, what);
-        }
-    }
-    found
-}
-
-/// The project's own entries: `seen`, without `.git` and `.bolt`.
-fn project_entries(env: &Env) -> BTreeMap<String, Seen> {
-    let mut all = seen(env.root());
-    all.retain(|path, _| {
-        let top = path.split('/').next().unwrap();
-        top != ".git" && top != ".bolt"
-    });
-    all
-}
-
-fn file(bytes: &[u8]) -> Seen {
-    Seen::File(bytes.to_vec())
-}
-
-/// A project with a `.git` folder beside `.bolt`, as after an import, at its only save but not on
-/// a line, so that `bolt goto main` switches to whatever is planted on `main`; and a folder
-/// beside it. `before_git` runs before `.git` is made.
-struct Case {
-    env: Env,
-    outside: TempDir,
-    git: BTreeMap<String, Seen>,
-    bolt: BTreeMap<String, Seen>,
-    beside: BTreeMap<String, Seen>,
-}
-
 impl Case {
-    fn new() -> Case {
-        Case::with(|_| {})
-    }
-
-    fn with(before_git: impl FnOnce(&Path)) -> Case {
-        let env = Env::empty();
-        env.bolt().arg("start").assert().success();
-        before_git(env.root());
-        let hooks = env.root().join(".git/hooks");
-        std::fs::create_dir_all(&hooks).unwrap();
-        std::fs::write(env.root().join(".git/config"), b"[core]\n").unwrap();
-        std::fs::write(hooks.join("pre-commit.sample"), b"#!/bin/sh\n").unwrap();
-        let first = env.state().1.lines["main"].to_hex();
-        let out = env.bolt().args(["goto", &first]).output().unwrap();
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("theirs.txt"), b"theirs").unwrap();
-        let mut case = Case {
-            git: BTreeMap::new(),
-            bolt: BTreeMap::new(),
-            beside: BTreeMap::new(),
-            env,
-            outside,
-        };
-        case.look_around();
-        case
-    }
-
-    fn root(&self) -> &Path {
-        self.env.root()
-    }
-
-    /// Notes what `.git`, `.bolt` and the folder beside hold now.
-    fn look_around(&mut self) {
-        self.git = seen(&self.root().join(".git"));
-        self.bolt = seen(&self.root().join(".bolt"));
-        self.beside = seen(self.outside.path());
-    }
-
-    /// The folder beside the project, with `/` between names, as a link target.
-    fn outside_target(&self) -> String {
-        self.outside.path().to_string_lossy().replace('\\', "/")
-    }
-
     /// Plants a save on `main` holding `entries` (path, kind, bytes).
     fn plant(&self, entries: &[(&str, EntryKind, &[u8])]) {
         plant_save(self.root(), |pack| listings(pack, entries));
@@ -150,145 +44,6 @@ impl Case {
             .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stdout)));
         (out.status.code(), doc, text(&out.stderr))
     }
-
-    /// Fails unless `.git` and the folder beside are as they were, and `.bolt` changed only
-    /// where Bolt keeps its state, holding no planted name or contents.
-    fn assert_nothing_escaped(&self) {
-        assert_eq!(seen(self.outside.path()), self.beside, "beside the project");
-        // Where `../pwned` and `../../pwned` would land. Only their own names: these are the
-        // system's temporary folders, shared with everything else.
-        for up in self.root().ancestors().skip(1).take(2) {
-            for e in std::fs::read_dir(up).unwrap() {
-                let name = e.unwrap().file_name();
-                assert!(
-                    !name.to_string_lossy().contains("pwned"),
-                    "{}",
-                    up.join(name).display()
-                );
-            }
-        }
-        assert_eq!(seen(&self.root().join(".git")), self.git, "in .git");
-        for (path, what) in seen(&self.root().join(".bolt")) {
-            assert!(!path.contains("pwned"), ".bolt/{path}");
-            if self.bolt.get(&path) == Some(&what) {
-                continue;
-            }
-            let top = path.split('/').next().unwrap();
-            assert!(
-                ["state", "store", "cache"].contains(&top),
-                "new in .bolt: {path}"
-            );
-            if let Seen::File(bytes) = what
-                && top != "store"
-            {
-                assert!(!holds(&bytes, PAYLOAD), ".bolt/{path} holds the payload");
-            }
-        }
-    }
-}
-
-fn holds(bytes: &[u8], wanted: &[u8]) -> bool {
-    bytes.windows(wanted.len()).any(|w| w == wanted)
-}
-
-/// Stores the folder listings that hold `entries` and returns the top one's ID.
-fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
-    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
-    for &(path, kind, bytes) in entries {
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
-        folders.entry(up.to_owned()).or_default().push(Entry {
-            name: name.to_owned(),
-            kind,
-            id: pack.add_content(bytes).unwrap(),
-            size: bytes.len() as u64,
-        });
-        // Every folder above, even one that holds only folders.
-        let mut at = up;
-        while let Some((above, _)) = at.rsplit_once('/') {
-            folders.entry(above.to_owned()).or_default();
-            at = above;
-        }
-        folders.entry(at.to_owned()).or_default();
-    }
-    // Longest path first, so a folder's listing is stored before the folder that holds it.
-    loop {
-        let path = folders.keys().max_by_key(|p| p.len()).cloned().unwrap();
-        let entries = folders.remove(&path).unwrap();
-        let id = pack
-            .add_record(
-                ObjectKind::FolderListing,
-                &Listing::new(entries).unwrap().encode(),
-            )
-            .unwrap();
-        if path.is_empty() {
-            return id;
-        }
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
-        let folder = Entry {
-            name: name.to_owned(),
-            kind: EntryKind::Folder,
-            id,
-            size: 0,
-        };
-        let held = folders.entry(up.to_owned()).or_default();
-        if !held.iter().any(|e| e.name == folder.name) {
-            held.push(folder);
-        }
-    }
-}
-
-fn strings(v: &serde_json::Value) -> Vec<String> {
-    v.as_array()
-        .unwrap_or_else(|| panic!("not a list: {v}"))
-        .iter()
-        .map(|s| s.as_str().unwrap().to_owned())
-        .collect()
-}
-
-fn kinds(doc: &serde_json::Value) -> Vec<String> {
-    doc["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w["kind"].as_str().unwrap().to_owned())
-        .collect()
-}
-
-/// The message of the warning of kind `kind`.
-fn message<'a>(doc: &'a serde_json::Value, kind: &str) -> &'a str {
-    doc["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|w| w["kind"] == kind)
-        .and_then(|w| w["message"].as_str())
-        .unwrap_or_else(|| panic!("no {kind} warning: {doc}"))
-}
-
-fn sorted(paths: &[&str]) -> Vec<String> {
-    let mut paths: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
-    paths.sort_unstable();
-    paths
-}
-
-/// Whether this drive takes names in other letter case for one, as `bolt` probes it.
-fn ignores_case(root: &Path) -> bool {
-    let probe = root.join("Case-Probe");
-    std::fs::write(&probe, b"").unwrap();
-    let blind = root.join("case-probe").exists();
-    std::fs::remove_file(probe).unwrap();
-    blind
-}
-
-/// Says a link that should have been made here is a placeholder because this account can't make
-/// links (Windows without Developer Mode). That fails in CI, whose runners can, so a test that
-/// proves nothing there can't pass for one that ran.
-fn no_link_right_here(path: &str) {
-    assert!(
-        cfg!(windows) && std::env::var_os("CI").is_none(),
-        "{path} should be a link: CI must be able to make links, so the link checks run there"
-    );
-    println!("Skipped the link checks: this account can't make links, so {path} is a file.");
 }
 
 // `.git` and `.bolt` spellings (T2).
@@ -380,33 +135,147 @@ fn the_short_name_of_gitmodules_is_never_written() {
 #[test]
 fn a_save_naming_a_spelling_of_bolt_is_refused_whole() {
     let case = Case::new();
-    // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
     plant_save(case.root(), |pack| {
         let inner = listings(pack, &[("pwned", File, PAYLOAD)]);
-        let top = Listing::new(vec![Entry {
-            name: "-BOLT".into(),
-            kind: EntryKind::Folder,
-            id: inner,
-            size: 0,
-        }])
-        .unwrap()
-        .encode();
-        let at = top.windows(5).position(|w| w == b"-BOLT").unwrap();
-        let mut hostile = top.clone();
-        hostile[at] = b'.';
-        pack.add_record(ObjectKind::FolderListing, &hostile)
-            .unwrap()
+        holding_bolt_spelling(pack, inner)
     });
+    let planted = Repository::open(case.root())
+        .unwrap()
+        .current()
+        .unwrap()
+        .1
+        .state
+        .lines["main"];
     let (code, doc, _) = case.goto_main();
     assert_eq!(code, Some(1), "{doc}");
-    let said = doc["error"]["message"].as_str().unwrap();
     assert_eq!(
-        said, "invalid name: a name cannot be spelled like Bolt's own folder (.bolt)",
+        doc["error"]["message"],
+        format!(
+            "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+             writes, so it can't be used.",
+            planted.short_hex()
+        ),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "Bolt never makes such a save, so another program put it there. Nothing was changed: go \
+         on from another save, and ask for help before trying to repair this one.",
         "{doc}"
     );
     assert!(project_entries(&case.env).is_empty());
     case.assert_nothing_escaped();
     assert!(!case.root().join(".bolt/state/journal").exists());
+}
+
+#[test]
+fn a_spelling_of_bolt_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_that_saves() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let shown = [
+        (".boltignore", File, b"ignored/\n" as &[u8]),
+        ("a.txt", File, b"a\n"),
+    ];
+    // The save to go to, then the save the project is on: its folder `ignored`, which its own
+    // `.boltignore` keeps out, holds a spelling of `.bolt`.
+    plant_save(env.root(), |pack| listings(pack, &shown));
+    let target = env.state().1.lines["main"];
+    plant_save(env.root(), |pack| {
+        let inner = listings(pack, &[("pwned", File, PAYLOAD)]);
+        let hostile = holding_bolt_spelling(pack, inner);
+        let mut top: Vec<Entry> = shown
+            .iter()
+            .map(|&(name, kind, bytes)| Entry {
+                name: name.into(),
+                kind,
+                id: pack.add_content(bytes).unwrap(),
+                size: bytes.len() as u64,
+            })
+            .collect();
+        top.push(Entry {
+            name: "ignored".into(),
+            kind: EntryKind::Folder,
+            id: hostile,
+            size: 0,
+        });
+        let top = Listing::new(top).unwrap().encode();
+        pack.add_record(ObjectKind::FolderListing, &top).unwrap()
+    });
+    let on = env.state().1.lines["main"];
+    for &(name, _, bytes) in &shown {
+        std::fs::write(env.root().join(name), bytes).unwrap();
+    }
+    std::fs::create_dir(env.root().join("ignored")).unwrap();
+    let out = env
+        .bolt()
+        .args(["goto", &target.to_hex(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        doc["error"]["message"],
+        format!(
+            "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+             writes, so it can't be used.",
+            on.short_hex()
+        ),
+        "{doc}"
+    );
+    // Every switch away from it reads it first, so going on from another save isn't offered.
+    assert_eq!(
+        doc["error"]["hint"],
+        "Bolt never makes such a save, so another program put it there. Nothing was changed: ask \
+         for help before trying to repair it.",
+        "{doc}"
+    );
+}
+
+#[test]
+fn a_spelling_of_bolt_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let files: [(&str, &[u8]); 2] = [("a.txt", b"a\n"), ("b.txt", b"b\n")];
+    // Saves to go to, one without the bad listing and one sharing it, then the save the project
+    // is on. Reading the folder skips `.git`, so the plan's later comparisons meet it first.
+    plant_save(env.root(), |pack| {
+        listings(pack, &[("a.txt", File, b"a\n"), ("b.txt", File, b"b\n")])
+    });
+    let without = env.state().1.lines["main"];
+    plant_save(env.root(), |pack| {
+        with_bolt_spelling_under_git(pack, &files)
+    });
+    let sharing = env.state().1.lines["main"];
+    plant_save(env.root(), |pack| {
+        with_bolt_spelling_under_git(pack, &files[..1])
+    });
+    let on = env.state().1.lines["main"];
+    std::fs::write(env.root().join("a.txt"), b"a\n").unwrap();
+    for target in [without, sharing] {
+        let out = env
+            .bolt()
+            .args(["goto", &target.to_hex(), "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            doc["error"]["message"],
+            format!(
+                "Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
+                 writes, so it can't be used.",
+                on.short_hex()
+            ),
+            "{doc}"
+        );
+        assert_eq!(
+            doc["error"]["hint"],
+            "Bolt never makes such a save, so another program put it there. Nothing was changed: \
+             ask for help before trying to repair it.",
+            "{doc}"
+        );
+    }
+    assert!(!env.root().join("b.txt").exists());
 }
 
 /// Writes `actions` as the journal of a switch from where the project is to the diary entry

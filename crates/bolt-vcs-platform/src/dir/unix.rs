@@ -20,6 +20,20 @@ const FOLDER: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
+/// A folder only to reach what is in it, never through a link at its name: Linux's O_PATH and
+/// macOS's O_SEARCH need no right to list it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const TO_SEARCH: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+#[cfg(target_vendor = "apple")]
+const TO_SEARCH: OFlags = OFlags::from_bits_retain(libc::O_SEARCH as u32)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+const TO_SEARCH: OFlags = FOLDER;
+
 /// A file to read, never through a link at its name. O_NONBLOCK: a pipe swapped in fails instead
 /// of waiting for a writer.
 const TO_READ: OFlags = OFlags::RDONLY
@@ -33,6 +47,19 @@ pub(super) fn open_top(path: &Path) -> io::Result<OwnedFd> {
 
 pub(super) fn open_dir(dir: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
     rustix::fs::openat(dir, name, FOLDER, Mode::empty()).map_err(|e| refusal(e, dir, name))
+}
+
+pub(super) fn open_dir_to_search(dir: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+    let fd = match rustix::fs::openat(dir, name, TO_SEARCH, Mode::empty()) {
+        // A system older than the flag may refuse it.
+        Err(Errno::INVAL) => rustix::fs::openat(dir, name, FOLDER, Mode::empty()),
+        opened => opened,
+    }
+    .map_err(|e| refusal(e, dir, name))?;
+    // Opening may check no right on the folder itself (O_PATH doesn't): one that can't be
+    // searched fails here.
+    rustix::fs::statat(&fd, ".", AtFlags::empty())?;
+    Ok(fd)
 }
 
 pub(super) fn entries(dir: &OwnedFd) -> io::Result<Vec<DirEntry>> {
@@ -87,6 +114,8 @@ pub(super) fn create_new(dir: &OwnedFd, name: &OsStr, executable: bool) -> io::R
     // The umask may have taken bits away. A drive that can't hold modes (FAT, say) refuses: the
     // new, empty file goes again, so trying once more doesn't find it in the way.
     if let Err(e) = rustix::fs::fchmod(&fd, mode(executable)) {
+        // By name, as Unix can't remove through a handle: Bolt makes files only in `.bolt/tmp`,
+        // under random names no other program writes there.
         let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
         return Err(e.into());
     }

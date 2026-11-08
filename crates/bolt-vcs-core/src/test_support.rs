@@ -11,6 +11,18 @@ use crate::save::Save;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Whether `repo` noted a fault met once its head had moved, which is only a warning: the command
+/// went on to the end.
+#[cfg(feature = "fault-injection")]
+pub(crate) fn after_head(repo: &Repository) -> bool {
+    use crate::warning::{HEAD_NOT_FLUSHED, SWITCH_UNFINISHED};
+    let after = [HEAD_NOT_FLUSHED, SWITCH_UNFINISHED];
+    repo.store()
+        .warnings()
+        .iter()
+        .any(|w| after.contains(&w.kind))
+}
+
 /// One tag and one server line, both at a made-up save.
 pub(crate) fn sample_records() -> (TagList, ServerLines) {
     let save = Id([0x5a; 32]);
@@ -49,6 +61,7 @@ pub(crate) fn commit_records(
         .expect("store the server lines");
     entry.parent = Some(head);
     entry.command = "tag".into();
+    entry.folder_change = None;
     entry.state.tags = Some(tags);
     entry.state.server_lines = Some(servers);
     repo.commit(&lock, packs, &entry).expect("commit");
@@ -152,6 +165,7 @@ pub(crate) fn plant_root(repo: &mut Repository, build: impl FnOnce(&mut PackSet)
         .expect("store the save");
     diary.parent = Some(head);
     diary.command = "save".into();
+    diary.folder_change = None;
     diary.state.lines.insert(line, save_id);
     repo.commit(&lock, packs, &diary).expect("commit");
 }

@@ -452,6 +452,118 @@ fn a_file_changed_after_the_plan_is_left_alone() {
     assert_eq!(fs::read(dir.path().join("gone")).unwrap(), b"mine too");
 }
 
+#[test]
+fn only_a_folder_gone_or_made_a_file_counts_as_changed_since_the_plan() {
+    use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    assert!(folder_changed(&io::Error::from(NotFound)));
+    assert!(folder_changed(&io::Error::from(NotADirectory)));
+    // A passing failure stops the command, so no copy is skipped for a file still there.
+    assert!(!folder_changed(&io::Error::from(PermissionDenied)));
+    assert!(!folder_changed(&io::Error::other("too many open files")));
+}
+
+/// Carries out the switch to `to`, while another program writes `bytes` to `path` as soon as
+/// the switch reaches `point`; what it left.
+#[cfg(feature = "fault-injection")]
+fn raced(
+    repo: &mut Repository,
+    from: Id,
+    to: Saved,
+    point: &'static str,
+    path: &'static str,
+    bytes: &'static [u8],
+) -> Applied {
+    let plan = planned(repo, from, to.0, false);
+    let at = repo.root().join(path);
+    // A modified time far from now, so a same-size save can't look unchanged within one tick.
+    crate::fsio::fault::act_at(point, move || {
+        fs::write(&at, bytes).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&at)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    });
+    applied(repo, &journal(to.1, &plan))
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_file_saved_while_its_new_contents_are_written_is_left() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    // Made at a path the plan saw empty.
+    let a = planted(&mut repo, &files(&[("x", b"old")]));
+    let done = raced(&mut repo, empty, a, "switch:written", "x", b"theirs");
+    assert_eq!(done.changed_since_plan, ["x"]);
+    assert_eq!(fs::read(dir.path().join("x")).unwrap(), b"theirs");
+    // Saved over a file the plan saw, keeping its size.
+    fs::write(dir.path().join("x"), b"old").unwrap();
+    let b = planted(&mut repo, &files(&[("x", b"new")]));
+    let done = raced(&mut repo, a.0, b, "switch:written", "x", b"mxn");
+    assert_eq!(done.changed_since_plan, ["x"]);
+    assert_eq!(fs::read(dir.path().join("x")).unwrap(), b"mxn");
+    assert!(names_in(&dir.path().join(".bolt/tmp")).is_empty());
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_file_saved_after_the_check_before_its_removal_is_left() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let a = planted(&mut repo, &files(&[("x", b"old"), ("f", b"a file")]));
+    switch(&mut repo, empty, a);
+    // Removed.
+    let b = planted(&mut repo, &files(&[("f", b"a file")]));
+    let done = raced(&mut repo, a.0, b, "switch:removing", "x", b"mine, edited");
+    assert_eq!(done.changed_since_plan, ["x"]);
+    assert_eq!(done.removed, 0);
+    assert_eq!(fs::read(dir.path().join("x")).unwrap(), b"mine, edited");
+    // Given a folder's place.
+    let c = planted(&mut repo, &files(&[("f/in", b"in")]));
+    let done = raced(&mut repo, b.0, c, "switch:removing", "f", b"mine, edited");
+    assert_eq!(done.changed_since_plan, ["f"]);
+    assert_eq!(fs::read(dir.path().join("f")).unwrap(), b"mine, edited");
+}
+
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn a_link_changed_after_the_check_before_its_removal_is_left() {
+    use std::os::unix::fs::symlink;
+    let (dir, mut repo) = project();
+    let at = dir.path().join("l");
+    let empty = current_save(&repo).unwrap();
+    let a = planted(&mut repo, &[("l", EntryKind::Symlink, b"t1")]);
+    switch(&mut repo, empty, a);
+    assert_eq!(fs::read_link(&at).unwrap(), Path::new("t1"));
+    // Another link put in its place: re-pointed by another program just before.
+    let b = planted(&mut repo, &[("l", EntryKind::Symlink, b"t2")]);
+    let plan = planned(&mut repo, a.0, b.0, false);
+    let link = at.clone();
+    crate::fsio::fault::act_at("switch:removing", move || {
+        fs::remove_file(&link).unwrap();
+        symlink("theirs", &link).unwrap();
+    });
+    let done = applied(&mut repo, &journal(b.1, &plan));
+    assert_eq!(done.changed_since_plan, ["l"]);
+    assert_eq!(fs::read_link(&at).unwrap(), Path::new("theirs"));
+    // A file put in its place: swapped for a file just before.
+    fs::remove_file(&at).unwrap();
+    symlink("t2", &at).unwrap();
+    let c = planted(&mut repo, &files(&[("l", b"a file")]));
+    let plan = planned(&mut repo, b.0, c.0, false);
+    let link = at.clone();
+    crate::fsio::fault::act_at("switch:removing", move || {
+        fs::remove_file(&link).unwrap();
+        fs::write(&link, b"mine").unwrap();
+    });
+    let done = applied(&mut repo, &journal(c.1, &plan));
+    assert_eq!(done.changed_since_plan, ["l"]);
+    assert_eq!(fs::read(&at).unwrap(), b"mine");
+}
+
 #[cfg(windows)]
 #[test]
 fn a_stored_link_target_holding_a_backslash_is_not_written_on_windows() {
@@ -784,6 +896,81 @@ fn a_link_through_a_name_that_isnt_a_folder_is_a_placeholder() {
     assert_eq!(plan.placeholders, ["through_a_file", "through_nothing"]);
 }
 
+#[test]
+fn a_link_is_written_as_one_only_inside_the_project_through_folders_of_the_save() {
+    let (_dir, mut repo) = project();
+    let save = planted(&mut repo, &files(&[("d/f", b"f")])).0;
+    let root = repo.store().save(&save, false).unwrap().root;
+    let stored = HashMap::new();
+    let exact = Drive {
+        ignores_case: false,
+        composes_unicode: false,
+    };
+    let mut tree = Tree::new(repo.store(), &stored, root, exact);
+    let too_long = format!("{}d/f", "./".repeat(2100));
+    for (path, target) in [
+        ("out", "/tmp"),
+        ("unc", "//host/share"),
+        ("drive", "C:/x"),
+        ("up", "../x"),
+        ("d/up", "../../x"),
+        ("through_a_file", "d/f/../f"),
+        ("through_nothing", "e/../d/f"),
+        ("long", too_long.as_str()),
+    ] {
+        let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
+        assert!(!as_link, "{path}");
+    }
+    for (path, target) in [("in", "d/f"), ("d/back", "../d"), ("dot", "./d")] {
+        let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
+        assert!(as_link, "{path}");
+    }
+}
+
+#[test]
+fn a_link_through_a_name_write_out_wont_write_is_a_placeholder() {
+    let (_dir, mut repo) = project();
+    let tree_files = files(&[
+        (".git/hooks/pre-commit", b"run"),
+        ("git~1/hooks/x", b"run"),
+        ("d/f", b"f"),
+    ]);
+    let save = planted(&mut repo, &tree_files).0;
+    let root = repo.store().save(&save, false).unwrap().root;
+    let stored = HashMap::new();
+    let exact = Drive {
+        ignores_case: false,
+        composes_unicode: false,
+    };
+    let mut tree = Tree::new(repo.store(), &stored, root, exact);
+    // The save's own `.git` folder is never written, so a link into it can't be one either.
+    for (path, target) in [
+        ("hook", ".git/hooks/pre-commit"),
+        ("hooks", ".git/hooks"),
+        ("git", ".git"),
+        ("short", "git~1/hooks/x"),
+        ("bolt", ".bolt/x"),
+        ("d/up", "../.git/hooks"),
+    ] {
+        let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
+        assert!(!as_link, "{path}");
+    }
+    assert!(writes_as_link(&mut tree, "in", b"d/f").unwrap());
+}
+
+#[test]
+fn whether_links_can_be_made_is_tried_in_bolts_own_folder() {
+    let (_dir, mut repo) = project();
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let probe = tempfile::tempdir().unwrap();
+    let link = probe.path().join("l");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink("x", &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file("x", &link);
+    assert_eq!(can_make_links(&repo).unwrap(), made.is_ok());
+}
+
 /// Makes `dir` keep letter case apart, as WSL folders do on a drive that otherwise ignores it.
 /// False, with a note, where Windows can't.
 #[cfg(windows)]
@@ -905,13 +1092,14 @@ fn assert_holds(dir: &Path, wanted: &[(&str, &[u8])]) {
 fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveError> {
     let who = who();
     let req = crate::snapshot::SaveRequest {
-        message: "next",
+        message: Some("next"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     crate::snapshot::save_folder(repo, &req, &mut |_| {}, &mut |_| true)
 }
@@ -921,6 +1109,7 @@ fn save_now(repo: &mut Repository) -> Result<crate::snapshot::SaveOutcome, SaveE
 fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
     use crate::fsio::fault;
     use crate::snapshot::SaveOutcome;
+    use crate::test_support::after_head;
     let mut stops_before_head = 0;
     for n in 1.. {
         assert!(n < 100, "the switch never finished");
@@ -930,6 +1119,7 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         fault::arm(n);
         let result = carry_out(&mut repo, &lock, &journal, drive);
         fault::disarm();
+        let went_on = after_head(&repo);
         drop(lock);
         drop(repo);
         assert_wholly_old_or_new(dir.path(), n);
@@ -948,17 +1138,28 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
         if result.is_err() && !took_effect {
             stops_before_head += 1;
         }
-        if let Ok(done) = result {
+        assert!(
+            result.is_ok() || !took_effect,
+            "fault {n}: failed once its head moved"
+        );
+        if let Ok(done) = result
+            && !went_on
+        {
             assert!(done.in_use.is_empty());
-            // A stop after each change, before the head, and in removing the journal.
+            // A stop after each change and before the head, then three after it: in flushing
+            // the head, in removing the journal and in flushing that.
             assert!(stops_before_head >= 8, "only {stops_before_head} stops");
-            assert!(n > stops_before_head + 1, "no stop after the head moved");
+            assert!(
+                n > stops_before_head + 3,
+                "too few stops after the head moved"
+            );
             break;
         }
     }
 }
 
 /// Every path below `dir`, `.bolt` aside, `/` between names.
+#[cfg(feature = "fault-injection")]
 fn all_paths(dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut folders = vec![(dir.to_path_buf(), String::new())];
@@ -985,6 +1186,7 @@ fn all_paths(dir: &Path) -> Vec<String> {
 }
 
 /// Every file of the switch wholly old or wholly new, and nothing else anywhere in the folder.
+#[cfg(feature = "fault-injection")]
 fn assert_wholly_old_or_new(dir: &Path, n: u64) {
     for (path, _) in OLD.iter().chain(NEW) {
         let now = held(dir, path);
@@ -1003,6 +1205,7 @@ fn assert_wholly_old_or_new(dir: &Path, n: u64) {
 }
 
 /// The switch done: `head` on its entry, no journal, the folder exactly the new save.
+#[cfg(feature = "fault-injection")]
 fn assert_switched(repo: &Repository, dir: &Path, journal: &Journal, n: u64) {
     assert_eq!(repo.head().unwrap(), journal.target, "fault {n}");
     assert_eq!(Journal::read(repo).unwrap(), None, "fault {n}");
@@ -1018,6 +1221,7 @@ fn assert_switched(repo: &Repository, dir: &Path, journal: &Journal, n: u64) {
 #[test]
 fn a_finish_stopped_in_turn_is_finished_by_the_command_after() {
     use crate::fsio::fault;
+    use crate::test_support::after_head;
     for n in [1, 4, 9] {
         for m in 1.. {
             assert!(m < 60, "the save never got through");
@@ -1031,12 +1235,13 @@ fn a_finish_stopped_in_turn_is_finished_by_the_command_after() {
             fault::arm(m);
             let finishing = save_now(&mut repo);
             fault::disarm();
+            let went_on = after_head(&repo);
             drop(repo);
             assert_wholly_old_or_new(dir.path(), m);
             let mut repo = Repository::open(dir.path()).unwrap();
             save_now(&mut repo).unwrap();
             assert_switched(&repo, dir.path(), &journal, m);
-            if finishing.is_ok() {
+            if finishing.is_ok() && !went_on {
                 break;
             }
         }
@@ -1048,7 +1253,9 @@ fn a_journal_whose_target_is_the_head_is_only_removed() {
     let (dir, mut repo, journal) = stopped_switch();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     repo.move_head_to(&lock, journal.target).unwrap();
-    assert_eq!(finish_interrupted(&mut repo, &lock).unwrap(), None);
+    // A stop finished all the same, with nothing left to write.
+    let done = finish_interrupted(&mut repo, &lock).unwrap();
+    assert_eq!(done, Some(Applied::default()));
     assert_eq!(Journal::read(&repo).unwrap(), None);
     // Nothing of it was carried out again.
     assert_holds(dir.path(), OLD);
@@ -1107,8 +1314,8 @@ fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
     let (dir, mut repo, journal) = stopped_switch();
     let on_disk = dir.path().join(".bolt/state/journal");
     let mut bytes = fs::read(&on_disk).unwrap();
-    let last = bytes.len() - 1;
-    bytes[last] ^= 1;
+    // At its front, where commands that only read look too.
+    bytes[0] ^= 1;
     fs::write(&on_disk, &bytes).unwrap();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     let e = finish_interrupted(&mut repo, &lock).unwrap_err();
@@ -1165,4 +1372,104 @@ fn a_file_held_open_keeps_the_switch_unfinished_until_let_go() {
     assert!(kinds(&done.warnings).contains(&warning::SWITCH_FINISHED));
     assert_eq!(repo.head().unwrap(), journal.target);
     assert_holds(dir.path(), NEW);
+}
+
+/// Commits a save whose top listing holds `.BOLT`, and gives its ID.
+fn planted_hostile(repo: &mut Repository) -> Id {
+    // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
+    crate::test_support::plant_root(repo, |packs| {
+        let id = packs.add_content(b"x").unwrap();
+        let named = |name: &str| Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id,
+            size: 1,
+        };
+        let listing = Listing::new(vec![named("-BOLT")]).unwrap().encode();
+        let at = listing.windows(5).position(|w| w == b"-BOLT").unwrap();
+        let mut hostile = listing;
+        hostile[at] = b'.';
+        packs
+            .add_record(ObjectKind::FolderListing, &hostile)
+            .unwrap()
+    });
+    current_save(repo).unwrap()
+}
+
+#[test]
+fn a_spelling_of_bolt_the_plan_meets_is_told_as_the_save_holding_it() {
+    let (_dir, mut repo) = project();
+    let (good, _) = planted(&mut repo, &files(&[("a.txt", b"a")]));
+    let other = planted_hostile(&mut repo);
+    let hostile = planted_hostile(&mut repo);
+    let told = |repo: &Repository, from, to| {
+        let met = SaveError::Repo(RepoError::BoltName {
+            save: None,
+            current: false,
+        });
+        match told_whose(repo, met, from, to) {
+            SaveError::Repo(RepoError::BoltName { save, current }) => (save, current),
+            other => panic!("{other:?}"),
+        }
+    };
+    // On a save that holds it, every switch away meets it, whatever the target holds.
+    assert_eq!(told(&repo, hostile, good), (Some(hostile), true));
+    assert_eq!(told(&repo, hostile, other), (Some(hostile), true));
+    // The save planned from is named if it holds it, else the target; the narrower hint only
+    // for the save the project is on, which an unshelf's base or an undo's kept save isn't.
+    planted(&mut repo, &files(&[("b.txt", b"b")]));
+    assert_eq!(told(&repo, hostile, good), (Some(hostile), false));
+    assert_eq!(told(&repo, good, hostile), (Some(hostile), false));
+    assert_eq!(told(&repo, other, hostile), (Some(other), false));
+    // Reading the folder against such a save meets it first.
+    let drive = this_drive(&mut repo);
+    match plan(&repo, hostile, good, None, false, drive, None) {
+        Err(SaveError::Repo(RepoError::BoltName { save, current })) => {
+            assert_eq!((save, current), (Some(hostile), false));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_placeholder_swapped_in_for_an_unsaved_link_is_kept_before_it_goes() {
+    let (dir, mut repo) = project();
+    let from = current_save(&repo).unwrap();
+    let target = b"a.txt";
+    let id = hash_content(target);
+    // What a discard plans for an unsaved link `l` -> a.txt, which the save doesn't hold.
+    let actions = vec![Action {
+        path: "l".into(),
+        change: Change::RemoveFile,
+        expected: Some(Expected {
+            kind: EntryKind::Symlink,
+            id,
+            size: 5,
+        }),
+    }];
+    // Another program swaps the link for a file holding exactly its target.
+    fs::write(dir.path().join("l"), target).unwrap();
+    let (head, _) = repo.current().unwrap();
+    let lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let copies = keep_safety_copies(&repo, &actions, from, drive, &mut packs).unwrap();
+    let copy = SafetyCopy {
+        path: "l".into(),
+        kind: EntryKind::Symlink,
+        id,
+        size: 5,
+    };
+    assert_eq!(copies, [copy]);
+    repo.store_packs(&lock, packs).unwrap();
+    let journal = Journal {
+        target: head,
+        from: head,
+        actions,
+    };
+    let done = apply(&repo, &lock, &journal, drive).unwrap();
+    assert_eq!((done.removed, done.changed_since_plan.len()), (1, 0));
+    let mut kept = Vec::new();
+    repo.store().copy_content(&id, &mut kept).unwrap();
+    assert_eq!(kept, target);
 }

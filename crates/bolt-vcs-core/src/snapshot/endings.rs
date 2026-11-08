@@ -8,8 +8,9 @@ use std::io::{self, Read, Write};
 use bolt_platform::dir::Dir;
 
 use super::{
-    Child, Folders, Handles, Kind, NAMED, SaveError, open_scanned, saved_file, stamp, stamp_of,
+    Child, Folders, Handles, NAMED, SaveError, each_file_with_saved, open_scanned, stamp, stamp_of,
 };
+use crate::drive::Drive;
 use crate::listing::{Entry, Listing};
 use crate::store::Store;
 
@@ -17,32 +18,29 @@ use crate::store::Store;
 const PIECE: usize = 64 << 10;
 
 /// Fails, naming the first few, if any file in `folders`, read through `handles`, is the base
-/// save's file with each LF turned into CRLF. `old` is what the base save holds in each folder.
-/// Entries kept as they were are not files in `folders`, so they are never looked at.
+/// save's file with each LF turned into CRLF, matched by name as `drive` compares names. `old` is
+/// what the base save holds in each folder. Entries kept as they were are not files in `folders`,
+/// so they are never looked at.
 pub(super) fn check(
     store: &Store,
+    drive: Drive,
     handles: &mut Handles,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
 ) -> Result<(), SaveError> {
     let mut count = 0;
     let mut first = Vec::new();
-    for (rel, children) in folders {
-        let Some(before) = old.get(rel).and_then(Option::as_ref) else {
-            continue;
-        };
-        for c in children.iter().filter(|c| c.kind == Kind::File) {
-            let Some(was) = saved_file(Some(before), &c.name) else {
-                continue;
-            };
-            if converted(store, was, handles.folder(rel)?, c)? {
-                count += 1;
-                if first.len() < NAMED {
-                    first.push(c.rel.clone());
-                }
+    each_file_with_saved(store, drive, folders, old, |rel, c, saved| {
+        if let Some(was) = saved
+            && converted(store, was, handles.folder(rel)?, c)?
+        {
+            count += 1;
+            if first.len() < NAMED {
+                first.push(c.rel.clone());
             }
         }
-    }
+        Ok(())
+    })?;
     if count == 0 {
         Ok(())
     } else {
@@ -161,7 +159,7 @@ mod tests {
     use crate::id::hash_content;
     use crate::listing::EntryKind;
     use crate::listing::SaveLimits;
-    use crate::snapshot::tests::{project, save_now, saved_root, walk_project, write};
+    use crate::snapshot::tests::{project, save_now, saved_root, this_drive, walk_project, write};
     use crate::test_support::{add_listing, plant_root, plant_save};
     use proptest::prelude::*;
 
@@ -184,7 +182,13 @@ mod tests {
         saved_root(save_now(&mut repo).unwrap());
         write(dir.path(), "f.txt", disk);
         let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        let result = check(repo.store(), &mut scan.handles, &scan.folders, &scan.old);
+        let result = check(
+            repo.store(),
+            this_drive(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        );
         // Ending a copy on purpose is no damage and no warning.
         assert!(repo.store().warnings().is_empty());
         result
@@ -242,7 +246,14 @@ mod tests {
         });
         write(dir.path(), "f.txt", b"\r\n\r\nx");
         let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        check(repo.store(), &mut scan.handles, &scan.folders, &scan.old).unwrap();
+        check(
+            repo.store(),
+            this_drive(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -260,11 +271,45 @@ mod tests {
         let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
         let found = found(check(
             repo.store(),
+            this_drive(),
             &mut scan.handles,
             &scan.folders,
             &scan.old,
         ));
         assert_eq!(found, (1, vec!["run.sh".to_owned()]));
+    }
+
+    /// Git on a drive that ignores letter case can write `F.txt` as `f.txt`, and a folder too.
+    #[test]
+    fn the_line_ending_check_matches_names_in_any_case_where_the_drive_does() {
+        let (dir, mut repo) = project();
+        plant_save(
+            &mut repo,
+            &[
+                ("F.txt", EntryKind::File, b"a\nb\n"),
+                ("Sub/g.txt", EntryKind::File, b"a\nb\n"),
+            ],
+        );
+        write(dir.path(), "f.txt", b"a\r\nb\r\n");
+        write(dir.path(), "sub/g.txt", b"a\r\nb\r\n");
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let mut check_on = |ignores_case| {
+            let drive = Drive {
+                ignores_case,
+                composes_unicode: false,
+            };
+            check(
+                repo.store(),
+                drive,
+                &mut scan.handles,
+                &scan.folders,
+                &scan.old,
+            )
+        };
+        let found = found(check_on(true));
+        assert_eq!(found, (2, vec!["f.txt".to_owned(), "sub/g.txt".to_owned()]));
+        // Where case counts, they are new files.
+        check_on(false).unwrap();
     }
 
     #[test]
@@ -278,7 +323,14 @@ mod tests {
             write(dir.path(), &format!("sub/f{n}.txt"), b"a\r\nb\r\n");
         }
         let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
-        let err = check(repo.store(), &mut scan.handles, &scan.folders, &scan.old).unwrap_err();
+        let err = check(
+            repo.store(),
+            this_drive(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        )
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "7 files differ from what Git stored only in line endings: Git turned LF into CRLF \
@@ -347,7 +399,14 @@ mod tests {
         write(dir.path(), "f.txt", b"a\r\nb\r\n");
         let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
         // Not taken for a file that differs: the store failed.
-        let err = check(repo.store(), &mut scan.handles, &scan.folders, &scan.old).unwrap_err();
+        let err = check(
+            repo.store(),
+            this_drive(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        )
+        .unwrap_err();
         assert!(matches!(err, SaveError::Repo(_)), "{err:?}");
     }
 

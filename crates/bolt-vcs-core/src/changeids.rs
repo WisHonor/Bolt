@@ -10,7 +10,7 @@ use crate::diary::State;
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::fsio;
 use crate::id::{ChangeId, Id};
-use crate::keyed::{self, KEY_LEN};
+use crate::keyed;
 use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
 
@@ -109,8 +109,12 @@ impl ChangeIds {
         self.lines.get(line).map(|l| (l.tip, l.ids.as_slice()))
     }
 
-    /// The cache in `repo`, or an empty one if it can't be read or `key` didn't seal it.
-    pub(crate) fn load(repo: &Repository, key: &[u8; KEY_LEN]) -> ChangeIds {
+    /// The cache in `repo`, or an empty one if it can't be read or the handle's key didn't seal
+    /// it, or the handle has none.
+    pub(crate) fn load(repo: &Repository) -> ChangeIds {
+        let Some(key) = repo.cache_key() else {
+            return ChangeIds::default();
+        };
         let shown = repo.cache_dir().join(FILE);
         let read =
             safe_fs::read_capped_in(repo.cache_folder(), OsStr::new(FILE), &shown, MAX_BYTES);
@@ -119,9 +123,13 @@ impl ChangeIds {
             .unwrap_or_default()
     }
 
-    /// Writes the cache back, sealed with `key`, if it changed, keeping only the lines `state`
-    /// has. A cache that can't be written is just not there next time, so a failure is ignored.
-    pub(crate) fn store(&mut self, repo: &Repository, key: &[u8; KEY_LEN], state: &State) {
+    /// Writes the cache back, sealed with the handle's key, if it changed, keeping only the lines
+    /// `state` has; nothing when the handle has no key. A cache that can't be written is just not
+    /// there next time, so a failure is ignored.
+    pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
+        let Some(key) = repo.cache_key() else {
+            return;
+        };
         let before = self.lines.len();
         self.lines.retain(|name, _| state.lines.contains_key(name));
         if !self.changed && self.lines.len() == before {
@@ -179,6 +187,17 @@ impl ChangeIds {
         };
         let at = line.ids.partition_point(|c| *c < change_id);
         line.ids.insert(at, change_id);
+        line.tip = tip;
+        self.changed = true;
+    }
+
+    /// Records that `tip`, which has the change ID and parents of `old`, took the place of `old`
+    /// as the newest save of `name`, so the line's change IDs stay as they are. Nothing changes
+    /// unless the cache knows the line at `old`.
+    pub(crate) fn replace(&mut self, name: &str, old: Id, tip: Id) {
+        let Some(line) = self.lines.get_mut(name).filter(|l| l.tip == old) else {
+            return;
+        };
         line.tip = tip;
         self.changed = true;
     }
@@ -261,6 +280,19 @@ mod tests {
         assert_eq!(tip, Id([8; 32]));
         assert_eq!(got.iter().map(|c| c.0[0]).collect::<Vec<_>>(), [3, 3, 5, 9]);
         ids.add("new", Id([1; 32]), Id([8; 32]), ChangeId([5; 16]));
+        assert!(ids.get("new").is_none());
+    }
+
+    #[test]
+    fn a_replaced_save_keeps_the_line_s_ids() {
+        let mut ids = sample();
+        ids.replace("main", Id([7; 32]), Id([8; 32]));
+        assert_eq!(ids.get("main").unwrap().0, Id([1; 32]));
+        ids.replace("main", Id([1; 32]), Id([8; 32]));
+        let (tip, got) = ids.get("main").unwrap();
+        assert_eq!(tip, Id([8; 32]));
+        assert_eq!(got.iter().map(|c| c.0[0]).collect::<Vec<_>>(), [3, 3, 9]);
+        ids.replace("new", Id([1; 32]), Id([8; 32]));
         assert!(ids.get("new").is_none());
     }
 }

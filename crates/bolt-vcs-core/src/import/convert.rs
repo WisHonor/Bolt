@@ -626,6 +626,7 @@ impl<'r> Converter<'r> {
             above.prefix.saturating_add(name.len()).saturating_add(1)
         });
         if let Some(done) = self.trees.get(id).copied() {
+            // A backstop, as below: the paths checked next pass their limit before this depth.
             walk.depth(level.saturating_add(done.depth))?;
             // Its own path was checked in the folder above; the paths below it may be too long here.
             if done.longest > 0 {
@@ -635,7 +636,7 @@ impl<'r> Converter<'r> {
             walk.add(done.total)?;
             return Ok(attach(stack, name, done));
         }
-        // Checked before the tree is read, so a deep one stops at the limit.
+        // A backstop: a folder this deep has a path past its limit, which the folder above checked.
         walk.depth(level)?;
         stack.push(Frame {
             git: *id,

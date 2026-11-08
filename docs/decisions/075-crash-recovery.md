@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 4 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 010](010-operation-log.md) (a command takes effect when `head` moves) and [decision 049](049-writing-files-one-at-a-time.md) (finishing a switch a crash stopped)
+- **Refined by:** [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built)
 
 ## Context
 
@@ -28,7 +29,7 @@ For a lost `head`:
 - **Once `head` has moved, nothing fails the command.** A flush of `state/` that fails after the rename is a `head_not_flushed` warning: the command happened, but a power cut soon after could undo it.
 - **A lost `head`** is a missing `state/head`, one that isn't an entry's ID, or one naming an entry the store doesn't hold or can't read. Every command, read-only ones included, stops with an error that says so, that the saves are safe, and which two commands help. Then:
   - `bolt undo --list` lists the diary entries in the store that no other entry has as its parent, newest first by the time they record, with their commands;
-  - `bolt undo --to <entry>` (any entry the store holds) adds a step after that entry, holding its state, and makes the new step current. It changes no file: `status` then shows how the folder differs from that state's save.
+  - `bolt undo --to <entry>` (any entry the store holds whose state's saves it can read; one it can't is refused, naming it, so the pick never strands the project) adds a step after that entry, holding its state, and makes the new step current. It changes no file: `status` then shows how the folder differs from that state's save.
   - Every other `undo` and `redo` waits until then.
 - Windows renames: [decision 076](076-renames-reach-the-disk-on-windows.md).
 

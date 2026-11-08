@@ -485,6 +485,31 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     );
 }
 
+/// macOS lets a program hold 256 files open by default, folders and packs included. A save of a
+/// tree deeper than the folders it holds open stays within that, however far CI raises the limit.
+#[cfg(unix)]
+#[test]
+fn a_deep_tree_saves_within_macos_open_file_limit() {
+    use bolt_platform::dir::Dir;
+    use std::ffi::OsStr;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    // 600 levels, each with a file, made a name at a time: macOS takes no path that long.
+    {
+        let n = OsStr::new;
+        let mut at = Dir::open_top(env.root()).unwrap();
+        for _ in 0..600 {
+            at.create_new(n("f"), false).unwrap();
+            at.create_dir(n("d")).unwrap();
+            at = at.open_dir(n("d")).unwrap();
+        }
+    }
+    let mut save = support::bolt_with_open_files(env.config(), env.root(), 256, &["save", "deep"]);
+    let out = save.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).starts_with("Saved "));
+}
+
 #[test]
 fn start_json_output() {
     let env = Env::new();
@@ -645,6 +670,29 @@ fn bolt_folder_is_hidden_on_windows() {
     let env = Env::new();
     env.bolt().arg("start").assert().success();
     assert!(bolt_platform::is_hidden(&env.root().join(".bolt")).unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_command_names_its_own_file_another_program_holds() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let bolt = env.root().join(".bolt");
+    // As a virus scanner or sync tool may hold it, for longer than Bolt tries.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(bolt.join("state/lock-info"))
+        .unwrap();
+    let out = env.bolt().args(["save", "Add a"]).output().unwrap();
+    drop(held);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains(r"\.bolt\state\lock-info: "), "{err}");
+    assert!(err.contains("virus scanner"), "{err}");
+    assert_eq!(std::fs::read_dir(bolt.join("tmp")).unwrap().count(), 0);
 }
 
 #[test]
@@ -1050,7 +1098,7 @@ fn save_json_output() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-fn interrupted_save_changes_nothing() {
+fn interrupted_save_changes_nothing_until_its_head_moves() {
     use bolt_core::repo::Repository;
     let env = Env::new();
     env.bolt().arg("start").assert().success();
@@ -1064,16 +1112,22 @@ fn interrupted_save_changes_nothing() {
             .env("BOLT_FAULT_AT", n.to_string())
             .output()
             .unwrap();
-        if !text(&out.stderr).contains("injected crash") {
+        let said = text(&out.stderr);
+        if !said.contains("injected crash") {
             assert!(n > 1, "no fault point was reached");
-            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+            assert_eq!(out.status.code(), Some(0), "{said}");
             break;
         }
         let repo = Repository::open(env.root()).unwrap();
         let (_, entry) = repo.current().unwrap();
-        assert_eq!(entry.state, first.state, "fault {n}");
         let report = bolt_core::verify::verify_store(repo.packs_dir());
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
+        // Its last stop comes once the new head is in place: the save happened.
+        if said.contains("injected crash at head:renamed") {
+            assert_ne!(entry.state, first.state, "fault {n}");
+            break;
+        }
+        assert_eq!(entry.state, first.state, "fault {n}");
     }
     let out = env.bolt().args(["save", "Add a"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -1624,7 +1678,7 @@ fn plant_history(
         who: save.author.clone(),
         bolt_version: "0.1.0".into(),
         state,
-        safety_copies: vec![],
+        folder_change: None,
     };
     repo.commit(&lock, pack, &diary).unwrap();
     change_ids
@@ -2040,4 +2094,278 @@ fn paths_are_relative_to_the_current_folder() {
     }
     std::fs::write(env.root().join("a.txt"), "f").unwrap();
     assert_eq!(saved(&["save", "F"]), serde_json::json!([]));
+}
+
+/// `bolt <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
+/// starts: how it ended, and what it said on stderr.
+fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = env
+        .bolt_process_in(env.root())
+        .args(args)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    (out.status.code(), text(&out.stderr))
+}
+
+/// `bolt <args>` in `env`'s folder with stdout and stderr on one pipe whose reader has gone before
+/// the command starts (`bolt status 2>&1 | true`): its exit code.
+fn with_both_readers_gone(env: &support::Env, args: &[&str]) -> Option<i32> {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = env
+        .bolt_process_in(env.root())
+        .args(args)
+        .stdout(writer.try_clone().unwrap())
+        .stderr(writer)
+        .output()
+        .unwrap();
+    out.status.code()
+}
+
+#[test]
+fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    // A folder holding a Git repository of its own: `status` and `save` warn about it.
+    std::fs::create_dir_all(env.root().join("inner/.git")).unwrap();
+    env.overwrite("inner/x.txt", "x\n");
+    env.overwrite("a.txt", "a\n");
+    for args in [&["status"][..], &["status", "--json"], &["save", "Add a"]] {
+        assert_eq!(with_both_readers_gone(&env, args), Some(0), "{args:?}");
+    }
+    let history = env.bolt().arg("history").output().unwrap();
+    assert!(text(&history.stdout).contains("Add a"));
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_stderr() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = support::main_tip(&env).to_hex();
+    env.overwrite("a.txt", "a\n");
+    env.overwrite("b.txt", "b\n");
+    env.bolt().args(["save", "Two files"]).assert().success();
+    // A goto stopped after removing a.txt, then a.txt written again.
+    let stopped = env
+        .bolt()
+        .args(["goto", &first])
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+    // A listing that stopped early still gives what it found first.
+    let (code, said) = with_reader_gone(&env, &["history"]);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(
+        said.starts_with("warning: A switch between saves was stopped before it was done"),
+        "{said}"
+    );
+    env.overwrite("a.txt", "mine\n");
+    // The next goto finishes it, warning that a.txt changed, then stops: a.txt is in the way.
+    let (code, said) = with_reader_gone(&env, &["goto", "main", "--json"]);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(
+        said.starts_with(
+            "error: Your unsaved changes, or files Bolt ignores, are in the way, so nothing was \
+             changed:\n  a.txt\nhint: "
+        ),
+        "{said}"
+    );
+    for kind in [
+        "warning: Finished a switch between saves that was stopped",
+        "warning: 1 entry changed while Bolt was switching",
+    ] {
+        assert_eq!(said.matches(kind).count(), 1, "{said}");
+    }
+    assert!(!said.contains("couldn't write"), "{said}");
+}
+
+#[test]
+fn a_json_listing_tells_the_error_it_ended_with_when_stdout_loses_the_end() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    env.overwrite("a.txt", "a\n");
+    env.overwrite("b.txt", "b\n");
+    env.bolt().args(["save", "Two files"]).assert().success();
+    let top = support::top_folder(env.root());
+    let b = top.entries().iter().find(|e| e.name == "b.txt").unwrap().id;
+    rot(env.root(), &b);
+    env.overwrite("a.txt", "A\n");
+    env.overwrite("b.txt", "B\n");
+    // a.txt is listed, then b.txt's saved copy can't be read, and the document ends with that.
+    let out = env.bolt().args(["changes", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["changes"].as_array().unwrap().len(), 1, "{doc}");
+    let error = format!("error: {}\n", doc["error"]["message"].as_str().unwrap());
+    // The items wait in stdout's buffer, so the document's end is the write that meets the gone
+    // reader, or fails.
+    let (code, said) = with_reader_gone(&env, &["changes", "--json"]);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(said.starts_with(&error), "{said}");
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let out = env
+            .bolt_process_in(env.root())
+            .args(["changes", "--json"])
+            .stdout(support::failing_stdout(&env))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let said = text(&out.stderr);
+        let lost = said.find("error: Bolt couldn't write its output: ");
+        assert!(said.starts_with(&error) && lost.is_some(), "{said}");
+    }
+}
+
+#[test]
+fn every_command_ends_quietly_when_its_reader_has_gone() {
+    let mut loud = Vec::new();
+    let mut quiet = |env: &support::Env, args: &[&str]| {
+        let (code, said) = with_reader_gone(env, args);
+        if (code, said.as_str()) != (Some(0), "") {
+            loud.push(format!("{args:?} ended with {code:?}: {said}"));
+        }
+    };
+    for json in [false, true] {
+        let with = |args: &[&'static str]| -> Vec<&'static str> {
+            let mut args = args.to_vec();
+            if json {
+                args.push("--json");
+            }
+            args
+        };
+        let git = support::Env::new();
+        git.commit("a.txt", "a\n", "First");
+        quiet(&git, &with(&["import"]));
+        let env = support::Env::empty();
+        quiet(&env, &with(&["start"]));
+        env.overwrite("a.txt", "a\n");
+        quiet(&env, &with(&["save", "Add a"]));
+        quiet(&env, &with(&["save", "Nothing new"]));
+        quiet(&env, &with(&["goto", "main"]));
+        env.overwrite("a.txt", "mine\n");
+        quiet(&env, &with(&["discard"]));
+        quiet(&env, &with(&["discard"]));
+    }
+    assert!(loud.is_empty(), "{loud:#?}");
+}
+
+/// A project at its first save with one planted after it holding a link that leads out of the
+/// project, which `bolt goto` writes as a plain file and warns about; that save's ID.
+fn warned_about() -> (support::Env, String) {
+    let link = ("out", EntryKind::Symlink, b"../outside" as &[u8]);
+    let (env, ids) = support::planted_saves(&[&[link]]);
+    (env, ids[0].to_hex())
+}
+
+const PLACEHOLDER_WARNING: &str = "warning: Wrote 1 link as plain files holding their targets: \
+                                   they lead out of the project, or this computer can't make \
+                                   links (on Windows that takes Developer Mode):\n  out\n";
+
+#[test]
+fn a_commands_warnings_reach_stderr_when_its_reader_has_gone() {
+    for json in [false, true] {
+        let (env, save) = warned_about();
+        let mut args = vec!["goto", save.as_str()];
+        if json {
+            args.push("--json");
+        }
+        // Still no error: only the warning.
+        assert_eq!(
+            with_reader_gone(&env, &args),
+            (Some(0), PLACEHOLDER_WARNING.to_owned())
+        );
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn a_commands_warnings_come_before_the_error_when_stdout_fails() {
+    let (env, save) = warned_about();
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["goto", &save])
+        .stdout(support::failing_stdout(&env))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    let after = said.strip_prefix(PLACEHOLDER_WARNING).expect(&said);
+    assert!(
+        after.starts_with("error: Bolt couldn't write its output: "),
+        "{said}"
+    );
+    assert!(
+        after.ends_with(
+            "\nhint: The command did its work all the same: only what Bolt printed was lost. \
+             bolt status and bolt undo --list show where the project stands.\n"
+        ),
+        "{said}"
+    );
+    assert_eq!(after.lines().count(), 2, "{said}");
+}
+
+#[cfg(all(feature = "fault-injection", any(windows, target_os = "linux")))]
+#[test]
+fn a_warning_the_store_keeps_is_told_once_when_stdout_fails() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = support::main_tip(&env).to_hex();
+    env.overwrite("a.txt", "a\n");
+    env.overwrite("b.txt", "b\n");
+    env.bolt().args(["save", "Two files"]).assert().success();
+    // A goto stopped after its first change. The next one finishes it first and says so, in its
+    // own warnings and in the store's, which a failure tells too.
+    let stopped = env
+        .bolt()
+        .args(["goto", &first])
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["goto", "main"])
+        .stdout(support::failing_stdout(&env))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    let finished = "warning: Finished a switch between saves that was stopped";
+    assert_eq!(said.matches(finished).count(), 1, "{said}");
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn a_command_that_did_its_work_but_couldnt_print_says_so() {
+    let env = support::Env::empty();
+    env.bolt().arg("start").assert().success();
+    env.overwrite("a.txt", "a\n");
+    let out = env
+        .bolt_process_in(env.root())
+        .args(["save", "Add a"])
+        .stdout(support::failing_stdout(&env))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    assert!(
+        said.starts_with("error: Bolt couldn't write its output: "),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(
+            "\nhint: The command did its work all the same: only what Bolt printed was lost. \
+             bolt status and bolt undo --list show where the project stands.\n"
+        ),
+        "{said}"
+    );
+    // It did: the save is made.
+    let history = env.bolt().arg("history").output().unwrap();
+    assert!(text(&history.stdout).contains("Add a"));
 }

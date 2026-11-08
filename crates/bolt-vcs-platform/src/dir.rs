@@ -82,6 +82,15 @@ impl Dir {
         sys::open_dir(&self.handle, name).map(Dir::held)
     }
 
+    /// Opens the folder `name` in this one only to reach what is in it, which on Unix needs the
+    /// right to search it but not to list it. Use it only to open or look at what it holds: on
+    /// Unix it may not be listed or synced, though on Windows, which opens it as `open_dir` does,
+    /// it can.
+    pub fn open_dir_to_search(&self, name: &OsStr) -> io::Result<Dir> {
+        one_name(name)?;
+        sys::open_dir_to_search(&self.handle, name).map(Dir::held)
+    }
+
     fn held(handle: sys::Handle) -> Dir {
         Dir {
             handle,
@@ -190,7 +199,8 @@ impl Dir {
     }
 
     /// Flushes this folder's entries to disk, so what was made, renamed or removed in it survives
-    /// a crash. Windows can't flush a folder opened only to read it: there this does nothing yet.
+    /// a crash. On Windows each rename, removal and new folder was written through to the disk as
+    /// it was made, so there this does nothing.
     pub fn sync(&self) -> io::Result<()> {
         sys::sync(&self.handle)
     }
@@ -373,6 +383,12 @@ mod tests {
         fs::symlink_metadata(path).is_err()
     }
 
+    fn read_only(path: &Path) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
     #[test]
     fn a_link_at_a_name_is_refused_at_every_call() {
         let (tmp, d) = held();
@@ -401,6 +417,7 @@ mod tests {
         for name in links {
             let refused = |e: io::Error| assert!(is_link_refusal(&e), "{name}: {e}");
             refused(d.open_dir(n(name)).unwrap_err());
+            refused(d.open_dir_to_search(n(name)).unwrap_err());
             refused(d.open_file(n(name)).unwrap_err());
             refused(d.open_or_create(n(name)).unwrap_err());
             refused(d.remove_dir(n(name)).unwrap_err());
@@ -416,10 +433,46 @@ mod tests {
             );
         }
         assert!(!is_link_refusal(&d.open_dir(n("file")).unwrap_err()));
+        let file = d.open_dir_to_search(n("file")).unwrap_err();
+        assert_eq!(file.kind(), io::ErrorKind::NotADirectory);
         // Nothing moved or changed, through the links or beside them.
         assert_eq!(fs::read_to_string(tmp.path().join("file")).unwrap(), "file");
         assert_eq!(fs::read_to_string(real.join("x")).unwrap(), "x");
         assert!(gone(&tmp.path().join("moved")));
+    }
+
+    /// A folder that can be searched but not listed opens to search, and what it holds can be
+    /// read through it; one that can't be searched is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_opened_to_search_needs_only_the_right_to_search_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, d) = held();
+        let hidden = tmp.path().join("hidden");
+        fs::create_dir(&hidden).unwrap();
+        fs::write(hidden.join("x"), "x").unwrap();
+        let mode = |m| fs::set_permissions(&hidden, fs::Permissions::from_mode(m)).unwrap();
+        mode(0o311);
+        // root reads everything, so there is nothing to test.
+        if fs::read_dir(&hidden).is_ok() {
+            mode(0o755);
+            return;
+        }
+        let listed = d.open_dir(n("hidden")).map(drop);
+        let mut read = String::new();
+        let searched = d.open_dir_to_search(n("hidden")).and_then(|h| {
+            h.open_file(n("x"))?.read_to_string(&mut read)?;
+            h.entries()
+        });
+        mode(0o000);
+        let refused = d.open_dir_to_search(n("hidden")).map(drop);
+        // Back to normal first, so that the temporary folder can be removed whatever happens.
+        mode(0o755);
+        assert_eq!(listed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        // Read, but not listed.
+        assert_eq!(read, "x");
+        assert!(searched.is_err());
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
@@ -842,11 +895,6 @@ mod tests {
     #[test]
     fn a_read_only_file_can_be_removed_or_replaced() {
         let (tmp, d) = held();
-        let read_only = |path: &Path| {
-            let mut permissions = fs::metadata(path).unwrap().permissions();
-            permissions.set_readonly(true);
-            fs::set_permissions(path, permissions).unwrap();
-        };
         fs::write(tmp.path().join("removed"), "removed").unwrap();
         read_only(&tmp.path().join("removed"));
         d.remove_file(n("removed")).unwrap();
@@ -864,6 +912,95 @@ mod tests {
         read_only(&tmp.path().join("folder"));
         d.remove_dir(n("folder")).unwrap();
         assert!(gone(&tmp.path().join("folder")));
+    }
+
+    #[cfg(windows)]
+    fn is_read_only(path: &Path) -> bool {
+        fs::metadata(path).unwrap().permissions().readonly()
+    }
+
+    /// A drive without POSIX renames (FAT, say) won't replace a read-only file: its flag is
+    /// cleared first, and set again if the rename still fails.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_file_is_replaced_on_the_plain_rename() {
+        let (tmp, d) = held();
+        let (replaced, kept) = (tmp.path().join("replaced"), tmp.path().join("kept"));
+        for (path, text) in [(&replaced, "old"), (&kept, "kept")] {
+            fs::write(path, text).unwrap();
+            read_only(path);
+        }
+        fs::write(tmp.path().join("new"), "new").unwrap();
+        fs::write(tmp.path().join("newer"), "newer").unwrap();
+        // Open elsewhere, a file can't be replaced without POSIX renames.
+        let reader = File::open(&kept).unwrap();
+        windows::PLAIN_ONLY.set(true);
+        let renamed = d.rename_into(n("new"), &d, n("replaced"));
+        let refused = d.rename_into(n("newer"), &d, n("kept"));
+        windows::PLAIN_ONLY.set(false);
+        drop(reader);
+        renamed.unwrap();
+        assert_eq!(fs::read_to_string(&replaced).unwrap(), "new");
+        assert!(gone(&tmp.path().join("new")));
+        assert!(refused.is_err());
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "kept");
+        assert!(is_read_only(&kept));
+        assert!(!gone(&tmp.path().join("newer")));
+    }
+
+    /// Nor deletes it: its flag is cleared first, and set again on a folder that isn't empty.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_file_is_removed_on_the_plain_delete() {
+        let (tmp, d) = held();
+        fs::write(tmp.path().join("removed"), "removed").unwrap();
+        fs::create_dir(tmp.path().join("empty")).unwrap();
+        fs::create_dir(tmp.path().join("full")).unwrap();
+        fs::write(tmp.path().join("full/inside"), "inside").unwrap();
+        for name in ["removed", "empty", "full"] {
+            read_only(&tmp.path().join(name));
+        }
+        windows::PLAIN_ONLY.set(true);
+        let removed = [d.remove_file(n("removed")), d.remove_dir(n("empty"))];
+        let full = d.remove_dir(n("full"));
+        windows::PLAIN_ONLY.set(false);
+        for result in removed {
+            result.unwrap();
+        }
+        assert!(gone(&tmp.path().join("removed")) && gone(&tmp.path().join("empty")));
+        let e = full.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::DirectoryNotEmpty, "{e}");
+        assert!(is_read_only(&tmp.path().join("full")));
+    }
+
+    /// Each is written through to the disk now, which only a power cut would show; every kind
+    /// still has to work, POSIX and plain.
+    #[cfg(windows)]
+    #[test]
+    fn renames_removals_and_new_folders_still_work_written_through() {
+        for plain in [false, true] {
+            let (tmp, d) = held();
+            windows::PLAIN_ONLY.set(plain);
+            d.create_dir(n("folder")).unwrap();
+            d.create_dir(n("empty")).unwrap();
+            let folder = d.open_dir(n("folder")).unwrap();
+            for (name, text) in [("a", "a"), ("b", "b"), ("folder/old", "old")] {
+                fs::write(tmp.path().join(name), text).unwrap();
+            }
+            folder_link(&tmp.path().join("link"), &tmp.path().join("folder"));
+            // Over a file in another folder, and to a free name in the same one.
+            d.rename_into(n("a"), &folder, n("old")).unwrap();
+            d.rename_into(n("b"), &d, n("c")).unwrap();
+            d.remove_file(n("link")).unwrap();
+            d.remove_file(n("c")).unwrap();
+            d.remove_dir(n("empty")).unwrap();
+            windows::PLAIN_ONLY.set(false);
+            let path = |name: &str| tmp.path().join(name);
+            assert_eq!(fs::read_to_string(path("folder/old")).unwrap(), "a");
+            for name in ["a", "b", "c", "link", "empty"] {
+                assert!(gone(&path(name)), "{plain}: {name}");
+            }
+        }
     }
 
     /// Making a file, folder or link at a name that holds a link fails, even when the link points

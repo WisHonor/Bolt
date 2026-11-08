@@ -32,12 +32,13 @@ pub enum ConfigError {
         escape(detail, false)
     )]
     Invalid { path: PathBuf, detail: String },
-    /// A `safe-folders` line below a `[section]` belongs to that section, so Bolt never sees it.
+    /// A `safe-folders` or `undo-window-days` line below a `[section]` belongs to that section, so
+    /// Bolt never sees it.
     #[error(
-        "safe-folders must be at the top of {}, before any [section]",
+        "{key} must be at the top of {}, before any [section]",
         escape(&path.display().to_string(), false)
     )]
-    SafeFoldersNotAtTop { path: PathBuf },
+    NotAtTop { key: &'static str, path: PathBuf },
     /// The user's own Git settings, read for their ignore list (decision 047), can't be read.
     #[error(
         "Bolt can't read your Git settings in {}: {}",
@@ -62,7 +63,7 @@ impl ConfigError {
                 "Set BOLT_CONFIG_DIR to a folder and add this to config.toml there:\n{SNIPPET}"
             )),
             ConfigError::Invalid { .. } => None,
-            ConfigError::SafeFoldersNotAtTop { .. } => {
+            ConfigError::NotAtTop { .. } => {
                 Some("Move that line above [user] and every other [section].".to_owned())
             }
             ConfigError::GitSettings { .. } => Some(
@@ -83,11 +84,20 @@ struct ConfigFile {
     /// Folders to use although another account owns them; only the user's own file is asked.
     #[serde(default, rename = "safe-folders")]
     safe_folders: Vec<String>,
-    /// Set after reading: `safe-folders` was also written below a `[section]`, where it belongs to
-    /// that section and is no list.
+    /// How many days of steps `tidy` keeps what undo needs for; checked where it is read.
+    #[serde(default, rename = "undo-window-days")]
+    undo_window_days: Option<toml::Value>,
+    /// Set after reading: the keys of `AT_TOP` also written below a `[section]`, where they belong
+    /// to that section.
     #[serde(skip)]
-    misplaced_safe_folders: bool,
+    misplaced: Vec<&'static str>,
 }
+
+/// The keys that only count at the top of the user's own file.
+const AT_TOP: [&str; 2] = ["safe-folders", "undo-window-days"];
+/// `undo-window-days` when it isn't set, and the most it may be.
+const UNDO_WINDOW_DAYS: u32 = 30;
+const MAX_UNDO_WINDOW_DAYS: u32 = 36_500;
 
 #[derive(Deserialize)]
 struct User {
@@ -102,14 +112,14 @@ struct ProjectEntry {
     email: Option<String>,
 }
 
-/// Whether a table in `value`, however deep, has a `safe-folders` key. The toml parser stops at 80
+/// Whether a table in `value`, however deep, has the key `key`. The toml parser stops at 80
 /// levels, so this does too.
-fn holds_safe_folders(value: &toml::Value) -> bool {
+fn holds_key(value: &toml::Value, key: &str) -> bool {
     match value {
         toml::Value::Table(table) => {
-            table.contains_key("safe-folders") || table.values().any(holds_safe_folders)
+            table.contains_key(key) || table.values().any(|v| holds_key(v, key))
         }
-        toml::Value::Array(items) => items.iter().any(holds_safe_folders),
+        toml::Value::Array(items) => items.iter().any(|v| holds_key(v, key)),
         _ => false,
     }
 }
@@ -159,14 +169,17 @@ fn read_file(
     };
     let parsed: toml::Value =
         toml::from_slice(&bytes).map_err(|e| invalid(e.message().to_owned()))?;
-    // The top level is where the list belongs, so only what is below it counts.
-    let misplaced = parsed
-        .as_table()
-        .is_some_and(|top| top.values().any(holds_safe_folders));
+    // The top level is where these keys belong, so only what is below it counts.
+    let below = |key: &&str| {
+        parsed
+            .as_table()
+            .is_some_and(|top| top.values().any(|v| holds_key(v, key)))
+    };
+    let misplaced = AT_TOP.into_iter().filter(below).collect();
     let mut file: ConfigFile = parsed
         .try_into()
         .map_err(|e| invalid(e.message().to_owned()))?;
-    file.misplaced_safe_folders = misplaced;
+    file.misplaced = misplaced;
     Ok(Some(file))
 }
 
@@ -471,14 +484,9 @@ pub fn safe_folders() -> Result<Vec<PathBuf>, ConfigError> {
 
 /// `safe_folders`, from the user's `config.toml` at `path`.
 fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
-    let Some(file) = read_file(path, &safe_fs::read_capped_following_links)? else {
+    let Some(file) = users_file(path, "safe-folders")? else {
         return Ok(Vec::new());
     };
-    if file.misplaced_safe_folders {
-        return Err(ConfigError::SafeFoldersNotAtTop {
-            path: path.to_owned(),
-        });
-    }
     file.safe_folders
         .into_iter()
         .map(|entry| {
@@ -493,6 +501,44 @@ fn safe_folders_in(path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
             }
         })
         .collect()
+}
+
+/// The user's own `config.toml` at `path`, for `key` of `AT_TOP`: refused if `key` is also
+/// written below a `[section]`.
+fn users_file(path: &Path, key: &'static str) -> Result<Option<ConfigFile>, ConfigError> {
+    let file = read_file(path, &safe_fs::read_capped_following_links)?;
+    if file.as_ref().is_some_and(|f| f.misplaced.contains(&key)) {
+        return Err(ConfigError::NotAtTop {
+            key,
+            path: path.to_owned(),
+        });
+    }
+    Ok(file)
+}
+
+/// How many days of steps `tidy` keeps what undo and redo need for: `undo-window-days` at the
+/// top of the user's own `config.toml`, a whole number from 1 to 36,500, and 30 when it isn't set.
+pub fn undo_window_days() -> Result<u32, ConfigError> {
+    user_config_path().map_or(Ok(UNDO_WINDOW_DAYS), |path| undo_window_days_in(&path))
+}
+
+/// `undo_window_days`, from the user's `config.toml` at `path`.
+fn undo_window_days_in(path: &Path) -> Result<u32, ConfigError> {
+    let Some(value) = users_file(path, "undo-window-days")?.and_then(|f| f.undo_window_days) else {
+        return Ok(UNDO_WINDOW_DAYS);
+    };
+    let days = match &value {
+        toml::Value::Integer(n) => u32::try_from(*n).ok(),
+        _ => None,
+    };
+    days.filter(|d| (1..=MAX_UNDO_WINDOW_DAYS).contains(d))
+        .ok_or_else(|| ConfigError::Invalid {
+            path: path.to_owned(),
+            detail: format!(
+                "undo-window-days must be a whole number of days from 1 to \
+                 {MAX_UNDO_WINDOW_DAYS}, not {value}"
+            ),
+        })
 }
 
 /// What the user can do about a project Bolt may not use (another account owns the folder or its
@@ -751,7 +797,8 @@ mod tests {
         let shown = invalid.to_string();
         assert_hostile_text_escaped(&shown);
         assert_eq!(shown.matches("b\\u{202e}c").count(), 2, "{shown}");
-        let misplaced = ConfigError::SafeFoldersNotAtTop {
+        let misplaced = ConfigError::NotAtTop {
+            key: "safe-folders",
             path: PathBuf::from(HOSTILE),
         };
         let shown = misplaced.to_string();
@@ -1310,6 +1357,49 @@ mod tests {
         // At the top it is the list, whatever tables follow.
         std::fs::write(&path, format!("safe-folders = [{work}]\n{user}{project}")).unwrap();
         assert_eq!(safe_folders_in(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn undo_window_days_is_read_from_the_users_settings_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // No settings file, or one without the key: 30 days.
+        assert_eq!(undo_window_days_in(&path).unwrap(), 30);
+        std::fs::write(&path, "[user]\nname = \"Ada\"\n").unwrap();
+        assert_eq!(undo_window_days_in(&path).unwrap(), 30);
+        for (text, days) in [
+            ("undo-window-days = 1\n", 1),
+            ("undo-window-days = 36500\n[user]\nname = \"Ada\"\n", 36_500),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(undo_window_days_in(&path).unwrap(), days, "{text}");
+        }
+        for value in ["0", "36501", "-1", "\"30\"", "30.5", "[30]"] {
+            std::fs::write(&path, format!("undo-window-days = {value}\n")).unwrap();
+            match undo_window_days_in(&path) {
+                Err(e @ ConfigError::Invalid { .. }) => {
+                    let said = e.to_string();
+                    assert!(said.starts_with(&path.display().to_string()), "{said}");
+                    let want = format!(
+                        "undo-window-days must be a whole number of days from 1 to 36500, not \
+                         {value}"
+                    );
+                    assert!(said.ends_with(&want), "{said}");
+                }
+                other => panic!("{value}: {other:?}"),
+            }
+        }
+        // Below a [section] it would belong to that section, where Bolt never looks.
+        std::fs::write(&path, "[user]\nname = \"Ada\"\nundo-window-days = 7\n").unwrap();
+        let err = undo_window_days_in(&path).unwrap_err();
+        let want = format!(
+            "undo-window-days must be at the top of {}, before any [section]",
+            path.display()
+        );
+        assert_eq!(err.to_string(), want);
+        assert!(err.hint().unwrap().contains("above"), "{err:?}");
+        // Each key is judged on its own.
+        assert!(safe_folders_in(&path).unwrap().is_empty());
     }
 
     #[test]

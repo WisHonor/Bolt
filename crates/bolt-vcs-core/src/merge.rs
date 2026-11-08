@@ -2,6 +2,7 @@
 //! have run (decisions 057 and 062).
 
 use crate::fsio::{self, fault_point};
+use crate::id::Id;
 use crate::pack::{PackError, PackReader, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::store::{is_damage, read_whole};
@@ -46,8 +47,9 @@ impl MergeReport {
 /// Merges the small packs (decision 062) into new ones once there are more than 32. Each object is
 /// checked before its stored bytes are copied as they are, and the old packs are removed only once
 /// the new ones are in the store, so a stop at any point leaves every object readable. A pack that
-/// can't be read is kept; only a failure to write stops the merge. `None` when there weren't
-/// enough small packs.
+/// can't be read is kept; only a failure to write stops the merge. `None` when 32 or fewer packs
+/// are under 64 MiB on disk; a report of nothing merged, naming the packs that couldn't be read,
+/// when 32 or fewer of those are small.
 pub(crate) fn merge_small_packs(
     repo: &mut Repository,
     _lock: &ChangeLock,
@@ -88,15 +90,15 @@ pub(crate) fn merge_small_packs(
         }
     }
     if small.len() <= MERGE_ABOVE {
-        return Ok(None);
+        return Ok(Some(report));
     }
     let mut taken = Vec::new();
     let mut out = repo.new_packs()?;
     for name in small {
         let path = packs_dir.join(&name);
         fsio::act_point("merge:copying");
-        match copy_pack(&folder, &name, &path, &mut out) {
-            Ok(()) => taken.push(name),
+        match copy_pack(&folder, &name, &path, &mut out, &|_| true) {
+            Ok(_) => taken.push(name),
             Err(Failed::Read(e)) => report.keep(path, &e),
             Err(Failed::Write(e)) => return Err(e.into()),
         }
@@ -110,7 +112,7 @@ pub(crate) fn merge_small_packs(
     report.merged = taken.len();
     for name in taken {
         // Merging what a stopped merge left can make the same pack again.
-        if made.contains(&name) {
+        if is_new(&made, &name) {
             continue;
         }
         let removed =
@@ -136,8 +138,9 @@ pub(crate) fn merge_after_commit(repo: &mut Repository, lock: &ChangeLock) {
         Ok(Some(report)) => {
             for path in &report.kept_damaged {
                 notes.push(format!(
-                    "Pack {} wasn't merged with the other small packs because a copy in it \
-                     failed its check. Ask for help before trying to repair the project.",
+                    "Pack {} wasn't merged with the other small packs because it is damaged: \
+                     it, or a copy in it, failed Bolt's checks. Ask for help before trying to \
+                     repair the project.",
                     shown(path)
                 ));
             }
@@ -184,26 +187,50 @@ fn holds_little(folder: &Dir, name: &OsStr, path: &Path) -> Result<bool, PackErr
     Ok(true)
 }
 
+/// Whether the old pack `name` may be one of the new packs `made`, compared ignoring letter case:
+/// where the drive ignores it, such a name is the file the new pack's rename replaced, and
+/// elsewhere keeping the old pack loses nothing.
+pub(crate) fn is_new(made: &[OsString], name: &OsStr) -> bool {
+    made.iter().any(|m| m.eq_ignore_ascii_case(name))
+}
+
+/// Whether a pack of `on_disk` bytes whose index records `uncompressed` bytes is small.
+pub(crate) fn is_small(on_disk: u64, uncompressed: u64) -> bool {
+    on_disk < SMALL_ON_DISK && uncompressed <= SMALL_UNCOMPRESSED
+}
+
 /// Why a pack wasn't copied: reading it, which keeps only that pack out, or writing the new ones,
 /// which stops the merge.
-enum Failed {
+pub(crate) enum Failed {
     Read(PackError),
     Write(PackError),
 }
 
-/// Checks each object of the pack `name` and copies it into `out`.
-fn copy_pack(folder: &Dir, name: &OsStr, path: &Path, out: &mut PackSet) -> Result<(), Failed> {
+/// Checks each object of the pack `name` that `keep` takes and copies it into `out`, and gives how
+/// many it copied.
+pub(crate) fn copy_pack(
+    folder: &Dir,
+    name: &OsStr,
+    path: &Path,
+    out: &mut PackSet,
+    keep: &dyn Fn(&Id) -> bool,
+) -> Result<u64, Failed> {
     let pack = PackReader::open_in(folder, name, path).map_err(Failed::Read)?;
+    let mut copied = 0u64;
     for entry in pack.entries() {
         let entry = entry.map_err(Failed::Read)?;
+        if !keep(&entry.id) {
+            continue;
+        }
         read_whole(entry.kind)(&pack, &entry).map_err(Failed::Read)?;
         match out.add_stored(&pack, &entry) {
             // The copy's header, read again.
             Err(e) if is_damage(&e) => return Err(Failed::Read(e)),
             added => added.map_err(Failed::Write)?,
         }
+        copied = copied.saturating_add(1);
     }
-    Ok(())
+    Ok(copied)
 }
 
 #[cfg(test)]
@@ -328,13 +355,14 @@ mod tests {
         for i in 0..33 {
             std::fs::write(dir.path().join("a.txt"), format!("version {i}\n")).unwrap();
             let req = SaveRequest {
-                message: "Change a",
+                message: Some("Change a"),
                 who: &who,
                 command: "save",
                 accept_crlf: false,
                 git_excludes: None,
                 new_line: None,
                 only: None,
+                amend: false,
             };
             match save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
                 SaveOutcome::Saved {
@@ -449,6 +477,23 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_small_pack_is_told_even_when_nothing_merges() {
+        let (_dir, mut repo) = project();
+        let lock = add_packs(&mut repo, 31);
+        // 33 packs under 64 MiB, of which only 32 can be judged small: nothing merges.
+        std::fs::write(repo.packs_dir().join("zz.pack"), vec![b'x'; 200]).unwrap();
+        merge_after_commit(&mut repo, &lock);
+        assert_eq!(pack_names(repo.packs_dir()).len(), 33);
+        let warnings = repo.store().warnings();
+        let named: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.kind == warning::PACK_NOT_MERGED)
+            .collect();
+        assert_eq!(named.len(), 1, "{warnings:?}");
+        assert!(named[0].message.contains("zz.pack"), "{warnings:?}");
+    }
+
+    #[test]
     fn big_packs_dont_make_every_commit_merge() {
         let (_dir, mut repo) = project();
         for i in 0..33 {
@@ -529,6 +574,16 @@ mod tests {
         assert_eq!(pack_names(&packs).len(), 1);
         std::fs::rename(packs.join("away"), packs.join(&first)).unwrap();
         assert_all_readable(&repo, 33, "after the merge");
+    }
+
+    /// An old pack named in capitals, on a drive that ignores case, is the file a new pack with its
+    /// index replaced: removing it by its old spelling would remove the new pack. On any drive.
+    #[test]
+    fn a_new_pack_is_known_by_its_name_in_any_letter_case() {
+        let made = [OsString::from("ab12.pack")];
+        assert!(is_new(&made, OsStr::new("ab12.pack")));
+        assert!(is_new(&made, OsStr::new("AB12.pack")));
+        assert!(!is_new(&made, OsStr::new("ab13.pack")));
     }
 
     #[test]

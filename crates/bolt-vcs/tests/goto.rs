@@ -143,46 +143,13 @@ fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
 
 // `bolt goto` itself.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use bolt_core::diary::{Action, DiaryEntry, Position};
+use bolt_core::diary::{Action, DiaryEntry, FolderChange, Position};
 use bolt_core::id::ChangeId;
 use bolt_core::pack::ObjectKind;
 use bolt_core::save::Save;
-
-/// Every file below `dir` but `.git` and `.bolt`, by path, with what it holds.
-fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut found = BTreeMap::new();
-    let mut folders = vec![(dir.to_path_buf(), String::new())];
-    while let Some((at, rel)) = folders.pop() {
-        for e in std::fs::read_dir(&at).unwrap() {
-            let e = e.unwrap();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && (name == ".git" || name == ".bolt") {
-                continue;
-            }
-            let path = if rel.is_empty() {
-                name
-            } else {
-                format!("{rel}/{name}")
-            };
-            if e.file_type().unwrap().is_dir() {
-                folders.push((e.path(), path));
-            } else {
-                found.insert(path, std::fs::read(e.path()).unwrap());
-            }
-        }
-    }
-    found
-}
-
-fn holding(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
-    entries
-        .iter()
-        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
-        .collect()
-}
+use support::{changed, files, holding};
 
 const MAIN: &[(&str, &str)] = &[
     ("a.txt", "a\n"),
@@ -238,17 +205,6 @@ fn goto_json(env: &Env, target: &str) -> serde_json::Value {
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
-}
-
-/// What `bolt status` finds changed.
-fn changed(env: &Env) -> Vec<String> {
-    let (_, doc) = warning_kinds(env, &["status"]);
-    doc["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["path"].as_str().unwrap().to_owned())
-        .collect()
 }
 
 #[test]
@@ -359,6 +315,7 @@ fn plant_with_change_id(root: &Path, change_id: ChangeId) {
         parent: Some(head),
         command: "save".into(),
         state,
+        folder_change: None,
         ..entry
     };
     repo.commit(&lock, pack, &diary).unwrap();
@@ -383,9 +340,11 @@ fn an_ambiguous_target_lists_the_saves() {
 }
 
 #[test]
-fn goto_records_safety_copies_in_its_diary_entry() {
+fn goto_records_its_switch_in_its_diary_entry() {
     let env = two_lines();
-    let before = Repository::open(env.root()).unwrap().head().unwrap();
+    let (repo, state) = env.state();
+    let before = repo.head().unwrap();
+    drop(repo);
     env.overwrite("a.txt", "mine\n");
     let doc = goto_json(&env, "feature");
     let repo = Repository::open(env.root()).unwrap();
@@ -394,8 +353,13 @@ fn goto_records_safety_copies_in_its_diary_entry() {
     assert_eq!(entry.action, Action::Command);
     assert_eq!(entry.command, "goto");
     assert_eq!(entry.state.position, Position::OnLine("feature".into()));
+    // The unsaved a.txt is the same in both saves, so the switch leaves it out.
+    let switched = FolderChange {
+        from: state.lines["main"],
+        to: state.lines["feature"],
+    };
+    assert_eq!(entry.folder_change, Some(switched));
     // Goto never overwrites unsaved work, so what it carries along needs no copy.
-    assert_eq!(entry.safety_copies, []);
     assert_eq!(doc["safety_copies"], 0, "{doc}");
     assert_eq!(std::fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
 }
@@ -572,4 +536,114 @@ fn a_goto_with_a_file_in_use_fails_and_the_next_one_finishes() {
     assert_eq!(doc["position"]["line"], "feature", "{doc}");
     assert_eq!(files(env.root()), holding(FEATURE));
     assert!(!env.root().join(".bolt/state/journal").exists());
+}
+
+// A link leading out of the project is written as a plain file holding its target, on every
+// system; a switch takes that file for the link, as a save does.
+
+use bolt_core::id::Id;
+use bolt_core::listing::EntryKind::{File, Symlink};
+use support::planted_saves;
+
+/// Where `at_a_placeholder`'s saves are among the IDs it gives.
+const HOLDING_OUT: usize = 0;
+const WITHOUT: usize = 1;
+const AS_FILE: usize = 2;
+const AS_FOLDER: usize = 3;
+const AS_OTHER_LINK: usize = 4;
+#[cfg(feature = "fault-injection")]
+const KEEP_CHANGED: usize = 5;
+
+/// A project at a save holding `out`, a link leading out of the project written as a
+/// placeholder, and saves to go to where `out` is gone, a file of other bytes, a folder, or
+/// another link, and one where it is gone and `keep.txt` changed. Their IDs, as indexed above.
+fn at_a_placeholder() -> (Env, Vec<Id>) {
+    let keep = ("keep.txt", File, b"k\n" as &[u8]);
+    let (env, ids) = planted_saves(&[
+        &[("out", Symlink, b"../outside"), keep],
+        &[keep],
+        &[("out", File, b"other\n"), keep],
+        &[("out/inside.txt", File, b"in\n"), keep],
+        &[("out", Symlink, b"../elsewhere"), keep],
+        &[("keep.txt", File, b"K\n")],
+    ]);
+    let doc = goto_json(&env, &ids[HOLDING_OUT].to_hex());
+    assert_eq!(doc["placeholders"], serde_json::json!(["out"]), "{doc}");
+    assert_eq!(
+        files(env.root()),
+        holding(&[("keep.txt", "k\n"), ("out", "../outside")])
+    );
+    assert!(changed(&env).is_empty());
+    (env, ids)
+}
+
+#[test]
+fn a_placeholder_is_removed_as_the_link_it_stands_for() {
+    let (env, ids) = at_a_placeholder();
+    let (kinds, doc) = warning_kinds(&env, &["goto", &ids[WITHOUT].to_hex()]);
+    assert!(kinds.is_empty(), "{doc}");
+    assert_eq!(doc["removed"], 1, "{doc}");
+    assert_eq!(files(env.root()), holding(&[("keep.txt", "k\n")]));
+    assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn a_placeholder_is_replaced_as_the_link_it_stands_for() {
+    let (env, ids) = at_a_placeholder();
+    for (to, then, warned) in [
+        (AS_FILE, &[("out", "other\n")], &[][..]),
+        (AS_FOLDER, &[("out/inside.txt", "in\n")], &[]),
+        (
+            AS_OTHER_LINK,
+            &[("out", "../elsewhere")],
+            &["placeholders_written"],
+        ),
+    ] {
+        let (kinds, doc) = warning_kinds(&env, &["goto", &ids[to].to_hex()]);
+        assert_eq!(kinds, warned, "{doc}");
+        let mut wanted = holding(then);
+        wanted.insert("keep.txt".into(), b"k\n".to_vec());
+        assert_eq!(files(env.root()), wanted);
+        assert!(changed(&env).is_empty());
+        goto(&env, &ids[HOLDING_OUT].to_hex());
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_stopped_switch_finishes_by_removing_a_placeholder_as_its_link() {
+    let (env, ids) = at_a_placeholder();
+    let to = ids[KEEP_CHANGED].to_hex();
+    // Stopped once `keep.txt` is written, before `out` goes.
+    let out = env
+        .bolt()
+        .args(["goto", &to])
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(env.root().join(".bolt/state/journal").exists());
+    let (kinds, doc) = warning_kinds(&env, &["goto", &to]);
+    assert_eq!(kinds, ["switch_finished"], "{doc}");
+    assert_eq!(files(env.root()), holding(&[("keep.txt", "K\n")]));
+    assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn a_placeholder_you_changed_is_unsaved_work() {
+    let (env, ids) = at_a_placeholder();
+    std::fs::write(env.root().join("out"), "mine\n").unwrap();
+    assert_eq!(changed(&env), ["out"]);
+    let out = env
+        .bolt()
+        .args(["goto", &ids[WITHOUT].to_hex()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let said = text(&out.stderr);
+    assert!(
+        said.contains("in the way") && said.contains("\n  out"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read(env.root().join("out")).unwrap(), b"mine\n");
 }

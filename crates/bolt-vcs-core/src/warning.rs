@@ -7,8 +7,15 @@ use crate::text::escape;
 pub const DAMAGED_PACK: &str = "damaged_pack";
 /// A stored copy couldn't be read for a reason other than damage, though another copy worked.
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
+/// A pack couldn't be opened or searched for a reason other than damage, such as no permission.
+pub const PACK_UNREADABLE: &str = "pack_unreadable";
 /// Small packs were merged after a command, but one or more couldn't be: the command happened.
 pub const PACK_NOT_MERGED: &str = "pack_not_merged";
+/// `tidy` left a pack as it is: it couldn't read it, or couldn't remove it.
+pub const PACK_NOT_TIDIED: &str = "pack_not_tidied";
+/// The command happened, but `state/` couldn't be flushed once its head moved, so a power cut
+/// soon after could undo it.
+pub const HEAD_NOT_FLUSHED: &str = "head_not_flushed";
 /// A change ID is shown whole because the line couldn't be read to shorten it.
 pub const CHANGE_ID_NOT_SHORTENED: &str = "change_id_not_shortened";
 /// The user's cache key can't be used, so the command went without its caches.
@@ -52,6 +59,8 @@ pub const PLACEHOLDERS_WRITTEN: &str = "placeholders_written";
 pub const FILES_IN_USE: &str = "files_in_use";
 /// Entries that changed after a switch was planned were left as they were.
 pub const CHANGED_SINCE_PLAN: &str = "changed_since_plan";
+/// Unsaved links that could come back only as files weren't thrown away.
+pub const LINKS_LEFT: &str = "links_left";
 /// A switch between saves was stopped, and is still to finish.
 pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 /// A command finished a switch between saves that was stopped, before doing its own work.
@@ -61,7 +70,8 @@ pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 
 /// Whether people see a warning of `kind` when the command then fails: it tells of files
 /// already written, by a switch the command finished first or by the command itself before it
-/// stopped, which happened all the same. Others are only in `--json`.
+/// stopped, or of a step whose head had moved, which happened all the same. Others are only in
+/// `--json`.
 #[must_use]
 pub fn told_on_failure(kind: &str) -> bool {
     [
@@ -69,6 +79,7 @@ pub fn told_on_failure(kind: &str) -> bool {
         CHANGED_SINCE_PLAN,
         PLACEHOLDERS_WRITTEN,
         NOT_WRITTEN_HERE,
+        HEAD_NOT_FLUSHED,
     ]
     .contains(&kind)
 }

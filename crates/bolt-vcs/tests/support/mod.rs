@@ -2,11 +2,13 @@
 // Each test file uses only some of them.
 #![allow(dead_code)]
 
+pub mod corpus;
 mod vs_git;
 
 #[allow(unused_imports)]
 pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -138,6 +140,96 @@ pub fn top_folder(dir: &Path) -> Listing {
     repo.store().listing(&save.root).unwrap()
 }
 
+/// Files by path, with what each holds.
+pub type Files = BTreeMap<String, Vec<u8>>;
+
+/// Every file below `dir` but `.bolt` and `.git` at the top, by path, with what it holds.
+pub fn files(dir: &Path) -> Files {
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = folders.pop() {
+        for e in std::fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if rel.is_empty() && (name == ".bolt" || name == ".git") {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                folders.push((e.path(), path));
+            } else {
+                found.insert(path, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    found
+}
+
+pub fn holding(entries: &[(&str, &str)]) -> Files {
+    entries
+        .iter()
+        .map(|(p, b)| ((*p).to_owned(), b.as_bytes().to_vec()))
+        .collect()
+}
+
+/// Writes the file `path` of the project, and the folders above it.
+pub fn write(env: &Env, path: &str, bytes: impl AsRef<[u8]>) {
+    let at = env.root().join(path);
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    std::fs::write(at, bytes).unwrap();
+}
+
+/// What `bolt status` finds changed.
+pub fn changed(env: &Env) -> Vec<String> {
+    let out = env.bolt().args(["status", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+pub fn main_tip(env: &Env) -> Id {
+    env.state().1.lines["main"]
+}
+
+/// The newest diary entry, with its ID.
+pub fn head(env: &Env) -> (Id, DiaryEntry) {
+    Repository::open(env.root()).unwrap().current().unwrap()
+}
+
+/// Every file of the save `save`, by path, with what it holds.
+pub fn saved_files(env: &Env, save: Id) -> Files {
+    let repo = Repository::open(env.root()).unwrap();
+    let store = repo.store();
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = folders.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                folders.push((e.id, path));
+            } else {
+                let mut bytes = Vec::new();
+                store.copy_content(&e.id, &mut bytes).unwrap();
+                found.insert(path, bytes);
+            }
+        }
+    }
+    found
+}
+
 /// Copies the folder `from`, everything in it, to `to`.
 pub fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -170,36 +262,149 @@ pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id
         .unwrap()
 }
 
+/// Stores the folder listings that hold `entries` (a path, a kind, and a file's bytes or a link's
+/// target) and returns the top one's ID.
+pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
+    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
+    for &(path, kind, bytes) in entries {
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind,
+            id: pack.add_content(bytes).unwrap(),
+            size: bytes.len() as u64,
+        });
+        // Every folder above, even one that holds only folders.
+        let mut at = up;
+        while let Some((above, _)) = at.rsplit_once('/') {
+            folders.entry(above.to_owned()).or_default();
+            at = above;
+        }
+        folders.entry(at.to_owned()).or_default();
+    }
+    // Longest path first, so a folder's listing is stored before the folder that holds it.
+    loop {
+        let path = folders.keys().max_by_key(|p| p.len()).cloned().unwrap();
+        let entries = folders.remove(&path).unwrap();
+        let id = pack
+            .add_record(
+                ObjectKind::FolderListing,
+                &Listing::new(entries).unwrap().encode(),
+            )
+            .unwrap();
+        if path.is_empty() {
+            return id;
+        }
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        let folder = Entry {
+            name: name.to_owned(),
+            kind: EntryKind::Folder,
+            id,
+            size: 0,
+        };
+        let held = folders.entry(up.to_owned()).or_default();
+        if !held.iter().any(|e| e.name == folder.name) {
+            held.push(folder);
+        }
+    }
+}
+
+/// Stores a listing holding the folder `.BOLT`, with `inside` in it. No listing Bolt makes holds
+/// one, so it is spelled `-BOLT`, then the bytes are changed.
+pub fn holding_bolt_spelling(pack: &mut PackSet, inside: Id) -> Id {
+    let listing = Listing::new(vec![Entry {
+        name: "-BOLT".into(),
+        kind: EntryKind::Folder,
+        id: inside,
+        size: 0,
+    }])
+    .unwrap()
+    .encode();
+    let at = listing.windows(5).position(|w| w == b"-BOLT").unwrap();
+    let mut hostile = listing;
+    hostile[at] = b'.';
+    pack.add_record(ObjectKind::FolderListing, &hostile)
+        .unwrap()
+}
+
+/// Stores a top listing holding `files` and a `.git` folder that holds a spelling of `.bolt`, and
+/// returns its ID. A folder walk never reads `.git`, so the bad listing is first met comparing
+/// the save with the folder, or with another save.
+pub fn with_bolt_spelling_under_git(pack: &mut PackSet, files: &[(&str, &[u8])]) -> Id {
+    let inside = listings(pack, &[("pwned", EntryKind::File, b"PWNED")]);
+    let git = holding_bolt_spelling(pack, inside);
+    let mut top: Vec<Entry> = files
+        .iter()
+        .map(|&(name, bytes)| Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id: pack.add_content(bytes).unwrap(),
+            size: bytes.len() as u64,
+        })
+        .collect();
+    top.push(Entry {
+        name: ".git".into(),
+        kind: EntryKind::Folder,
+        id: git,
+        size: 0,
+    });
+    let top = Listing::new(top).unwrap().encode();
+    pack.add_record(ObjectKind::FolderListing, &top).unwrap()
+}
+
+/// A started project at its first save, not on a line, with `saves` planted on `main` one after
+/// another, each holding its entries as for [`listings`]; their IDs. `bolt goto` then writes each.
+pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = main_tip(&env).to_hex();
+    env.bolt().args(["goto", &first]).assert().success();
+    let mut ids = Vec::new();
+    for entries in saves {
+        plant_save(env.root(), |pack| listings(pack, entries));
+        ids.push(main_tip(&env));
+    }
+    (env, ids)
+}
+
+/// Stores a save of the folder whose top listing is `root`, made on the save `parent` by its
+/// author; its ID.
+pub fn add_save(repo: &Repository, pack: &mut PackSet, root: Id, parent: Id) -> Id {
+    let made_on = repo.store().save(&parent, false).unwrap();
+    let save = Save {
+        root,
+        parents: vec![parent],
+        author: made_on.author,
+        saver: made_on.saver,
+        message: "Planted".into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: made_on.extra,
+    };
+    pack.add_record(ObjectKind::Save, &save.encode()).unwrap()
+}
+
 /// Commits, through Bolt's own library, a save on `main` whose top folder `build` makes.
 pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     let mut repo = Repository::open(root).unwrap();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     let (head, entry) = repo.current().unwrap();
     let parent_id = entry.state.lines["main"];
-    let parent = repo.store().save(&parent_id, false).unwrap();
+    let author = repo.store().save(&parent_id, false).unwrap().author;
     let mut pack = repo.new_packs().unwrap();
-    let save = Save {
-        root: build(&mut pack),
-        parents: vec![parent_id],
-        author: parent.author.clone(),
-        saver: parent.saver.clone(),
-        message: "Planted".into(),
-        change_id: ChangeId::random().unwrap(),
-        move_notes: vec![],
-        signature: vec![],
-        extra: parent.extra.clone(),
-    };
-    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let top = build(&mut pack);
+    let save_id = add_save(&repo, &mut pack, top, parent_id);
     let mut state = entry.state.clone();
     state.lines.insert("main".into(), save_id);
     let diary = DiaryEntry {
         parent: Some(head),
         action: Action::Command,
         command: "save".into(),
-        who: parent.author.clone(),
+        who: author,
         bolt_version: "0.1.0".into(),
         state,
-        safety_copies: vec![],
+        folder_change: None,
     };
     repo.commit(&lock, pack, &diary).unwrap();
 }
@@ -216,6 +421,20 @@ pub fn bolt_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> 
         .arg(format!(
             "ulimit -v {cap_kb} 2>/dev/null; exec \"$0\" \"$@\""
         ))
+        .arg(assert_cmd::cargo::cargo_bin("bolt"))
+        .args(args)
+        .current_dir(dir);
+    as_test_user(&mut cmd, config);
+    cmd
+}
+
+/// `bolt <args>` in `dir`, as the test user with its settings in `config`, allowed at most `most`
+/// open files at once.
+#[cfg(unix)]
+pub fn bolt_with_open_files(config: &Path, dir: &Path, most: u32, args: &[&str]) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!("ulimit -n {most} && exec \"$0\" \"$@\""))
         .arg(assert_cmd::cargo::cargo_bin("bolt"))
         .args(args)
         .current_dir(dir);
@@ -300,6 +519,26 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
             };
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A stdout every write to fails, for a reason other than its reader going: a file opened only
+/// to read on Windows, the full device on Linux.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn failing_stdout(env: &Env) -> std::fs::File {
+    #[cfg(windows)]
+    {
+        let path = env.config().join("out");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::File::open(path).unwrap()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = env;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
     }
 }
 

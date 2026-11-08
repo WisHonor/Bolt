@@ -2,14 +2,20 @@
 
 use std::fmt::{self, Write as _};
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use bolt_core::changes::{Endings, Lines, Tag, only_line_endings};
-use bolt_core::diary::Position;
+use bolt_core::changes::{Endings, Lines, Tag, eol_only, only_line_endings};
+use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
+use bolt_core::shelf::ShelfInfo;
+use bolt_core::switch::DiscardOutcome;
 use bolt_core::text::{escape, thousands};
+use bolt_core::tidy::TidyReport;
+use bolt_core::undo::{Effect, Taken};
 use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
 
@@ -62,6 +68,314 @@ pub fn change_json(c: &FileChange) -> Value {
     })
 }
 
+/// A step undone or redone as JSON (docs/json.md, `bolt undo --json`).
+pub fn step_json(t: &Taken) -> Value {
+    let effects: Vec<Value> = t.effects.iter().map(effect_json).collect();
+    let action = match t.action {
+        Action::Undo(_) => "undo",
+        Action::Redo(_) => "redo",
+        Action::Command => "jump",
+    };
+    json!({
+        "entry": t.step.to_hex(),
+        "action": action,
+        "command": t.entry.command,
+        "time_ms": t.entry.who.time_ms,
+        "effects": effects,
+        "written": t.applied.written,
+        "removed": t.applied.removed,
+    })
+}
+
+fn effect_json(e: &Effect) -> Value {
+    let hex = |id: &Option<Id>| id.map(|id| id.to_hex());
+    match e {
+        Effect::Line { name, from, to } => {
+            json!({"kind": "line", "name": name, "from": hex(from), "to": hex(to)})
+        }
+        Effect::Position { from, to } => json!({
+            "kind": "position",
+            "from": position_json(from),
+            "to": position_json(to),
+        }),
+        Effect::ShelfAdded { label, save } => {
+            json!({"kind": "shelf_added", "label": label, "save": save.to_hex()})
+        }
+        Effect::ShelfGone { label, save } => {
+            json!({"kind": "shelf_gone", "label": label, "save": save.to_hex()})
+        }
+        Effect::Tags => json!({"kind": "tags"}),
+        Effect::ServerLines => json!({"kind": "server_lines"}),
+        Effect::Files { from, to } => {
+            json!({"kind": "files", "from": from.to_hex(), "to": to.to_hex()})
+        }
+    }
+}
+
+/// What a step taken did, in one line for people: undone, redone, or gone to by `undo --to`.
+/// `went` is the entry `undo --to` went to, when the step's command was one. `named` gives a
+/// save's short change ID, and its message's first line if it can be read. The shelves `--shelve`
+/// made (`shelved`) are told on lines of their own.
+pub fn step_line(
+    t: &Taken,
+    went: Option<&Id>,
+    shelved: &[(String, Id)],
+    named: &mut dyn FnMut(&Id) -> (String, Option<String>),
+) -> String {
+    let mut command = escape(&t.entry.command, false);
+    if let Some(went) = went {
+        let _ = write!(command, " --to {}", went.short_hex());
+    }
+    let (redo, jump) = (
+        matches!(t.action, Action::Redo(_)),
+        t.action == Action::Command,
+    );
+    let mut line = match t.action {
+        Action::Undo(_) => format!("Undid {command}"),
+        Action::Redo(_) => format!("Redid {command}"),
+        Action::Command => format!("Went back to entry {} ({command})", t.step.short_hex()),
+    };
+    // The save a step made is the one a line moved to. `undo --to`, recorded as `undo`, makes
+    // none: it moves lines to saves that were there.
+    let made = t.effects.iter().find_map(|e| match e {
+        Effect::Line { from, to, .. } if !jump && t.entry.command != "undo" => {
+            if redo {
+                *to
+            } else {
+                *from
+            }
+        }
+        _ => None,
+    });
+    if let Some(save) = made {
+        let (short, message) = named(&save);
+        let _ = write!(line, " {short}");
+        if let Some(message) = message {
+            let _ = write!(line, " \"{}\"", escape(&message, false));
+        }
+    }
+    let (mut parts, mut moved, mut files) = (Vec::new(), false, false);
+    let again = |what: String| match t.action {
+        Action::Undo(_) => format!("back {what}"),
+        Action::Redo(_) => format!("{what} again"),
+        Action::Command => what,
+    };
+    for e in &t.effects {
+        match e {
+            Effect::Line { name, to, .. } => {
+                moved = true;
+                let name = escape(name, false);
+                parts.push(match to {
+                    Some(to) if jump => format!("{name} is at {}", named(to).0),
+                    Some(to) if redo => format!("{name} is at {} again", named(to).0),
+                    Some(to) => format!("{name} is back at {}", named(to).0),
+                    None => format!("line {name} is gone"),
+                });
+            }
+            Effect::Position { to, .. } => {
+                moved = true;
+                parts.push(again(match to {
+                    Position::OnLine(line) => {
+                        let tip = t.after.lines.get(line).map(|s| named(s).0);
+                        format!("on {} at {}", escape(line, false), tip.unwrap_or_default())
+                    }
+                    Position::AtSave(save) => format!("at save {}", named(save).0),
+                }));
+            }
+            Effect::ShelfAdded { label, save } => {
+                if !shelved.iter().any(|(_, s)| s == save) {
+                    parts.push(format!("shelf {} is back", escape(label, false)));
+                }
+            }
+            Effect::ShelfGone { label, .. } => {
+                parts.push(format!("shelf {} is gone", escape(label, false)));
+            }
+            Effect::Tags if redo => parts.push("the tags changed again".to_owned()),
+            Effect::Tags => parts.push("the tags changed back".to_owned()),
+            Effect::ServerLines if redo => parts.push("the server lines changed again".to_owned()),
+            Effect::ServerLines => parts.push("the server lines changed back".to_owned()),
+            Effect::Files { .. } => files = true,
+        }
+    }
+    if files {
+        let count = |n: usize| match n {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        parts.push(match (t.applied.written, t.applied.removed) {
+            (0, 0) => "no file needed changing".to_owned(),
+            (0, removed) => format!("{} removed", count(removed)),
+            (written, removed) => {
+                // An undo that leaves the project where it was puts files back.
+                let written = if moved || redo || jump {
+                    format!("{} written", count(written))
+                } else {
+                    format!("{} back", count(written))
+                };
+                match removed {
+                    0 => written,
+                    removed => format!("{written}, {removed} removed"),
+                }
+            }
+        });
+    }
+    if !parts.is_empty() {
+        let _ = write!(line, ": {}", parts.join(", "));
+    }
+    // A save undone leaves its files as they are.
+    if !redo && !files && made.is_some() {
+        line.push_str("; its changes show as unsaved");
+    }
+    line.push('.');
+    line
+}
+
+/// What `undo --to` did for a lost `head`, in one line for people: the entry it made current, and
+/// where that leaves the project. `named` names a save as for [`step_line`].
+pub fn picked_up_line(t: &Taken, named: &mut dyn FnMut(&Id) -> (String, Option<String>)) -> String {
+    let at = match &t.after.position {
+        Position::OnLine(line) => {
+            let tip = t.after.lines.get(line).map(|s| titled(named, s));
+            format!("on {} at {}", escape(line, false), tip.unwrap_or_default())
+        }
+        Position::AtSave(save) => format!("at save {}", titled(named, save)),
+    };
+    format!(
+        "Made entry {} ({}) the current one: {at}. No file was changed: bolt status shows how \
+         your files differ from that save.",
+        t.step.short_hex(),
+        escape(&t.entry.command, false)
+    )
+}
+
+/// A diary entry as `bolt undo --list --json` gives it (docs/json.md, "An entry").
+pub fn entry_json(id: &Id, entry: &DiaryEntry, effects: &[Effect]) -> Value {
+    let (action, target) = match &entry.action {
+        Action::Command => ("command", None),
+        Action::Undo(step) => ("undo", Some(step.to_hex())),
+        Action::Redo(step) => ("redo", Some(step.to_hex())),
+    };
+    let effects: Vec<Value> = effects.iter().map(effect_json).collect();
+    json!({
+        "entry": id.to_hex(),
+        "action": action,
+        "target": target,
+        "command": entry.command,
+        "time_ms": entry.who.time_ms,
+        "effects": effects,
+        "first": entry.parent.is_none(),
+    })
+}
+
+/// What a diary entry did, as `bolt undo --list` tells it: its command, and the step it undid or
+/// redid, then what changed. `named` names a save as for [`step_line`]; `files` counts the files
+/// two saves differ in, if it can read them.
+pub fn entry_line(
+    entry: &DiaryEntry,
+    effects: &[Effect],
+    named: &mut dyn FnMut(&Id) -> (String, Option<String>),
+    files: &mut dyn FnMut(Id, Id) -> Option<usize>,
+) -> String {
+    let mut line = match (&entry.action, entry.command.as_str()) {
+        // `undo --to` records the steps it makes as `undo`; the step line names them so too.
+        (Action::Command, "undo") => "undo --to".to_owned(),
+        _ => escape(&entry.command, false),
+    };
+    if let Action::Undo(step) | Action::Redo(step) = &entry.action {
+        let _ = write!(line, " of {}", step.short_hex());
+    }
+    if entry.parent.is_none() {
+        line.push_str(": the diary's first entry, which can't be undone");
+        return line;
+    }
+    let mut parts = Vec::new();
+    for e in effects {
+        parts.push(match e {
+            Effect::Line {
+                name,
+                from: None,
+                to: Some(to),
+            } => format!("line {} made at {}", escape(name, false), titled(named, to)),
+            Effect::Line {
+                name, to: Some(to), ..
+            } => format!("{} moved to {}", escape(name, false), titled(named, to)),
+            Effect::Line { name, to: None, .. } => format!("line {} gone", escape(name, false)),
+            Effect::Position {
+                to: Position::OnLine(on),
+                ..
+            } => {
+                let tip = entry.state.lines.get(on).map(|s| named(s).0);
+                format!("on {} at {}", escape(on, false), tip.unwrap_or_default())
+            }
+            Effect::Position {
+                to: Position::AtSave(save),
+                ..
+            } => format!("at save {}", named(save).0),
+            Effect::ShelfAdded { label, .. } => format!("shelf {} added", escape(label, false)),
+            Effect::ShelfGone { label, .. } => format!("shelf {} gone", escape(label, false)),
+            Effect::Tags => "the tags changed".to_owned(),
+            Effect::ServerLines => "the server lines changed".to_owned(),
+            Effect::Files { from, to } => match files(*from, *to) {
+                Some(0) => "only folders changed".to_owned(),
+                Some(1) => "1 file changed".to_owned(),
+                Some(n) => format!("{n} files changed"),
+                None => "files changed".to_owned(),
+            },
+        });
+    }
+    if !parts.is_empty() {
+        let _ = write!(line, ": {}", parts.join(", "));
+    }
+    line
+}
+
+/// A shelf as `bolt shelf --list --json` gives it (docs/json.md, "A shelf").
+pub fn shelf_json(s: &ShelfInfo) -> Value {
+    json!({
+        "label": s.label,
+        "save": s.save.to_hex(),
+        "message": s.message,
+        "line": s.line,
+        "saver": person_json(&s.saver),
+        "files": s.files,
+    })
+}
+
+/// A shelf as `bolt shelf --list` shows it: its number, right-aligned to `width`, when it was
+/// made, on which line, how many files it changes, and its message's first line.
+pub fn shelf_line(s: &ShelfInfo, width: usize, now_ms: i64) -> String {
+    let label = escape(&s.label, false);
+    let when = relative_time(s.saver.time_ms, s.saver.tz_offset_min, now_ms);
+    let at = match &s.line {
+        Some(line) => format!("on {}", escape(line, false)),
+        None => "at a save".to_owned(),
+    };
+    let files = match s.files {
+        0 => "only folders".to_owned(),
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
+    let title = escape(s.message.lines().next().unwrap_or_default(), false);
+    format!("{label:>width$}  {when}  {at}  {files}  \"{title}\"")
+}
+
+/// A save named, then its message's first line in quotes if it can be read.
+fn titled(named: &mut dyn FnMut(&Id) -> (String, Option<String>), save: &Id) -> String {
+    match named(save) {
+        (short, Some(message)) => format!("{short} \"{}\"", escape(&message, false)),
+        (short, None) => short,
+    }
+}
+
+/// The document of a command that failed after doing part of its work: `done` with the error
+/// and the warnings added.
+pub fn failed_document(mut done: Value, failure: &Failure, warnings: &[Warning]) -> Value {
+    done["bolt_json"] = BOLT_JSON.into();
+    done["error"] = error_json(failure);
+    done["warnings"] = warnings_json(warnings);
+    done
+}
+
 /// A file's change as people see it, its path escaped.
 pub fn change_line(c: &FileChange) -> String {
     let p = escape(c.path, false);
@@ -107,12 +421,13 @@ impl fmt::Display for LinesJson<'_> {
                 h.old_lines,
                 h.old_start
             )?;
-            for (j, (tag, line)) in h.lines.iter().enumerate() {
+            for (j, ((tag, line), eol)) in h.lines.iter().zip(eol_only(h)).enumerate() {
                 let text = Value::from(String::from_utf8_lossy(line).as_ref());
                 write!(
                     f,
-                    "{}{{\"tag\":\"{}\",\"text\":{text}}}",
+                    "{}{{{}\"tag\":\"{}\",\"text\":{text}}}",
                     if j == 0 { "" } else { "," },
+                    if eol { "\"eol_only\":true," } else { "" },
                     tag_name(*tag)
                 )?;
             }
@@ -179,7 +494,7 @@ pub fn write_lines(
             h.old_start, h.old_lines, h.new_start, h.new_lines
         );
         writeln!(out, "{}", paint("36", &at))?;
-        for (tag, line) in &h.lines {
+        for ((tag, line), eol) in h.lines.iter().zip(eol_only(h)) {
             let (mark, code) = match tag {
                 Tag::Same => (' ', ""),
                 Tag::Removed => ('-', "31"),
@@ -193,7 +508,11 @@ pub fn write_lines(
                 .split('\t')
                 .map(|piece| escape(piece, false))
                 .collect();
-            let shown = format!("{mark}{}", shown.join("\t"));
+            let mut shown = format!("{mark}{}", shown.join("\t"));
+            // Of a pair that differs only in its ending, the line that ends in CRLF says so.
+            if eol && line.ends_with(b"\r\n") {
+                shown.push_str(" (CRLF)");
+            }
             if code.is_empty() {
                 writeln!(out, "{shown}")?;
             } else {
@@ -207,53 +526,163 @@ pub fn write_lines(
     Ok(())
 }
 
-/// Standard output, remembering when whoever reads it went away (`bolt changes | head`), so the
-/// command can end quietly instead of failing.
+/// Standard output. What it couldn't take is remembered for the whole command (its reader went
+/// away, as in `bolt changes | head`, or a write failed), so [`ended`] can tell it on stderr.
 pub struct Stdout {
     inner: io::StdoutLock<'static>,
-    pub closed: bool,
+}
+
+/// A write that failed for another reason than its reader going away: its kind and the message.
+type Failed = OnceLock<(io::ErrorKind, String)>;
+
+/// The first write to stdout that failed so. Nothing more is written there after it, so what was
+/// printed is cut off rather than spliced.
+static FAILED: Failed = OnceLock::new();
+
+/// Whether stdout's reader went away.
+static GONE: AtomicBool = AtomicBool::new(false);
+
+/// Whether stdout couldn't take something the command printed: its reader went, or a write failed.
+fn lost() -> bool {
+    GONE.load(Ordering::Relaxed) || FAILED.get().is_some()
+}
+
+/// `write` done, unless a write kept in `failed` came before it; a failure of its own is kept,
+/// but not a reader gone, nor an interrupted write, which `write_all` tries again.
+fn guarded<T>(failed: &Failed, write: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let refused = |(kind, why): &(io::ErrorKind, String)| io::Error::new(*kind, why.clone());
+    if let Some(earlier) = failed.get() {
+        return Err(refused(earlier));
+    }
+    let passing = [io::ErrorKind::BrokenPipe, io::ErrorKind::Interrupted];
+    match write() {
+        Err(e) if passing.contains(&e.kind()) => Err(e),
+        Err(e) => {
+            let why = (e.kind(), format!("Bolt couldn't write its output: {e}"));
+            Err(refused(failed.get_or_init(|| why)))
+        }
+        done => done,
+    }
 }
 
 impl Stdout {
     pub fn new() -> Stdout {
         Stdout {
             inner: io::stdout().lock(),
-            closed: false,
         }
     }
+}
 
-    fn noting<T>(&mut self, done: io::Result<T>) -> io::Result<T> {
-        if let Err(e) = &done
-            && e.kind() == io::ErrorKind::BrokenPipe
-        {
-            self.closed = true;
-        }
-        done
+/// `done`, with a reader gone remembered.
+fn noting<T>(done: io::Result<T>) -> io::Result<T> {
+    if let Err(e) = &done
+        && e.kind() == io::ErrorKind::BrokenPipe
+    {
+        GONE.store(true, Ordering::Relaxed);
     }
+    done
 }
 
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let done = self.inner.write(buf);
-        self.noting(done)
+        noting(guarded(&FAILED, || self.inner.write(buf)))
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let done = self.inner.flush();
-        self.noting(done)
+        noting(guarded(&FAILED, || self.inner.flush()))
     }
 }
 
-/// Prints `text` on stdout, then `warnings` on stderr; a reader that went away ends it quietly.
-pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+/// Writes `text` on stdout. What it couldn't take is remembered, for [`ended`] to tell.
+pub fn print_out(text: &str) {
     let mut out = Stdout::new();
-    let done = out.write_all(text.as_bytes()).and_then(|()| out.flush());
-    if out.closed {
-        return Ok(());
+    let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+}
+
+/// Writes `line` on stderr. A line stderr can't take is lost, never a panic: its reader may have
+/// gone with stdout's.
+pub fn tell(line: &str) {
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
+/// What a changing command whose output was lost did all the same.
+const DONE: &str = "The command did its work all the same: only what Bolt printed was lost. bolt \
+                    status and bolt undo --list show where the project stands.";
+
+/// Ends a command, once it has printed what it could on stdout.
+///
+/// While stdout took it all, `warnings` go to stderr (a failure its `--json` document ends with
+/// lists them there instead), and `failure` comes back for [`print_error`].
+///
+/// When stdout couldn't take it (its reader went, or a write failed), stderr gets it as text, in
+/// this order: the command's own `failure`, with the text `taken` makes, only then, of what an
+/// `undo` or `redo` took before it stopped; then `warnings`, each once; then, only if a write
+/// failed, that it did, with `done`, what the command did all the same, as the hint. It all
+/// comes back told: the command's failure, or the write's; or nothing if it succeeded and only
+/// the reader went.
+pub fn ended(
+    failure: Option<Failure>,
+    taken: impl FnOnce() -> String,
+    warnings: &[Warning],
+    done: Option<&str>,
+) -> Result<(), Failure> {
+    if !lost() {
+        if !failure.as_ref().is_some_and(|f| f.printed) {
+            print_warnings(warnings);
+        }
+        return failure.map_or(Ok(()), Err);
     }
-    done?;
+    if let Some(failure) = &failure {
+        tell_failure(failure);
+    }
+    let _ = write!(io::stderr().lock(), "{}", taken());
     print_warnings(warnings);
-    Ok(())
+    let wrote = FAILED.get().map(|(_, why)| Failure {
+        message: why.clone(),
+        hint: done.map(str::to_owned),
+        printed: false,
+    });
+    if let Some(wrote) = &wrote {
+        tell_failure(wrote);
+    }
+    match failure.or(wrote) {
+        Some(failure) => Err(Failure {
+            printed: true,
+            ..failure
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Prints `text` on stdout, then ends the command with `warnings` ([`ended`]).
+pub fn print_quietly(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+    print_out(text);
+    ended(None, String::new, warnings, None)
+}
+
+/// [`print_quietly`], for a command that changed the project: if a write fails, the hint says the
+/// change stands.
+pub fn print_done(text: &str, warnings: &[Warning]) -> Result<(), Failure> {
+    print_out(text);
+    ended(None, String::new, warnings, Some(DONE))
+}
+
+/// Ends a command that printed as it read ([`ended`]): `done` is how that went, with the warnings
+/// it found by the end; `found` gives those it had so far, for when stdout stopped it first. Once
+/// stdout is lost, a failure in `done` is stdout's own, unless it is `printed`: then it is the
+/// command's, in the document stdout lost.
+pub fn listed(
+    done: Result<Vec<Warning>, Failure>,
+    found: impl FnOnce() -> Vec<Warning>,
+) -> Result<(), Failure> {
+    match done {
+        Ok(warnings) => ended(None, String::new, &warnings, None),
+        Err(failure) if failure.printed && lost() => {
+            ended(Some(failure), String::new, &found(), None)
+        }
+        Err(_) if lost() => ended(None, String::new, &found(), None),
+        Err(failure) => Err(failure),
+    }
 }
 
 /// The warnings of a `--json` document: `[{"kind": …, "message": …}]`.
@@ -264,25 +693,33 @@ pub fn warnings_json(warnings: &[Warning]) -> Value {
         .collect()
 }
 
-/// Prints each warning on stderr for people; a damaged copy also gets the hint.
+/// The warnings already on stderr. A command whose output failed tells its own, the store's among
+/// them, before the error, which then doesn't tell them again.
+static TOLD: Mutex<Vec<Warning>> = Mutex::new(Vec::new());
+
+/// Prints each warning on stderr for people, once; a damaged copy also gets the hint.
 pub fn print_warnings(warnings: &[Warning]) {
-    for warning in warnings {
-        eprintln!("warning: {}", warning.message);
+    let mut told = TOLD.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut damaged = false;
+    for w in warnings {
+        if !told.contains(w) {
+            tell(&format!("warning: {}", w.message));
+            damaged |= w.kind == warning::DAMAGED_PACK;
+            told.push(w.clone());
+        }
     }
-    if warnings.iter().any(|w| w.kind == warning::DAMAGED_PACK) {
-        eprintln!(
-            "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
-        );
+    if damaged {
+        tell("hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it.");
     }
 }
 
 /// A failed command's message and what to do about it. Text from outside Bolt in a message is
 /// already escaped by the error that made it; the lines Bolt writes itself are not.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Failure {
     pub message: String,
     pub hint: Option<String>,
-    /// The command's `--json` document already ends with this failure.
+    /// Already told: the command's `--json` document ends with it, or [`ended`] said it.
     pub printed: bool,
 }
 
@@ -329,30 +766,34 @@ fn document_end(more: Value, warnings: &[Warning], failure: Option<&Failure>) ->
 ///
 /// If `walk` fails before its first item, nothing is written and the failure comes back as it is,
 /// for the caller to print as a document of its own. If it fails later, the document is closed
-/// with the error in it instead of being cut off, and the failure comes back marked `printed`.
+/// with the error in it instead of being cut off, and the failure comes back marked `printed`,
+/// even when stdout loses that end: [`ended`] then tells it. If a write fails, the document stops
+/// there, and that failure comes back.
 pub fn stream_document<W: Write>(
     out: &mut W,
     opening: &str,
     walk: impl FnOnce(&mut dyn FnMut(&dyn fmt::Display) -> Result<(), Failure>) -> Result<(), Failure>,
     end: impl FnOnce() -> (Value, Vec<Warning>),
 ) -> Result<Vec<Warning>, Failure> {
-    let mut begun = false;
+    let (mut begun, mut cut) = (false, false);
     let mut item = |value: &dyn fmt::Display| -> Result<(), Failure> {
-        write!(out, "{}{value}", if begun { "," } else { opening })?;
+        let wrote = write!(out, "{}{value}", if begun { "," } else { opening });
+        cut |= wrote.is_err();
+        wrote?;
         begun = true;
         Ok(())
     };
     match walk(&mut item) {
-        Err(failure) if !begun => Err(failure),
+        Err(failure) if !begun || cut => Err(failure),
         walked => {
             let (more, warnings) = end();
             if !begun {
                 write!(out, "{opening}")?;
             }
             let closing = document_end(more, &warnings, walked.as_ref().err());
-            writeln!(out, "{closing}")?;
+            let closed = writeln!(out, "{closing}");
             match walked {
-                Ok(()) => Ok(warnings),
+                Ok(()) => closed.map(|()| warnings).map_err(Failure::from),
                 Err(failure) => Err(Failure {
                     printed: true,
                     ..failure
@@ -362,25 +803,38 @@ pub fn stream_document<W: Write>(
     }
 }
 
-/// Prints `failure`: to stdout as JSON with `--json`, else to stderr as text. `warnings` are what
-/// the command had found before it failed; only the JSON document lists them. A failure the
-/// command's own document already ends with is not printed again.
+/// Prints `failure`, unless it was already told: with `--json`, as a document on stdout, which
+/// lists `warnings`, what the command had found before it failed, and which [`ended`] tells on
+/// stderr if stdout can't take it; else on stderr as text, after the warnings a failure tells.
 pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
     if failure.printed {
         return;
     }
     if json {
-        println!("{}", error_document(failure, warnings));
-    } else {
-        for w in warnings.iter().filter(|w| warning::told_on_failure(w.kind)) {
-            eprintln!("warning: {}", w.message);
-        }
-        // Escaped once more, so that a piece nobody thought of escaping still can't drive the
-        // terminal. Only the newlines Bolt writes survive: the pieces had theirs escaped.
-        eprintln!("error: {}", escape(&failure.message, true));
-        if let Some(hint) = &failure.hint {
-            eprintln!("hint: {}", escape(hint, true));
-        }
+        print_out(&format!("{}\n", error_document(failure, warnings)));
+        let in_document = Failure {
+            printed: true,
+            ..failure.clone()
+        };
+        let _ = ended(Some(in_document), String::new, warnings, None);
+        return;
+    }
+    let told: Vec<Warning> = warnings
+        .iter()
+        .filter(|w| warning::told_on_failure(w.kind))
+        .cloned()
+        .collect();
+    print_warnings(&told);
+    tell_failure(failure);
+}
+
+/// `failure`'s message and hint on stderr. Escaped once more, so that a piece nobody thought of
+/// escaping still can't drive the terminal; only the newlines Bolt writes survive, the pieces
+/// having had theirs escaped.
+fn tell_failure(failure: &Failure) {
+    tell(&format!("error: {}", escape(&failure.message, true)));
+    if let Some(hint) = &failure.hint {
+        tell(&format!("hint: {}", escape(hint, true)));
     }
 }
 
@@ -473,6 +927,81 @@ impl<W: Write> Progress<W> {
     }
 }
 
+/// What `bolt discard` did, for people; `everywhere` when it was given no paths.
+pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
+    let n = done.restored.len() + done.removed.len();
+    let count = |n: usize, one: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {one}s"),
+    };
+    // Folders count only where no file does.
+    let what = if n == 0 {
+        count(done.folders, "folder")
+    } else {
+        count(n, "file")
+    };
+    // A deleted file put back loses nothing, so it needs no copy.
+    let copies = match done.safety_copies {
+        0 => String::new(),
+        k if k == n && n == 1 => " (a safety copy of it was kept)".into(),
+        k if k == n => " (a safety copy of each was kept)".into(),
+        1 => " (a safety copy of the 1 that held unsaved work was kept)".into(),
+        k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
+    };
+    let nothing = n == 0 && done.folders == 0;
+    // The warning that follows names what stayed and says why.
+    let said = match (nothing, everywhere) {
+        (true, true) if !done.applied.changed_since_plan.is_empty() => {
+            "Nothing was discarded: your files changed while Bolt was discarding them. Run bolt \
+             discard again."
+                .to_owned()
+        }
+        (true, false) if !done.applied.changed_since_plan.is_empty() => {
+            "Nothing was discarded there: your files changed while Bolt was discarding them. Run \
+             the same bolt discard again."
+                .to_owned()
+        }
+        (true, _) if done.links_left.len() == 1 => {
+            "Nothing was discarded: the unsaved link stays as it is.".to_owned()
+        }
+        (true, _) if !done.links_left.is_empty() => {
+            "Nothing was discarded: the unsaved links stay as they are.".to_owned()
+        }
+        (true, true) => "Nothing to discard: your files match your last save.".to_owned(),
+        (true, false) => "Nothing to discard there: it matches your last save.".to_owned(),
+        _ => format!("Threw away your unsaved changes in {what}{copies}."),
+    };
+    said + "\n"
+}
+
+/// What `bolt tidy` did, for people.
+pub fn tidied(report: &TidyReport) -> String {
+    let freed = report.bytes_before.saturating_sub(report.bytes_after);
+    let removed = match report.packs_removed {
+        1 => "1 pack".to_owned(),
+        n => format!("{n} packs"),
+    };
+    let mut text = format!(
+        "Freed {} ({removed} removed, {} written).\n",
+        format_size(freed),
+        report.packs_written
+    );
+    match report.packs_young {
+        0 => {}
+        1 => {
+            text += "Left 1 pack changed in the last 24 hours as it is: a later bolt tidy frees \
+                     what it holds that nothing needs.\n";
+        }
+        n => {
+            text += &format!(
+                "Left {n} packs changed in the last 24 hours as they are: a later bolt tidy \
+                 frees what they hold that nothing needs.\n"
+            );
+        }
+    }
+    text
+}
+
 /// 1024-based size: bytes below 1 KiB, else KB, MB or GB with one decimal.
 #[allow(clippy::cast_precision_loss)]
 pub fn format_size(bytes: u64) -> String {
@@ -527,6 +1056,64 @@ mod tests {
     const CHANGES: &str = r#"{"bolt_json":1,"changes":["#;
 
     #[test]
+    fn an_undone_jump_says_where_it_went_and_leaves_nothing_unsaved() {
+        use bolt_core::diary::State;
+        use bolt_core::writeout::Applied;
+        use std::collections::BTreeMap;
+        let (old, new, went) = (Id([1; 32]), Id([2; 32]), Id([3; 32]));
+        let on = |save| State {
+            lines: BTreeMap::from([("main".to_owned(), save)]),
+            tags: None,
+            position: Position::OnLine("main".into()),
+            shelves: vec![],
+            server_lines: None,
+        };
+        // A step that moved main and wrote no file, undone.
+        let undone = |command: &str| Taken {
+            step: Id([4; 32]),
+            entry: DiaryEntry {
+                parent: Some(Id([5; 32])),
+                action: Action::Command,
+                command: command.into(),
+                who: Person {
+                    name: "Ada".into(),
+                    email: "a@example.com".into(),
+                    time_ms: 0,
+                    tz_offset_min: 0,
+                },
+                bolt_version: String::new(),
+                state: on(new),
+                folder_change: None,
+            },
+            action: Action::Undo(Id([4; 32])),
+            before: on(new),
+            after: on(old),
+            effects: vec![Effect::Line {
+                name: "main".into(),
+                from: Some(new),
+                to: Some(old),
+            }],
+            applied: Applied::default(),
+        };
+        let mut named = |id: &Id| (id.short_hex(), Some("Add b".to_owned()));
+        let (old, new) = (old.short_hex(), new.short_hex());
+        assert_eq!(
+            step_line(&undone("undo"), Some(&went), &[], &mut named),
+            format!(
+                "Undid undo --to {}: main is back at {old}.",
+                went.short_hex()
+            )
+        );
+        // A save undone leaves its changes unsaved, and says so.
+        assert_eq!(
+            step_line(&undone("save"), None, &[], &mut named),
+            format!(
+                "Undid save {new} \"Add b\": main is back at {old}; its changes show as unsaved."
+            )
+        );
+    }
+
+    #[test]
     fn a_stream_that_fails_after_its_first_items_ends_as_one_document_with_the_error() {
         let (out, ended) = stream(SAVES, json!({}), |each| {
             each(&json!({"message": "one"}))?;
@@ -560,6 +1147,66 @@ mod tests {
         let failure = ended.unwrap_err();
         assert!(!failure.printed);
         assert_eq!(failure.message, "Can't read it.");
+    }
+
+    /// Takes `room` bytes, then refuses every write.
+    struct Full {
+        held: Vec<u8>,
+        room: usize,
+    }
+
+    impl Write for Full {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.held.len() + buf.len() > self.room {
+                return Err(io::Error::other("the disk is full"));
+            }
+            self.held.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const ONE: &str = r#"{"message":"one"}"#;
+
+    /// Streams a document whose walk fails into a writer with room for the opening and `ONE`
+    /// only: the failure that comes back.
+    fn stream_into_full(
+        walk: impl FnOnce(
+            &mut dyn FnMut(&dyn fmt::Display) -> Result<(), Failure>,
+        ) -> Result<(), Failure>,
+    ) -> Failure {
+        let mut out = Full {
+            held: Vec::new(),
+            room: SAVES.len() + ONE.len(),
+        };
+        stream_document(&mut out, SAVES, walk, || (json!({}), vec![damaged()])).unwrap_err()
+    }
+
+    #[test]
+    fn a_stream_that_cant_be_written_gives_back_its_own_failure_or_the_writes() {
+        // The walk failed after an item, and the end with its error couldn't be written: its
+        // failure, as in the document, for `ended` to tell.
+        let back = stream_into_full(|each| {
+            each(&ONE)?;
+            Err(failure())
+        });
+        assert_eq!(
+            (back.message.as_str(), back.printed),
+            ("Can't read it.", true)
+        );
+        // A write that fails stops it there: the write's failure.
+        let back = stream_into_full(|each| {
+            each(&ONE)?;
+            each(&ONE)?;
+            Err(failure())
+        });
+        assert_eq!(
+            (back.message.as_str(), back.printed),
+            ("the disk is full", false)
+        );
     }
 
     #[test]
@@ -629,6 +1276,91 @@ mod tests {
             ]
         );
         assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
+    }
+
+    #[test]
+    fn tidy_says_what_it_freed_and_what_it_left_young() {
+        let report = TidyReport {
+            to_free: 3000,
+            bytes_before: 5000,
+            bytes_after: 2000,
+            packs_removed: 1,
+            packs_written: 1,
+            packs_young: 1,
+        };
+        assert_eq!(
+            tidied(&report),
+            "Freed 2.9 KB (1 pack removed, 1 written).\nLeft 1 pack changed in the last 24 hours \
+             as it is: a later bolt tidy frees what it holds that nothing needs.\n"
+        );
+        let nothing = TidyReport::default();
+        assert_eq!(
+            tidied(&nothing),
+            "Freed 0 B (0 packs removed, 0 written).\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_is_kept_and_refuses_the_writes_after_it() {
+        let failed = Failed::new();
+        let fine = || Ok(1);
+        // A reader gone, or a write interrupted and tried again, isn't kept.
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Interrupted] {
+            let gone = guarded(&failed, || Err::<usize, _>(io::Error::from(kind)));
+            assert_eq!(gone.unwrap_err().kind(), kind);
+            assert_eq!(guarded(&failed, fine).unwrap(), 1);
+        }
+        // Any other failure is, and a write that would go through after it is refused with it.
+        let full = guarded(&failed, || {
+            Err::<usize, _>(io::Error::other("the disk is full"))
+        });
+        let full = full.unwrap_err();
+        assert_eq!(
+            full.to_string(),
+            "Bolt couldn't write its output: the disk is full"
+        );
+        let refused = guarded(&failed, fine).unwrap_err();
+        assert_eq!(
+            (refused.kind(), refused.to_string()),
+            (full.kind(), full.to_string())
+        );
+    }
+
+    #[test]
+    fn a_discard_whose_files_all_changed_again_says_nothing_was_discarded() {
+        use bolt_core::writeout::Applied;
+        let nothing = DiscardOutcome {
+            restored: vec![],
+            removed: vec![],
+            folders: 0,
+            applied: Applied::default(),
+            safety_copies: 0,
+            folder_change: None,
+            links_left: vec![],
+        };
+        assert_eq!(
+            discarded(&nothing, true),
+            "Nothing to discard: your files match your last save.\n"
+        );
+        // Every file it planned to throw away changed before it was written: they don't match.
+        let changed_again = DiscardOutcome {
+            applied: Applied {
+                changed_since_plan: vec!["a.txt".into()],
+                ..Applied::default()
+            },
+            ..nothing
+        };
+        assert_eq!(
+            discarded(&changed_again, true),
+            "Nothing was discarded: your files changed while Bolt was discarding them. Run bolt \
+             discard again.\n"
+        );
+        // Given paths, it says the same of them, so running it again throws away no more.
+        assert_eq!(
+            discarded(&changed_again, false),
+            "Nothing was discarded there: your files changed while Bolt was discarding them. Run \
+             the same bolt discard again.\n"
+        );
     }
 
     #[test]

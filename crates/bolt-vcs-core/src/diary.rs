@@ -5,8 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::encoding::{DecodeError, Reader, Writer, varint_len};
 use crate::id::{Flavor, Id, hash_record};
-use crate::listing::EntryKind;
-use crate::names::MAX_PATH_BYTES;
 use crate::save::{Person, read_person, write_person};
 
 pub const MAX_NAME_BYTES: usize = 255;
@@ -17,7 +15,6 @@ pub const MAX_LINES: u64 = 100_000;
 pub const MAX_TAGS: u64 = 100_000;
 pub const MAX_SHELVES: u64 = 10_000;
 pub const MAX_SERVERS: u64 = 64;
-pub const MAX_SAFETY_COPIES: u64 = 1_000_000;
 pub const MAX_GIT_TAG_OBJECTS: u64 = 16;
 pub const MAX_GIT_TAG_OBJECT_BYTES: usize = 1 << 20;
 
@@ -74,13 +71,12 @@ pub struct State {
     pub server_lines: Option<Id>,
 }
 
-/// A file Bolt kept before overwriting it, so the command can be undone.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SafetyCopy {
-    pub path: String,
-    pub kind: EntryKind,
-    pub id: Id,
-    pub size: u64,
+/// What a command did to the project folder: a switch from one save to another. The two must
+/// differ; an entry with the same save twice encodes but will not decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderChange {
+    pub from: Id,
+    pub to: Id,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,8 +87,8 @@ pub struct DiaryEntry {
     pub who: Person,
     pub bolt_version: String,
     pub state: State,
-    /// Paths must be unique; an entry with duplicates encodes but will not decode.
-    pub safety_copies: Vec<SafetyCopy>,
+    /// `None` for a command that changed no file.
+    pub folder_change: Option<FolderChange>,
 }
 
 /// Whether a line name may hold `c` (decision 012).
@@ -254,14 +250,10 @@ impl DiaryEntry {
             w.id(save);
         }
         write_optional_id(&mut w, s.server_lines);
-        let mut copies: Vec<&SafetyCopy> = self.safety_copies.iter().collect();
-        copies.sort_by(|a, b| a.path.cmp(&b.path));
-        w.varint(copies.len() as u64);
-        for c in copies {
-            w.string(&c.path);
-            w.u8(c.kind as u8);
-            w.id(&c.id);
-            w.varint(c.size);
+        w.bool(self.folder_change.is_some());
+        if let Some(change) = &self.folder_change {
+            w.id(&change.from);
+            w.id(&change.to);
         }
         w.into_bytes()
     }
@@ -308,26 +300,18 @@ impl DiaryEntry {
             shelves.push((label, r.id()?));
         }
         let server_lines = read_optional_id(&mut r)?;
-        let n = r.count(MAX_SAFETY_COPIES, "safety-copy count")?;
-        let mut safety_copies: Vec<SafetyCopy> = Vec::new();
-        for _ in 0..n {
-            let path = r.string(MAX_PATH_BYTES, "safety-copy path")?.to_owned();
-            if safety_copies.last().is_some_and(|c| c.path >= path) {
+        let folder_change = if r.bool()? {
+            let from = r.id()?;
+            let to = r.id()?;
+            if from == to {
                 return Err(DecodeError::Invalid(
-                    "safety copies not strictly sorted by path",
+                    "a folder change from a save to itself",
                 ));
             }
-            let kind = EntryKind::from_u8(r.u8()?)
-                .ok_or(DecodeError::Invalid("unknown safety-copy kind"))?;
-            let id = r.id()?;
-            let size = r.varint()?;
-            safety_copies.push(SafetyCopy {
-                path,
-                kind,
-                id,
-                size,
-            });
-        }
+            Some(FolderChange { from, to })
+        } else {
+            None
+        };
         r.finish()?;
         Ok(DiaryEntry {
             parent,
@@ -342,7 +326,7 @@ impl DiaryEntry {
                 shelves,
                 server_lines,
             },
-            safety_copies,
+            folder_change,
         })
     }
 
@@ -604,7 +588,7 @@ mod tests {
                 shelves: vec![],
                 server_lines: None,
             },
-            safety_copies: vec![],
+            folder_change: None,
         }
     }
 
@@ -628,7 +612,7 @@ mod tests {
             "01046d61696e", // on line "main"
             "00",           // no shelves
             "00",           // no server lines
-            "00",           // no safety copies
+            "00",           // no folder change
         ]
         .concat();
         let bytes = minimal().encode();
@@ -659,7 +643,7 @@ mod tests {
             &"33".repeat(32), // its save
             "01",             // server lines: the list's ID follows
             &"22".repeat(32), // the server-lines list
-            "00",             // no safety copies
+            "00",             // no folder change
         ]
         .concat();
         let bytes = e.encode();
@@ -694,8 +678,9 @@ mod tests {
             DiaryEntry::decode(&bytes),
             Err(DecodeError::LimitExceeded { .. })
         ));
-        // A has-tags byte and a has-server-lines byte of 2: the 10th and the 2nd from the end.
-        for from_end in [10, 2] {
+        // A has-tags, has-server-lines and has-folder-change byte of 2: the 10th, the 2nd and the
+        // last from the end.
+        for from_end in [10, 2, 1] {
             let mut bytes = good.clone();
             let at = bytes.len() - from_end;
             bytes[at] = 2;
@@ -737,24 +722,34 @@ mod tests {
     }
 
     #[test]
-    fn unsorted_safety_copies_are_rejected() {
-        let copy = |p: &str| SafetyCopy {
-            path: p.into(),
-            kind: EntryKind::File,
-            id: Id([3; 32]),
-            size: 9,
-        };
+    fn a_folder_change_round_trips() {
         let mut e = minimal();
-        e.safety_copies = vec![copy("b"), copy("a")];
-        // Encoding sorts them, so build the bad bytes by hand: swap the two copies.
+        e.folder_change = Some(FolderChange {
+            from: Id([0x5a; 32]),
+            to: Id([0x6b; 32]),
+        });
         let bytes = e.encode();
-        let one = 1 + 1 + 1 + 32 + 1; // path, kind, id, size
-        let start = bytes.len() - 2 * one;
-        let mut bad = bytes[..start].to_vec();
-        bad.extend_from_slice(&bytes[start + one..]);
-        bad.extend_from_slice(&bytes[start..start + one]);
-        assert!(DiaryEntry::decode(&bytes).is_ok());
-        assert!(DiaryEntry::decode(&bad).is_err());
+        // The flag takes the place of the zero byte an entry without one ends with.
+        let without = hex(&minimal().encode());
+        let flag_and_saves = format!("01{}{}", "5a".repeat(32), "6b".repeat(32));
+        let expected = format!("{}{flag_and_saves}", &without[..without.len() - 2]);
+        assert_eq!(hex(&bytes), expected);
+        assert_eq!(DiaryEntry::decode(&bytes).unwrap(), e);
+    }
+
+    #[test]
+    fn a_folder_change_from_a_save_to_itself_is_refused() {
+        let mut e = minimal();
+        e.folder_change = Some(FolderChange {
+            from: Id([7; 32]),
+            to: Id([7; 32]),
+        });
+        assert_eq!(
+            DiaryEntry::decode(&e.encode()),
+            Err(DecodeError::Invalid(
+                "a folder change from a save to itself"
+            ))
+        );
     }
 
     /// A tag list written by hand, so that it can break rules a `BTreeMap` keeps.
@@ -1131,7 +1126,7 @@ mod tests {
             at_save in prop::option::of(id_strategy()),
             shelves in prop::collection::btree_map(".{1,10}", id_strategy(), 0..4),
             server_lines in prop::option::of(id_strategy()),
-            copies in prop::collection::btree_map(".{1,20}", (1u8..=6, id_strategy(), any::<u64>()), 0..4),
+            folder_change in prop::option::of((id_strategy(), id_strategy())),
             time in any::<i64>(),
         ) {
             let mut e = minimal();
@@ -1149,9 +1144,9 @@ mod tests {
             e.state.tags = tags;
             e.state.shelves = shelves.into_iter().collect();
             e.state.server_lines = server_lines;
-            e.safety_copies = copies.into_iter().map(|(path, (k, id, size))| SafetyCopy {
-                path, kind: EntryKind::from_u8(k).unwrap(), id, size,
-            }).collect();
+            e.folder_change = folder_change
+                .filter(|(from, to)| from != to)
+                .map(|(from, to)| FolderChange { from, to });
             let bytes = e.encode();
             prop_assert_eq!(DiaryEntry::decode(&bytes).unwrap(), e.clone());
             prop_assert_eq!(e.id(), hash_record(Flavor::DiaryEntry, &bytes));

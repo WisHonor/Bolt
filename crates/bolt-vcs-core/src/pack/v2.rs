@@ -16,6 +16,13 @@ const ID_LEN: u64 = 32;
 /// Kind, offset, uncompressed size, stored size.
 const LINE_LEN: u64 = 25;
 
+/// How many bytes the index of `count` objects takes.
+pub(super) fn index_len(count: u64) -> u64 {
+    count
+        .saturating_mul(ID_LEN.saturating_add(LINE_LEN))
+        .saturating_add(HEAD_LEN)
+}
+
 /// The index of `entries`, which are sorted by ID.
 pub(super) fn encode<'a>(entries: impl Iterator<Item = &'a IndexEntry> + Clone) -> Vec<u8> {
     let mut fan_out = [0u32; 256];

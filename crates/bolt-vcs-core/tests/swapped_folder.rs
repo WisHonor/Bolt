@@ -37,13 +37,14 @@ fn a_folder_swapped_before_its_files_are_looked_at_is_refused() {
         fs::rename(&other, &swap).unwrap();
     });
     let req = SaveRequest {
-        message: "Swapped",
+        message: Some("Swapped"),
         who: &who,
         command: "save",
         accept_crlf: false,
         git_excludes: None,
         new_line: None,
         only: None,
+        amend: false,
     };
     match save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true) {
         Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "sub/a.txt"),

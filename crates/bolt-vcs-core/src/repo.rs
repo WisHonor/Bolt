@@ -15,15 +15,18 @@ use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 use crate::config::{self, ConfigError};
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
-use crate::fsio::{self, fault_point, write_atomic};
+use crate::fsio::{self, Done, fault_point, write_atomic};
 use crate::id::{ChangeId, Id};
-use crate::keyed::{self, KEY_LEN};
+use crate::journal::Journal;
+use crate::keyed::KEY_LEN;
 use crate::listing::Listing;
+use crate::names::NameError;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, is_damage};
 use crate::text::escape;
+use crate::warning::{self, Warning};
 
 pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";
 
@@ -103,6 +106,29 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Bolt data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
+    /// A folder of a save holds a spelling of `.bolt`, which no listing Bolt makes holds: of
+    /// `save` once the command knows which save it was reading. `current` only when the project
+    /// is on that save, which a save read for another reason (a shelf's base, say) isn't.
+    #[error(
+        "{} holds a name spelled like Bolt's own folder (.bolt), which Bolt never writes, so it \
+         can't be used.",
+        save.map_or_else(|| "A save".to_owned(), |id| format!("Save {}", id.short_hex()))
+    )]
+    BoltName { save: Option<Id>, current: bool },
+    /// `tidy` found a kind of object it doesn't follow, so it can't tell what that one keeps.
+    #[error(
+        "Bolt can't tidy this project: pack {} holds {what}, which this version of Bolt doesn't \
+         follow.",
+        escape(&path.display().to_string(), false)
+    )]
+    CantTidy { path: PathBuf, what: &'static str },
+    /// `state/head` is missing, isn't an entry's ID, or names an entry the store can't give: no
+    /// command can tell which state is current, though every save is in the store.
+    #[error(
+        "Bolt can't tell which diary entry is the project's current one: .bolt/state/head {}.",
+        escape(detail, false)
+    )]
+    HeadLost { detail: String },
     /// `state/journal`, the record of a stopped switch between saves, can't be used. It is
     /// neither carried out nor passed over, since the folder may be half switched.
     #[error(
@@ -123,6 +149,13 @@ pub enum RepoError {
         escape(detail, true)
     )]
     SwitchInUse { detail: String },
+    /// One of Bolt's own files in `.bolt` couldn't be replaced.
+    #[error(
+        "Bolt couldn't write {}: {}",
+        escape(&path.display().to_string(), false),
+        escape(&source.to_string(), false)
+    )]
+    CantWrite { path: PathBuf, source: io::Error },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -193,6 +226,25 @@ impl RepoError {
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
                 }
+                // Every switch away from the save the project is on reads it first.
+                RepoError::BoltName { current: true, .. } => {
+                    "Bolt never makes such a save, so another program put it there. Nothing was \
+                     changed: ask for help before trying to repair it."
+                }
+                RepoError::BoltName { .. } => {
+                    "Bolt never makes such a save, so another program put it there. Nothing was \
+                     changed: go on from another save, and ask for help before trying to repair \
+                     this one."
+                }
+                RepoError::CantTidy { .. } => {
+                    "Nothing was removed, and the project works as before. A version of Bolt that \
+                     follows them can tidy it."
+                }
+                RepoError::HeadLost { .. } => {
+                    "Your saves are safe. `bolt undo --list` lists the entries where the diary may \
+                     have stopped, newest first, and `bolt undo --to <entry>` makes one of them \
+                     current, without changing any file."
+                }
                 // Removing the journal is no roll back: the files stay as the switch left them.
                 RepoError::JournalUnusable { .. } => {
                     "Nothing was changed. Your files are as the stopped switch left them, and \
@@ -216,6 +268,15 @@ impl RepoError {
                     "Close that program, then run the command again: Bolt finishes the switch \
                      before anything else."
                 }
+                RepoError::CantWrite { source, .. } if fsio::held(source) => {
+                    "Another program, such as a virus scanner or sync tool, may have it open: run \
+                     the command again in a moment. If it keeps failing, check that Bolt can write \
+                     to the .bolt folder."
+                }
+                RepoError::CantWrite { .. } => {
+                    "Check that Bolt can write to the .bolt folder and that its drive has free \
+                     space, then run the command again."
+                }
                 RepoError::Config(e) => return e.hint(),
                 RepoError::CacheKey { .. } => {
                     "If that file is there, delete it: Bolt makes a new key, and rebuilds the \
@@ -226,6 +287,19 @@ impl RepoError {
             }
             .to_owned(),
         )
+    }
+
+    /// This error, met reading the folders of the save `save`: a spelling of `.bolt` is told as
+    /// that save's, `current` when the project is on it.
+    #[must_use]
+    pub(crate) fn in_save(self, save: Id, current: bool) -> RepoError {
+        match self {
+            RepoError::BoltName { save: None, .. } => RepoError::BoltName {
+                save: Some(save),
+                current,
+            },
+            other => other,
+        }
     }
 
     /// `hint`, then `then`, for a refusal that stopped `bolt start` or `bolt import` after `.bolt`
@@ -248,6 +322,13 @@ impl From<StoreError> for RepoError {
             StoreError::Pack(p) => p.into(),
             // A save past the limits of the format is no save to trust (decision 025).
             StoreError::SaveTooLarge { .. } => damaged(e.to_string()),
+            // Only a listing's names are held to the rules that refuse it.
+            StoreError::Decode(DecodeError::InvalidName(NameError::BoltSpelling)) => {
+                RepoError::BoltName {
+                    save: None,
+                    current: false,
+                }
+            }
             other => RepoError::Store(other),
         }
     }
@@ -281,6 +362,25 @@ pub(crate) fn refused(e: io::Error) -> RepoError {
         io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => damaged(e.to_string()),
         _ => e.into(),
     }
+}
+
+/// `e`, from opening the lock file at `shown`, as `refused` takes it, naming the file.
+fn lock_error(shown: &Path, e: io::Error) -> RepoError {
+    match refused(e) {
+        RepoError::Io(e) => naming(shown, "open", e).into(),
+        e => e,
+    }
+}
+
+/// `e`, met when Bolt went to `doing` the file at `shown`, naming the file.
+fn naming(shown: &Path, doing: &str, e: io::Error) -> io::Error {
+    let shown = escape(&shown.display().to_string(), false);
+    io::Error::new(e.kind(), format!("Bolt couldn't {doing} {shown}: {e}"))
+}
+
+/// `e`, from replacing Bolt's own file at `path`, naming it.
+pub(crate) fn cant_write(path: PathBuf, e: io::Error) -> RepoError {
+    RepoError::CantWrite { path, source: e }
 }
 
 /// The folders that must be real folders, never links or junctions (storage-format.md §10),
@@ -325,15 +425,15 @@ struct Held {
 }
 
 impl Held {
-    /// The fixed folders of the `.bolt` folder `bolt`, each opened from the one above it.
-    fn open(bolt: &Path) -> Result<Held, RepoError> {
-        let top = Dir::open_top(bolt).map_err(|e| unreal(bolt, e))?;
-        let store = fixed(&top, bolt, "store")?;
+    /// The fixed folders of the `.bolt` folder `bolt`, held open as `top`, each made in the one
+    /// above it if missing, then opened from it.
+    fn make(top: Dir, bolt: &Path) -> Result<Held, RepoError> {
+        let store = make_fixed(&top, bolt, "store")?;
         Ok(Held {
-            state: fixed(&top, bolt, "state")?,
-            packs: Arc::new(fixed(&store, &bolt.join("store"), "packs")?),
-            tmp: Arc::new(fixed(&top, bolt, "tmp")?),
-            cache: fixed(&top, bolt, "cache")?,
+            state: make_fixed(&top, bolt, "state")?,
+            packs: Arc::new(make_fixed(&store, &bolt.join("store"), "packs")?),
+            tmp: Arc::new(make_fixed(&top, bolt, "tmp")?),
+            cache: make_fixed(&top, bolt, "cache")?,
             bolt: top,
         })
     }
@@ -344,6 +444,16 @@ impl Held {
 fn fixed(dir: &Dir, path: &Path, name: &str) -> Result<Dir, RepoError> {
     dir.open_dir(OsStr::new(name))
         .map_err(|e| unreal(&path.join(name), e))
+}
+
+/// `fixed`, made first if nothing has the name, with `dir` flushed after.
+fn make_fixed(dir: &Dir, path: &Path, name: &str) -> Result<Dir, RepoError> {
+    match dir.create_dir(OsStr::new(name)) {
+        Ok(()) => dir.sync()?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    fixed(dir, path, name)
 }
 
 /// What opening the fixed folder at `path` found: a link, junction or file there is damage, as
@@ -552,23 +662,45 @@ pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
     })
 }
 
-fn parse_head(bytes: &[u8]) -> Result<Id, RepoError> {
-    std::str::from_utf8(bytes)
-        .ok()
-        .and_then(|t| t.strip_suffix('\n'))
-        .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h))
-        .ok_or_else(|| damaged("state/head is not a lowercase fingerprint and a newline"))
+/// What `state/head` holds.
+enum Head {
+    At(Id),
+    Missing,
+    /// Anything but an entry's ID, in lowercase hex, and a newline.
+    Garbled,
 }
 
-/// `head` in `state`, the `state` folder of the `.bolt` folder `bolt`, or `None` before the first
-/// commit.
-fn read_head(state: &Dir, bolt: &Path) -> Result<Option<Id>, RepoError> {
+impl Head {
+    fn id(&self) -> Option<Id> {
+        match self {
+            Head::At(id) => Some(*id),
+            Head::Missing | Head::Garbled => None,
+        }
+    }
+}
+
+/// `head` in `state`, the `state` folder of the `.bolt` folder `bolt`. A link or special file
+/// there is damage.
+fn read_head(state: &Dir, bolt: &Path) -> Result<Head, RepoError> {
     let shown = bolt.join("state").join("head");
     let max = safe_fs::MAX_HEAD_BYTES;
-    match safe_fs::read_capped_in(state, OsStr::new("head"), &shown, max) {
-        Ok(bytes) => parse_head(&bytes).map(Some),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(refused(e)),
+    let bytes = match safe_fs::read_capped_in(state, OsStr::new("head"), &shown, max) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Head::Missing),
+        // Longer than any head.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Ok(Head::Garbled),
+        Err(e) => return Err(refused(e)),
+    };
+    let id = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|t| t.strip_suffix('\n'))
+        .and_then(|h| Id::from_hex(h).filter(|id| id.to_hex() == h));
+    Ok(id.map_or(Head::Garbled, Head::At))
+}
+
+fn head_lost(detail: impl Into<String>) -> RepoError {
+    RepoError::HeadLost {
+        detail: detail.into(),
     }
 }
 
@@ -586,11 +718,10 @@ pub struct Repository {
     format: FormatInfo,
     store: Store,
     /// The head read before the store was last loaded, so every object it reaches is
-    /// registered. `None` when there was no head yet.
+    /// registered. `None` when there was no head yet, or none that is an entry's ID.
     head: Option<Id>,
-    /// What seals this handle's caches: one for this handle alone unless `set_cache_key` gave
-    /// the user's own.
-    cache_key: [u8; KEY_LEN],
+    /// The user's own key, which seals the caches; without it none is read or written.
+    cache_key: Option<[u8; KEY_LEN]>,
 }
 
 /// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
@@ -695,7 +826,14 @@ fn diary_of(bolt: &Path) -> Result<Diary, RepoError> {
     let state = bolt.join("state");
     // A start can stop before it makes `state`.
     let head = match Dir::open_top(&state) {
-        Ok(dir) => read_head(&dir, bolt)?,
+        Ok(dir) => match read_head(&dir, bolt)? {
+            Head::Garbled => {
+                return Err(damaged(
+                    "state/head is not a lowercase fingerprint and a newline",
+                ));
+            }
+            head => head.id(),
+        },
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(unreal(&state, e)),
     };
@@ -814,7 +952,7 @@ impl Repository {
                 shelves: vec![],
                 server_lines: None,
             },
-            safety_copies: vec![],
+            folder_change: None,
         };
         repo.commit_first(&lock, packs, &entry)?;
         Ok(repo)
@@ -874,8 +1012,18 @@ impl Repository {
         let root = &resolved(root);
         let bolt = root.join(".bolt");
         let found = Repository::check_new_with(root, owner_check)?;
+        let top = Dir::open_top(root).map_err(|e| {
+            let shown = escape(&root.display().to_string(), false);
+            let said = format!("Bolt couldn't open the project folder {shown}: {e}");
+            io::Error::new(e.kind(), said)
+        })?;
         if !found {
-            fsio::create_dir_durable(&bolt)?;
+            match top.create_dir(OsStr::new(".bolt")) {
+                Ok(()) => top.sync()?,
+                // One made meanwhile, by another start say, is checked below as this one would be.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
             // Some drives give a new folder another owner, or none, and every later command
             // would refuse it.
             let made = check_bolt(root, owner_check).map_err(|e| {
@@ -895,13 +1043,10 @@ impl Repository {
                 .into());
             }
         }
-        // Not `.bolt` itself: one gone since its check must not be made again unchecked.
-        for dir in fixed_folders(&bolt).iter().skip(1) {
-            fsio::create_dir_durable(dir)?;
-        }
-        check_shape(&bolt)?;
+        // Opened, never made: one gone since its check must not be made again unchecked. Each
+        // folder in it is made and opened through the one above, so none through a link.
+        let held = Held::make(fixed(&top, root, ".bolt")?, &bolt)?;
         bolt_platform::hide_path(&bolt)?;
-        let held = Held::open(&bolt)?;
         let tmp = bolt.join("tmp");
         let packs = bolt.join("store").join("packs");
         let mut repo = Repository {
@@ -915,7 +1060,7 @@ impl Repository {
                 features: BTreeSet::new(),
             },
             head: None,
-            cache_key: keyed::run_key()?,
+            cache_key: None,
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
         // `start` too.
@@ -940,8 +1085,9 @@ impl Repository {
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
         let id = self.move_head(lock, packs, entry)?;
-        let held = &self.held;
-        write_atomic(&held.tmp, &held.bolt, "format", FORMAT_TEXT.as_bytes())?;
+        let (held, name) = (&self.held, "format");
+        write_atomic(&held.tmp, &held.bolt, name, FORMAT_TEXT.as_bytes())
+            .map_err(|e| cant_write(self.bolt.join(name), e))?;
         // Only once it is a project, so a stopped merge never leaves it unfinished.
         crate::merge::merge_after_commit(self, lock);
         Ok(id)
@@ -1010,21 +1156,15 @@ impl Repository {
             &bolt.join("store"),
             "packs",
         )?);
-        // The head first: its pack was in the store before the head pointed at it.
-        let head = read_head(&state, &bolt)?;
+        // The head first: its pack was in the store before the head pointed at it. One that is
+        // lost is found by `current`, so that `undo --list` and `--to` can still open the project.
+        let head = read_head(&state, &bolt)?.id();
         let store = Store::open_in(Arc::clone(&packs_dir), &packs)?;
         // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
         // project found damaged is left as it was.
-        for name in ["tmp", "cache"] {
-            match top.create_dir(OsStr::new(name)) {
-                Ok(()) => top.sync()?,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
         let held = Held {
-            tmp: Arc::new(fixed(&top, &bolt, "tmp")?),
-            cache: fixed(&top, &bolt, "cache")?,
+            tmp: Arc::new(make_fixed(&top, &bolt, "tmp")?),
+            cache: make_fixed(&top, &bolt, "cache")?,
             bolt: top,
             state,
             packs: packs_dir,
@@ -1038,20 +1178,40 @@ impl Repository {
             format,
             store,
             head,
-            cache_key: keyed::run_key()?,
+            cache_key: None,
         };
         repo.clean_tmp()?;
         Ok(repo)
     }
 
     /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
-    /// command holds the change lock; otherwise it may be a pack being written right now.
+    /// command holds the change lock; otherwise it may be a pack being written right now. The
+    /// lock file is only opened to read, so a project the user can't write still opens; where it
+    /// can't be, or a leftover can't be removed, the leftovers wait for a command that can.
     fn clean_tmp(&self) -> Result<(), RepoError> {
-        let file = self.open_lock_file()?;
-        if file.try_lock().is_err() {
-            return Ok(());
+        let shown = self.lock_path();
+        let file = match safe_fs::open_regular_in(&self.held.state, OsStr::new("lock"), &shown) {
+            Ok(file) => file,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(e) => return Err(lock_error(&shown, e)),
+        };
+        if file.try_lock().is_ok() {
+            self.clear_tmp(&ChangeLock { _file: file });
         }
-        self.remove_temp_files(&ChangeLock { _file: file })
+        Ok(())
+    }
+
+    /// `remove_temp_files` as far as it gets: a leftover this user can't remove (in a project
+    /// shared read-only, say) is only litter, so it fails nothing.
+    fn clear_tmp(&self, lock: &ChangeLock) {
+        let _ = self.remove_temp_files(lock);
     }
 
     /// Deletes what Bolt left in `tmp/`, under the lock, so none of it is being written: its files,
@@ -1068,8 +1228,14 @@ impl Repository {
     }
 
     fn open_lock_file(&self) -> Result<File, RepoError> {
-        let shown = self.bolt.join("state").join("lock");
-        fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown).map_err(refused)
+        let shown = self.lock_path();
+        fsio::open_lock_file(&self.held.state, OsStr::new("lock"), &shown)
+            .map_err(|e| lock_error(&shown, e))
+    }
+
+    /// `state/lock`, to name it.
+    fn lock_path(&self) -> PathBuf {
+        self.bolt.join("state").join("lock")
     }
 
     #[must_use]
@@ -1097,16 +1263,17 @@ impl Repository {
         &self.held.bolt
     }
 
-    /// The key that seals this project's caches for this handle.
+    /// The key that seals this project's caches, if `set_cache_key` gave one.
     #[must_use]
-    pub fn cache_key(&self) -> &[u8; KEY_LEN] {
-        &self.cache_key
+    pub fn cache_key(&self) -> Option<&[u8; KEY_LEN]> {
+        self.cache_key.as_ref()
     }
 
     /// Seals caches with `key` from now on: the user's own, which the command line reads, so
-    /// that they last from one command to the next.
+    /// that they last from one command to the next. Until then no cache is read or written: what
+    /// a key for one run seals, no later run trusts, and writing it would replace a good cache.
     pub fn set_cache_key(&mut self, key: [u8; KEY_LEN]) {
-        self.cache_key = key;
+        self.cache_key = Some(key);
     }
 
     /// `state/`, held open.
@@ -1160,22 +1327,51 @@ impl Repository {
     }
 
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
+    /// `HeadLost` when it is missing or isn't an entry's ID.
     pub fn head(&self) -> Result<Id, RepoError> {
-        let head = self.bolt.join("state").join("head");
-        let max = safe_fs::MAX_HEAD_BYTES;
-        let read = safe_fs::read_capped_in(&self.held.state, OsStr::new("head"), &head, max);
-        parse_head(&read.map_err(refused)?)
+        match read_head(&self.held.state, &self.bolt)? {
+            Head::At(id) => Ok(id),
+            Head::Missing => Err(head_lost("is missing")),
+            Head::Garbled => Err(head_lost("isn't a diary entry's ID and a newline")),
+        }
     }
 
     /// The newest diary entry this handle can see: the one when it was opened, or when it
-    /// last took the change lock or committed. Read from the store.
+    /// last took the change lock or committed. Read from the store. Every command reads it, so
+    /// every command stops at a lost head, `HeadLost`.
     pub fn current(&self) -> Result<(Id, DiaryEntry), RepoError> {
         let id = match self.head {
             Some(id) => id,
             None => self.head()?,
         };
-        let bytes = self.store.read_record(&id, ObjectKind::DiaryEntry)?;
-        Ok((id, DiaryEntry::decode(&bytes)?))
+        let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
+        let bytes = match self.store.read_record(&id, ObjectKind::DiaryEntry) {
+            Ok(bytes) => bytes,
+            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+                return Err(lost("which the store doesn't hold".to_owned()));
+            }
+            Err(StoreError::Pack(e)) if is_damage(&e) => {
+                return Err(lost(format!("which can't be read ({e})")));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let entry =
+            DiaryEntry::decode(&bytes).map_err(|e| lost(format!("which can't be read ({e})")))?;
+        Ok((id, entry))
+    }
+
+    /// The diary entry `id`. One the store lacks, holds as another kind of record, or can't
+    /// decode, is damage to the diary, named.
+    pub fn entry(&self, id: &Id) -> Result<DiaryEntry, RepoError> {
+        let bytes = match self.store.read_record(id, ObjectKind::DiaryEntry) {
+            Ok(bytes) => bytes,
+            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+                return Err(damaged(format!("the diary has no entry {id}")));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        DiaryEntry::decode(&bytes)
+            .map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
     }
 
     /// The tags of `state`; empty if it has none.
@@ -1207,6 +1403,7 @@ impl Repository {
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<ChangeLock, RepoError> {
         let file = self.open_lock_file()?;
+        let locking = |e| naming(&self.lock_path(), "lock", e);
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
@@ -1218,10 +1415,14 @@ impl Repository {
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .unwrap_or_default();
                 on_wait(&info);
-                file.lock()?;
+                file.lock().map_err(locking)?;
             }
-            Err(TryLockError::Error(e)) => return Err(e.into()),
+            Err(TryLockError::Error(e)) => return Err(locking(e).into()),
         }
+        let lock = ChangeLock { _file: file };
+        // Opening the project couldn't clear `tmp/` where a drive locks only a file open for
+        // writing.
+        self.clear_tmp(&lock);
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
@@ -1229,18 +1430,19 @@ impl Repository {
             "pid {}\ncommand {command}\nstarted {started}\n",
             std::process::id()
         );
-        let held = &self.held;
-        write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())?;
-        // Another command may have committed since this handle was opened.
-        self.head = read_head(&self.held.state, &self.bolt)?;
+        let (held, name) = (&self.held, "lock-info");
+        write_atomic(&held.tmp, &held.state, name, info.as_bytes())
+            .map_err(|e| cant_write(self.state_dir().join(name), e))?;
+        // Another command may have committed since this handle was opened. A lost head stops
+        // the command at `current`, unless it is the `undo --to` that picks one up.
+        self.head = read_head(&self.held.state, &self.bolt)?.id();
         self.store.refresh()?;
-        Ok(ChangeLock { _file: file })
+        Ok(lock)
     }
 
     /// Stores `entry` in the last of `packs`, moves that pack into the store, registers all of
     /// them, then replaces `state/head`. The command has happened exactly when the head is
-    /// replaced (decision 010), so an `Io` error from the final folder sync does not mean
-    /// "nothing changed".
+    /// replaced, so nothing after that fails it.
     /// Then merges the small packs; problems doing so are only warnings, kept with the store's.
     pub fn commit(
         &mut self,
@@ -1253,13 +1455,19 @@ impl Repository {
         Ok(id)
     }
 
-    /// `commit`, without the merge.
+    /// `commit`, without the merge. A finished switch's journal, left when removing it failed, is
+    /// removed first: once `head` moves on, nothing could tell it was finished.
     fn move_head(
         &mut self,
         lock: &ChangeLock,
         packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
+        if let Some(journal) = Journal::read(self)?
+            && self.head == Some(journal.target)
+        {
+            Journal::remove_before_head(self, lock)?;
+        }
         let id = self.store_entry(lock, packs, entry)?;
         fault_point("commit:before-head")?;
         self.move_head_to(lock, id)?;
@@ -1270,7 +1478,7 @@ impl Repository {
     /// `state/head` as it is: a switch stores its entry before it changes the folder.
     pub fn store_entry(
         &mut self,
-        _lock: &ChangeLock,
+        lock: &ChangeLock,
         mut packs: PackSet,
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
@@ -1278,19 +1486,40 @@ impl Repository {
         // Refuse an entry that would not read back before storing it.
         DiaryEntry::decode(&bytes)?;
         let id = packs.add_record(ObjectKind::DiaryEntry, &bytes)?;
-        for path in packs.finish()? {
-            self.store.register(&path);
-        }
+        self.store_packs(lock, packs)?;
         Ok(id)
     }
 
-    /// Points `state/head` at `id`, a diary entry already stored: how a switch between saves
-    /// takes effect.
+    /// Moves `packs` into the store, for what a command must read back before its diary entry is
+    /// ready. Nothing names what they hold until an entry does.
+    pub(crate) fn store_packs(
+        &mut self,
+        _lock: &ChangeLock,
+        packs: PackSet,
+    ) -> Result<(), RepoError> {
+        for path in packs.finish()? {
+            self.store.register(&path);
+        }
+        Ok(())
+    }
+
+    /// Points `state/head` at `id`, a diary entry already stored: how a command takes effect.
+    /// Once the new head is in place, a flush of `state/` that fails is only a warning.
     pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
-        let head = format!("{id}\n");
-        let held = &self.held;
-        write_atomic(&held.tmp, &held.state, "head", head.as_bytes())?;
+        let (name, head) = ("head", format!("{id}\n"));
+        let done = fsio::write_head(&self.held.tmp, &self.held.state, name, head.as_bytes())
+            .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         self.head = Some(id);
+        if let Done::NotFlushed(e) = done {
+            self.store.note(Warning::new(
+                warning::HEAD_NOT_FLUSHED,
+                format!(
+                    "The command happened, but Bolt couldn't flush .bolt/state to the disk after \
+                     it ({}), so a power cut soon after could undo it.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            ));
+        }
         Ok(())
     }
 }
@@ -1353,6 +1582,8 @@ mod tests {
             std::fs::create_dir_all(bolt.join(sub)).unwrap();
         }
         std::fs::write(bolt.join("format"), FORMAT_TEXT).unwrap();
+        // As `start` leaves it: opening a project never makes it.
+        std::fs::write(bolt.join("state").join("lock"), b"").unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
     }
@@ -1441,8 +1672,9 @@ mod tests {
     #[test]
     fn a_damaged_project_is_left_as_found() {
         // Not a damaged pack: packs are opened only when first searched, so opening the project
-        // doesn't find one.
-        for spoil in ["state/head"] {
+        // doesn't find one. Nor a garbled head: that is a lost head, which the project is opened
+        // to pick up.
+        for spoil in ["format"] {
             let (dir, repo) = project();
             drop(repo);
             let bolt = dir.path().join(".bolt");
@@ -1481,7 +1713,7 @@ mod tests {
                 shelves: vec![],
                 server_lines: None,
             },
-            safety_copies: vec![],
+            folder_change: None,
         }
     }
 
@@ -1661,9 +1893,65 @@ mod tests {
         for bad in ["xyz\n", upper.as_str(), no_newline.as_str(), ""] {
             std::fs::write(&head, bad).unwrap();
             assert!(
-                matches!(repo.head(), Err(RepoError::Damaged { .. })),
+                matches!(repo.head(), Err(RepoError::HeadLost { .. })),
                 "{bad:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_head_naming_a_damaged_or_undecodable_entry_is_lost() {
+        let (dir, mut repo) = project();
+        // The only copy of an entry, failing its check.
+        let bytes = entry(1).encode();
+        let flavor = ObjectKind::DiaryEntry.flavor().unwrap();
+        let damaged = crate::id::hash_record(flavor, &bytes);
+        let planted = [(ObjectKind::DiaryEntry, bytes.as_slice())];
+        crate::test_support::plant_damaged_copies(repo.packs_dir(), &planted);
+        // A record that checks out but isn't an entry.
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let undecodable = packs
+            .add_record(ObjectKind::DiaryEntry, b"not an entry")
+            .unwrap();
+        repo.store_packs(&lock, packs).unwrap();
+        drop((lock, repo));
+        for id in [damaged, undecodable] {
+            std::fs::write(dir.path().join(".bolt/state/head"), format!("{id}\n")).unwrap();
+            let read = Repository::open(dir.path()).unwrap().current();
+            match read {
+                Err(e @ RepoError::HeadLost { .. }) => {
+                    let why = format!(
+                        "names diary entry {}, which can't be read (",
+                        id.short_hex()
+                    );
+                    assert!(e.to_string().contains(&why), "{e}");
+                    assert!(e.hint().unwrap().starts_with("Your saves are safe"), "{e}");
+                }
+                other => panic!("{id}: {other:?}"),
+            }
+        }
+    }
+
+    /// A `.bolt` without `format` is a start or import that stopped, judged as before: a head
+    /// there that isn't an entry's ID is damage, not a lost head.
+    #[test]
+    fn a_garbled_head_without_format_is_still_damage() {
+        let who = entry(0).who;
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &who).unwrap());
+        std::fs::remove_file(dir.path().join(".bolt/format")).unwrap();
+        std::fs::write(dir.path().join(".bolt/state/head"), b"not an ID\n").unwrap();
+        let found = Repository::discover(dir.path()).map(drop);
+        let started = Repository::init(dir.path(), &who).map(drop);
+        for refused in [found, started] {
+            match refused {
+                Err(e @ RepoError::Damaged { .. }) => {
+                    let why = "state/head is not a lowercase fingerprint and a newline";
+                    assert!(e.to_string().contains(why), "{e}");
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 
@@ -1976,6 +2264,76 @@ mod tests {
         );
     }
 
+    /// A project shared read-only, say: reading needs no write to `state/lock` or `tmp/`, and a
+    /// command that would change the project names the file it can't open.
+    #[test]
+    fn a_project_the_user_cannot_write_still_reads() {
+        let dir = tempdir();
+        let (head, _) = Repository::init(dir.path(), &entry(0).who)
+            .unwrap()
+            .current()
+            .unwrap();
+        let bolt = dir.path().join(".bolt");
+        let (state, tmp) = (bolt.join("state"), bolt.join("tmp"));
+        let lock = state.join("lock");
+        // A stopped command's leftover, which this user can't remove.
+        let left = tmp.join(bolt_platform::temp_name());
+        std::fs::write(&left, b"half a pack").unwrap();
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&left)
+                .unwrap()
+        };
+        // The folders too, mode 0555 then on Unix (Windows ignores a folder's read-only flag).
+        let was = [&lock, &state, &tmp].map(|p| (p, std::fs::metadata(p).unwrap().permissions()));
+        let read_only = |on: bool| {
+            for (path, was) in &was {
+                let mut now = was.clone();
+                if on {
+                    now.set_readonly(true);
+                }
+                std::fs::set_permissions(path, now).unwrap();
+            }
+        };
+        read_only(true);
+        // root writes anyway, so there is nothing to test.
+        let root_user = std::fs::OpenOptions::new().write(true).open(&lock).is_ok();
+        let opened = Repository::open(dir.path()).map(|mut repo| {
+            let refused = repo.lock_for_change("save", &mut |_| {}).map(drop);
+            (repo, refused)
+        });
+        read_only(false);
+        #[cfg(windows)]
+        drop(held);
+        if root_user {
+            return;
+        }
+        let (repo, refused) = opened.unwrap();
+        assert_eq!(repo.current().unwrap().0, head);
+        assert!(left.exists());
+        let e = refused.unwrap_err();
+        assert!(e.to_string().contains(&lock.display().to_string()), "{e}");
+    }
+
+    /// Where a drive locks only a file open for writing, opening a project leaves `tmp/` as it
+    /// is; taking the lock to change the project clears it.
+    #[test]
+    fn taking_the_lock_clears_what_stopped_commands_left_in_tmp() {
+        let (dir, mut repo) = project();
+        let left = dir
+            .path()
+            .join(".bolt/tmp")
+            .join(bolt_platform::temp_name());
+        std::fs::write(&left, b"half a pack").unwrap();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        assert!(!left.exists());
+        drop(lock);
+    }
+
     /// Windows makes a link in `tmp/` before moving it into place, so a run that stops can leave
     /// one: it goes as a link, file and folder links alike, and what it points to stays. A link
     /// under another name stays too.
@@ -2081,7 +2439,8 @@ mod tests {
     fn a_misplaced_safe_folders_line_is_what_the_user_is_told() {
         let dir = tempdir();
         let misplaced = || -> Result<Vec<PathBuf>, ConfigError> {
-            Err(ConfigError::SafeFoldersNotAtTop {
+            Err(ConfigError::NotAtTop {
+                key: "safe-folders",
                 path: PathBuf::from("config.toml"),
             })
         };
@@ -2493,6 +2852,24 @@ mod tests {
         assert!(!bolt.exists() && !format_path(&root).exists());
     }
 
+    #[test]
+    fn start_names_a_project_folder_it_cannot_open() {
+        let dir = tempdir();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        // Gone while its owner is asked, so it can't be opened after the checks.
+        let check = |folder: &Path, _seen: bool| {
+            if folder == root && root.exists() {
+                std::fs::remove_dir(&root).unwrap();
+            }
+            Ok(())
+        };
+        let e = Repository::init_with(&root, &entry(0).who, &check)
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains(&root.display().to_string()), "{e}");
+    }
+
     /// A link that appears where `bolt start` is about to make `.bolt` is never followed.
     #[test]
     fn start_refuses_a_bolt_link_that_appears_while_it_starts() {
@@ -2526,6 +2903,39 @@ mod tests {
             started.map(|_| ())
         );
         assert!(!target.exists());
+    }
+
+    /// A link put in an unfinished `.bolt` once its shape was checked is refused, and nothing is
+    /// made where it points.
+    #[test]
+    fn start_never_makes_a_fixed_folder_through_a_link() {
+        for name in ["store", "state", "cache", "tmp"] {
+            let dir = tempdir();
+            let (root, target) = (dir.path().join("root"), dir.path().join("target"));
+            std::fs::create_dir_all(root.join(".bolt")).unwrap();
+            std::fs::create_dir(&target).unwrap();
+            // A `.bolt` above, with no `format`: the search for a project around this one asks
+            // its owner after this one was checked, and the link appears then.
+            std::fs::create_dir(dir.path().join(".bolt")).unwrap();
+            let link = root.join(".bolt").join(name);
+            let check = |folder: &Path, _seen: bool| {
+                if folder == dir.path() && std::fs::symlink_metadata(&link).is_err() {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&target, &link).unwrap();
+                    #[cfg(windows)]
+                    crate::test_support::junction(&link, &target);
+                }
+                Ok(())
+            };
+            let started = Repository::init_with(&root, &entry(0).who, &check);
+            assert!(
+                matches!(started, Err(RepoError::Damaged { .. })),
+                "{name}: {:?}",
+                started.map(|_| ())
+            );
+            let made: Vec<_> = std::fs::read_dir(&target).unwrap().collect();
+            assert!(made.is_empty(), "{name}: {made:?}");
+        }
     }
 
     /// With the inside unreadable, any look inside a `.bolt` the user may not use would fail and
@@ -2869,6 +3279,25 @@ mod tests {
     }
 
     #[test]
+    fn a_file_bolt_cant_replace_is_named_with_what_to_do() {
+        let failed = |source| RepoError::CantWrite {
+            path: PathBuf::from("/srv/work/.bolt/state/head"),
+            source,
+        };
+        let full = failed(io::Error::other("no space left"));
+        assert_eq!(
+            full.to_string(),
+            "Bolt couldn't write /srv/work/.bolt/state/head: no space left"
+        );
+        assert!(full.hint().unwrap().contains("free space"), "{full:?}");
+        // Code 32 means another program has the file open only on Windows.
+        let held = failed(io::Error::from_raw_os_error(32));
+        let hint = held.hint().unwrap();
+        assert_eq!(hint.contains("virus scanner"), cfg!(windows), "{hint}");
+        assert_eq!(hint.contains("free space"), !cfg!(windows), "{hint}");
+    }
+
+    #[test]
     fn the_refusal_names_the_group_and_both_ways_on() {
         let root = Path::new("/srv/work");
         let e = RepoError::AdminsNotElevated {
@@ -3187,5 +3616,38 @@ mod tests {
             tx.send(repo.head().unwrap()).unwrap();
         });
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_head_another_program_holds_past_every_try_is_named() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let b = commit(&mut repo, &entry(2)).unwrap();
+        let lock = repo.lock_for_change("undo", &mut |_| {}).unwrap();
+        let head = dir.path().join(".bolt").join("state").join("head");
+        // As a virus scanner or sync tool may hold it, for longer than Bolt tries.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&head)
+            .unwrap();
+        let started = Instant::now();
+        let e = repo.move_head_to(&lock, a).unwrap_err();
+        let took = started.elapsed();
+        drop(held);
+        // Ten tries, 100 ms apart.
+        assert!(took >= Duration::from_millis(900), "{took:?}");
+        let shown = escape(&head.display().to_string(), false);
+        let said = e.to_string();
+        assert!(
+            said.starts_with(&format!("Bolt couldn't write {shown}: ")),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("virus scanner"), "{e:?}");
+        assert_eq!(std::fs::read_to_string(&head).unwrap(), format!("{b}\n"));
+        let tmp = std::fs::read_dir(dir.path().join(".bolt").join("tmp")).unwrap();
+        assert_eq!(tmp.count(), 0);
     }
 }

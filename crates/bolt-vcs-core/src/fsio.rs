@@ -3,7 +3,7 @@
 //! held open, never by path.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -16,6 +16,10 @@ pub use bolt_platform::is_temp_name;
 
 use crate::safe_fs;
 
+/// A file another program holds is tried this many times, this far apart.
+pub(crate) const TRIES: u32 = 10;
+pub(crate) const BETWEEN_TRIES: Duration = Duration::from_millis(100);
+
 /// Creates a new, empty file in the folder `tmp`, named as `bolt_platform::temp_name` says:
 /// `tmp-` and 16 random lowercase hex digits. Returns it and its name.
 pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
@@ -27,16 +31,29 @@ pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
 /// Replaces `name` in the folder `to` with `bytes`, written in the folder `tmp` first, so that,
 /// even after a crash, it holds either the old or the new bytes, never a mix.
 pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    replace(tmp, to, name, bytes, true)
+    replace(tmp, to, name, bytes, true, rename_durable)
+}
+
+/// `write_atomic` for the head, `name` in the folder `state`: once it is renamed into place the
+/// command has happened, so a flush that fails after that is told apart from an error.
+pub(crate) fn write_head(tmp: &Dir, state: &Dir, name: &str, bytes: &[u8]) -> io::Result<Done> {
+    replace(tmp, state, name, bytes, true, rename_reported)
 }
 
 /// `write_atomic` for a cache, which is no part of what a command did, so crash tests don't
 /// stop there.
 pub(crate) fn write_cache(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    replace(tmp, to, name, bytes, false)
+    replace(tmp, to, name, bytes, false, rename_durable)
 }
 
-fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::Result<()> {
+fn replace<T>(
+    tmp: &Dir,
+    to: &Dir,
+    name: &str,
+    bytes: &[u8],
+    faults: bool,
+    rename: fn(&Dir, &OsStr, &Dir, &OsStr) -> io::Result<T>,
+) -> io::Result<T> {
     let (mut file, temp) = create_temp(tmp)?;
     let result = (|| {
         file.write_all(bytes)?;
@@ -45,7 +62,7 @@ fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::R
         if faults {
             fault_point("write:before-rename")?;
         }
-        rename_durable(tmp, &temp, to, OsStr::new(name))
+        rename(tmp, &temp, to, OsStr::new(name))
     })();
     if result.is_err() {
         // The temp file is only litter now; failing to remove it changes nothing.
@@ -57,37 +74,59 @@ fn replace(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8], faults: bool) -> io::R
 /// Moves `from` in the folder `from_dir` to `to` in the folder `to_dir`, replacing a file there,
 /// then flushes `to_dir` so the move survives a crash.
 pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
-    let mut retries = 0;
+    rename(from_dir, from, to_dir, to)?;
+    to_dir.sync()
+}
+
+/// A change made in a folder: flushed to the disk after it, or not.
+#[derive(Debug)]
+pub(crate) enum Done {
+    Flushed,
+    /// The change happened, but flushing its folder afterwards failed.
+    NotFlushed(io::Error),
+}
+
+/// `rename_durable` for `state/head`, whose move is the moment a command happens: a flush that
+/// fails after it comes back as `NotFlushed`, not as an error.
+pub(crate) fn rename_reported(
+    from_dir: &Dir,
+    from: &OsStr,
+    to_dir: &Dir,
+    to: &OsStr,
+) -> io::Result<Done> {
+    rename(from_dir, from, to_dir, to)?;
+    Ok(flush_after(to_dir, "head:renamed"))
+}
+
+/// Flushes `dir` after a change made in it, past the fault point `label`.
+pub(crate) fn flush_after(dir: &Dir, label: &'static str) -> Done {
+    match fault_point(label).and_then(|()| dir.sync()) {
+        Ok(()) => Done::Flushed,
+        Err(e) => Done::NotFlushed(e),
+    }
+}
+
+fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+    let mut tries = 1;
     loop {
         match from_dir.rename_into(from, to_dir, to) {
-            Ok(()) => break,
-            // Virus scanners and indexers briefly hold files open on Windows.
-            Err(e) if cfg!(windows) && retries < 10 && matches!(e.raw_os_error(), Some(5 | 32)) => {
-                retries += 1;
-                std::thread::sleep(Duration::from_millis(50));
+            Ok(()) => return Ok(()),
+            Err(e) if held(&e) && tries < TRIES => {
+                tries += 1;
+                std::thread::sleep(BETWEEN_TRIES);
             }
             Err(e) => return Err(e),
         }
     }
-    to_dir.sync()
 }
 
-/// Flushes the folder that holds `path`.
-fn sync_parent(path: &Path) -> io::Result<()> {
-    match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => sync_dir(p),
-        _ => sync_dir(Path::new(".")),
-    }
-}
-
-/// Creates the folder `dir` in its existing parent and flushes the parent so it survives a crash.
-/// Whatever is already at `dir`, a link included, is left alone for the caller to check.
-pub fn create_dir_durable(dir: &Path) -> io::Result<()> {
-    match fs::create_dir(dir) {
-        Ok(()) => sync_parent(dir),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
-    }
+/// Whether a write of Bolt's own file failed because another program, such as a virus scanner
+/// or indexer, has the file open: refused, in use, or deleted but not yet closed (Windows only).
+pub(crate) fn held(e: &io::Error) -> bool {
+    // Refused (5), in use (32) or delete pending (303), all tried again: a real refusal only
+    // fails a little later.
+    const DELETE_PENDING: i32 = 303;
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | DELETE_PENDING))
 }
 
 /// Deletes the file `name` in the folder `dir`, or the link itself if it is one. Not flushed: only
@@ -101,18 +140,6 @@ pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
 /// contents never matter, so it is never truncated.
 pub fn open_lock_file(state: &Dir, name: &OsStr, shown: &Path) -> io::Result<File> {
     safe_fs::open_or_create_in(state, name, shown)
-}
-
-/// Flushes a folder's entries to disk. Windows has no such call: a rename there keeps its order
-/// with earlier writes but can be lost on power failure.
-pub fn sync_dir(dir: &Path) -> io::Result<()> {
-    if cfg!(unix) {
-        File::open(dir)?.sync_all()
-    } else {
-        // shortcut: renames are not durable on Windows; make them so in milestone 4.
-        let _ = dir;
-        Ok(())
-    }
 }
 
 /// A place where crash tests can inject a failure. Does nothing without `fault-injection`.
@@ -280,6 +307,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use std::ffi::OsStr;
+    use std::fs;
 
     #[test]
     fn write_atomic_replaces_the_file_whole() {
@@ -315,21 +343,45 @@ mod tests {
         }
     }
 
+    /// A virus scanner or sync tool may hold a file for a moment: open, or deleted but still open,
+    /// which keeps its name until it is closed.
+    #[cfg(windows)]
     #[test]
-    fn create_dir_durable_never_follows_what_is_already_there() {
+    fn a_file_held_for_a_moment_is_replaced_once_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const DELETE_ON_CLOSE: u32 = 0x0400_0000;
         let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("a");
-        create_dir_durable(&dir).unwrap();
-        create_dir_durable(&dir).unwrap();
-        assert!(dir.is_dir());
-        // A link already there, to nothing: following it would look in its target.
-        let (link, target) = (root.path().join("link"), root.path().join("target"));
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        #[cfg(windows)]
-        crate::test_support::junction(&link, &target);
-        create_dir_durable(&link).unwrap();
-        assert!(!target.exists());
+        let dir = Dir::open_top(root.path()).unwrap();
+        let head = root.path().join("head");
+        for deleted in [false, true] {
+            write_atomic(&dir, &dir, "head", b"old").unwrap();
+            let held = if deleted {
+                let open = fs::File::open(&head).unwrap();
+                // Deleted once this closes, but its name stays while `open` holds it.
+                fs::OpenOptions::new()
+                    .access_mode(DELETE)
+                    .custom_flags(DELETE_ON_CLOSE)
+                    .open(&head)
+                    .unwrap();
+                open
+            } else {
+                // Shared with nobody, so it can't be replaced while open.
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&head)
+                    .unwrap()
+            };
+            let holder = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(held);
+            });
+            write_atomic(&dir, &dir, "head", b"new").unwrap();
+            holder.join().unwrap();
+            assert_eq!(fs::read(&head).unwrap(), b"new", "deleted: {deleted}");
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
     }
 
     #[cfg(feature = "fault-injection")]

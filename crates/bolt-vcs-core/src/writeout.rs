@@ -7,27 +7,24 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::time::Duration;
 
-use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
+use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
-use crate::diary::{DiaryEntry, SafetyCopy};
-use crate::diff::{for_each_change_in, for_each_entry_change_in};
+use crate::diary::DiaryEntry;
+use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
-use crate::fsio;
-use crate::history::tip_of;
+use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
+use crate::history::{current_save, tip_of};
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::names::{
-    MAX_PATH_BYTES, holdable_here, is_bolt_alias, is_git_alias, validate_path, writable_here,
-};
+use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, writable_here};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
-use crate::snapshot::{NAMED, SaveError, listed, read_folder};
+use crate::snapshot::{NAMED, SaveError, listed, read_folder, same_file};
 use crate::store::{Store, StoreError};
 use crate::warning::{self, Warning};
 
@@ -43,6 +40,9 @@ pub struct Plan {
     pub placeholders: Vec<String>,
     /// Unsaved work the switch would overwrite or remove, which it leaves out.
     pub collisions: Vec<String>,
+    /// Where the target differs from `from` and the folder already holds the target's version,
+    /// all that is below included: nothing to write there. The top such paths only.
+    pub matched: Vec<String>,
     /// Unsaved changes the folder holds, which stay as they are unless they collide.
     pub carried: usize,
     /// What reading the folder found wrong.
@@ -71,10 +71,6 @@ pub struct Applied {
 /// The longest link target written as a link; a longer one is a placeholder. Linux's own limit.
 const MAX_LINK_TARGET: u64 = MAX_PATH_BYTES as u64;
 
-/// A file another program holds is tried this many times, this far apart (decision 049).
-const TRIES: u32 = 10;
-const BETWEEN_TRIES: Duration = Duration::from_millis(100);
-
 /// Works out how to switch the folder from the save `from`, the one it is on, to the save `to`.
 /// The folder is read as `status` reads it. Unsaved work (a difference between the folder and
 /// `from`) where `to` differs from `from`, at the same path or a folder above or below it, and
@@ -90,10 +86,48 @@ pub fn plan(
     drive: Drive,
     git_excludes: Option<&Path>,
 ) -> Result<Plan, SaveError> {
+    planned(repo, from, to, only, remove_new, drive, git_excludes)
+        .map_err(|e| told_whose(repo, e, from, to))
+}
+
+/// `e`, a spelling of `.bolt` the plan met past reading the folder against `from`, told as the
+/// save that holds it: `from` if its whole tree meets one, as every switch from it would, else
+/// `to`.
+fn told_whose(repo: &Repository, e: SaveError, from: Id, to: Id) -> SaveError {
+    if !matches!(e, SaveError::Repo(RepoError::BoltName { save: None, .. })) {
+        return e;
+    }
+    let holds = || -> Result<(), RepoError> {
+        let root = repo.store().save(&from, repo.signatures_allowed())?.root;
+        for_each_change(repo.store(), None, root, |_| Ok::<(), RepoError>(()))
+    };
+    let named = match holds() {
+        Err(RepoError::BoltName { .. }) => from,
+        _ => to,
+    };
+    e.in_save(named, is_current(repo, named))
+}
+
+/// Whether the project is on `save`: an unshelf plans from the shelf's base, and an undo step
+/// can plan from a kept save.
+fn is_current(repo: &Repository, save: Id) -> bool {
+    current_save(repo).is_ok_and(|on| on == save)
+}
+
+fn planned(
+    repo: &Repository,
+    from: Id,
+    to: Id,
+    only: Option<&[String]>,
+    remove_new: bool,
+    drive: Drive,
+    git_excludes: Option<&Path>,
+) -> Result<Plan, SaveError> {
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
-    let now = read_folder(repo, from_root, false, git_excludes)?;
+    let now = read_folder(repo, from_root, false, git_excludes)
+        .map_err(|e| e.in_save(from, is_current(repo, from)))?;
     let mut unsaved = BTreeSet::new();
     for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
         unsaved.insert(c.path.to_owned());
@@ -131,12 +165,15 @@ pub fn plan(
         warnings: now.warnings,
         ..Plan::default()
     };
+    // Every path where the folder differs from the target.
+    let mut visited = BTreeSet::new();
     for_each_entry_change_in(
         store,
         &now.listings,
         Some(now.root),
         to_root,
         |path, n, t| {
+            visited.insert(path.to_owned());
             if !in_scope(path, only.as_ref(), t) {
                 return Ok(());
             }
@@ -202,6 +239,17 @@ pub fn plan(
             Ok::<(), SaveError>(())
         },
     )?;
+    // Where the target differs from `from` but not from the folder, at the path and below it.
+    let matched: BTreeSet<&str> = switched
+        .iter()
+        .filter(|p| !visited.contains(*p) && !any_below(p, &visited))
+        .map(String::as_str)
+        .collect();
+    plan.matched = matched
+        .iter()
+        .filter(|p| !ancestors(p).any(|up| matched.contains(up)))
+        .map(|p| (*p).to_owned())
+        .collect();
     plan.actions.sort_by(|a, b| a.path.cmp(&b.path));
     if drive.ignores_case || drive.composes_unicode {
         take_over_renamed(&mut plan.actions, drive);
@@ -311,6 +359,15 @@ pub fn spellings(
     Ok(found)
 }
 
+/// A file or link Bolt kept before overwriting or removing it, so the command can be undone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyCopy {
+    pub path: String,
+    pub kind: EntryKind,
+    pub id: Id,
+    pub size: u64,
+}
+
 /// Stores in `packs` what carrying out `actions` would overwrite or remove that the save `from`
 /// doesn't hold at the same path, and lists it by path: the safety copies (decision 050). An
 /// entry that is no longer what the plan found is left by the switch, so it needs none.
@@ -362,28 +419,30 @@ fn copy_in(
     packs: &mut PackSet,
 ) -> Result<bool, SaveError> {
     let (up, name) = split(path);
-    if disk.enter(up).is_err() {
-        return Ok(false);
+    match disk.enter(up) {
+        Ok(()) => {}
+        Err(err) if folder_changed(&err) => return Ok(false),
+        Err(err) => return Err(unreadable(path, err)),
     }
     let dir = disk.here();
-    let os = OsStr::new(name);
-    // Gone, or no longer what it was: the switch leaves what is there.
-    let still = |kind: EntryType| dir.metadata(os).is_ok_and(|now| now.kind == kind);
     if e.kind == EntryKind::Symlink {
-        let target = match crate::snapshot::link_target(dir, name, path) {
-            Ok(target) => target,
-            Err(_) if !still(EntryType::Symlink) => return Ok(false),
-            Err(err) => return Err(err),
-        };
-        if hash_content(target.as_bytes()) != e.id {
+        let Some(target) = link_in(dir, name, path, e)? else {
             return Ok(false);
-        }
+        };
         packs.add_content(target.as_bytes())?;
         return Ok(true);
     }
+    let os = OsStr::new(name);
     let mut file = match dir.open_file(os) {
         Ok(file) => file,
-        Err(_) if !still(EntryType::File) => return Ok(false),
+        // Gone, or no longer what it was: the switch leaves what is there.
+        Err(_)
+            if !dir
+                .metadata(os)
+                .is_ok_and(|now| now.kind == EntryType::File) =>
+        {
+            return Ok(false);
+        }
         Err(err) => return Err(unreadable(path, err)),
     };
     match packs.add_content_from(&mut file, e.id) {
@@ -391,6 +450,72 @@ fn copy_in(
         Err(PackError::ContentChanged) => Ok(false),
         Err(err) => Err(err.into()),
     }
+}
+
+/// The target of the link at `path` if it is still the one the plan found (`e`), or a file
+/// holding exactly that target; `None` if it is gone or changed since. Anything else that stops
+/// it being read is an error.
+pub(crate) fn planned_link(
+    disk: &mut Folders,
+    path: &str,
+    e: Expected,
+) -> Result<Option<String>, SaveError> {
+    let (up, name) = split(path);
+    match disk.enter(up) {
+        Ok(()) => {}
+        Err(err) if folder_changed(&err) => return Ok(None),
+        Err(err) => return Err(unreadable(path, err)),
+    }
+    link_in(disk.here(), name, path, e)
+}
+
+/// Whether entering the folder above a planned path failed because it changed since the plan
+/// (gone, a file now, or a link), so the switch leaves what is there. Any other error stops it.
+fn folder_changed(err: &io::Error) -> bool {
+    is_link_refusal(err)
+        || matches!(
+            err.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        )
+}
+
+/// The target of the link `name` in `dir`, at the project path `path`, if it is still the one
+/// the plan found (`e`) or a file holding exactly that target, which the run takes for it;
+/// `None` if it is neither.
+fn link_in(dir: &Dir, name: &str, path: &str, e: Expected) -> Result<Option<String>, SaveError> {
+    let os = OsStr::new(name);
+    let target = match crate::snapshot::link_target(dir, name, path) {
+        Ok(target) => target,
+        Err(err)
+            if dir
+                .metadata(os)
+                .is_ok_and(|now| now.kind == EntryType::Symlink) =>
+        {
+            return Err(err);
+        }
+        Err(_) => {
+            let file = match dir.open_file(os) {
+                Ok(file) => file,
+                Err(_)
+                    if !dir
+                        .metadata(os)
+                        .is_ok_and(|now| now.kind == EntryType::File) =>
+                {
+                    return Ok(None);
+                }
+                Err(err) => return Err(unreadable(path, err)),
+            };
+            let mut bytes = Vec::new();
+            file.take(e.size.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|err| unreadable(path, err))?;
+            match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => return Ok(None),
+            }
+        }
+    };
+    Ok((hash_content(target.as_bytes()) == e.id).then_some(target))
 }
 
 /// Carries out `journal`, made by [`plan`] or read back after a crash. Each change is checked
@@ -487,8 +612,9 @@ pub fn apply(
 }
 
 /// Carries out `journal`, then, unless another program held a file open, moves `head` to its
-/// entry and removes it: the switch has then happened. With files in use the journal stays and
-/// `head` doesn't move, so the next command finishes the rest.
+/// entry and removes it: the switch has then happened, and what goes wrong after that is only a
+/// warning. With files in use the journal stays and `head` doesn't move, so the next command
+/// finishes the rest.
 pub fn carry_out(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -498,15 +624,37 @@ pub fn carry_out(
     let done = apply(repo, lock, journal, drive)?;
     if done.in_use.is_empty() {
         repo.move_head_to(lock, journal.target)?;
-        Journal::remove(repo, lock)?;
+        match Journal::remove(repo, lock) {
+            Ok(Done::Flushed) => {}
+            // The head's own flush came first, so a power cut can only bring the journal back.
+            Ok(Done::NotFlushed(e)) => repo.store().note(Warning::new(
+                warning::HEAD_NOT_FLUSHED,
+                format!(
+                    "The switch between saves is done, but Bolt couldn't flush .bolt/state to the \
+                     disk after removing its journal ({}): after a power cut the journal may be \
+                     back, and the next command that changes the project removes it.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            )),
+            Err(e) => repo.store().note(Warning::new(
+                warning::SWITCH_UNFINISHED,
+                format!(
+                    "The switch between saves is done, but Bolt couldn't remove its journal, \
+                     .bolt/state/journal ({}): the next command that changes the project removes \
+                     it first.",
+                    e.to_string().trim_end_matches('.')
+                ),
+            )),
+        }
     }
     Ok(done)
 }
 
 /// Finishes a switch that a crash or a stop left in `state/journal`, before a command changes
-/// anything (decision 049): never rolled back. `None` when there was none, or when `head`
-/// already names its entry and only the journal was left. A switch that still can't finish is
-/// an error, the journal kept, so no command builds on a half-switched folder.
+/// anything: never rolled back. `None` when there was none. When `head` already
+/// names its entry, only the journal was left: it is removed, and what was done is empty. A
+/// switch that still can't finish is an error, the journal kept, so no command builds on a
+/// half-switched folder. A lost `head` leaves the journal as it is, for the command to stop at.
 pub fn finish_interrupted(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -514,12 +662,17 @@ pub fn finish_interrupted(
     let Some(journal) = Journal::read(repo)? else {
         return Ok(None);
     };
-    let head = repo.head()?;
+    let head = match repo.current() {
+        Ok((head, _)) => head,
+        // Nothing can be judged against it; only `undo --to` goes on, and changes no file.
+        Err(RepoError::HeadLost { .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
     if head == journal.target {
-        Journal::remove(repo, lock)?;
-        return Ok(None);
+        Journal::remove_before_head(repo, lock)?;
+        return Ok(Some(Applied::default()));
     }
-    let journal = usable(repo, journal, head)?;
+    usable(repo, journal.target, journal.from, head)?;
     let drive = drive::probe(repo.tmp_folder())?;
     let mut done = carry_out(repo, lock, &journal, drive)?;
     if !done.in_use.is_empty() {
@@ -539,47 +692,54 @@ pub fn finish_interrupted(
     Ok(Some(done))
 }
 
-/// `journal` if it can be carried out on this project, whose `head` is `head`: made from that
-/// entry, to one that reads. Otherwise it is no switch of this folder to finish.
-fn usable(repo: &Repository, journal: Journal, head: Id) -> Result<Journal, RepoError> {
-    if head != journal.from {
+/// Whether the switch from `from` to `target` can be carried out on this project, whose `head` is
+/// `head`: made from that entry, to one that reads. Otherwise it is no switch of this folder to finish.
+fn usable(repo: &Repository, target: Id, from: Id, head: Id) -> Result<(), RepoError> {
+    if head != from {
         return Err(journal::unusable(
             "was made for another save than the one the project is on",
         ));
     }
     let entry = repo
         .store()
-        .read_record(&journal.target, ObjectKind::DiaryEntry)
+        .read_record(&target, ObjectKind::DiaryEntry)
         .map_err(RepoError::from)
         .and_then(|bytes| Ok(DiaryEntry::decode(&bytes)?));
     match entry {
-        Ok(_) => Ok(journal),
+        Ok(_) => Ok(()),
         Err(e) => Err(journal::unusable(format!(
             "names a diary entry that can't be read ({e})"
         ))),
     }
 }
 
-/// For commands that only read: says a switch between saves is still to finish, or that its
-/// journal can't be used.
+/// For commands that only read: says a switch between saves is still to finish, or stopped just
+/// after it was done, or that its journal can't be used.
 #[must_use]
 pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
-    let pending = Journal::read(repo).and_then(|found| match found {
+    // Whether the switch took effect, when there is one.
+    let pending = Journal::read_front(repo).and_then(|found| match found {
         None => Ok(None),
-        Some(j) => {
-            let head = repo.head()?;
-            // It took effect; the next change only removes the journal.
-            if head == j.target {
-                return Ok(None);
+        Some((target, from)) => {
+            let (head, _) = repo.current()?;
+            let took_effect = head == target;
+            if !took_effect {
+                usable(repo, target, from, head)?;
             }
-            usable(repo, j, head).map(Some)
+            Ok(Some(took_effect))
         }
     });
     let message = match pending {
-        Ok(None) => return None,
-        Ok(Some(_)) => "A switch between saves was stopped before it was done, so some files may \
-                        still be as they were. Running `bolt goto` or `bolt discard` again, or any \
-                        command that changes the project, finishes it first."
+        // A lost head is what the command tells.
+        Ok(None) | Err(RepoError::HeadLost { .. }) => return None,
+        Ok(Some(true)) => "A switch between saves was stopped just after it was done: its files \
+                           are all written, and the next command that changes the project removes \
+                           its journal, .bolt/state/journal, first."
+            .to_owned(),
+        Ok(Some(false)) => "A switch between saves was stopped before it was done, so some files \
+                            may still be as they were. Running `bolt goto` or `bolt discard` \
+                            again, or any command that changes the project, finishes it first if \
+                            its journal reads whole, or else says how to go on."
             .to_owned(),
         Err(e) => format!(
             "{e} Commands that change the project won't run until it is dealt with. {}",
@@ -615,7 +775,7 @@ struct Run<'a> {
     repo: &'a Repository,
     folders: Folders,
     cache: FileCache,
-    /// The diary entry the switch commits, whose save says which links lead to folders.
+    /// The diary entry the switch commits, whose saves say which links lead to folders.
     target_entry: Id,
     stored: HashMap<Id, Listing>,
     target_root: Option<Id>,
@@ -707,9 +867,8 @@ impl Run<'_> {
     fn look(&self, name: &str, path: &str, sizes: &[u64]) -> io::Result<Option<Found>> {
         let dir = self.folders.here();
         let os = OsStr::new(name);
-        let meta = match retried(|| dir.metadata(os)) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            meta => meta?,
+        let Some(meta) = self.meta_of(os)? else {
+            return Ok(None);
         };
         let kind = match meta.kind {
             EntryType::Dir => {
@@ -717,6 +876,7 @@ impl Run<'_> {
                     kind: Some(EntryKind::Folder),
                     size: 0,
                     id: Some(Id([0; 32])),
+                    meta,
                 }));
             }
             EntryType::Other => {
@@ -724,6 +884,7 @@ impl Run<'_> {
                     kind: None,
                     size: meta.size,
                     id: None,
+                    meta,
                 }));
             }
             EntryType::Symlink => {
@@ -736,6 +897,7 @@ impl Run<'_> {
                     kind: Some(EntryKind::Symlink),
                     size: target.as_ref().map_or(0, |t| t.len() as u64),
                     id: target.map(|t| crate::id::hash_content(t.as_bytes())),
+                    meta,
                 }));
             }
             EntryType::File if meta.executable == Some(true) => EntryKind::Executable,
@@ -758,7 +920,16 @@ impl Run<'_> {
             kind: Some(kind),
             size: meta.size,
             id,
+            meta,
         }))
+    }
+
+    /// The details of what is at `name` in the folder entered, `None` if nothing is.
+    fn meta_of(&self, name: &OsStr) -> io::Result<Option<EntryMeta>> {
+        match retried(|| self.folders.here().metadata(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            meta => meta.map(Some),
+        }
     }
 
     fn make_folder(&mut self, a: &Action) -> Result<Outcome, RepoError> {
@@ -772,18 +943,17 @@ impl Run<'_> {
             Err(e) => return classify(e),
         };
         let os = OsStr::new(name);
-        let dir = self.folders.here();
         match found {
             Some(f) if f.kind == Some(EntryKind::Folder) => return Ok(Outcome::Nothing),
             None => {}
-            Some(f) if f.is(a.expected) => {
-                if let Err(e) = retried(|| dir.remove_file(os)) {
-                    return classify(e);
-                }
-            }
+            Some(f) if f.is(a.expected) => match self.remove_unchanged(os, f.meta) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Outcome::Changed),
+                Err(e) => return classify(e),
+            },
             Some(_) => return Ok(Outcome::Changed),
         }
-        match dir.create_dir(os) {
+        match self.folders.here().create_dir(os) {
             Ok(()) => Ok(Outcome::Made),
             Err(e) => classify(e),
         }
@@ -831,11 +1001,16 @@ impl Run<'_> {
             None => {}
             Some(f) if !ours(f) => return Ok(Outcome::Changed),
             Some(f) => {
-                if let Some(outcome) = self.clear(os, f.kind)? {
+                if let Some(outcome) = self.clear(os, f)? {
                     return Ok(outcome);
                 }
             }
         }
+        // A file stays until the rename replaces it; a link or folder was cleared.
+        let mut there = found
+            .as_ref()
+            .filter(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
+            .map(|f| f.meta);
         // Some drives keep the old spelling when a file replaces one whose name differs only as
         // they ignore (macOS), so the old file takes the new spelling first. Only when both
         // names are that one file: a folder may keep case apart (Windows' per-folder setting, or
@@ -844,17 +1019,36 @@ impl Run<'_> {
         // Both paths fold to one, so `old` is in this folder however its folders are spelled.
         if let Some((_, old)) = renaming.map(split)
             && old != name
-            && found
-                .as_ref()
-                .is_some_and(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
+            && there.is_some()
             && one_entry(self.folders.here(), old, name)
         {
+            match self.unchanged(os, there) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Outcome::Changed),
+                Err(e) => return classify(e),
+            }
             let dir = self.folders.here();
             if let Err(e) = retried(|| dir.rename_into(OsStr::new(old), dir, os)) {
                 return classify(e);
             }
+            // Renaming it changed its change time.
+            there = match self.meta_of(os) {
+                Ok(Some(meta)) => Some(meta),
+                Ok(None) => return Ok(Outcome::Changed),
+                Err(e) => return classify(e),
+            };
         }
-        self.write_file(os, c, executable)
+        self.write_file(os, c, executable, there)
+    }
+
+    /// Whether `name` in the folder entered still holds what was seen there: the same file, or
+    /// nothing for `None`.
+    fn unchanged(&self, name: &OsStr, seen: Option<EntryMeta>) -> io::Result<bool> {
+        Ok(match (seen, self.meta_of(name)?) {
+            (None, None) => true,
+            (Some(seen), Some(now)) => same_file(&seen, &now),
+            _ => false,
+        })
     }
 
     /// Whether the project paths `a` and `b` name one entry on the drive.
@@ -871,22 +1065,31 @@ impl Run<'_> {
 
     /// Removes what is at `name` before something else is put there: a link or folder, which a
     /// rename won't replace. A file stays, for the rename to replace in one step.
-    fn clear(&self, name: &OsStr, kind: Option<EntryKind>) -> Result<Option<Outcome>, RepoError> {
-        let dir = self.folders.here();
-        let cleared = match kind {
-            Some(EntryKind::Folder) => retried(|| dir.remove_dir(name)),
-            Some(EntryKind::Symlink) => retried(|| dir.remove_file(name)),
+    fn clear(&self, name: &OsStr, found: &Found) -> Result<Option<Outcome>, RepoError> {
+        let cleared = match found.kind {
+            Some(EntryKind::Folder) => {
+                retried(|| self.folders.here().remove_dir(name)).map(|()| true)
+            }
+            Some(EntryKind::Symlink) => self.remove_unchanged(name, found.meta),
             _ => return Ok(None),
         };
         match cleared {
-            Ok(()) => Ok(None),
+            Ok(true) => Ok(None),
+            Ok(false) => Ok(Some(Outcome::Changed)),
             Err(e) => classify(e).map(Some),
         }
     }
 
     /// Writes the content `c` from the store to `name` in the folder entered, through a file in
-    /// `.bolt/tmp`, flushed, then renamed over whatever file is there.
-    fn write_file(&self, name: &OsStr, c: Content, executable: bool) -> Result<Outcome, RepoError> {
+    /// `.bolt/tmp`, flushed, then renamed into place. `there`: what the plan's look saw at
+    /// `name`, `None` for nothing; if that changed meanwhile, it is left.
+    fn write_file(
+        &self,
+        name: &OsStr,
+        c: Content,
+        executable: bool,
+        there: Option<EntryMeta>,
+    ) -> Result<Outcome, RepoError> {
         let tmp = self.repo.tmp_folder();
         let temp = bolt_platform::temp_name();
         let mut file = tmp.create_new(&temp, executable)?;
@@ -900,12 +1103,18 @@ impl Run<'_> {
             }
             file.sync_all()?;
             fsio::fault_point("switch:written")?;
+            fsio::act_point("switch:written");
             Ok(())
         })();
         drop(file);
+        // Writing can take long: another program may have saved there meanwhile.
         let outcome = match written {
-            Ok(()) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
-                Ok(()) => return Ok(Outcome::Wrote),
+            Ok(()) => match self.unchanged(name, there) {
+                Ok(false) => Ok(Outcome::Changed),
+                Ok(true) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
+                    Ok(()) => return Ok(Outcome::Wrote),
+                    Err(e) => classify(e),
+                },
                 Err(e) => classify(e),
             },
             Err(e) => Err(e),
@@ -938,15 +1147,27 @@ impl Run<'_> {
                     Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
                         return Ok(Outcome::Nothing);
                     }
-                    removed => removed,
+                    removed => removed.map(|()| true),
                 }
             }
-            Some(_) => retried(|| dir.remove_file(os)),
+            Some(f) => self.remove_unchanged(os, f.meta),
         };
         match removed {
-            Ok(()) => Ok(Outcome::Removed),
+            Ok(true) => Ok(Outcome::Removed),
+            Ok(false) => Ok(Outcome::Changed),
             Err(e) => classify(e),
         }
+    }
+
+    /// Removes the file or link at `name` in the folder entered unless it changed since it was
+    /// `seen` (a second look at its metadata, just before the removal); whether it was removed.
+    fn remove_unchanged(&self, name: &OsStr, seen: EntryMeta) -> io::Result<bool> {
+        fsio::act_point("switch:removing");
+        if !self.unchanged(name, Some(seen))? {
+            return Ok(false);
+        }
+        retried(|| self.folders.here().remove_file(name))?;
+        Ok(true)
     }
 
     fn link(&mut self, a: &Action, c: Content) -> Result<Outcome, RepoError> {
@@ -962,20 +1183,21 @@ impl Run<'_> {
         };
         let os = OsStr::new(name);
         match &found {
-            // A placeholder written before counts as done.
-            Some(f) if f.is_content(EntryKind::Symlink, c) || f.is_content(EntryKind::File, c) => {
-                return Ok(Outcome::Nothing);
-            }
+            // The link, or a placeholder written before, counts as done.
+            Some(f) if f.is_content(EntryKind::Symlink, c) => return Ok(Outcome::Nothing),
             None => {}
             Some(f) if !f.is(a.expected) => return Ok(Outcome::Changed),
             Some(f) => {
-                let dir = self.folders.here();
                 let cleared = match f.kind {
-                    Some(EntryKind::Folder) => retried(|| dir.remove_dir(os)),
-                    _ => retried(|| dir.remove_file(os)),
+                    Some(EntryKind::Folder) => {
+                        retried(|| self.folders.here().remove_dir(os)).map(|()| true)
+                    }
+                    _ => self.remove_unchanged(os, f.meta),
                 };
-                if let Err(e) = cleared {
-                    return classify(e);
+                match cleared {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(Outcome::Changed),
+                    Err(e) => return classify(e),
                 }
             }
         }
@@ -1003,6 +1225,11 @@ impl Run<'_> {
         } else {
             target.into_owned()
         };
+        match self.unchanged(os, None) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Outcome::Changed),
+            Err(e) => return classify(e),
+        }
         let dir = self.folders.here();
         match dir.symlink(os, OsStr::new(&target), to_dir, self.repo.tmp_folder()) {
             Ok(()) => Ok(Outcome::Wrote),
@@ -1012,21 +1239,28 @@ impl Run<'_> {
     }
 
     fn placeholder(&self, name: &OsStr, c: Content) -> Result<Outcome, RepoError> {
-        Ok(match self.write_file(name, c, false)? {
+        Ok(match self.write_file(name, c, false, None)? {
             Outcome::Wrote => Outcome::Placeholder,
             other => other,
         })
     }
 
-    /// The top listing of the save the journal's diary entry is on.
+    /// The top listing of the save the switch writes: the "to" side of its diary entry's folder
+    /// change (an undo ends on another save than it writes), or else the save the entry is on.
     fn target_root(&mut self) -> Result<Id, RepoError> {
         if let Some(root) = self.target_root {
             return Ok(root);
         }
-        let store = self.repo.store();
-        let bytes = store.read_record(&self.target_entry, ObjectKind::DiaryEntry)?;
-        let save = tip_of(&DiaryEntry::decode(&bytes)?)?;
-        let root = store.save(&save, self.repo.signatures_allowed())?.root;
+        let entry = self.repo.entry(&self.target_entry)?;
+        let save = match entry.folder_change {
+            Some(change) => change.to,
+            None => tip_of(&entry)?,
+        };
+        let root = self
+            .repo
+            .store()
+            .save(&save, self.repo.signatures_allowed())?
+            .root;
         self.target_root = Some(root);
         Ok(root)
     }
@@ -1097,6 +1331,7 @@ struct Found {
     size: u64,
     /// `None` if it wasn't read, or couldn't be.
     id: Option<Id>,
+    meta: EntryMeta,
 }
 
 impl Found {
@@ -1118,10 +1353,14 @@ impl Found {
     }
 }
 
-/// Windows has no executable bit, so there a file is either.
-fn same_kind(a: EntryKind, b: EntryKind) -> bool {
+/// Whether an entry `found` of one kind can be one `expected` of another. Windows has no
+/// executable bit, so there a file is either; and a file holding a link's target is that link's
+/// placeholder, as a save reads it, but a link is never a file.
+fn same_kind(found: EntryKind, expected: EntryKind) -> bool {
     let file = |k| matches!(k, EntryKind::File | EntryKind::Executable);
-    a == b || (cfg!(windows) && file(a) && file(b))
+    found == expected
+        || (cfg!(windows) && file(found) && file(expected))
+        || (expected == EntryKind::Symlink && file(found))
 }
 
 fn removes(change: Change) -> bool {
@@ -1252,11 +1491,7 @@ fn below_project_link<'a>(
 /// removes (`README.md` where `Readme.md` goes) is that entry, renamed: it is checked against
 /// what the removed one held.
 fn take_over_renamed(actions: &mut [Action], drive: Drive) {
-    let removed: HashMap<String, Option<Expected>> = actions
-        .iter()
-        .filter(|a| removes(a.change))
-        .map(|a| (fold_path(&a.path, drive), a.expected))
-        .collect();
+    let removed = removed_by_name(actions, drive);
     for a in actions.iter_mut() {
         if a.expected.is_none()
             && !removes(a.change)
@@ -1267,7 +1502,35 @@ fn take_over_renamed(actions: &mut [Action], drive: Drive) {
     }
 }
 
-fn fold_path(path: &str, drive: Drive) -> String {
+/// The writes [`take_over_renamed`] checks against a removed entry: the folder held that entry,
+/// under the removed spelling, and nothing under theirs.
+pub(crate) fn renamed(actions: &[Action], drive: Drive) -> HashSet<&str> {
+    if !(drive.ignores_case || drive.composes_unicode) {
+        return HashSet::new();
+    }
+    let removed = removed_by_name(actions, drive);
+    actions
+        .iter()
+        .filter(|a| {
+            a.expected.is_some()
+                && !removes(a.change)
+                && removed.get(&fold_path(&a.path, drive)) == Some(&a.expected)
+        })
+        .map(|a| a.path.as_str())
+        .collect()
+}
+
+/// What each entry the switch removes held, by its path as `drive` compares names.
+fn removed_by_name(actions: &[Action], drive: Drive) -> HashMap<String, Option<Expected>> {
+    actions
+        .iter()
+        .filter(|a| removes(a.change))
+        .map(|a| (fold_path(&a.path, drive), a.expected))
+        .collect()
+}
+
+/// `path` as `drive` compares names: paths that come out the same are one entry there.
+pub(crate) fn fold_path(path: &str, drive: Drive) -> String {
     path.split('/')
         .map(|name| drive.compared(name))
         .collect::<Vec<_>>()
@@ -1372,40 +1635,18 @@ impl Write for Capped {
 }
 
 /// Whether the link at `path` with this stored target stays inside the project, judged from the
-/// save written alone, never from the disk (decision 052): `Some(true)` if it leads to a folder
-/// of that save, `Some(false)` otherwise; `None` for a link to write as a placeholder. A target
-/// leaves when it is absolute, starts with a drive letter or `\\`, or climbs past the top with
-/// `..`; on Windows also when it holds a `\` (decision 045) or a name Windows reads otherwise.
-/// So is a target whose names before the last aren't all folders of that save.
+/// save written alone, never from the disk: `Some(true)` if it leads to a folder of that save,
+/// `Some(false)` otherwise; `None` for a link to write as a placeholder: one [`link_parts`]
+/// refuses, or whose names before the last aren't all folders of that save.
 fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>, StoreError> {
-    let Ok(target) = std::str::from_utf8(target) else {
+    let Some(parts) = link_parts(path, target) else {
         return Ok(None);
     };
-    let bytes = target.as_bytes();
-    let drive_letter =
-        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
-    let windows_reads_otherwise = cfg!(windows) && target.contains(['\\', ':']);
-    if target.is_empty()
-        || target.starts_with(['/', '\\'])
-        || drive_letter
-        || windows_reads_otherwise
-    {
-        return Ok(None);
-    }
     let mut at: Vec<&str> = parent(path).split('/').filter(|n| !n.is_empty()).collect();
-    let parts: Vec<&str> = target
-        .split('/')
-        .filter(|p| !p.is_empty() && *p != ".")
-        .collect();
     for (i, part) in parts.iter().enumerate() {
         if *part == ".." {
-            if at.pop().is_none() {
-                return Ok(None);
-            }
+            at.pop();
             continue;
-        }
-        if !holdable_here(part) {
-            return Ok(None);
         }
         at.push(part);
         // `..` is taken on the drive after the name before it, so every name but the last must
@@ -1416,6 +1657,67 @@ fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>
         }
     }
     Ok(Some(tree.folder(&at.join("/"))?.is_some()))
+}
+
+/// The parts of a link's target in the order they are followed from the link's folder, or `None`
+/// if it leads out of the project: it is absolute, starts with a drive letter or `\\`, or climbs
+/// past the top with `..`; on Windows also when it holds a `\` or a name Windows reads otherwise.
+/// `None` too when it passes through a name write-out wouldn't write, such as a spelling of
+/// `.git` or `.bolt`: a link into the project's own `.git` could run what it finds there.
+fn link_parts<'a>(path: &str, target: &'a [u8]) -> Option<Vec<&'a str>> {
+    let target = std::str::from_utf8(target).ok()?;
+    let bytes = target.as_bytes();
+    let drive_letter =
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+    let windows_reads_otherwise = cfg!(windows) && target.contains(['\\', ':']);
+    if target.is_empty()
+        || target.starts_with(['/', '\\'])
+        || drive_letter
+        || windows_reads_otherwise
+    {
+        return None;
+    }
+    let parts: Vec<&str> = target
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    let mut depth = parent(path).split('/').filter(|n| !n.is_empty()).count();
+    for part in &parts {
+        if *part == ".." {
+            depth = depth.checked_sub(1)?;
+        } else if writable_here(part, &[]).is_ok() {
+            depth += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(parts)
+}
+
+/// Whether write-out writes a link at `path` with `target` as a link, not a placeholder, where
+/// `tree` is the save it writes and links can be made: the target isn't too long, and
+/// [`link_shape`] keeps it inside the project.
+pub(crate) fn writes_as_link(
+    tree: &mut Tree,
+    path: &str,
+    target: &[u8],
+) -> Result<bool, StoreError> {
+    Ok(target.len() as u64 <= MAX_LINK_TARGET && link_shape(tree, path, target)?.is_some())
+}
+
+/// Whether this system and account can make links: tried with a throwaway one in `.bolt/tmp`.
+pub(crate) fn can_make_links(repo: &Repository) -> Result<bool, SaveError> {
+    let tmp = repo.tmp_folder();
+    let name = bolt_platform::temp_name();
+    match tmp.symlink(&name, OsStr::new("x"), false, tmp) {
+        Ok(()) => {
+            // Left behind it is only litter, which opening the project clears.
+            let _ = fsio::remove_file(tmp, &name);
+            Ok(true)
+        }
+        Err(e) if cant_link(&e) => Ok(false),
+        Err(e) => Err(RepoError::from(e).into()),
+    }
 }
 
 /// Whether making a link failed because this system or account can't make one here: Windows
@@ -1429,6 +1731,7 @@ fn cant_link(e: &io::Error) -> bool {
 
 /// Whether another program holds the file open: a sharing or lock violation on Windows.
 fn in_use(e: &io::Error) -> bool {
+    // A project file in use (32) or locked (33) is left for the next run; a refusal (5) may be real.
     cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
 }
 
@@ -1534,7 +1837,7 @@ impl Folders {
 
 /// One save's folders, read as needed: from the store, or from `unstored` for a folder read but
 /// not saved.
-struct Tree<'a> {
+pub(crate) struct Tree<'a> {
     store: &'a Store,
     unstored: &'a HashMap<Id, Listing>,
     root: Id,
@@ -1542,14 +1845,14 @@ struct Tree<'a> {
     folders: HashMap<String, Option<Folder>>,
 }
 
-struct Folder {
-    listing: Listing,
+pub(crate) struct Folder {
+    pub(crate) listing: Listing,
     /// Names that are one file with another of this folder's on the drive.
     twins: HashSet<String>,
 }
 
 impl<'a> Tree<'a> {
-    fn new(
+    pub(crate) fn new(
         store: &'a Store,
         unstored: &'a HashMap<Id, Listing>,
         root: Id,
@@ -1566,7 +1869,7 @@ impl<'a> Tree<'a> {
 
     /// The folder at `path` (`""` for the top), if the save has one there. Read down from the
     /// deepest folder already read on the way, a name at a time.
-    fn folder(&mut self, path: &str) -> Result<Option<&Folder>, StoreError> {
+    pub(crate) fn folder(&mut self, path: &str) -> Result<Option<&Folder>, StoreError> {
         if !self.folders.contains_key(path) {
             let mut known = path;
             while !known.is_empty() && !self.folders.contains_key(known) {
@@ -1603,7 +1906,7 @@ impl<'a> Tree<'a> {
         Ok(self.folders.get(path).and_then(Option::as_ref))
     }
 
-    fn entry(&mut self, path: &str) -> Result<Option<Entry>, StoreError> {
+    pub(crate) fn entry(&mut self, path: &str) -> Result<Option<Entry>, StoreError> {
         let (up, name) = split(path);
         Ok(self.folder(up)?.and_then(|f| f.listing.get(name)).cloned())
     }
@@ -1683,7 +1986,8 @@ fn in_use_warning(paths: &[String]) -> Warning {
     )
 }
 
-fn changed_warning(paths: &[String]) -> Warning {
+/// Says entries changed after the plan, so they were left as they are.
+pub(crate) fn changed_warning(paths: &[String]) -> Warning {
     Warning::new(
         warning::CHANGED_SINCE_PLAN,
         format!(

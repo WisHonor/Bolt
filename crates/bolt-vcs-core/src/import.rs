@@ -483,7 +483,7 @@ fn carry_out(
             shelves: Vec::new(),
             server_lines: servers,
         },
-        safety_copies: Vec::new(),
+        folder_change: None,
     };
     repo.commit_first(lock, packs, &entry)?;
     report.warnings.extend(repo.store().warnings());

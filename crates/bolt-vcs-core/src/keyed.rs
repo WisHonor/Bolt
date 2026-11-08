@@ -18,11 +18,11 @@ pub const KEY_FILE: &str = "cache-key";
 /// line asks for it, and hands it to `Repository::set_cache_key`. Two Bolts making it at once end
 /// with one key. A key file that can't be read, or isn't 32 bytes, is an error naming it, never
 /// replaced: it is the user's own, and replacing it silently could hide that someone changed it.
-/// With no settings folder, a key for this run alone, so no cache is trusted again.
-pub fn cache_key() -> Result<[u8; KEY_LEN], RepoError> {
+/// With no settings folder, none: the command goes without its caches.
+pub fn cache_key() -> Result<Option<[u8; KEY_LEN]>, RepoError> {
     match config::user_config_path().as_deref().and_then(Path::parent) {
-        Some(dir) => key_in(dir),
-        None => Ok(run_key()?),
+        Some(dir) => key_in(dir).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -44,8 +44,8 @@ pub fn open_sealed<'a>(key: &[u8; KEY_LEN], bytes: &'a [u8]) -> Option<&'a [u8]>
     (blake3::keyed_hash(key, body) == tag).then_some(body)
 }
 
-/// A key for one run, or one `Repository` handle, alone: what it seals no later run trusts.
-pub(crate) fn run_key() -> io::Result<[u8; KEY_LEN]> {
+/// A new key, of random bytes.
+fn new_key() -> io::Result<[u8; KEY_LEN]> {
     let mut key = [0; KEY_LEN];
     getrandom::fill(&mut key).map_err(io::Error::other)?;
     Ok(key)
@@ -80,7 +80,7 @@ fn read_key(path: &Path) -> io::Result<[u8; KEY_LEN]> {
 /// another Bolt linked in first.
 fn make_key(dir: &Path, path: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let key = run_key()?;
+    let key = new_key()?;
     let temp = dir.join(bolt_platform::temp_name());
     let written = new_private(&temp).and_then(|mut file| {
         file.write_all(&key)?;
