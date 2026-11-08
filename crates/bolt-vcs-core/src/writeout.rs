@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
+use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
@@ -863,9 +863,8 @@ impl Run<'_> {
     fn look(&self, name: &str, path: &str, sizes: &[u64]) -> io::Result<Option<Found>> {
         let dir = self.folders.here();
         let os = OsStr::new(name);
-        let meta = match retried(|| dir.metadata(os)) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            meta => meta?,
+        let Some(meta) = self.meta_of(os)? else {
+            return Ok(None);
         };
         let kind = match meta.kind {
             EntryType::Dir => {
@@ -873,6 +872,7 @@ impl Run<'_> {
                     kind: Some(EntryKind::Folder),
                     size: 0,
                     id: Some(Id([0; 32])),
+                    meta,
                 }));
             }
             EntryType::Other => {
@@ -880,6 +880,7 @@ impl Run<'_> {
                     kind: None,
                     size: meta.size,
                     id: None,
+                    meta,
                 }));
             }
             EntryType::Symlink => {
@@ -892,6 +893,7 @@ impl Run<'_> {
                     kind: Some(EntryKind::Symlink),
                     size: target.as_ref().map_or(0, |t| t.len() as u64),
                     id: target.map(|t| crate::id::hash_content(t.as_bytes())),
+                    meta,
                 }));
             }
             EntryType::File if meta.executable == Some(true) => EntryKind::Executable,
@@ -914,7 +916,16 @@ impl Run<'_> {
             kind: Some(kind),
             size: meta.size,
             id,
+            meta,
         }))
+    }
+
+    /// The details of what is at `name` in the folder entered, `None` if nothing is.
+    fn meta_of(&self, name: &OsStr) -> io::Result<Option<EntryMeta>> {
+        match retried(|| self.folders.here().metadata(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            meta => meta.map(Some),
+        }
     }
 
     fn make_folder(&mut self, a: &Action) -> Result<Outcome, RepoError> {
@@ -997,20 +1008,29 @@ impl Run<'_> {
         // names are that one file: a folder may keep case apart (Windows' per-folder setting, or
         // another drive mounted there), and then the old one is a file of its own, which its own
         // removal checks.
+        // A file stays until the rename replaces it.
+        let mut replacing = found
+            .as_ref()
+            .filter(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
+            .map(|f| f.meta);
         // Both paths fold to one, so `old` is in this folder however its folders are spelled.
         if let Some((_, old)) = renaming.map(split)
             && old != name
-            && found
-                .as_ref()
-                .is_some_and(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
+            && replacing.is_some()
             && one_entry(self.folders.here(), old, name)
         {
             let dir = self.folders.here();
             if let Err(e) = retried(|| dir.rename_into(OsStr::new(old), dir, os)) {
                 return classify(e);
             }
+            // Renaming it changed its change time.
+            replacing = match self.meta_of(os) {
+                Ok(Some(meta)) => Some(meta),
+                Ok(None) => return Ok(Outcome::Changed),
+                Err(e) => return classify(e),
+            };
         }
-        self.write_file(os, c, executable)
+        self.write_file(os, c, executable, replacing)
     }
 
     /// Whether the project paths `a` and `b` name one entry on the drive.
@@ -1041,8 +1061,15 @@ impl Run<'_> {
     }
 
     /// Writes the content `c` from the store to `name` in the folder entered, through a file in
-    /// `.bolt/tmp`, flushed, then renamed over whatever file is there.
-    fn write_file(&self, name: &OsStr, c: Content, executable: bool) -> Result<Outcome, RepoError> {
+    /// `.bolt/tmp`, flushed, then renamed over whatever file is there. `replacing`: the details
+    /// of the file it replaces as the plan's look saw them; if it changed meanwhile, it is left.
+    fn write_file(
+        &self,
+        name: &OsStr,
+        c: Content,
+        executable: bool,
+        replacing: Option<EntryMeta>,
+    ) -> Result<Outcome, RepoError> {
         let tmp = self.repo.tmp_folder();
         let temp = bolt_platform::temp_name();
         let mut file = tmp.create_new(&temp, executable)?;
@@ -1059,9 +1086,18 @@ impl Run<'_> {
             Ok(())
         })();
         drop(file);
+        // Writing can take long: another program may have saved into the file meanwhile.
+        let still = |seen: EntryMeta| match self.meta_of(name) {
+            Ok(now) => Ok(now.is_some_and(|now| same_file(&seen, &now))),
+            Err(e) => Err(e),
+        };
         let outcome = match written {
-            Ok(()) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
-                Ok(()) => return Ok(Outcome::Wrote),
+            Ok(()) => match replacing.map(still).transpose() {
+                Ok(Some(false)) => Ok(Outcome::Changed),
+                Ok(_) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
+                    Ok(()) => return Ok(Outcome::Wrote),
+                    Err(e) => classify(e),
+                },
                 Err(e) => classify(e),
             },
             Err(e) => Err(e),
@@ -1166,7 +1202,7 @@ impl Run<'_> {
     }
 
     fn placeholder(&self, name: &OsStr, c: Content) -> Result<Outcome, RepoError> {
-        Ok(match self.write_file(name, c, false)? {
+        Ok(match self.write_file(name, c, false, None)? {
             Outcome::Wrote => Outcome::Placeholder,
             other => other,
         })
@@ -1258,6 +1294,12 @@ struct Found {
     size: u64,
     /// `None` if it wasn't read, or couldn't be.
     id: Option<Id>,
+    meta: EntryMeta,
+}
+
+/// Whether `now` is still the file seen as `seen`: the same file, size and change time.
+fn same_file(seen: &EntryMeta, now: &EntryMeta) -> bool {
+    now.file_id == seen.file_id && now.size == seen.size && now.changed_ns == seen.changed_ns
 }
 
 impl Found {

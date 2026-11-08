@@ -95,7 +95,6 @@ fn big(seed: u8) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "RT6-2: a file saved while undo writes a big file over it is replaced with no copy"]
 fn rt6_2_a_file_saved_while_undo_writes_over_it_is_never_lost() {
     let env = project();
     let file = env.root().join("art.psd");
@@ -118,7 +117,8 @@ fn rt6_2_a_file_saved_while_undo_writes_over_it_is_never_lost() {
             while start.elapsed() < Duration::from_secs(60) {
                 let writing = fs::read_dir(&tmp).into_iter().flatten().flatten().any(|e| {
                     e.file_name().to_string_lossy().starts_with("tmp-")
-                        && e.metadata().is_ok_and(|m| m.len() > 1 << 20)
+                        // Asked of the file itself: a folder listing on Windows lags its size.
+                        && fs::metadata(e.path()).is_ok_and(|m| m.len() > 1 << 20)
                 });
                 if writing {
                     fs::write(&file, &theirs).unwrap();
