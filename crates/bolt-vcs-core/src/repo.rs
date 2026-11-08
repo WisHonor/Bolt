@@ -149,6 +149,13 @@ pub enum RepoError {
         escape(detail, true)
     )]
     SwitchInUse { detail: String },
+    /// One of Bolt's own files in `.bolt` couldn't be replaced.
+    #[error(
+        "Bolt couldn't write {}: {}",
+        escape(&path.display().to_string(), false),
+        escape(&source.to_string(), false)
+    )]
+    CantWrite { path: PathBuf, source: io::Error },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -261,6 +268,11 @@ impl RepoError {
                     "Close that program, then run the command again: Bolt finishes the switch \
                      before anything else."
                 }
+                RepoError::CantWrite { .. } => {
+                    "Another program, such as a virus scanner or sync tool, may have it open: run \
+                     the command again in a moment. If it keeps failing, check that Bolt can write \
+                     to the .bolt folder."
+                }
                 RepoError::Config(e) => return e.hint(),
                 RepoError::CacheKey { .. } => {
                     "If that file is there, delete it: Bolt makes a new key, and rebuilds the \
@@ -360,6 +372,11 @@ fn lock_error(shown: &Path, e: io::Error) -> RepoError {
 fn naming(shown: &Path, doing: &str, e: io::Error) -> io::Error {
     let shown = escape(&shown.display().to_string(), false);
     io::Error::new(e.kind(), format!("Bolt couldn't {doing} {shown}: {e}"))
+}
+
+/// `e`, from replacing Bolt's own file at `path`, naming it.
+pub(crate) fn cant_write(path: PathBuf, e: io::Error) -> RepoError {
+    RepoError::CantWrite { path, source: e }
 }
 
 /// The folders that must be real folders, never links or junctions (storage-format.md §10),
@@ -1065,7 +1082,8 @@ impl Repository {
     ) -> Result<Id, RepoError> {
         let id = self.move_head(lock, packs, entry)?;
         let held = &self.held;
-        write_atomic(&held.tmp, &held.bolt, "format", FORMAT_TEXT.as_bytes())?;
+        write_atomic(&held.tmp, &held.bolt, "format", FORMAT_TEXT.as_bytes())
+            .map_err(|e| cant_write(self.bolt.join("format"), e))?;
         // Only once it is a project, so a stopped merge never leaves it unfinished.
         crate::merge::merge_after_commit(self, lock);
         Ok(id)
@@ -1409,7 +1427,8 @@ impl Repository {
             std::process::id()
         );
         let held = &self.held;
-        write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())?;
+        write_atomic(&held.tmp, &held.state, "lock-info", info.as_bytes())
+            .map_err(|e| cant_write(self.state_dir().join("lock-info"), e))?;
         // Another command may have committed since this handle was opened. A lost head stops
         // the command at `current`, unless it is the `undo --to` that picks one up.
         self.head = read_head(&self.held.state, &self.bolt)?.id();
@@ -1484,7 +1503,8 @@ impl Repository {
     /// Once the new head is in place, a flush of `state/` that fails is only a warning.
     pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
         let head = format!("{id}\n");
-        let done = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())?;
+        let done = fsio::write_head(&self.held.tmp, &self.held.state, head.as_bytes())
+            .map_err(|e| cant_write(self.state_dir().join("head"), e))?;
         self.head = Some(id);
         if let Done::NotFlushed(e) = done {
             self.store.note(Warning::new(
@@ -3573,5 +3593,37 @@ mod tests {
             tx.send(repo.head().unwrap()).unwrap();
         });
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_head_another_program_holds_past_every_try_is_named() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, mut repo) = project();
+        let a = commit(&mut repo, &entry(1)).unwrap();
+        let b = commit(&mut repo, &entry(2)).unwrap();
+        let lock = repo.lock_for_change("undo", &mut |_| {}).unwrap();
+        let head = dir.path().join(".bolt").join("state").join("head");
+        // As a virus scanner or sync tool may hold it, for longer than Bolt tries.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&head)
+            .unwrap();
+        let started = Instant::now();
+        let e = repo.move_head_to(&lock, a).unwrap_err();
+        let took = started.elapsed();
+        drop(held);
+        assert!(took >= fsio::BETWEEN_TRIES * (fsio::TRIES - 1), "{took:?}");
+        let shown = escape(&head.display().to_string(), false);
+        let said = e.to_string();
+        assert!(
+            said.starts_with(&format!("Bolt couldn't write {shown}: ")),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("virus scanner"), "{e:?}");
+        assert_eq!(std::fs::read_to_string(&head).unwrap(), format!("{b}\n"));
+        let tmp = std::fs::read_dir(dir.path().join(".bolt").join("tmp")).unwrap();
+        assert_eq!(tmp.count(), 0);
     }
 }

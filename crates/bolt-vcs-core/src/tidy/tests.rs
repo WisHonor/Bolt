@@ -501,7 +501,8 @@ fn tidy_stopped_at_every_step_loses_nothing() {
         let done = match &result {
             Err(e) => {
                 let said = e.to_string();
-                let at = said.strip_prefix("injected fault at ");
+                // A fault replacing Bolt's own file comes after the file's name.
+                let at = said.split_once("injected fault at ").map(|(_, at)| at);
                 stopped.insert(at.unwrap_or_else(|| panic!("{why}: {said}")).to_owned());
                 false
             }

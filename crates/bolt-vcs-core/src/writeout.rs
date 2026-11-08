@@ -7,7 +7,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::time::Duration;
 
 use bolt_platform::dir::{Dir, EntryType, is_link_refusal};
 
@@ -15,7 +14,7 @@ use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
-use crate::fsio::{self, Done};
+use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
 use crate::history::{current_save, tip_of};
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
@@ -71,10 +70,6 @@ pub struct Applied {
 
 /// The longest link target written as a link; a longer one is a placeholder. Linux's own limit.
 const MAX_LINK_TARGET: u64 = MAX_PATH_BYTES as u64;
-
-/// A file another program holds is tried this many times, this far apart (decision 049).
-const TRIES: u32 = 10;
-const BETWEEN_TRIES: Duration = Duration::from_millis(100);
 
 /// Works out how to switch the folder from the save `from`, the one it is on, to the save `to`.
 /// The folder is read as `status` reads it. Unsaved work (a difference between the folder and

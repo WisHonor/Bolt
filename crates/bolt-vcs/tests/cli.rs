@@ -672,6 +672,29 @@ fn bolt_folder_is_hidden_on_windows() {
     assert!(bolt_platform::is_hidden(&env.root().join(".bolt")).unwrap());
 }
 
+#[cfg(windows)]
+#[test]
+fn a_command_names_its_own_file_another_program_holds() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let bolt = env.root().join(".bolt");
+    // As a virus scanner or sync tool may hold it, for longer than Bolt tries.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(bolt.join("state/lock-info"))
+        .unwrap();
+    let out = env.bolt().args(["save", "Add a"]).output().unwrap();
+    drop(held);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains(r"\.bolt\state\lock-info: "), "{err}");
+    assert!(err.contains("virus scanner"), "{err}");
+    assert_eq!(std::fs::read_dir(bolt.join("tmp")).unwrap().count(), 0);
+}
+
 #[test]
 fn ordinary_commands_still_write_one_pack() {
     let env = Env::new();

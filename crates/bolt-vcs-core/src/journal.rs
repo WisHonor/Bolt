@@ -12,7 +12,7 @@ use crate::fsio::{self, Done};
 use crate::id::Id;
 use crate::listing::EntryKind;
 use crate::names::{MAX_PATH_BYTES, validate_path};
-use crate::repo::{ChangeLock, RepoError, Repository, refused};
+use crate::repo::{ChangeLock, RepoError, Repository, cant_write, refused};
 use crate::safe_fs;
 
 const MAGIC: &[u8; 8] = b"BOLTJRNL";
@@ -206,7 +206,8 @@ impl Journal {
         }
         // One that wouldn't read back is refused before it can be relied on.
         Journal::decode(&bytes)?;
-        fsio::write_atomic(repo.tmp_folder(), repo.state_folder(), FILE, &bytes)?;
+        fsio::write_atomic(repo.tmp_folder(), repo.state_folder(), FILE, &bytes)
+            .map_err(|e| cant_write(repo.state_dir().join(FILE), e))?;
         Ok(())
     }
 

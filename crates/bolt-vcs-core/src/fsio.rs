@@ -16,6 +16,10 @@ pub use bolt_platform::is_temp_name;
 
 use crate::safe_fs;
 
+/// A file another program holds is tried this many times, this far apart.
+pub(crate) const TRIES: u32 = 10;
+pub(crate) const BETWEEN_TRIES: Duration = Duration::from_millis(100);
+
 /// Creates a new, empty file in the folder `tmp`, named as `bolt_platform::temp_name` says:
 /// `tmp-` and 16 random lowercase hex digits. Returns it and its name.
 pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
@@ -103,18 +107,24 @@ pub(crate) fn flush_after(dir: &Dir, label: &'static str) -> Done {
 }
 
 fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
-    let mut retries = 0;
+    let mut tries = 1;
     loop {
         match from_dir.rename_into(from, to_dir, to) {
             Ok(()) => return Ok(()),
-            // Virus scanners and indexers briefly hold files open on Windows.
-            Err(e) if cfg!(windows) && retries < 10 && matches!(e.raw_os_error(), Some(5 | 32)) => {
-                retries += 1;
-                std::thread::sleep(Duration::from_millis(50));
+            Err(e) if held(&e) && tries < TRIES => {
+                tries += 1;
+                std::thread::sleep(BETWEEN_TRIES);
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Whether a rename failed because another program, such as a virus scanner or indexer, has
+/// the file open: refused, in use, or deleted but not yet closed (Windows only).
+fn held(e: &io::Error) -> bool {
+    const DELETE_PENDING: i32 = 303;
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | DELETE_PENDING))
 }
 
 /// Deletes the file `name` in the folder `dir`, or the link itself if it is one. Not flushed: only
@@ -328,6 +338,47 @@ mod tests {
             "notes.txt".to_owned(),
         ] {
             assert!(!is_temp_name(OsStr::new(&other)), "{other:?}");
+        }
+    }
+
+    /// A virus scanner or sync tool may hold a file for a moment: open, or deleted but still open,
+    /// which keeps its name until it is closed.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_for_a_moment_is_replaced_once_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        let root = tempfile::tempdir().unwrap();
+        let dir = Dir::open_top(root.path()).unwrap();
+        let head = root.path().join("head");
+        for deleted in [false, true] {
+            write_atomic(&dir, &dir, "head", b"old").unwrap();
+            let held = if deleted {
+                let open = fs::File::open(&head).unwrap();
+                // Deleted once this closes, but its name stays while `open` holds it.
+                fs::OpenOptions::new()
+                    .access_mode(DELETE)
+                    .custom_flags(DELETE_ON_CLOSE)
+                    .open(&head)
+                    .unwrap();
+                open
+            } else {
+                // Shared with nobody, so it can't be replaced while open.
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&head)
+                    .unwrap()
+            };
+            let holder = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(held);
+            });
+            write_atomic(&dir, &dir, "head", b"new").unwrap();
+            holder.join().unwrap();
+            assert_eq!(fs::read(&head).unwrap(), b"new", "deleted: {deleted}");
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
         }
     }
 
