@@ -465,7 +465,17 @@ fn raced(
 ) -> Applied {
     let plan = planned(repo, from, to.0, false);
     let at = repo.root().join(path);
-    crate::fsio::fault::act_at(point, move || fs::write(at, bytes).unwrap());
+    // A modified time far from now, so a same-size save can't look unchanged within one tick.
+    crate::fsio::fault::act_at(point, move || {
+        fs::write(&at, bytes).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&at)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    });
     applied(repo, &journal(to.1, &plan))
 }
 
