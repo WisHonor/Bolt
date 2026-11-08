@@ -459,7 +459,7 @@ impl Store {
 
     /// `copy_content`, of a file or of one of its chunks.
     fn copy(&self, id: &Id, wanted: Wanted, out: &mut dyn Write) -> Result<(), StoreError> {
-        let first = self.first_copy(id)?;
+        let mut first = self.first_copy(id)?;
         let mut tries = Tries::default();
         // Bytes can't be taken back out of `out`, so it gets one copy only.
         let known_good = |c: &Copy| wanted.takes(&c.entry) && self.is_good(c);
@@ -477,17 +477,25 @@ impl Store {
                     return Ok(out.write_all(&bytes).map_err(PackError::from)?);
                 }
             }
-            // Otherwise it is streamed: when several packs hold it, a good copy is found first.
+            // Otherwise it is streamed: when several packs hold it, a good copy is found first and
+            // read first, as one that fails may fail again for a reason that isn't damage.
             if self.all_copies(id)?.0.len() > 1 {
                 let tried = std::mem::take(&mut tries);
-                self.first_good_from(first.clone(), tried, id, wanted, false, |pack, entry| {
-                    self.copy_file(pack, entry, &mut io::sink())
-                })?;
+                let (_, good) = self.first_good_from(
+                    first.clone(),
+                    tried,
+                    id,
+                    wanted,
+                    false,
+                    |pack, entry| self.copy_file(pack, entry, &mut io::sink()),
+                )?;
+                first = Some(good);
             }
         }
         self.first_good_from(first, tries, id, wanted, true, |pack, entry| {
             self.copy_file(pack, entry, out)
         })
+        .map(drop)
     }
 
     /// Writes the copy `entry` of a file, in `pack`, to `out`: content as it is stored, a chunk
@@ -578,9 +586,11 @@ impl Store {
         let first = self.first_copy(id)?;
         let wanted = Wanted::Kind(kind);
         self.first_good_from(first, Tries::default(), id, wanted, once, read)
+            .map(|(value, _)| value)
     }
 
-    /// `first_good`, given the first copy found and what reading copies has come to so far.
+    /// `first_good`, given the first copy found and what reading copies has come to so far. Gives
+    /// the copy that passed too.
     fn first_good_from<T>(
         &self,
         first: Option<Copy>,
@@ -589,14 +599,14 @@ impl Store {
         wanted: Wanted,
         once: bool,
         mut read: impl FnMut(Arc<PackReader>, &IndexEntry) -> Result<T, PackError>,
-    ) -> Result<T, StoreError> {
+    ) -> Result<(T, Copy), StoreError> {
         let Some(first) = first else {
             return Err(StoreError::Missing(*id));
         };
         let near = first.entry.uncompressed_size <= NEAR || self.is_good(&first);
         if near {
             match self.attempt(&first, wanted, &mut tries, &mut read) {
-                Ok(value) => return Ok(value),
+                Ok(value) => return Ok((value, first)),
                 Err(true) if once => return Err(tries.error(id, wanted)),
                 Err(_) => {}
             }
@@ -612,7 +622,7 @@ impl Store {
         }
         for c in copies {
             match self.attempt(&c, wanted, &mut tries, &mut read) {
-                Ok(value) => return Ok(value),
+                Ok(value) => return Ok((value, c)),
                 Err(true) if once => break,
                 Err(_) => {}
             }
@@ -1304,6 +1314,28 @@ mod tests {
         assert_eq!(store.open_count(), 16);
     }
 
+    /// Makes the pack at `path` one Bolt may not open while what this gives is held; `None` where
+    /// that can't be done, as root reads everything.
+    fn lock(path: &Path) -> Option<Option<std::fs::File>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let none = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(path, none).unwrap();
+            std::fs::read(path).is_err().then_some(None)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(path)
+                .unwrap();
+            Some(Some(held))
+        }
+    }
+
     /// A pack Bolt may not read is passed over, named in one warning however many lookups pass
     /// it, and named in the error of a lookup that finds nothing.
     #[test]
@@ -1315,24 +1347,8 @@ mod tests {
         let locked = packs.join("00.pack");
         std::fs::rename(pack_of(&tmp, &packs, &[b"locked".to_vec()]), &locked).unwrap();
         pack_of(&tmp, &packs, std::slice::from_ref(&content));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let none = std::fs::Permissions::from_mode(0o000);
-            std::fs::set_permissions(&locked, none).unwrap();
-            // root reads everything, so there is nothing to test.
-            if std::fs::read(&locked).is_ok() {
-                return;
-            }
-        }
-        #[cfg(windows)]
-        let _held = {
-            use std::os::windows::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .read(true)
-                .share_mode(0)
-                .open(&locked)
-                .unwrap()
+        let Some(_held) = lock(&locked) else {
+            return;
         };
         let store = Store::open(&packs).unwrap();
         for _ in 0..2 {
@@ -1789,6 +1805,41 @@ mod tests {
                 assert_eq!(damaged.len(), 1, "{damaged:?}");
             }
         }
+    }
+
+    /// A list whose chunk is only in a pack Bolt may not open fails each time it is read, for a
+    /// reason that isn't damage: the read goes on to the copy the check proved good, no pack is
+    /// called damaged, and the list isn't marked bad, so it builds its file once the pack opens.
+    #[test]
+    fn a_list_that_cant_be_read_never_hides_a_good_whole_copy() {
+        let (_root, tmp, packs) = dirs();
+        let (list, chunks) = chunked(b"hello world", 6);
+        // The list is found first, and is small, so it is read first.
+        pack_with(&tmp, &packs, Some("00.pack"), &[&chunks[1]], &[&list]);
+        let locked = pack_with(&tmp, &packs, Some("11.pack"), &[&chunks[0]], &[]);
+        pack_with(&tmp, &packs, Some("ff.pack"), &[b"hello world"], &[]);
+        let Some(_held) = lock(&locked) else {
+            return;
+        };
+        let store = Store::open(&packs).unwrap();
+        for _ in 0..2 {
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert_eq!(out, b"hello world");
+        }
+        assert!(
+            store.damaged_packs().is_empty(),
+            "{:?}",
+            store.damaged_packs()
+        );
+        assert!(store.checked().bad.is_empty());
+        // The copy that couldn't be read, and the pack that couldn't be opened, which is why.
+        let warnings = store.warnings();
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        let expected = [warning::COPY_UNREADABLE, warning::PACK_UNREADABLE];
+        assert_eq!(kinds, expected, "{warnings:?}");
+        assert!(warnings[0].message.contains("00.pack"), "{warnings:?}");
+        assert!(warnings[1].message.contains("11.pack"), "{warnings:?}");
     }
 
     #[test]
