@@ -1522,3 +1522,112 @@ fn unsaved_work_changed_to_as_many_bytes_after_the_plan_is_left_alone() {
         assert_eq!(fs::read(dir.path().join(name)).unwrap(), now, "{name}");
     }
 }
+
+/// A new project holding unsaved work a discard would remove, and the actions that remove it:
+/// 120 small files in five folders, some of them alike, a big file and, where links can be made,
+/// a link.
+fn unsaved_work() -> (tempfile::TempDir, Repository, Vec<Action>) {
+    let (dir, repo) = project();
+    let mut actions = Vec::new();
+    let mut plan = |path: &str, kind: EntryKind, bytes: &[u8]| {
+        actions.push(Action {
+            path: path.into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind,
+                id: hash_content(bytes),
+                size: bytes.len() as u64,
+            }),
+        });
+    };
+    for i in 0..120u64 {
+        let bytes = match i % 3 {
+            0 => format!("unsaved {i}\n").repeat(i as usize + 1).into_bytes(),
+            1 => noise(i, 100 + (i as usize * 97) % 5000),
+            _ => b"the same in many folders\n".to_vec(),
+        };
+        let path = format!("d{}/f{i:03}.txt", i % 5);
+        fs::create_dir_all(dir.path().join(format!("d{}", i % 5))).unwrap();
+        fs::write(dir.path().join(&path), &bytes).unwrap();
+        plan(&path, EntryKind::File, &bytes);
+    }
+    let big = noise(500, 3 << 20);
+    fs::write(dir.path().join("big.bin"), &big).unwrap();
+    plan("big.bin", EntryKind::File, &big);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("d0/f000.txt", dir.path().join("link")).unwrap();
+        plan("link", EntryKind::Symlink, b"d0/f000.txt");
+    }
+    (dir, repo, actions)
+}
+
+/// The packs a command wrote, by name, with their bytes.
+type Written = Vec<(std::ffi::OsString, Vec<u8>)>;
+
+/// The safety copies `keep_safety_copies` keeps of `actions` with `count` workers, or the first
+/// problem, and the packs it wrote, 7 objects a pack so that the set rolls over many times.
+fn copied_with(
+    count: usize,
+    repo: &mut Repository,
+    actions: &[Action],
+) -> (Result<Vec<SafetyCopy>, String>, Written) {
+    let from = current_save(repo).unwrap();
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let tmp = repo.root().join(".bolt/tmp");
+    let mut packs = PackSet::with_limit(&tmp, repo.packs_dir(), 7).unwrap();
+    crate::workers::set_test_workers(Some(count));
+    let copies = keep_safety_copies(repo, actions, from, drive, &mut packs);
+    crate::workers::set_test_workers(None);
+    let written = packs.finish().unwrap().into_iter().map(|p| {
+        let name = p.file_name().unwrap().to_owned();
+        (name, fs::read(&p).unwrap())
+    });
+    (copies.map_err(|e| format!("{e:?}")), written.collect())
+}
+
+#[test]
+fn safety_copies_of_many_files_are_the_same_on_one_thread_or_eight() {
+    let mut seen = Vec::new();
+    for count in [1, 8] {
+        let (dir, mut repo, actions) = unsaved_work();
+        // Changed to as many bytes since the plan: neither kept nor stored.
+        let changed = dir.path().join("d1/f001.txt");
+        let mut now = fs::read(&changed).unwrap();
+        now[50] ^= 1;
+        fs::write(&changed, &now).unwrap();
+        let (copies, written) = copied_with(count, &mut repo, &actions);
+        let copies = copies.unwrap();
+        assert_eq!(copies.len(), actions.len() - 1, "{count}");
+        assert!(copies.iter().all(|c| c.path != "d1/f001.txt"));
+        for (name, _) in &written {
+            let pack = crate::pack::PackReader::open(&repo.packs_dir().join(name)).unwrap();
+            let mut ids = pack.entries().map(|e| e.unwrap().id);
+            assert!(!ids.any(|id| id == hash_content(&now)), "{count}: stored");
+        }
+        assert!(written.len() > 5, "{} packs", written.len());
+        seen.push((copies, written));
+    }
+    let names = |w: &Written| w.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(seen[0].0, seen[1].0);
+    assert_eq!(names(&seen[0].1), names(&seen[1].1));
+    assert!(seen[0].1 == seen[1].1, "the packs hold other bytes");
+}
+
+/// The copies run on workers; the hook this thread sets reaches them.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_file_the_hook_makes_unreadable_is_caught_when_copies_run_on_workers() {
+    for count in [8, 1] {
+        let (_dir, mut repo, actions) = unsaved_work();
+        crate::fsio::fault::unreadable(Some("d2/f052.txt"));
+        let (copies, _) = copied_with(count, &mut repo, &actions);
+        crate::fsio::fault::unreadable(None);
+        let said = copies.unwrap_err();
+        assert!(
+            said.contains("Unreadable") && said.contains("\"d2/f052.txt\""),
+            "{count}: {said}"
+        );
+    }
+}
