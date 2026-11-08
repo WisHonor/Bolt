@@ -25,7 +25,7 @@ The edits stand: the code, the tests and storage-format.md match them. This reco
 - **075, crash recovery** (0bf667e). Before: `undo --to` after a lost head picks any entry the store holds. After: only one whose state's saves it can read; one it can't is refused, naming it. Why: making such a state current would strand the project, with no command able to read it.
 - **077, `tidy`** (969b40b). Added: each pack's index is checked against its checksum before `tidy` judges it, and one that fails is left with a warning; a pack holding nothing to keep is removed first, so `tidy` frees space on a full disk; a store holding a chunk list or a conflict record stops `tidy` before it removes anything. Why: `tidy` decides what to delete from the index alone, unlike reads, which check each object; and it must not delete what a kind of record it doesn't yet follow names.
 
-Commit c67083e, which the final review also named, edited storage-format.md §9 and design.md, not decision 071, whose text already said what it records.
+Commit c67083e, which the final review also named, edited only storage-format.md §9, not decision 071, whose text already said what it records.
 
 From milestone 5, an accepted decision that building shows to be wrong or short is refined by a new record, written before the code, as CLAUDE.md says. Whether to allow in-place edits before a milestone merges instead, recorded once in CLAUDE.md, is for the owner to decide.
 
