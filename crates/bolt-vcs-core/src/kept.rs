@@ -30,6 +30,9 @@ pub(crate) const EXACT: Drive = Drive {
 /// What a change puts at a path: a kind, ID and size. A folder's ID isn't used.
 pub(crate) type Put = (EntryKind, Id, u64);
 
+/// A folder put at a path, its listing built from the base's and the changes below it.
+const FOLDER: Put = (EntryKind::Folder, Id([0; 32]), 0);
+
 /// Who makes a kept save, and what it says.
 pub(crate) struct KeptFrom<'a> {
     /// The save the folder is on, and every kept save's only parent.
@@ -60,9 +63,11 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 /// wherever it touched. The "from" save is that with what the folder held at each path the plan
 /// writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too, except inside a
 /// folder the plan makes where the folder held a file, a link or nothing: there "to" holds only
-/// what the plan writes or finds already there. A held file or link the store lacks is stored
-/// first; one that couldn't be, having changed since the plan, is left out of both sides, and so
-/// is what is planned below it and the folders above it. Each side is `kept.base`, `from` or
+/// what the plan writes or finds already there. A folder above a path either side sets, which the
+/// plan neither makes nor removes, is a folder on both sides: it was one before and after. A held
+/// file or link the store lacks is stored first; one that couldn't be, having changed since the
+/// plan, is left out of both sides with what is planned below it, and the folders above it, which
+/// can't be emptied, are neither made nor removed. Each side is `kept.base`, `from` or
 /// `target` when its folders are exactly that save's, otherwise a kept save stored in `packs`.
 /// `None` when the two sides are the same. Also gives how many safety copies it kept.
 pub(crate) fn switch_saves(
@@ -114,8 +119,20 @@ pub(crate) fn switch_saves(
             }
         }
     }
+    // A folder above these paths that the switch neither makes nor removes was one before and
+    // after it, even where the base holds none, or a file: so it is one on both sides.
+    let untouched: BTreeSet<String> = after
+        .keys()
+        .flat_map(|p| ancestors(p))
+        .filter(|up| !held.contains_key(*up))
+        .map(str::to_owned)
+        .collect();
     let mut before = after.clone();
     before.extend(held);
+    for up in untouched {
+        before.entry(up.clone()).or_insert(Some(FOLDER));
+        after.entry(up).or_insert(Some(FOLDER));
+    }
     let before_root = overlay(store, base_root, &before, packs)?;
     let after_root = overlay(store, base_root, &after, packs)?;
     if before_root == after_root {

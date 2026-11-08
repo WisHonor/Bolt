@@ -37,11 +37,16 @@ fn write_all(dir: &Path, files: &[(&str, &[u8])]) {
     }
 }
 
-/// A project whose folder holds `files`, saved on `main`.
-fn saved(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
+/// A project just started, its folder holding `files`, unsaved.
+fn started(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
     let dir = tempfile::tempdir().unwrap();
-    let mut repo = Repository::init(dir.path(), &who()).unwrap();
+    let repo = Repository::init(dir.path(), &who()).unwrap();
     write_all(dir.path(), files);
+    (dir, repo)
+}
+
+/// Saves the folder on the line the project is on; gives the save.
+fn save_now(repo: &mut Repository) -> Id {
     let who = who();
     let req = SaveRequest {
         message: Some("next"),
@@ -53,8 +58,16 @@ fn saved(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
         only: None,
         amend: false,
     };
-    let saved = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true).unwrap();
-    assert!(matches!(saved, SaveOutcome::Saved { .. }));
+    match save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
+        SaveOutcome::Saved { save_id, .. } => save_id,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A project whose folder holds `files`, saved on `main`.
+fn saved(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
+    let (dir, mut repo) = started(files);
+    save_now(&mut repo);
     (dir, repo)
 }
 
@@ -603,6 +616,165 @@ fn undo_writes_a_link_through_a_folder_only_the_save_it_writes_has() {
     let link = fs::symlink_metadata(root.join("l")).unwrap();
     assert!(link.file_type().is_symlink(), "written as a plain file");
     assert_eq!(fs::read(root.join("l")).unwrap(), b"x");
+}
+
+/// The save the project is on.
+fn save_on(repo: &Repository) -> Id {
+    tip_of(&repo.current().unwrap().1).unwrap()
+}
+
+fn goto_save(repo: &mut Repository, save: Id) {
+    goto(repo, &Target::Save(save), &who(), "goto", None, &mut |_| {}).unwrap();
+}
+
+fn discard_at(repo: &mut Repository, path: &str) {
+    let paths = [path.to_owned()];
+    discard(repo, Some(&paths), &who(), "discard", None, &mut |_| {}).unwrap();
+}
+
+#[test]
+fn a_redo_leaves_the_folder_a_discard_only_threw_away_inside() {
+    // All new: the discard of `d/e` leaves `d`.
+    let (dir, mut repo) = started(&[("d/e/b", b"b")]);
+    let root = dir.path();
+    discard_at(&mut repo, "d/e");
+    assert!(root.join("d").is_dir() && !root.join("d/e").exists());
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/e/b")).unwrap(), b"b");
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(root.join("d").is_dir(), "the redo removed the folder");
+    assert!(!root.join("d/e").exists());
+}
+
+#[test]
+fn a_redo_after_undo_to_leaves_the_folder_around_a_discarded_file() {
+    let (dir, mut repo) = started(&[("a", b"a"), ("d/c", b"c")]);
+    let root = dir.path();
+    let first = repo.head().unwrap();
+    discard_at(&mut repo, "d/c");
+    let who = who();
+    undo_to(&mut repo, &first.to_hex(), &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(root.join("d").is_dir(), "the redo removed the folder");
+    assert!(!root.join("d/c").exists());
+    assert_eq!(fs::read(root.join("a")).unwrap(), b"a");
+}
+
+/// A project at its first save, which is empty, with `main` holding `d/a`: the folder `d` is
+/// made since, holding `mine`, then a goto to `main` writes `d/a` inside it.
+fn wrote_inside_the_users_folder(mine: &[(&str, &[u8])]) -> (tempfile::TempDir, Repository) {
+    let (dir, mut repo) = started(&[("d/a", b"a")]);
+    let empty = save_on(&repo);
+    save_now(&mut repo);
+    goto_save(&mut repo, empty);
+    fs::create_dir(dir.path().join("d")).unwrap();
+    write_all(dir.path(), mine);
+    goto_main(&mut repo);
+    assert_eq!(fs::read(dir.path().join("d/a")).unwrap(), b"a");
+    (dir, repo)
+}
+
+#[test]
+fn undo_of_a_goto_leaves_a_folder_it_only_wrote_inside_and_the_work_in_it() {
+    let (dir, mut repo) = wrote_inside_the_users_folder(&[("d/c", b"c")]);
+    let root = dir.path();
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(!root.join("d/a").exists());
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+}
+
+#[test]
+fn undo_of_a_goto_leaves_an_empty_folder_it_only_wrote_inside() {
+    let (dir, mut repo) = wrote_inside_the_users_folder(&[]);
+    let root = dir.path();
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(root.join("d").is_dir(), "the undo removed the folder");
+    assert!(!root.join("d/a").exists());
+}
+
+#[test]
+fn undo_shelve_of_a_goto_into_a_folder_of_the_users_sets_nothing_aside() {
+    let (dir, mut repo) = wrote_inside_the_users_folder(&[("d/c", b"c")]);
+    let root = dir.path();
+    let who = who();
+    let shelve = StepRequest {
+        shelve: true,
+        ..one_step(&who)
+    };
+    let done = undo(&mut repo, &shelve, &mut |_| {}).unwrap();
+    assert!(done.shelved.is_empty(), "{:?}", done.shelved);
+    assert!(repo.current().unwrap().1.state.shelves.is_empty());
+    assert!(!root.join("d/a").exists());
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+}
+
+#[test]
+fn undo_of_an_unshelf_leaves_an_empty_folder_it_only_wrote_inside() {
+    let (dir, mut repo) = started(&[("d/c", b"c")]);
+    let root = dir.path();
+    let who = who();
+    crate::shelf::shelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    assert!(!root.join("d").exists());
+    fs::create_dir(root.join("d")).unwrap();
+    crate::shelf::unshelf(&mut repo, None, &who, None, &mut |_| {}).unwrap();
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(root.join("d").is_dir(), "the undo removed the folder");
+    assert!(!root.join("d/c").exists());
+    assert_eq!(repo.current().unwrap().1.state.shelves.len(), 1);
+}
+
+#[test]
+fn undo_of_a_jump_leaves_an_empty_folder_it_only_wrote_inside() {
+    let (dir, mut repo) = started(&[("d/c", b"c")]);
+    let root = dir.path();
+    save_now(&mut repo);
+    let saved = repo.head().unwrap();
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    // A new step, so the save is reached by a jump, not by redo.
+    discard(&mut repo, None, &who, "discard", None, &mut |_| {}).unwrap();
+    fs::create_dir(root.join("d")).unwrap();
+    let done = undo_to(&mut repo, &saved.to_hex(), &one_step(&who), &mut |_| {}).unwrap();
+    assert_eq!(done.taken[0].action, Action::Command);
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(root.join("d").is_dir(), "the undo removed the folder");
+    assert!(!root.join("d/c").exists());
+}
+
+#[test]
+fn undo_of_a_goto_leaves_a_folder_the_user_made_in_place_of_a_saved_file() {
+    let (dir, mut repo) = saved(&[("d", b"file")]);
+    let root = dir.path();
+    let file = save_on(&repo);
+    fs::remove_file(root.join("d")).unwrap();
+    write_all(root, &[("d/a", b"a")]);
+    let folder = save_now(&mut repo);
+    goto_save(&mut repo, file);
+    // The user's own folder where the save holds a file, then a goto that writes inside it.
+    fs::remove_file(root.join("d")).unwrap();
+    write_all(root, &[("d/c", b"c")]);
+    goto_save(&mut repo, folder);
+    assert_eq!(fs::read(root.join("d/a")).unwrap(), b"a");
+    let who = who();
+    undo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    assert!(!root.join("d/a").exists());
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
+    // With --shelve, nothing is in the way to set aside.
+    redo(&mut repo, &one_step(&who), &mut |_| {}).unwrap();
+    let shelve = StepRequest {
+        shelve: true,
+        ..one_step(&who)
+    };
+    let done = undo(&mut repo, &shelve, &mut |_| {}).unwrap();
+    assert!(done.shelved.is_empty(), "{:?}", done.shelved);
+    assert!(!root.join("d/a").exists());
+    assert_eq!(fs::read(root.join("d/c")).unwrap(), b"c");
 }
 
 #[test]
