@@ -4,7 +4,7 @@
 - **Date:** 2026-11-08
 - **Agenda topic:** none (milestone 5 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
-- **Refines:** [decision 009](009-storage-engine.md) (chunking: FastCDC from 1 MB, 16 KB / 64 KB / 256 KB to start)
+- **Refines:** [decision 009](009-storage-engine.md) (chunking: FastCDC from 1 MB, 16 KB / 64 KB / 256 KB to start); decisions [013](013-local-data-and-offline.md) and [016](016-presets.md) (the threshold is fixed at 1 MiB until the presets make it a `bolt.toml` setting)
 
 ## Context
 
@@ -22,12 +22,12 @@ And the sizes: a smaller average (16 KB) finds more shared pieces but makes four
 
 **A, with decision 009's sizes in binary units.**
 
-- **What is cut:** a file of at least 1 MiB (1,048,576 bytes) is cut into chunks, up to the limit below; a smaller one is stored whole.
+- **What is cut:** a file of at least 1 MiB (1,048,576 bytes) is cut into chunks, up to the limit below; a smaller one is stored whole. The 1 MiB is fixed until milestone 6's presets make it the `bolt.toml` setting decisions 013 and 016 describe (`chunk-files-over`); the setting will change which files are cut, never an ID.
 - **Sizes:** at least 16 KiB (16,384 bytes), about 64 KiB (65,536) on average, at most 256 KiB (262,144). Only a file's last chunk can be shorter than the minimum.
 - **The rule** (storage-format.md §6 gives it exactly): from the start of the bytes not yet cut, the first 16,384 are skipped; then a 64-bit hash takes in one byte at a time (shift left by one, add the table's number for the byte, wrapping), and the chunk ends after the first byte at which the hash's top 17 bits are all zero, before the 64 KiB mark, or its top 15 bits, after it, or at 256 KiB.
 - **The table:** 256 numbers of 64 bits, little-endian, the first 2,048 bytes of BLAKE3's extendable output in key-derivation mode with the context string `bolt-vcs 2026-11-08 chunk-cutter gear v1`.
 - **Pinned, not part of the format:** any chunk list that rebuilds the file is valid (decision 005), but Bolt's cutter is pinned by test vectors, so changing it is a decision of its own. A change costs sharing with what was cut before, never correctness.
-- **A limit:** a file of more than 128 GiB (137,438,953,472 bytes) is stored whole, streamed, as every file is today. The table is public, so someone can make a file whose every chunk comes out at the minimum; below 128 GiB such a file still has at most 8,388,097 chunks, a list of under 300 MB, inside a chunk list's limits (2^24 chunks, 512 MiB). Files that big are rare, and chunking them waits for a list of lists.
+- **A limit:** a file of more than 128 GiB (137,438,953,472 bytes) is stored whole, streamed, as every file is today. The table is public, so someone can make a file whose every chunk comes out at the minimum; below 128 GiB such a file still has at most 8,388,097 chunks, a list of under 300 MB, inside a chunk list's limits (8,388,608 chunks, 512 MiB; [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md)). Files that big are rare, and chunking them waits for a list of lists.
 - **Tuning** waits for milestone 5's benchmarks on real assets ([decision 088](088-benchmarks-and-the-speed-gates.md); risk 4).
 
 ## Consequences

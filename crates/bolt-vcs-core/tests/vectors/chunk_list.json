@@ -5,12 +5,12 @@
   ],
   "invalid": [
     {"name": "version-2", "hex": "02d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b02955ddfbf1efade57480fbf6019f3ab768198a04a85e5bae4cf2d1ee04f03e18b06d7894ae9716d38d2dfad0ec55424ca321ee12453d51f1b3adeb77d0475ed988c05", "why": "the version must be 1"},
-    {"name": "no-chunks", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b00", "why": "a chunk list holds at least one chunk"},
+    {"name": "no-chunks", "hex": "01af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f32620000", "why": "a chunk list holds at least one chunk (an empty file, so nothing else is wrong)"},
     {"name": "empty-chunk", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b02d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240baf1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f326200", "why": "a chunk is at least one byte"},
     {"name": "sizes-dont-add-up", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b02955ddfbf1efade57480fbf6019f3ab768198a04a85e5bae4cf2d1ee04f03e18b06d7894ae9716d38d2dfad0ec55424ca321ee12453d51f1b3adeb77d0475ed988c06", "why": "the chunk sizes must add up to the file size"},
     {"name": "trailing-byte", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b02955ddfbf1efade57480fbf6019f3ab768198a04a85e5bae4cf2d1ee04f03e18b06d7894ae9716d38d2dfad0ec55424ca321ee12453d51f1b3adeb77d0475ed988c0500", "why": "nothing may follow the last chunk"},
     {"name": "non-minimal-size", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e248b0002955ddfbf1efade57480fbf6019f3ab768198a04a85e5bae4cf2d1ee04f03e18b06d7894ae9716d38d2dfad0ec55424ca321ee12453d51f1b3adeb77d0475ed988c05", "why": "a varint must be minimal"},
     {"name": "count-past-the-bytes", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b03955ddfbf1efade57480fbf6019f3ab768198a04a85e5bae4cf2d1ee04f03e18b06d7894ae9716d38d2dfad0ec55424ca321ee12453d51f1b3adeb77d0475ed988c05", "why": "the count says more chunks than the record holds"},
-    {"name": "count-over-the-limit", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b81808008", "why": "at most 16,777,216 chunks"}
+    {"name": "count-over-the-limit", "hex": "01d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e240b81808004", "why": "at most 8,388,608 chunks (it also claims more than its bytes hold; a reader need only refuse it)"}
   ]
 }

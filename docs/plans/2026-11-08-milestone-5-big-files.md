@@ -34,9 +34,11 @@
   | Masks | `MASK_S` = top 17 bits (`0xFFFF800000000000`) before 65,536; `MASK_L` = top 15 (`0xFFFE000000000000`) from there (082) |
   | The cutter's table | BLAKE3 derive-key, context `bolt-vcs 2026-11-08 chunk-cutter gear v1`, no key material, first 2,048 bytes of its extendable output as 256 little-endian `u64` (082) |
   | A chunk list in a pack | kind 18, ID = the file's ID, uncompressed size = the file's size, stored size = the record's length (at most 512 MiB), compression 0 (083) |
-  | Chunk count | 1 to 16,777,216 per list; Bolt's cutter makes at most 8,388,097 (083) |
+  | Chunk count | 1 to 8,388,608 per list; Bolt's cutter makes at most 8,388,097; a list is decoded as it is read, never held as stored bytes and decoded list at once (083) |
+  | Merging and `tidy` copy chunk lists last | a list whose ID the pack being written holds as whole content is left out; a different list for the same ID starts a new pack; an identical one is left out (083) |
+  | `.bolt/format` | `feature chunks`: written by `start` and `import`; added by every changing command right after the lock when missing, before it stores anything (083) |
   | Worker threads | `std::thread::available_parallelism()`, clamped to 1..=8 (084) |
-  | Work waiting for the writer | about 64 MiB of results (084) |
+  | Work handed to workers | each job counted from hand-out until the writer takes its result, at what it reads plus the most its result can be; no more handed out while that passes 64 MiB or 4 jobs a worker are out; workers never wait on the writer (084) |
   | A Git LFS pointer | at most 1,024 bytes, not empty, accepted by Git LFS's parser (085) |
   | A Git LFS object | `.git/lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`, a regular file of the pointer's size (085) |
   | Missing objects listed | the first 20 (path, commit, size), then the count and total size (085) |
@@ -109,7 +111,7 @@ pub const CHUNK_UP_TO: u64 = 1 << 37;       // ...up to this long; a longer one 
 pub const MIN_CHUNK: usize = 16 << 10;
 pub const AVG_CHUNK: usize = 64 << 10;
 pub const MAX_CHUNK: usize = 256 << 10;
-pub const MAX_CHUNKS: u64 = 1 << 24;        // per chunk list, as the format allows
+pub const MAX_CHUNKS: u64 = 1 << 23;        // per chunk list, as the format allows
 pub fn is_cut(size: u64) -> bool;           // CHUNK_FROM..=CHUNK_UP_TO
 /// Length of the chunk that starts `data`, which holds every byte left or at least MAX_CHUNK.
 pub fn chunk_len(data: &[u8]) -> usize;
@@ -126,6 +128,8 @@ pub struct ChunkList { pub file: Id, pub size: u64, pub chunks: Vec<Chunk> }
 impl ChunkList {
     pub fn encode(&self) -> Vec<u8>;
     pub fn decode(bytes: &[u8]) -> Result<ChunkList, DecodeError>;   // §6's rules exactly
+    /// The same rules, decoding `len` bytes as they are read, never holding them whole.
+    pub fn read_from(reader: &mut dyn Read, len: u64) -> Result<ChunkList, DecodeError>;
 }
 ```
 - The table is computed once (`std::sync::OnceLock`) from `blake3::Hasher::new_derive_key(…).finalize_xof()`.
@@ -142,6 +146,7 @@ impl ChunkList {
 #[test] fn chunk_lists_that_break_a_rule_are_refused() { /* chunk_list.json invalid */ }
 #[test] fn a_count_past_the_bytes_is_refused_before_anything_is_allocated() {}
 #[test] fn decode_then_encode_gives_the_same_bytes() { /* proptest */ }
+#[test] fn read_from_agrees_with_decode_on_every_vector() { /* valid and invalid, through a reader giving odd read sizes */ }
 ```
 - [ ] **Step 2:** Run them. Expected: FAIL (no `chunks` module).
 - [ ] **Step 3:** Implement. Fuzz targets: `decode_chunk_list` (decodes, and re-encodes what decodes to the same bytes) and `cut_chunks` (cuts random data; every length within the rules; lengths add up; cutting through a `Cutter` with odd read sizes gives the same lengths).
@@ -153,7 +158,7 @@ impl ChunkList {
 Decision 083; storage-format.md §6 and §11 (kind 18, reading, merging).
 
 **Files:**
-- Modify: `pack.rs` (kind 18 entries; `prepare`/`add_prepared` for bytes compressed elsewhere; the index's size limits per kind, v1 and v2), `pack/v2.rs`, `store.rs`, `merge.rs` (`holds_little`, `copy_pack`'s check), `verify.rs`, `crates/bolt-vcs-core/tests/vectors.rs` (`pack_chunked.json`).
+- Modify: `pack.rs` (kind 18 entries; `prepare`/`add_prepared` for bytes compressed elsewhere; the index's size limits per kind, v1 and v2), `pack/v2.rs`, `store.rs`, `merge.rs` (`holds_little`, `copy_pack`'s check and order), `verify.rs`, `repo.rs` (`feature chunks`), `crates/bolt-vcs-core/tests/vectors.rs` (`pack_chunked.json`).
 
 **Interfaces:**
 ```rust
@@ -175,7 +180,9 @@ impl Store {
 - An index line of kind 18 may record an uncompressed size up to 2^40 and a stored size up to 512 MiB; every other kind keeps its limits. `read_chunk_list` refuses compression other than 0, and a record whose file or size isn't the entry's (damage, so the copy is passed over).
 - `copy_content`: copies of kind 1 and kind 18 are both copies of the file, in today's order and with today's rule for several copies (each checked before one is streamed). A chunk list streams its chunks in order, each looked up as kind 1 only (a kind-18 copy under a chunk's ID is passed over), each checked against its ID and its size in the list, through the existing per-object path (so a chunk's bad copy is passed over for a good one, and the pack is reported as damaged). The whole is hashed as it goes; a hash that isn't the file's ID makes this copy damage and the call an error, with the pack named.
 - `has_good_copy` is unchanged for whole copies, and never counts a chunk list as good: a writer proves one by cutting the file (Task 3).
-- Merging checks a chunk list with `read_chunk_list` (structure only) and copies its stored bytes; `holds_little` counts it at its stored size.
+- `read_chunk_list` decodes the list as it reads it (`ChunkList::read_from`), never holding the stored bytes and the decoded list at once.
+- Merging checks a chunk list with `read_chunk_list` (structure only) and copies its stored bytes; `holds_little` counts it at its stored size. `copy_pack` copies every other object first and chunk lists last: a list whose ID the pack being written already holds as content is left out, a list whose ID it already holds as a different list starts a new pack (so both survive), an identical list is left out. `tidy` (Task 5) shares `copy_pack`, so it gets the same order.
+- `feature chunks`: `bolt start` and `bolt import` write it in `.bolt/format`; `Repository::lock_for_change` adds it, when missing, right after taking the lock and before anything is stored (`format` replaced whole through `tmp/` and a rename, as today); a reader accepts it. Read-only commands never write `format`.
 - `verify_store` checks every chunk list's structure and that its file rebuilds to its ID.
 
 - [ ] **Step 1: Write the failing tests** (`pack.rs`, `store.rs`, `merge.rs`, `verify.rs` unit tests; `vectors.rs`):
@@ -192,8 +199,14 @@ impl Store {
 #[test] fn has_good_copy_never_counts_a_chunk_list() {}
 #[test] fn holds_chunk_list_matches_only_the_same_list() {}
 #[test] fn merging_keeps_chunked_files_readable() {}
+#[test] fn a_planted_list_under_a_chunks_id_never_takes_the_chunks_place_in_a_merge() { /* the planted pack sorts first by name */ }
+#[test] fn a_list_never_takes_a_whole_copys_place_in_a_merge() {}
+#[test] fn two_different_lists_for_one_file_both_survive_a_merge() {}
 #[test] fn a_pack_holding_the_list_of_a_10_gib_file_still_counts_as_small() {}
 #[test] fn verify_finds_a_chunk_list_that_builds_the_wrong_file() {}
+#[test] fn start_and_import_write_feature_chunks() {}
+#[test] fn a_changing_command_adds_feature_chunks_before_storing_anything() { /* an older repository's format */ }
+#[test] fn a_command_that_only_reads_leaves_format_alone() {}
 ```
 - [ ] **Step 2:** Run them. Expected: FAIL.
 - [ ] **Step 3:** Implement.
@@ -255,14 +268,16 @@ Decision 084.
 /// Worker threads for one command: `available_parallelism()` clamped to 1..=8 (a test hook sets the count).
 pub(crate) fn with_workers<R>(f: impl FnOnce(&Workers<'_>) -> R) -> R;
 impl Workers<'_> {
-    /// Runs `work` on each job on the workers and hands the results to `take` in the jobs' order,
-    /// submitting a job only while the results not yet taken weigh less than `window` bytes.
+    /// Runs `work` on each job on the workers and hands the results to `take` in the jobs' order.
+    /// A job counts `cost(&job)` bytes (what it reads plus the most its result can be) from when it
+    /// is handed out until its result is taken; none is handed out while that total passes `window`
+    /// or 4 jobs a worker are out.
     pub fn in_order<J, T, E>(&self, jobs: impl IntoIterator<Item = J>, window: usize,
-        work: impl Fn(J) -> T + Sync, weight: impl Fn(&T) -> usize,
+        cost: impl Fn(&J) -> usize, work: impl Fn(J) -> T + Sync,
         take: impl FnMut(T) -> Result<(), E>) -> Result<(), E> where J: Send, T: Send;
 }
 ```
-- **Workers never wait on the writer:** results go into a shared table, never a bounded channel, and only the writer decides when to submit more. No worker touches a `PackSet`; workers may use the `Store` (it is safe to share).
+- **Workers never wait on the writer:** results go into a shared table, never a bounded channel, and only the writer decides when to hand out more, by the cost counted from hand-out (not by results alone, which would let jobs pile up unseen). A chunk job costs twice its length plus zstd's bound; a small file twice its size plus the bound. No worker touches a `PackSet`; workers may use the `Store` (it is safe to share).
 - **Save:** after the walk, the files the cache doesn't vouch for are taken in `build_with`'s order. A small file is a worker job (read whole, hash, check the store, `pack::prepare`). The writer looks ahead over small files only up to the next big file; a big file is cut on the writer's thread while its chunks are hashed, checked and prepared on the workers, and the writer adds them in order. The first problem a save reports is the one it reports today.
 - **Status:** every file the cache doesn't vouch for, big ones included, is hashed on a worker; results are taken in order.
 - **Safety copies and the import:** their big files' chunks go to the workers.
@@ -271,7 +286,8 @@ impl Workers<'_> {
 - [ ] **Step 1: Write the failing tests:**
 ```rust
 #[test] fn results_come_back_in_the_jobs_order_whatever_the_timing() {}
-#[test] fn no_more_than_the_window_waits_for_the_writer() {}
+#[test] fn no_more_than_the_window_is_handed_out_however_slow_the_workers() { /* slow workers, fast writer: in-flight cost never passes the window */ }
+#[test] fn a_slow_writer_never_blocks_a_worker() {}
 #[test] fn a_save_writes_the_same_packs_with_one_thread_or_eight() { /* identical pack names and bytes */ }
 #[test] fn the_first_problem_is_the_same_with_one_thread_or_eight() {}
 #[test] fn an_unchanged_file_is_still_not_read_by_save() { /* the hook reaches the workers */ }
@@ -292,6 +308,8 @@ Decision 083; storage-format.md §11 "Tidying"; the follow-up on `tidy` and chun
 - First, every pack's index is read and checked against its checksum, young packs included; a pack that can't be opened, read or checked stops `tidy` (`RepoError::CantTidy` naming it, with a hint: check its permissions; if it is damaged for good, moving it out of `.bolt/store/packs` lets `tidy` run, losing what only it holds). A conflict record still stops it.
 - The kind-18 entries seen are kept as a map from file ID to their packs. Marking a file (kind 1, 2 or 3 entry) also reads every chunk list stored under its ID (`read_chunk_list`) and marks each chunk; so does every chunk list in a young pack. A list that can't be read stops `tidy`, as any record it must keep.
 - `pack_not_tidied` stays for a pack whose copy reads differently from its checked index.
+- Every size `tidy` adds up from an index (the small-pack judgement, the estimate of what it frees) counts a chunk list at its stored size, not its file's (today `tidy.rs` counts every line's uncompressed size).
+- Rewriting goes through `merge::copy_pack`, so chunk lists are copied last, as Task 2 made it.
 
 - [ ] **Step 1: Write the failing tests:**
 ```rust
@@ -327,10 +345,11 @@ pub fn is_exact_lfs_pointer(blob: &[u8], p: &LfsPointer) -> bool;   // the bytes
 impl Repo { pub fn lfs_object(&self, p: &LfsPointer) -> Result<Option<File>, GitError>; }  // None: not there
 ```
 - **The first pass** (only with a sign of Git LFS): walk the root tree of every commit in `order`, each distinct tree once (a set of Git IDs), within the import's limits; for each blob, its size from its header; each of at most 1,024 bytes is read (once, a set of Git IDs) and parsed. A pointer whose object is missing, or not a regular file of its size (a stat, through the reader's no-link opener), is noted (the first 20 with path and commit; all counted with their sizes). A pointer with extensions stops the import there. Any missing: `ImportError::LfsMissing { first, count, bytes }`, before `.bolt` exists, with the hint `git lfs fetch --all`, then `bolt import` again.
-- **`lfs.storage`** in `.git/config`: `ImportError::LfsStorageElsewhere`, before anything is written.
+- **`lfs.storage`** in `.git/config`, or in the user's own Git settings (the files and plain includes `git/config.rs` already reads for decision 060): `ImportError::LfsStorageElsewhere`, naming where it is set, before anything is written.
+- Sizes added up from pointers (the missing total, the summary's bytes) saturate rather than overflow: pointers are untrusted.
 - **The second pass:** a blob of at most 1,024 bytes that parses is brought in from its object: opened with `lfs_object`, its length checked, streamed through `ingest::store_bytes` behind a reader that computes SHA-256 as it passes; a different SHA-256 is `ImportError::LfsMismatch` (path, commit, oid), nothing committed. A missing object here is `LfsMissing` with that one. Size 0: an empty file, no object read. A pointer with extensions: `ImportError::LfsExtension`. A memo from oid to Bolt ID skips objects already stored by this import.
 - **Look-alikes** are stored as they are; an `lfs_lookalikes` warning names the first 5 (path, commit) and counts them all.
-- **The summary** gains the Git LFS files brought in (count and bytes) and the pointers not in Git LFS's exact form (count), in text and in `--json`.
+- **The summary** gains the Git LFS files brought in (count and bytes), the pointers not in Git LFS's exact form (count) and the commits that hold Git LFS files (count; an export can give back their Git IDs only by turning those files back into pointers), in text and in `--json`.
 
 - [ ] **Step 1: Write the failing tests** (unit tests in `object.rs`, `import.rs`; end to end in `import_lfs.rs`, writing `.git/lfs/objects` by hand; the last test with real Git LFS):
 ```rust
@@ -344,6 +363,8 @@ impl Repo { pub fn lfs_object(&self, p: &LfsPointer) -> Result<Option<File>, Git
 #[test] fn a_link_inside_git_lfs_is_never_followed() {}
 #[test] fn a_pointer_with_extensions_stops_the_import() {}
 #[test] fn lfs_storage_in_the_repository_config_is_refused() {}
+#[test] fn lfs_storage_in_the_users_own_git_settings_is_refused() {}
+#[test] fn the_summary_counts_commits_holding_lfs_files() {}
 #[test] fn a_lookalike_comes_in_as_it_is_with_a_warning() {}
 #[test] fn a_pointer_of_size_zero_is_an_empty_file() {}
 #[test] fn pointers_not_in_the_exact_form_are_counted() {}
@@ -391,8 +412,8 @@ impl Repo {
 }
 ```
 - The scan reads each entry's header in pack order once and keeps its base's position (offset deltas) or index (ref deltas), at most 8 bytes an entry; children lists come from it.
-- Every object built is checked against the name the pack's index gives it (Git ID), as every read is.
-- Memory: at most the base and the object being built, each at most 512 MiB, plus the base cache; an object with children still to come is kept in the cache while it fits, else rebuilt from the bottom when needed.
+- Every object built is checked against the name the pack's index gives it (Git ID), as every read is. A member whose delta can't be applied, or whose result isn't its name, is neither stored nor mapped (and not handed to `each`); one that was built still serves as the base of its children, each checked against its own name; the import stops on such a member only if a commit needs it, through today's path. (The red-team tests `rt3_8` and `rt4_4` build members under names that don't match and expect the import to succeed.)
+- Memory: at most the base and the object being built, each at most 512 MiB, plus the base cache; an object with children still to come is kept in the cache while it fits, else written to a file in `.bolt/tmp` (through `fsio`, at most 4 GiB of such files at once, each removed after its last child) and read back whole for its next child; past 4 GiB it is rebuilt from the bottom when needed, counted against the allowance. `rt3_8` and `rt4_4` bound the import's peak at 750 MB for a 300 MiB file: keep the chunk window inside that margin.
 - The work allowance and its numbers are unchanged; its stop's hint no longer needs the repack advice for honest histories.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -402,7 +423,8 @@ impl Repo {
     // the allowance lowered by a test hook so the old quadratic work fails and once-each passes
 }
 #[test] fn each_object_of_a_family_is_built_once() { /* a build counter */ }
-#[test] fn a_family_with_branches_keeps_memory_bounded() {}
+#[test] fn a_family_with_branches_keeps_memory_bounded() { /* a member too big for the cache goes to .bolt/tmp and is built once */ }
+#[test] fn a_family_member_no_commit_needs_may_fail_its_check() { /* the import still succeeds */ }
 #[test] fn the_base_cache_keeps_what_it_builds() {}
 #[test] fn the_family_scan_runs_only_for_a_pack_it_needs() { /* pack_memory's planted pack still costs reads, not memory */ }
 ```
@@ -447,7 +469,7 @@ Decisions 087 and 088; testing.md §5.
 - **Data:** a real code project at a fixed tag; 20 files of 50 MiB of noise; one 1 GiB file in 10 versions, each with 1 MiB overwritten and 4 KiB inserted at fixed offsets; Godot's demo projects at a fixed tag; a Git LFS repository the script builds (10 versions of five 100 MiB files); the red team's RT4-1 repository and a 200 MiB file in 50 versions changing 1% each (for import sizes, decision 087).
 - **Steps timed** for Bolt, Git, and Git with Git LFS tracking files over 1 MiB: first save/commit; a small change; `status` with nothing changed; `status` after touching one big file; going back to the first version; size on disk; and `bolt import` of the Git LFS repository. `hyperfine --warmup 1 --runs 5` (3 for steps over a minute); export markdown.
 - **Parts:** `throughput.rs` prints MB/s for the cutter, BLAKE3 and zstd levels 3, 9 and 19 on 64 KiB pieces, and, for compressing again, the bytes and time of each level on the code set, on uncompressed assets (generated WAV- and BMP-like data) and on compressed assets (the Godot demos' PNG and OGG files, given by an environment variable).
-- **Compressing again:** apply decision 088's rule to the numbers; write the ruling with them. If a level qualifies, a decision record and storage-format.md change come first, then the code in `merge.rs` and `tidy.rs`; otherwise nothing changes.
+- **Compressing again:** apply decision 088's rule to the numbers; write the ruling with them. If a level qualifies, a decision record and storage-format.md change come first, then the code in `merge.rs` and `tidy.rs` (content only: a chunk list always stays uncompressed); otherwise nothing changes.
 - **Publish** every number in `docs/benchmarks.md`, with the machines, versions and commands, including where Git or Git LFS wins.
 
 - [ ] Steps: write the scripts and tests; push the branch's head to `bench/m5` to run the workflow (a manual workflow can't be started before it is on `main`); copy the results; run the micro tests locally; rule on compressing again; delete the `bench/m5` branch; commit `Benchmark Bolt against Git and Git LFS`.
