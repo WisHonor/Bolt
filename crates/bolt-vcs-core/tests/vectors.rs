@@ -10,6 +10,7 @@ use bolt_core::link::ProjectLink;
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
 use bolt_core::save::{MoveNote, Person, Save};
+use bolt_core::store::Store;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -567,6 +568,57 @@ fn pack_v2_matches_its_vector() {
         assert_eq!(path.file_name().unwrap().to_str().unwrap(), v.file);
         assert_eq!(hex(&std::fs::read(&path).unwrap()), v.hex, "{}", v.name);
         pack_reads_back(&v);
+    }
+}
+
+#[derive(Deserialize)]
+struct ChunkedPackVector {
+    name: String,
+    file: String,
+    hex: String,
+}
+
+#[test]
+fn the_writer_writes_the_chunked_pack_vector_byte_for_byte() {
+    let path = format!(
+        "{}/tests/vectors/pack_chunked.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<ChunkedPackVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors.len(), 1);
+    for v in &vectors {
+        // `hello world` cut into `hello ` and `world`, both stored raw, then its chunk list.
+        let root = tempfile::tempdir().unwrap();
+        let mut w = PackWriter::create(root.path()).unwrap();
+        let chunks = ["hello ", "world"]
+            .iter()
+            .map(|piece| Chunk {
+                id: w.add_content(piece.as_bytes()).unwrap(),
+                size: piece.len() as u64,
+            })
+            .collect();
+        let list = ChunkList {
+            file: hash_content(b"hello world"),
+            size: 11,
+            chunks,
+        };
+        w.add_chunk_list(&list).unwrap();
+        let path = w.finish(root.path()).unwrap().unwrap();
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), v.file);
+        assert_eq!(hex(&std::fs::read(&path).unwrap()), v.hex, "{}", v.name);
+
+        // Read back: the list under the file's ID, and the file through it.
+        let r = PackReader::open(&path).unwrap();
+        let entry = r.find(&list.file).unwrap().unwrap();
+        assert_eq!(entry.kind, ObjectKind::ChunkList);
+        assert_eq!(r.read_chunk_list(&entry).unwrap(), list);
+        let mut out = Vec::new();
+        Store::open(root.path())
+            .unwrap()
+            .copy_content(&list.file, &mut out)
+            .unwrap();
+        assert_eq!(out, b"hello world");
     }
 }
 

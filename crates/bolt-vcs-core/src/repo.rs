@@ -28,7 +28,9 @@ use crate::store::{Store, StoreError, is_damage};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 
-pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\n";
+pub const FORMAT_TEXT: &str = "bolt-repository 1\nhash blake3\nfeature chunks\n";
+/// The store may hold chunk lists, which builds from before them can't read safely.
+const CHUNKS: &str = "chunks";
 
 /// What went wrong with a project. A path or detail in a message may hold text from outside Bolt
 /// (the project folder's name, a hostile `.bolt/format`), so it is shown escaped.
@@ -648,18 +650,22 @@ pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
         }
         _ => return Err(damaged_format()),
     }
-    // This version knows no features yet, so any further line is a refusal.
-    if let Some(line) = lines.next() {
-        return Err(match line.strip_prefix("feature ") {
-            Some(f) if is_word(f) => RepoError::NewerFormat {
-                detail: format!("the feature \"{f}\""),
-            },
-            _ => damaged_format(),
-        });
+    let mut features = BTreeSet::new();
+    for line in lines {
+        let feature = line
+            .strip_prefix("feature ")
+            .filter(|f| is_word(f))
+            .ok_or_else(damaged_format)?;
+        if feature != CHUNKS {
+            return Err(RepoError::NewerFormat {
+                detail: format!("the feature \"{feature}\""),
+            });
+        }
+        if !features.insert(feature.to_owned()) {
+            return Err(damaged_format());
+        }
     }
-    Ok(FormatInfo {
-        features: BTreeSet::new(),
-    })
+    Ok(FormatInfo { features })
 }
 
 /// What `state/head` holds.
@@ -1056,9 +1062,8 @@ impl Repository {
             bolt,
             tmp,
             packs,
-            format: FormatInfo {
-                features: BTreeSet::new(),
-            },
+            // As `commit_first` writes it, so taking the lock writes none before then.
+            format: parse_format(FORMAT_TEXT)?,
             head: None,
             cache_key: None,
         };
@@ -1085,12 +1090,20 @@ impl Repository {
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
         let id = self.move_head(lock, packs, entry)?;
-        let (held, name) = (&self.held, "format");
-        write_atomic(&held.tmp, &held.bolt, name, FORMAT_TEXT.as_bytes())
-            .map_err(|e| cant_write(self.bolt.join(name), e))?;
+        self.write_format(lock)?;
         // Only once it is a project, so a stopped merge never leaves it unfinished.
         crate::merge::merge_after_commit(self, lock);
         Ok(id)
+    }
+
+    /// Replaces `.bolt/format` with this version's. It knows no feature but `chunks`, so that
+    /// adds the one line a project of an older build can lack.
+    fn write_format(&mut self, _lock: &ChangeLock) -> Result<(), RepoError> {
+        let (held, name) = (&self.held, "format");
+        write_atomic(&held.tmp, &held.bolt, name, FORMAT_TEXT.as_bytes())
+            .map_err(|e| cant_write(self.bolt.join(name), e))?;
+        self.format = parse_format(FORMAT_TEXT)?;
+        Ok(())
     }
 
     /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one.
@@ -1433,6 +1446,10 @@ impl Repository {
         let (held, name) = (&self.held, "lock-info");
         write_atomic(&held.tmp, &held.state, name, info.as_bytes())
             .map_err(|e| cant_write(self.state_dir().join(name), e))?;
+        // Before anything is stored: builds from before chunk lists must refuse this project now.
+        if !self.format.features.contains(CHUNKS) {
+            self.write_format(&lock)?;
+        }
         // Another command may have committed since this handle was opened. A lost head stops
         // the command at `current`, unless it is the `undo --to` that picks one up.
         self.head = read_head(&self.held.state, &self.bolt)?.id();
@@ -1536,9 +1553,18 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    /// The format Bolt wrote before chunk lists.
+    const OLDER_FORMAT: &str = "bolt-repository 1\nhash blake3\n";
+
     #[test]
     fn format_file() {
-        assert!(parse_format(FORMAT_TEXT).unwrap().features.is_empty());
+        let chunks = BTreeSet::from(["chunks".to_owned()]);
+        assert_eq!(
+            FORMAT_TEXT,
+            "bolt-repository 1\nhash blake3\nfeature chunks\n"
+        );
+        assert_eq!(parse_format(FORMAT_TEXT).unwrap().features, chunks);
+        assert!(parse_format(OLDER_FORMAT).unwrap().features.is_empty());
         for (text, needle) in [
             ("bolt-repository 2\nhash blake3\n", "bolt-repository 2"),
             ("bolt-repository 1\nhash sha256\n", "sha256"),
@@ -1549,6 +1575,10 @@ mod tests {
             ),
             (
                 "bolt-repository 1\nhash blake3\nfeature teleport\n",
+                "teleport",
+            ),
+            (
+                "bolt-repository 1\nhash blake3\nfeature chunks\nfeature teleport\n",
                 "teleport",
             ),
         ] {
@@ -1565,6 +1595,8 @@ mod tests {
             "bolt-repository 1\nhash blake3\r\n",
             "bolt-repository 1\nhash blake3\nfeature \n",
             "bolt-repository 1\nhash blake3\nfeature a b\n",
+            "bolt-repository 1\nhash blake3\nfeature chunks\nfeature chunks\n",
+            "bolt-repository 1\nhash blake3\nfeature chunks\n\n",
             "hello\n",
         ] {
             assert!(
@@ -1765,6 +1797,53 @@ mod tests {
                 ));
             }
         }
+    }
+
+    /// Builds from before chunk lists can't read them safely, so the first command that changes an
+    /// older project says the project may hold them, before it stores anything.
+    #[test]
+    fn a_changing_command_adds_feature_chunks_before_storing_anything() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        let format = format_path(dir.path());
+        std::fs::write(&format, OLDER_FORMAT).unwrap();
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let packs = || {
+            std::fs::read_dir(dir.path().join(".bolt/store/packs"))
+                .unwrap()
+                .count()
+        };
+        let before = packs();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        assert_eq!(packs(), before);
+        let (head, mut next) = repo.current().unwrap();
+        next.parent = Some(head);
+        let stored = repo.new_packs().unwrap();
+        repo.commit(&lock, stored, &next).unwrap();
+        drop(lock);
+        let mut reopened = Repository::open(dir.path()).unwrap();
+        assert!(reopened.format.features.contains("chunks"));
+        drop(reopened.lock_for_change("save", &mut |_| {}).unwrap());
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+    }
+
+    #[test]
+    fn a_command_that_only_reads_leaves_format_alone() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        let format = format_path(dir.path());
+        std::fs::write(&format, OLDER_FORMAT).unwrap();
+        let repo = Repository::discover(dir.path()).unwrap();
+        assert!(repo.format.features.is_empty());
+        let (_, current) = repo.current().unwrap();
+        let save = repo
+            .store()
+            .save(&current.state.lines["main"], false)
+            .unwrap();
+        repo.store().listing(&save.root).unwrap();
+        drop(repo);
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), OLDER_FORMAT);
     }
 
     #[test]

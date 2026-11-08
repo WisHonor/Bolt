@@ -17,6 +17,7 @@ fuzz_target!(|data: &[u8]| {
             let Ok(entry) = entry else { break };
             let _ = reader.find(&entry.id);
             let _ = reader.read_record(&entry);
+            let _ = reader.read_chunk_list(&entry);
             let _ = reader.copy_content(&entry, &mut std::io::sink());
         }
         let _ = reader.find(&bolt_core::id::Id([0xff; 32]));

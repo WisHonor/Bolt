@@ -2,10 +2,11 @@
 //! searched, and searched on disk; at most `MAX_OPEN` stay open.
 use bolt_platform::dir::Dir;
 
+use crate::chunks::ChunkList;
 use crate::encoding::DecodeError;
-use crate::id::Id;
+use crate::id::{ContentHasher, Id};
 use crate::listing::Listing;
-use crate::pack::{IndexEntry, ObjectKind, PackError, PackReader};
+use crate::pack::{HashingWriter, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::save::Save;
 use crate::text::escape;
 use crate::warning::{self, Warning};
@@ -43,6 +44,38 @@ pub enum StoreError {
 
 /// A copy of an object: (pack number, its id).
 type At = (usize, Id);
+
+/// What a lookup takes as a copy of the object it wants.
+#[derive(Clone, Copy)]
+enum Wanted {
+    /// An object of this kind.
+    Kind(ObjectKind),
+    /// A file: its content stored whole, or a chunk list.
+    File,
+    /// A chunk of a file: content stored whole, of the size its list gives. Never a chunk list, so
+    /// a read goes no deeper than one list.
+    Chunk(u64),
+}
+
+impl Wanted {
+    fn takes(self, entry: &IndexEntry) -> bool {
+        match self {
+            Wanted::Kind(kind) => entry.kind == kind,
+            Wanted::File => matches!(entry.kind, ObjectKind::Content | ObjectKind::ChunkList),
+            Wanted::Chunk(size) => {
+                entry.kind == ObjectKind::Content && entry.uncompressed_size == size
+            }
+        }
+    }
+
+    /// The kind a lookup that found only other objects names.
+    fn kind(self) -> ObjectKind {
+        match self {
+            Wanted::Kind(kind) => kind,
+            Wanted::File | Wanted::Chunk(_) => ObjectKind::Content,
+        }
+    }
+}
 
 /// A copy found in pack `n`. It doesn't hold the pack open: however many packs hold an object,
 /// at most `MAX_OPEN` stay open.
@@ -140,12 +173,12 @@ struct Tries {
 }
 
 impl Tries {
-    fn error(self, id: &Id, kind: ObjectKind) -> StoreError {
+    fn error(self, id: &Id, wanted: Wanted) -> StoreError {
         match (most(self.failed), self.wrong_kind) {
             (Some(e), _) => StoreError::Pack(e),
             (None, Some(found)) => StoreError::WrongKind {
                 id: *id,
-                expected: kind,
+                expected: wanted.kind(),
                 found,
             },
             (None, None) => StoreError::Missing(*id),
@@ -269,8 +302,13 @@ impl Store {
 
     /// Whether a copy of `id` reads back whole and matches its fingerprint, so storing it can be
     /// skipped. A copy recording another `size` than the object's is damage, and is never read.
+    /// Never a chunk list: a writer relies on one only once it has cut the file into the same
+    /// chunks (`holds_chunk_list`).
     pub fn has_good_copy(&self, id: &Id, kind: ObjectKind, size: u64) -> Result<bool, StoreError> {
-        let mut tries = Tries::default();
+        if kind == ObjectKind::ChunkList {
+            return Ok(false);
+        }
+        let (wanted, mut tries) = (Wanted::Kind(kind), Tries::default());
         let mut skipped = Vec::new();
         let found = self.search(id, &mut skipped, |c| {
             if c.entry.kind == kind && c.entry.uncompressed_size != size {
@@ -282,7 +320,11 @@ impl Store {
                 return ControlFlow::Continue(());
             }
             let good = c.entry.kind == kind && self.is_good(&c);
-            if good || self.attempt(&c, kind, &mut tries, read_whole(kind)).is_ok() {
+            if good
+                || self
+                    .attempt(&c, wanted, &mut tries, read_whole(kind))
+                    .is_ok()
+            {
                 return ControlFlow::Break(());
             }
             ControlFlow::Continue(())
@@ -290,6 +332,42 @@ impl Store {
         // A pack or copy that couldn't be read for a reason other than damage may hold a good
         // copy, so its error is the answer. Damage isn't: storing the object again is harmless.
         match (found, most(tries.failed.into_iter().chain(skipped))) {
+            (Some(()), _) => Ok(true),
+            (None, Some(e)) if !is_damage(&e) && !is_gone(&e) => Err(e.into()),
+            (None, _) => Ok(false),
+        }
+    }
+
+    /// Whether a chunk list stored under `list.file` is exactly `list`. Each copy is checked by its
+    /// structure only, so a writer relies on one only once it has cut the file into the same
+    /// chunks, each checked or stored as it went.
+    pub fn holds_chunk_list(&self, list: &ChunkList) -> Result<bool, StoreError> {
+        let (mut failed, mut skipped) = (Vec::new(), Vec::new());
+        let found = self.search(&list.file, &mut skipped, |c| {
+            let known_bad = self.checked().bad.contains_key(&c.at());
+            if c.entry.kind != ObjectKind::ChunkList
+                || c.entry.uncompressed_size != list.size
+                || known_bad
+            {
+                return ControlFlow::Continue(());
+            }
+            match self
+                .pack(c.n)
+                .and_then(|pack| pack.read_chunk_list(&c.entry))
+            {
+                Ok(stored) if stored == *list => return ControlFlow::Break(()),
+                Ok(_) => {}
+                Err(e) => {
+                    if is_damage(&e) {
+                        self.note_damage(c.at(), self.pack_path(c.n), &e);
+                    }
+                    failed.push(e);
+                }
+            }
+            ControlFlow::Continue(())
+        })?;
+        // As for `has_good_copy`: a copy that couldn't be read may be this list.
+        match (found, most(failed.into_iter().chain(skipped))) {
             (Some(()), _) => Ok(true),
             (None, Some(e)) if !is_damage(&e) && !is_gone(&e) => Err(e.into()),
             (None, _) => Ok(false),
@@ -374,22 +452,27 @@ impl Store {
         self.first_good(id, kind, false, |pack, entry| pack.read_record(entry))
     }
 
-    /// Streams content into `out`; treat the output as untrusted until this returns `Ok`.
+    /// Streams a file into `out`, from its content stored whole or from its chunk list; treat the
+    /// output as untrusted until this returns `Ok`.
     pub fn copy_content(&self, id: &Id, out: &mut dyn Write) -> Result<(), StoreError> {
-        let content = ObjectKind::Content;
+        self.copy(id, Wanted::File, out)
+    }
+
+    /// `copy_content`, of a file or of one of its chunks.
+    fn copy(&self, id: &Id, wanted: Wanted, out: &mut dyn Write) -> Result<(), StoreError> {
         let first = self.first_copy(id)?;
         let mut tries = Tries::default();
         // Bytes can't be taken back out of `out`, so it gets one copy only.
-        let known_good = |c: &Copy| c.entry.kind == content && self.is_good(c);
+        let known_good = |c: &Copy| wanted.takes(&c.entry) && self.is_good(c);
         if let Some(c) = &first
             && !known_good(c)
         {
             // A small first copy, and only that one, is read whole before anything goes out.
-            if c.entry.kind == content && c.entry.uncompressed_size <= NEAR {
+            if wanted.takes(&c.entry) && c.entry.uncompressed_size <= NEAR {
                 let mut bytes = Vec::new();
-                let read = self.attempt(c, content, &mut tries, |pack, entry| {
+                let read = self.attempt(c, wanted, &mut tries, |pack, entry| {
                     bytes.clear();
-                    pack.copy_content(entry, &mut bytes)
+                    self.copy_file(pack, entry, &mut bytes)
                 });
                 if read.is_ok() {
                     return Ok(out.write_all(&bytes).map_err(PackError::from)?);
@@ -397,14 +480,70 @@ impl Store {
             }
             // Otherwise it is streamed: when several packs hold it, a good copy is found first.
             if self.all_copies(id)?.0.len() > 1 {
-                let check = read_whole(content);
                 let tried = std::mem::take(&mut tries);
-                self.first_good_from(first.clone(), tried, id, content, false, check)?;
+                self.first_good_from(first.clone(), tried, id, wanted, false, |pack, entry| {
+                    self.copy_file(pack, entry, &mut io::sink())
+                })?;
             }
         }
-        self.first_good_from(first, tries, id, content, true, |pack, entry| {
-            pack.copy_content(entry, out)
+        self.first_good_from(first, tries, id, wanted, true, |pack, entry| {
+            self.copy_file(pack, entry, out)
         })
+    }
+
+    /// Writes the copy `entry` of a file, in `pack`, to `out`: content as it is stored, a chunk
+    /// list chunk by chunk.
+    fn copy_file(
+        &self,
+        pack: &PackReader,
+        entry: &IndexEntry,
+        out: &mut dyn Write,
+    ) -> Result<(), PackError> {
+        if entry.kind != ObjectKind::ChunkList {
+            return pack.copy_content(entry, out);
+        }
+        let list = pack.read_chunk_list(entry)?;
+        self.copy_chunks(&list, pack.path(), out)
+    }
+
+    /// Writes the file `list` names to `out`, each chunk read and checked as content stored whole
+    /// of the size the list gives, and checks the whole against the file's ID. A list that can't
+    /// build its file is damage in the pack at `at`, which holds it; `out` is untrusted until
+    /// this returns `Ok`.
+    pub(crate) fn copy_chunks(
+        &self,
+        list: &ChunkList,
+        at: &Path,
+        out: &mut dyn Write,
+    ) -> Result<(), PackError> {
+        let damaged = |reason: String| PackError::Corrupt {
+            path: at.to_owned(),
+            reason,
+        };
+        let mut hashing = HashingWriter {
+            inner: out,
+            hasher: ContentHasher::new(),
+        };
+        for chunk in &list.chunks {
+            match self.copy(&chunk.id, Wanted::Chunk(chunk.size), &mut hashing) {
+                Ok(()) => {}
+                // Damage in the chunk's own pack is noted there; memory and I/O aren't damage.
+                Err(StoreError::Pack(e)) => return Err(e),
+                Err(_) => {
+                    return Err(damaged(format!(
+                        "the chunk list of {} names chunk {} of {} bytes, which isn't in the store",
+                        list.file, chunk.id, chunk.size
+                    )));
+                }
+            }
+        }
+        if hashing.hasher.finish() != list.file {
+            return Err(damaged(format!(
+                "the chunks the list of {} names build another file",
+                list.file
+            )));
+        }
+        Ok(())
     }
 
     pub fn listing(&self, id: &Id) -> Result<Listing, StoreError> {
@@ -435,7 +574,8 @@ impl Store {
         read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
         let first = self.first_copy(id)?;
-        self.first_good_from(first, Tries::default(), id, kind, once, read)
+        let wanted = Wanted::Kind(kind);
+        self.first_good_from(first, Tries::default(), id, wanted, once, read)
     }
 
     /// `first_good`, given the first copy found and what reading copies has come to so far.
@@ -444,7 +584,7 @@ impl Store {
         first: Option<Copy>,
         mut tries: Tries,
         id: &Id,
-        kind: ObjectKind,
+        wanted: Wanted,
         once: bool,
         mut read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, StoreError> {
@@ -453,9 +593,9 @@ impl Store {
         };
         let near = first.entry.uncompressed_size <= NEAR || self.is_good(&first);
         if near {
-            match self.attempt(&first, kind, &mut tries, &mut read) {
+            match self.attempt(&first, wanted, &mut tries, &mut read) {
                 Ok(value) => return Ok(value),
-                Err(true) if once => return Err(tries.error(id, kind)),
+                Err(true) if once => return Err(tries.error(id, wanted)),
                 Err(_) => {}
             }
         }
@@ -469,25 +609,25 @@ impl Store {
             copies.sort_by_key(|c| (!checked.good.contains(&c.at()), c.entry.uncompressed_size));
         }
         for c in copies {
-            match self.attempt(&c, kind, &mut tries, &mut read) {
+            match self.attempt(&c, wanted, &mut tries, &mut read) {
                 Ok(value) => return Ok(value),
                 Err(true) if once => break,
                 Err(_) => {}
             }
         }
-        Err(tries.error(id, kind))
+        Err(tries.error(id, wanted))
     }
 
-    /// Reads the copy `c` with `read`, unless it is of another kind or known bad, noting what
-    /// happened in `tries`. A failure says whether the copy was read.
+    /// Reads the copy `c` with `read`, unless it isn't what `wanted` takes or is known bad, noting
+    /// what happened in `tries`. A failure says whether the copy was read.
     fn attempt<T>(
         &self,
         c: &Copy,
-        kind: ObjectKind,
+        wanted: Wanted,
         tries: &mut Tries,
         mut read: impl FnMut(&PackReader, &IndexEntry) -> Result<T, PackError>,
     ) -> Result<T, bool> {
-        if c.entry.kind != kind {
+        if !wanted.takes(&c.entry) {
             tries.wrong_kind.get_or_insert(c.entry.kind);
             return Err(false);
         }
@@ -513,6 +653,13 @@ impl Store {
                 Ok(value)
             }
             Err(e) if is_damage(&e) => {
+                // Met in a chunk this copy's list names, it is another pack's, noted there.
+                if let PackError::Corrupt { path: there, .. } = &e
+                    && *there != path()
+                {
+                    tries.failed.push(e);
+                    return Err(true);
+                }
                 let reason = self.note_damage(c.at(), path(), &e);
                 tries.failed.push(PackError::Corrupt {
                     path: path(),
@@ -799,8 +946,9 @@ fn again(e: &PackError) -> PackError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::chunks::Chunk;
     use crate::id::hash_content;
-    use crate::pack::{PackWriter, open_files};
+    use crate::pack::{PackWriter, Prepared, open_files};
     use crate::repo::RepoError;
     use crate::test_support::plant_damaged_copies;
     use proptest::prelude::*;
@@ -1447,6 +1595,327 @@ mod tests {
             let opened = open_files::total() - before;
             assert!(opened <= 4, "a miss opened {opened} packs");
         }
+    }
+
+    /// `bytes` cut every `every` bytes: its chunk list, and the chunks' bytes.
+    fn chunked(bytes: &[u8], every: usize) -> (ChunkList, Vec<Vec<u8>>) {
+        let pieces: Vec<Vec<u8>> = bytes.chunks(every).map(<[u8]>::to_vec).collect();
+        let list = ChunkList {
+            file: hash_content(bytes),
+            size: bytes.len() as u64,
+            chunks: pieces
+                .iter()
+                .map(|p| Chunk {
+                    id: hash_content(p),
+                    size: p.len() as u64,
+                })
+                .collect(),
+        };
+        (list, pieces)
+    }
+
+    /// A pack of `contents` and `lists`, named `name` if given, else as Bolt names it.
+    fn pack_with(
+        tmp: &Path,
+        packs: &Path,
+        name: Option<&str>,
+        contents: &[&[u8]],
+        lists: &[&ChunkList],
+    ) -> PathBuf {
+        let mut w = PackWriter::create(tmp).unwrap();
+        for c in contents {
+            w.add_content(c).unwrap();
+        }
+        for l in lists {
+            w.add_chunk_list(l).unwrap();
+        }
+        let path = w.finish(packs).unwrap().unwrap();
+        let Some(name) = name else { return path };
+        std::fs::rename(&path, packs.join(name)).unwrap();
+        packs.join(name)
+    }
+
+    /// 3 MiB that don't compress: past `NEAR`, so streamed.
+    fn big() -> Vec<u8> {
+        let mut big = vec![0u8; 3 << 20];
+        blake3::Hasher::new()
+            .update(b"big")
+            .finalize_xof()
+            .fill(&mut big);
+        big
+    }
+
+    /// "hello world", read whole before it goes out, and 3 MiB, streamed, cut into 256 KiB chunks.
+    fn files() -> [(Vec<u8>, usize); 2] {
+        [(b"hello world".to_vec(), 6), (big(), 256 << 10)]
+    }
+
+    fn pieces(pieces: &[Vec<u8>]) -> Vec<&[u8]> {
+        pieces.iter().map(Vec::as_slice).collect()
+    }
+
+    /// Fails unless `e` is damage found in the pack at `path`.
+    fn damage_in(e: StoreError, path: &Path) {
+        match &e {
+            StoreError::Pack(PackError::Corrupt { path: found, .. }) => {
+                assert_eq!(found, path, "{e}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
+    }
+
+    #[test]
+    fn a_chunked_file_reads_back_from_one_pack_or_several() {
+        for (bytes, every) in files() {
+            let (list, chunks) = chunked(&bytes, every);
+            for spread in [false, true] {
+                let (_root, tmp, packs) = dirs();
+                if spread {
+                    for c in &chunks {
+                        pack_with(&tmp, &packs, None, &[c], &[]);
+                    }
+                    pack_with(&tmp, &packs, None, &[], &[&list]);
+                } else {
+                    pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+                }
+                let store = Store::open(&packs).unwrap();
+                for _ in 0..2 {
+                    let mut out = Writes::default();
+                    store.copy_content(&list.file, &mut out).unwrap();
+                    assert!(out.data == bytes, "{} bytes", bytes.len());
+                    // A chunk at a time, never the whole file.
+                    assert!(out.largest <= 256 << 10, "{} bytes at once", out.largest);
+                }
+                assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+            }
+        }
+    }
+
+    #[test]
+    fn a_chunk_with_a_bad_copy_is_read_from_its_good_one() {
+        for (bytes, every) in files() {
+            let (_root, tmp, packs) = dirs();
+            let (list, chunks) = chunked(&bytes, every);
+            plant_damaged_copies(&packs, &[(ObjectKind::Content, &chunks[0])]);
+            pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+            let store = Store::open(&packs).unwrap();
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert!(out == bytes);
+            let damaged: Vec<String> = store
+                .damaged_packs()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(damaged.len(), 1, "{damaged:?}");
+            assert!(damaged[0].contains("00.pack is damaged"), "{damaged:?}");
+
+            // With no good copy of the chunk, the read fails at the chunk's pack, each time, and
+            // the list's pack isn't called damaged.
+            let (_root, tmp, packs) = dirs();
+            plant_damaged_copies(&packs, &[(ObjectKind::Content, &chunks[0])]);
+            pack_with(&tmp, &packs, None, &pieces(&chunks[1..]), &[&list]);
+            let store = Store::open(&packs).unwrap();
+            for _ in 0..2 {
+                let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+                damage_in(e, &packs.join("00.pack"));
+            }
+            let damaged = store.damaged_packs();
+            assert_eq!(damaged.len(), 1, "{damaged:?}");
+            assert!(damaged[0].to_string().contains("00.pack"), "{damaged:?}");
+        }
+    }
+
+    #[test]
+    fn a_chunk_list_naming_a_missing_chunk_fails_the_read() {
+        let (list, chunks) = chunked(b"hello world", 6);
+        // A chunk held only with another size than the list gives counts as missing too.
+        let mut shorter = chunked(b"hello worl", 6).0;
+        shorter.chunks[1].id = list.chunks[1].id;
+        for (list, held) in [(&list, &chunks[..1]), (&shorter, &chunks[..])] {
+            let (_root, tmp, packs) = dirs();
+            let path = pack_with(&tmp, &packs, None, &pieces(held), &[list]);
+            let store = Store::open(&packs).unwrap();
+            let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+            let named = e.to_string().contains(&list.chunks[1].id.to_hex());
+            assert!(named, "{e}");
+            damage_in(e, &path);
+        }
+    }
+
+    #[test]
+    fn a_chunk_list_of_good_chunks_that_build_another_file_fails_the_read() {
+        for (bytes, every) in files() {
+            let (_root, tmp, packs) = dirs();
+            let (mut list, chunks) = chunked(&bytes, every);
+            let mut other = bytes.clone();
+            other[0] ^= 1;
+            list.file = hash_content(&other);
+            let path = pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+            let store = Store::open(&packs).unwrap();
+            for _ in 0..2 {
+                // What went out is untrusted, as always.
+                let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+                assert!(e.to_string().contains("build another file"), "{e}");
+                damage_in(e, &path);
+            }
+            assert_eq!(store.damaged_packs().len(), 1);
+            // Its chunks are fine.
+            let mut out = Vec::new();
+            store.copy_content(&list.chunks[0].id, &mut out).unwrap();
+            assert_eq!(out, chunks[0]);
+        }
+    }
+
+    #[test]
+    fn a_chunk_list_under_a_chunks_id_is_passed_over() {
+        let (list, chunks) = chunked(b"hello world", 6);
+        let (inner, inner_chunks) = chunked(&chunks[0], 3);
+        let (_root, tmp, packs) = dirs();
+        // "hello " is held only as a chunk list, in the pack searched first.
+        let mut held = pieces(&inner_chunks);
+        held.push(&chunks[1]);
+        pack_with(&tmp, &packs, Some("00.pack"), &held, &[&inner]);
+        let path = pack_with(&tmp, &packs, None, &[], &[&list]);
+        let store = Store::open(&packs).unwrap();
+        // As a file of its own it reads through its list...
+        let mut out = Vec::new();
+        store.copy_content(&inner.file, &mut out).unwrap();
+        assert_eq!(out, chunks[0]);
+        // ...but never as a chunk of another file, so a read goes no deeper than one list.
+        let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+        damage_in(e, &path);
+        // With the chunk stored whole too, the file reads, past the list found first.
+        pack_with(&tmp, &packs, None, &[&chunks[0]], &[]);
+        let store = Store::open(&packs).unwrap();
+        let mut out = Vec::new();
+        store.copy_content(&list.file, &mut out).unwrap();
+        assert_eq!(out, b"hello world");
+        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+    }
+
+    /// A pack of one chunk list entry: `stored` under `id`, recording `size`.
+    fn plant_list_entry(tmp: &Path, packs: &Path, id: Id, size: u64, zstd: bool, stored: Vec<u8>) {
+        let mut w = PackWriter::create(tmp).unwrap();
+        let entry = Prepared {
+            id,
+            size,
+            zstd,
+            stored,
+        };
+        w.add_prepared(ObjectKind::ChunkList, &entry).unwrap();
+        w.finish(packs).unwrap();
+    }
+
+    #[test]
+    fn a_chunk_list_that_names_another_file_or_size_is_damage() {
+        let (list, chunks) = chunked(b"hello world", 6);
+        let another = hash_content(b"another file");
+        for (id, size) in [(another, 11), (list.file, 12)] {
+            let (_root, tmp, packs) = dirs();
+            pack_with(&tmp, &packs, None, &pieces(&chunks), &[]);
+            plant_list_entry(&tmp, &packs, id, size, false, list.encode());
+            let store = Store::open(&packs).unwrap();
+            let e = store.copy_content(&id, &mut Vec::new()).unwrap_err();
+            assert!(e.to_string().contains("names another file"), "{e}");
+            assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
+            assert_eq!(store.damaged_packs().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_compressed_chunk_list_is_damage() {
+        let (_root, tmp, packs) = dirs();
+        let (list, chunks) = chunked(b"hello world", 6);
+        pack_with(&tmp, &packs, None, &pieces(&chunks), &[]);
+        let compressed = zstd::bulk::compress(&list.encode(), 3).unwrap();
+        plant_list_entry(&tmp, &packs, list.file, 11, true, compressed);
+        let store = Store::open(&packs).unwrap();
+        let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+        assert!(e.to_string().contains("compressed"), "{e}");
+        assert!(matches!(RepoError::from(e), RepoError::Damaged { .. }));
+        // Nor is it the list a writer looks for.
+        assert!(!store.holds_chunk_list(&list).unwrap());
+        assert_eq!(store.damaged_packs().len(), 1);
+    }
+
+    #[test]
+    fn a_whole_copy_and_a_chunked_copy_are_both_copies() {
+        for (bytes, every) in files() {
+            let (list, chunks) = chunked(&bytes, every);
+            // A bad whole copy, searched first, and a good chunk list.
+            let (_root, tmp, packs) = dirs();
+            plant_damaged_copies(&packs, &[(ObjectKind::Content, &bytes)]);
+            pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+            let store = Store::open(&packs).unwrap();
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert!(out == bytes);
+            assert_eq!(store.damaged_packs().len(), 1);
+            // A list that builds another file, searched first, and a good whole copy.
+            let (_root, tmp, packs) = dirs();
+            let mut other = bytes.clone();
+            other[0] ^= 1;
+            let (mut lying, other_chunks) = chunked(&other, every);
+            lying.file = list.file;
+            pack_with(
+                &tmp,
+                &packs,
+                Some("00.pack"),
+                &pieces(&other_chunks),
+                &[&lying],
+            );
+            pack_with(&tmp, &packs, None, &[&bytes], &[]);
+            let store = Store::open(&packs).unwrap();
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert!(out == bytes);
+            let damaged = store.damaged_packs();
+            assert_eq!(damaged.len(), 1, "{damaged:?}");
+            assert!(damaged[0].to_string().contains("00.pack"), "{damaged:?}");
+        }
+    }
+
+    #[test]
+    fn has_good_copy_never_counts_a_chunk_list() {
+        let (_root, tmp, packs) = dirs();
+        let (list, chunks) = chunked(b"hello world", 6);
+        pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+        let store = Store::open(&packs).unwrap();
+        // The list builds its file...
+        store.copy_content(&list.file, &mut Vec::new()).unwrap();
+        // ...but a writer relies on one only once it has cut the file into the same chunks.
+        for kind in [ObjectKind::Content, ObjectKind::ChunkList] {
+            assert!(!store.has_good_copy(&list.file, kind, 11).unwrap());
+        }
+        assert!(
+            store
+                .has_good_copy(&list.chunks[0].id, ObjectKind::Content, 6)
+                .unwrap()
+        );
+        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+    }
+
+    #[test]
+    fn holds_chunk_list_matches_only_the_same_list() {
+        let (_root, tmp, packs) = dirs();
+        let (list, _) = chunked(b"hello world", 6);
+        pack_with(&tmp, &packs, None, &[], &[&list]);
+        let store = Store::open(&packs).unwrap();
+        assert!(store.holds_chunk_list(&list).unwrap());
+        let (other_cut, _) = chunked(b"hello world", 4);
+        let mut other_file = list.clone();
+        other_file.file = hash_content(b"HELLO WORLD");
+        for other in [other_cut, other_file] {
+            assert!(!store.holds_chunk_list(&other).unwrap());
+        }
+        // Nor does the file stored whole count.
+        let (whole, _) = chunked(b"stored whole", 6);
+        pack_with(&tmp, &packs, None, &[b"stored whole"], &[]);
+        let store = Store::open(&packs).unwrap();
+        assert!(!store.holds_chunk_list(&whole).unwrap());
+        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
     }
 
     #[test]

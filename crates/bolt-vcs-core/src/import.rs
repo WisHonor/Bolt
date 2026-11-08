@@ -1137,6 +1137,19 @@ mod tests {
         )
     }
 
+    #[test]
+    fn start_and_import_write_feature_chunks() {
+        let started = tempfile::tempdir().unwrap();
+        Repository::init(started.path(), &who()).unwrap();
+        let imported = tempfile::tempdir().unwrap();
+        one_commit(imported.path());
+        import(imported.path()).unwrap();
+        for dir in [started.path(), imported.path()] {
+            let format = std::fs::read_to_string(dir.join(".bolt/format")).unwrap();
+            assert_eq!(format, "bolt-repository 1\nhash blake3\nfeature chunks\n");
+        }
+    }
+
     /// The converter would refuse these tags only after every commit was converted; the first
     /// pass refuses them alike, before `.bolt` is made.
     #[test]

@@ -1,5 +1,6 @@
 //! Pack files: the container every stored object lives in (docs/storage-format.md section 11).
 
+use crate::chunks::{ChunkList, ReadListError};
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::fsio;
 use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
@@ -95,11 +96,13 @@ impl ObjectKind {
         })
     }
 
-    fn max_size(self) -> u64 {
-        if self == ObjectKind::Content {
-            MAX_OBJECT_SIZE
-        } else {
-            MAX_RECORD_SIZE
+    /// Whether an entry of this kind may record these sizes. A chunk list records its file's size,
+    /// and its own bytes are a record's.
+    fn sizes_allowed(self, uncompressed: u64, stored: u64) -> bool {
+        match self {
+            ObjectKind::Content => uncompressed <= MAX_OBJECT_SIZE,
+            ObjectKind::ChunkList => uncompressed <= MAX_OBJECT_SIZE && stored <= MAX_RECORD_SIZE,
+            _ => uncompressed <= MAX_RECORD_SIZE,
         }
     }
 }
@@ -143,6 +146,34 @@ fn misuse(what: &'static str) -> PackError {
 /// Compressed data is kept only if it is smaller than 95% of the original.
 fn worth_compressing(compressed: usize, original: usize) -> bool {
     (compressed as u64) * 20 < (original as u64) * 19
+}
+
+/// An object's bytes as a pack stores them, made ready by `prepare`, perhaps on another thread.
+pub struct Prepared {
+    pub id: Id,
+    /// The object's own size.
+    pub size: u64,
+    pub zstd: bool,
+    pub stored: Vec<u8>,
+}
+
+/// The bytes of the object `id`, compressed if that saves enough.
+pub fn prepare(id: Id, bytes: &[u8]) -> Result<Prepared, PackError> {
+    let compressed = zstd::bulk::compress(bytes, ZSTD_LEVEL)?;
+    let zstd = worth_compressing(compressed.len(), bytes.len());
+    let stored = if zstd {
+        compressed
+    } else {
+        // Gone first, so the bytes are held twice at most.
+        drop(compressed);
+        bytes.to_vec()
+    };
+    Ok(Prepared {
+        id,
+        size: bytes.len() as u64,
+        zstd,
+        stored,
+    })
 }
 
 /// Builds a pack in the temp folder; `finish` moves it into the store.
@@ -255,6 +286,33 @@ impl PackWriter {
         Ok(())
     }
 
+    /// Stores an object whose bytes `prepare` made ready.
+    pub fn add_prepared(&mut self, kind: ObjectKind, p: &Prepared) -> Result<(), PackError> {
+        if self.contains(&p.id) {
+            return Ok(());
+        }
+        self.add_entry(kind, p.id, |file| {
+            file.write_all(&p.stored)?;
+            Ok((p.size, if p.zstd { ZSTD } else { NO_COMPRESSION }, p.id))
+        })?;
+        Ok(())
+    }
+
+    /// Stores `list` as a copy of its file: under the file's ID, recording the file's size, its
+    /// own bytes as they are.
+    pub fn add_chunk_list(&mut self, list: &ChunkList) -> Result<(), PackError> {
+        if self.contains(&list.file) {
+            return Ok(());
+        }
+        let raw = Prepared {
+            id: list.file,
+            size: list.size,
+            zstd: false,
+            stored: list.encode(),
+        };
+        self.add_prepared(ObjectKind::ChunkList, &raw)
+    }
+
     #[must_use]
     pub fn contains(&self, id: &Id) -> bool {
         self.index.contains_key(id)
@@ -301,17 +359,7 @@ impl PackWriter {
         if self.contains(&id) {
             return Ok(());
         }
-        let compressed = zstd::bulk::compress(data, ZSTD_LEVEL)?;
-        let (compression, stored) = if worth_compressing(compressed.len(), data.len()) {
-            (ZSTD, &compressed[..])
-        } else {
-            (NO_COMPRESSION, data)
-        };
-        self.add_entry(kind, id, |file| {
-            file.write_all(stored)?;
-            Ok((data.len() as u64, compression, id))
-        })?;
-        Ok(())
+        self.add_prepared(kind, &prepare(id, data)?)
     }
 
     /// Writes one entry: a zeroed header, then the data from `body`, then the real header.
@@ -336,9 +384,6 @@ impl PackWriter {
             if actual != id {
                 return Err(PackError::ContentChanged);
             }
-            if size > kind.max_size() {
-                return Err(PackError::TooLarge);
-            }
             let data_end = self.file.stream_position()?;
             let entry = IndexEntry {
                 id,
@@ -347,6 +392,9 @@ impl PackWriter {
                 uncompressed_size: size,
                 stored_size: data_end - start - ENTRY_HEADER_LEN,
             };
+            if !kind.sizes_allowed(size, entry.stored_size) {
+                return Err(PackError::TooLarge);
+            }
             let mut header = Writer::new();
             header.u8(kind as u8);
             header.id(&id);
@@ -509,10 +557,37 @@ impl PackSet {
         self.add(|w| w.add_stored(pack, entry))
     }
 
+    /// Stores an object whose bytes `prepare` made ready.
+    pub fn add_prepared(&mut self, kind: ObjectKind, p: &Prepared) -> Result<(), PackError> {
+        self.add(|pack| pack.add_prepared(kind, p))
+    }
+
+    /// Stores `list` as a copy of its file, under the file's ID.
+    pub fn add_chunk_list(&mut self, list: &ChunkList) -> Result<(), PackError> {
+        self.add(|pack| pack.add_chunk_list(list))
+    }
+
     /// Whether the pack being built holds `id`. Packs already in the store aren't looked in.
     #[must_use]
     pub fn contains(&self, id: &Id) -> bool {
         self.current.contains(id)
+    }
+
+    /// The kind of what the pack being built holds under `id`.
+    pub(crate) fn kind_of(&self, id: &Id) -> Option<ObjectKind> {
+        self.current.index.get(id).map(|e| e.kind)
+    }
+
+    /// Moves the pack being built into the store and starts the next, which holds no ID yet.
+    pub(crate) fn start_next(&mut self) -> Result<(), PackError> {
+        if self.broken {
+            return Err(failed_earlier());
+        }
+        if let Err(e) = self.roll_over() {
+            self.broken = true;
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Whether nothing has been added, to any of the packs.
@@ -763,6 +838,10 @@ impl PackReader {
 
     /// Reads a structured record and checks its fingerprint.
     pub fn read_record(&self, entry: &IndexEntry) -> Result<Vec<u8>, PackError> {
+        // Stored under its file's ID, a chunk list has no fingerprint of its own.
+        if entry.kind == ObjectKind::ChunkList {
+            return Err(misuse("read_record cannot read a chunk list"));
+        }
         let flavor = entry
             .kind
             .flavor()
@@ -794,6 +873,44 @@ impl PackReader {
             return Err(PackError::FingerprintMismatch { id: entry.id });
         }
         Ok(())
+    }
+
+    /// Reads a chunk list and checks it by its structure: stored as it is, decoding by
+    /// storage-format.md section 6's rules, and naming its entry's file and size. Neither its
+    /// chunks nor the file they build are checked here.
+    pub fn read_chunk_list(&self, entry: &IndexEntry) -> Result<ChunkList, PackError> {
+        self.read_chunk_list_hashed(entry).map(|(list, _)| list)
+    }
+
+    /// `read_chunk_list`, with the plain BLAKE3 hash of the list's bytes, which tells lists apart.
+    pub(crate) fn read_chunk_list_hashed(
+        &self,
+        entry: &IndexEntry,
+    ) -> Result<(ChunkList, Id), PackError> {
+        let id = entry.id;
+        if entry.kind != ObjectKind::ChunkList {
+            return Err(misuse("read_chunk_list can only read a chunk list"));
+        }
+        let (compression, data) = self.stored(entry)?;
+        if compression != NO_COMPRESSION {
+            return Err(self.corrupt(format!("the chunk list of {id} is compressed")));
+        }
+        let mut hashing = HashingReader {
+            inner: data,
+            hasher: blake3::Hasher::new(),
+        };
+        // Decoded as it is read, so the list's bytes are never held as well.
+        let list = ChunkList::read_from(&mut hashing, entry.stored_size).map_err(|e| match e {
+            ReadListError::Damaged(why) => {
+                self.corrupt(format!("the chunk list of {id} is invalid: {why}"))
+            }
+            ReadListError::Io(e) => PackError::Io(e),
+            ReadListError::OutOfMemory => PackError::OutOfMemory,
+        })?;
+        if list.file != id || list.size != entry.uncompressed_size {
+            return Err(self.corrupt(format!("the chunk list of {id} names another file or size")));
+        }
+        Ok((list, Id(*hashing.hasher.finalize().as_bytes())))
     }
 
     fn corrupt(&self, reason: impl Into<String>) -> PackError {
@@ -992,7 +1109,7 @@ fn read_index(
         if entries.last().is_some_and(|prev| prev.id >= id) {
             return Err(r.corrupt("entries are not sorted by id, or repeat one"));
         }
-        if uncompressed_size > kind.max_size() {
+        if !kind.sizes_allowed(uncompressed_size, stored_size) {
             return Err(r.corrupt(format!("{id} is larger than allowed")));
         }
         let end = offset
@@ -1136,9 +1253,9 @@ impl Read for Section<'_> {
 }
 
 /// Passes writes through while hashing them.
-struct HashingWriter<'a> {
-    inner: &'a mut dyn Write,
-    hasher: ContentHasher,
+pub(crate) struct HashingWriter<'a> {
+    pub(crate) inner: &'a mut dyn Write,
+    pub(crate) hasher: ContentHasher,
 }
 
 impl Write for HashingWriter<'_> {
@@ -1157,6 +1274,7 @@ impl Write for HashingWriter<'_> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::chunks::Chunk;
     use crate::id::{Flavor, hash_content, hash_record};
     use crate::listing::{Entry, EntryKind, Listing};
     use std::collections::BTreeMap;
@@ -1513,6 +1631,76 @@ mod tests {
         for bad in [decreasing, overshooting, short] {
             let reason = refusal(root.path(), &bad);
             assert!(reason.contains("fan-out"), "{reason}");
+        }
+    }
+
+    /// A chunk list's line records its file's size, up to 1 TiB, but its own bytes are a record's.
+    #[test]
+    fn a_chunk_lists_line_may_record_a_big_file_but_not_a_big_record() {
+        let (root, tmp, packs) = dirs();
+        let list = |id: u8, size: u64| ChunkList {
+            file: Id([id; 32]),
+            size,
+            chunks: vec![Chunk {
+                id: Id([0x80; 32]),
+                size,
+            }],
+        };
+        let ten_gib = list(1, 10 << 30);
+        let mut w = PackWriter::create(&tmp).unwrap();
+        w.add_chunk_list(&ten_gib).unwrap();
+        let over = w.add_chunk_list(&list(2, MAX_OBJECT_SIZE + 1));
+        assert!(matches!(over, Err(PackError::TooLarge)), "{over:?}");
+        let path = w.finish(&packs).unwrap().unwrap();
+        let r = PackReader::open(&path).unwrap();
+        let e = r.find(&ten_gib.file).unwrap().unwrap();
+        assert_eq!(
+            (e.kind, e.uncompressed_size),
+            (ObjectKind::ChunkList, 10 << 30)
+        );
+        assert_eq!(r.read_chunk_list(&e).unwrap(), ten_gib);
+
+        // The line read by position in version 2: as a save, or with too many stored bytes.
+        let good = std::fs::read(&path).unwrap();
+        let trailer = good.len() - 48;
+        let index = u64::from_le_bytes(good[trailer..trailer + 8].try_into().unwrap());
+        let line = usize::try_from(index).unwrap() + 1032 + 32;
+        let mut as_save = good.clone();
+        as_save[line] = ObjectKind::Save as u8;
+        let mut stored = good.clone();
+        stored[line + 17..line + 25].copy_from_slice(&(MAX_RECORD_SIZE + 1).to_le_bytes());
+        for bad in [as_save, stored] {
+            let path = root.path().join("bad.pack");
+            std::fs::write(&path, bad).unwrap();
+            let refused = PackReader::open(&path).unwrap().find(&ten_gib.file);
+            assert!(
+                matches!(&refused, Err(PackError::Corrupt { reason, .. }) if reason.contains("larger than allowed")),
+                "{refused:?}"
+            );
+        }
+
+        // And in version 1, as the index is read: the size check comes before the entry's place,
+        // which these lines, in a pack with no entries, can't pass.
+        let v1_line = |kind: ObjectKind, size: u64, stored: u64| {
+            let mut index = Writer::new();
+            index.varint(1);
+            index.id(&ten_gib.file);
+            index.u8(kind as u8);
+            index.u64(PACK_HEADER_LEN);
+            index.varint(size);
+            index.varint(stored);
+            refusal(root.path(), &pack_with_index(&index.into_bytes()))
+        };
+        let list_line = v1_line(ObjectKind::ChunkList, 10 << 30, 100);
+        assert!(
+            list_line.contains("lies outside the entry area"),
+            "{list_line}"
+        );
+        for refused in [
+            v1_line(ObjectKind::Save, 10 << 30, 100),
+            v1_line(ObjectKind::ChunkList, 10 << 30, MAX_RECORD_SIZE + 1),
+        ] {
+            assert!(refused.contains("larger than allowed"), "{refused}");
         }
     }
 

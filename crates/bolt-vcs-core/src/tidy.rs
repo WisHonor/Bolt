@@ -13,7 +13,7 @@ use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::fsio::{self, fault_point};
 use crate::id::Id;
 use crate::listing::{EntryKind, Listing};
-use crate::merge::{self, Failed};
+use crate::merge;
 use crate::pack::{self, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Save;
@@ -144,10 +144,19 @@ pub fn tidy(
     remove(repo, &folder, &packs_dir, unread, &mut report);
     let mut out = repo.new_packs()?;
     let mut taken = Vec::new();
-    for (name, kept) in rewrite {
+    let names: Vec<OsString> = rewrite.iter().map(|(name, _)| name.clone()).collect();
+    let keeps = |id: &Id| keep.contains(id);
+    let copied = merge::copy_packs(
+        &folder,
+        &packs_dir,
+        &names,
+        &mut out,
+        &keeps,
+        "tidy:copying",
+    )?;
+    for ((name, kept), copied) in rewrite.into_iter().zip(copied) {
         let path = packs_dir.join(&name);
-        fsio::act_point("tidy:copying");
-        match merge::copy_pack(&folder, &name, &path, &mut out, &|id| keep.contains(id)) {
+        match copied {
             Ok(copied) if copied == kept => taken.push(name),
             // The index read otherwise than when it was checked: what it judged can't be trusted.
             Ok(copied) => repo.store().note(Warning::new(
@@ -161,8 +170,7 @@ pub fn tidy(
                     thousands(kept)
                 ),
             )),
-            Err(Failed::Read(e)) => not_tidied(repo, &path, &e),
-            Err(Failed::Write(e)) => return Err(e.into()),
+            Err(e) => not_tidied(repo, &path, &e),
         }
     }
     let made: Vec<OsString> = out
