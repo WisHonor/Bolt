@@ -10,6 +10,7 @@ use std::io;
 use encoding_rs::{Encoding, UTF_8};
 
 use super::ImportError;
+use crate::chunks::is_too_long_to_cut;
 use crate::diary::{
     self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
 };
@@ -18,7 +19,8 @@ use crate::git::{
     self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, looks_like_lfs_pointer,
     parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit, shown,
 };
-use crate::id::{ChangeId, ContentHasher, Id, hash_content, hash_record};
+use crate::id::{ChangeId, ContentHasher, Id, hash_record};
+use crate::ingest::{self, IngestError};
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{MAX_NAME_BYTES, NameError, is_git_alias, validate_name};
@@ -29,7 +31,8 @@ use crate::save::{
 };
 use crate::store::Store;
 
-/// Blobs up to this size are read whole; bigger ones stream through, twice.
+/// Blobs up to this size are read whole; bigger ones stream through once, or twice if they are
+/// too long to cut.
 const MAX_WHOLE_BLOB: u64 = 64 << 20;
 
 /// The biggest commit a save can keep exactly: its header lines, the empty line and its message
@@ -820,17 +823,30 @@ impl<'r> Converter<'r> {
                 });
             }
             let size = object.data.len() as u64;
-            (self.put(ObjectKind::Content, &object.data)?, size)
+            // Held whole already, so a big one is cut where it lies.
+            let stored = ingest::store_held(self.packs, self.store, &object.data);
+            (stored.map_err(|e| not_stored(e, id, &place))?, size)
         } else {
-            self.stream(id, &place)?
+            self.stream(id, size, &place)?
         };
         self.blobs.insert(*id, done);
         Ok(done)
     }
 
-    /// Stores a blob too big to read whole: one pass learns its content ID, and a second stores
-    /// it unless a good copy is stored already.
-    fn stream(&mut self, id: &GitId, place: &dyn Fn() -> String) -> Result<(Id, u64), ImportError> {
+    /// Stores a blob too big to read whole, of the `size` its header gives, reading it once. One
+    /// too long to cut is read twice: once to learn its content ID, then again to store it unless
+    /// a good copy is stored already.
+    fn stream(
+        &mut self,
+        id: &GitId,
+        size: u64,
+        place: &dyn Fn() -> String,
+    ) -> Result<(Id, u64), ImportError> {
+        if !is_too_long_to_cut(size) {
+            let mut blob = self.git.blob_reader(id).map_err(|e| at(e, place))?;
+            let stored = ingest::store_bytes(self.packs, self.store, &mut blob, size);
+            return Ok((stored.map_err(|e| not_stored(e, id, place))?, size));
+        }
         let failed = |e: io::Error| match e.downcast::<GitError>() {
             Ok(e) => at(e, place),
             Err(e) => PackError::Io(e).into(),
@@ -857,30 +873,42 @@ impl<'r> Converter<'r> {
         Ok((content, size))
     }
 
-    /// Stores an object unless this converter stored it already, this pack holds it or the store
-    /// has a good copy, and returns its ID.
+    /// Stores a record unless this converter stored it already, this pack holds it or the store
+    /// has a good copy, and returns its ID. Content is stored once through its blob's Git ID; a
+    /// record can come from two Git objects, such as two trees whose modes Bolt reads alike.
     fn put(&mut self, kind: ObjectKind, bytes: &[u8]) -> Result<Id, ImportError> {
-        let id = match kind.flavor() {
-            Some(flavor) => hash_record(flavor, bytes),
-            None => hash_content(bytes),
-        };
-        // Content is stored once through its blob's Git ID; a record can come from two Git
-        // objects, such as two trees whose modes Bolt reads alike.
-        let record = kind != ObjectKind::Content;
-        if record && self.records.contains(&id) {
+        let flavor = kind
+            .flavor()
+            .ok_or_else(|| bug("Bolt took a file for a record".to_owned()))?;
+        let id = hash_record(flavor, bytes);
+        if self.records.contains(&id) {
             return Ok(id);
         }
         if !self.packs.contains(&id) && !self.store.has_good_copy(&id, kind, bytes.len() as u64)? {
-            if record {
-                self.packs.add_record(kind, bytes)?;
-            } else {
-                self.packs.add_content(bytes)?;
-            }
+            self.packs.add_record(kind, bytes)?;
         }
-        if record {
-            self.records.insert(id);
-        }
+        self.records.insert(id);
         Ok(id)
+    }
+}
+
+/// What stops the import when the blob `id`, read where `place` says, couldn't be stored. A Git
+/// object's bytes can't change, so a blob that isn't the size its header says is damaged.
+fn not_stored(e: IngestError, id: &GitId, place: &dyn Fn() -> String) -> ImportError {
+    match e {
+        IngestError::Changed => {
+            let what = format!(
+                "blob `{}` doesn't hold the number of bytes its header says",
+                id.to_hex()
+            );
+            at(GitError::Broken { what }, place)
+        }
+        IngestError::Read(e) => match e.downcast::<GitError>() {
+            Ok(e) => at(e, place),
+            Err(e) => PackError::Io(e).into(),
+        },
+        IngestError::Pack(e) => e.into(),
+        IngestError::Store(e) => e.into(),
     }
 }
 
@@ -1218,12 +1246,19 @@ mod tests {
         assert_eq!(content(&store, &entry("small").id), small);
         assert_eq!(entry("big").size, big.len() as u64);
         assert!(content(&store, &entry("big").id) == big);
-        // Each blob is stored once, however often it comes.
+        // Each blob is stored once, however often it comes: the big one as its chunks and their
+        // list.
         assert_eq!(entry("small-again").id, entry("small").id);
-        assert_eq!(stored(dir.path(), "a", ObjectKind::Content), 2);
+        let held = || {
+            let kinds = [ObjectKind::Content, ObjectKind::ChunkList];
+            kinds.map(|kind| stored(dir.path(), "a", kind))
+        };
+        let [chunks_and_small, lists] = held();
+        assert_eq!(lists, 1);
+        assert!(chunks_and_small > 2, "{chunks_and_small}");
         // A store that holds them already gets neither again.
         convert(dir.path(), "a", |c| c.commit(&first).unwrap());
-        assert_eq!(stored(dir.path(), "a", ObjectKind::Content), 2);
+        assert_eq!(held(), [chunks_and_small, lists]);
     }
 
     #[test]

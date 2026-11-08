@@ -11,6 +11,7 @@ use std::path::Path;
 use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
+use crate::chunks::is_too_long_to_cut;
 use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
@@ -19,6 +20,7 @@ use crate::filecache::{self, FileCache};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
+use crate::ingest::{self, IngestError};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
@@ -1301,9 +1303,10 @@ fn stamp(file: &File) -> io::Result<(u64, i128, i128)> {
     Dir::file_meta(file).map(|m| stamp_of(&m))
 }
 
-/// Stores one file in two passes: hash it, then copy it into `packs` unless already held. The
+/// Stores one file into `packs`, reading it once: a big one is cut into chunks as it is read. The
 /// file is `name` in `dir`, at the project path `rel`, and must be the one the walk saw (`seen`;
-/// see `open_scanned`). A file that changes in between gives `ChangedDuringSave`.
+/// see `open_scanned`). A file that changes while it is read gives `ChangedDuringSave`, which is
+/// checked once `after_read` has run.
 pub(crate) fn store_file(
     packs: &mut PackSet,
     store: &Store,
@@ -1311,34 +1314,54 @@ pub(crate) fn store_file(
     name: &str,
     rel: &str,
     seen: Option<&EntryMeta>,
-    between_passes: &mut dyn FnMut(),
+    after_read: &mut dyn FnMut(),
 ) -> Result<(Id, u64), SaveError> {
-    let (mut file, id, size) = hash_scanned(dir, name, rel, seen, between_passes)?;
-    if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
-        return Ok((id, size));
-    }
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
         source,
     };
-    file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
-    match packs.add_content_from(&mut file, id) {
-        Ok(_) => Ok((id, size)),
-        Err(PackError::ContentChanged) => Err(SaveError::ChangedDuringSave {
-            path: rel.to_owned(),
-        }),
-        Err(e) => Err(e.into()),
+    let changed = || SaveError::ChangedDuringSave {
+        path: rel.to_owned(),
+    };
+    if seen.is_some_and(|seen| is_too_long_to_cut(seen.size)) {
+        // Hashed first, then stored whole unless the store holds it already.
+        let (mut file, id, size) = hash_scanned(dir, name, rel, seen, after_read)?;
+        if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
+            return Ok((id, size));
+        }
+        file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
+        return match packs.add_content_from(&mut file, id) {
+            Ok(_) => Ok((id, size)),
+            Err(PackError::ContentChanged) => Err(changed()),
+            Err(e) => Err(e.into()),
+        };
     }
+    let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
+    let before = stamp_of(&opened);
+    // Chunks stored before a change is found stay in the packs, which nothing names yet.
+    let id = match ingest::store_bytes(packs, store, &mut file, opened.size) {
+        Ok(id) => id,
+        Err(IngestError::Changed) => return Err(changed()),
+        Err(IngestError::Read(e)) => return Err(unreadable(e)),
+        Err(IngestError::Pack(e)) => return Err(e.into()),
+        Err(IngestError::Store(e)) => return Err(e.into()),
+    };
+    after_read();
+    if stamp(&file).map_err(unreadable)? != before {
+        return Err(changed());
+    }
+    Ok((id, opened.size))
 }
 
-/// `store_file`'s first pass: reads the file `name` in `dir` through and gives it, still open,
-/// with its content ID and size. It must stay the file the walk saw (`seen`) until read.
+/// Reads the file `name` in `dir` through and gives it, still open, with its content ID and size:
+/// to know the ID, or as the first of two reads of a file too long to cut. It must stay the file
+/// the walk saw (`seen`) until read, which is checked once `after_read` has run.
 fn hash_scanned(
     dir: &Dir,
     name: &str,
     rel: &str,
     seen: Option<&EntryMeta>,
-    between_passes: &mut dyn FnMut(),
+    after_read: &mut dyn FnMut(),
 ) -> Result<(File, Id, u64), SaveError> {
     let unreadable = |source| SaveError::Unreadable {
         path: rel.to_owned(),
@@ -1363,7 +1386,7 @@ fn hash_scanned(
         size += n as u64;
     }
     let id = hasher.finish();
-    between_passes();
+    after_read();
     if size != before.0 || stamp(&file).map_err(unreadable)? != before {
         return Err(changed());
     }

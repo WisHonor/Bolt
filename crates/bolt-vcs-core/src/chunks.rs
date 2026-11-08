@@ -34,7 +34,37 @@ const LEAST_PER_CHUNK: u64 = 33;
 /// Whether a file of `size` bytes is cut into chunks; any other is stored whole.
 #[must_use]
 pub fn is_cut(size: u64) -> bool {
-    (CHUNK_FROM..=CHUNK_UP_TO).contains(&size)
+    let (from, up_to) = cut_sizes();
+    (from..=up_to).contains(&size)
+}
+
+/// Whether a file of `size` bytes is too long to cut, so it is stored whole.
+#[must_use]
+pub fn is_too_long_to_cut(size: u64) -> bool {
+    size > cut_sizes().1
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_CUT_SIZES: std::cell::Cell<Option<(u64, u64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Makes this thread cut files from `from` up to `up_to` bytes long instead, so a test can turn
+/// cutting off or reach its upper limit with small files; `None` goes back. How a file is cut
+/// never changes.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_cut_sizes(sizes: Option<(u64, u64)>) {
+    TEST_CUT_SIZES.set(sizes);
+}
+
+/// `CHUNK_FROM` and `CHUNK_UP_TO`, or what a test set on this thread.
+fn cut_sizes() -> (u64, u64) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(sizes) = TEST_CUT_SIZES.get() {
+        return sizes;
+    }
+    (CHUNK_FROM, CHUNK_UP_TO)
 }
 
 /// The number the rolling hash adds for each byte value: from BLAKE3, so the spec can state them.

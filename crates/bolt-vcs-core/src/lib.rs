@@ -16,6 +16,7 @@ pub mod history;
 pub mod id;
 pub mod ignore;
 pub mod import;
+pub(crate) mod ingest;
 pub mod journal;
 pub(crate) mod kept;
 pub mod keyed;

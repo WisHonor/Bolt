@@ -9,7 +9,7 @@ mod vs_git;
 pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -17,11 +17,12 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command as Bolt;
 use bolt_core::diary::{Action, DiaryEntry, State};
 use bolt_core::history::current_save;
-use bolt_core::id::{ChangeId, Id};
+use bolt_core::id::{ChangeId, ContentHasher, Id};
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackSet};
+use bolt_core::pack::{ObjectKind, PackReader, PackSet};
 use bolt_core::repo::Repository;
-use bolt_core::save::{EXTRA_GIT_COMMIT, Save};
+use bolt_core::save::{EXTRA_GIT_COMMIT, Person, Save};
+use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use tempfile::TempDir;
 
 /// `git args` in `dir`, with nothing from this computer's Git set-up: no system or user config,
@@ -228,6 +229,85 @@ pub fn saved_files(env: &Env, save: Id) -> Files {
         }
     }
     found
+}
+
+// Big files, written and read a block at a time.
+
+/// Writes `size` bytes at `path` that look random, so they don't compress, made from `seed`; their
+/// ID.
+pub fn write_noise(path: &Path, seed: u64, size: u64) -> Id {
+    let mut file = std::fs::File::create(path).unwrap();
+    let mut hasher = ContentHasher::new();
+    let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut block = vec![0u8; 1 << 20];
+    let mut left = size;
+    while left > 0 {
+        let n = left.min(block.len() as u64) as usize;
+        for word in block[..n].chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
+        }
+        file.write_all(&block[..n]).unwrap();
+        hasher.update(&block[..n]);
+        left -= n as u64;
+    }
+    hasher.finish()
+}
+
+/// The ID of the file at `path`.
+pub fn id_of(path: &Path) -> Id {
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut hasher = ContentHasher::new();
+    let mut block = vec![0u8; 1 << 20];
+    loop {
+        match file.read(&mut block).unwrap() {
+            0 => return hasher.finish(),
+            n => hasher.update(&block[..n]),
+        }
+    }
+}
+
+/// The kind of each copy of `id` in the store of the project at `root`, a pack at a time.
+pub fn copies_of(root: &Path, id: &Id) -> Vec<ObjectKind> {
+    let mut kinds = Vec::new();
+    for pack in std::fs::read_dir(root.join(".bolt/store/packs")).unwrap() {
+        let path = pack.unwrap().path();
+        if path.extension().is_some_and(|e| e == "pack")
+            && let Some(copy) = PackReader::open(&path).unwrap().find(id).unwrap()
+        {
+            kinds.push(copy.kind);
+        }
+    }
+    kinds
+}
+
+/// Ada, at a set time, for commands run in the test's own process.
+pub fn ada() -> Person {
+    Person {
+        name: "Ada".into(),
+        email: "ada@example.com".into(),
+        time_ms: 1_700_000_000_000,
+        tz_offset_min: 0,
+    }
+}
+
+/// `bolt save <message>` in the project at `root`, run by Ada in the test's own process.
+pub fn save_here(root: &Path, message: &str) -> Result<SaveOutcome, SaveError> {
+    let mut repo = Repository::open(root).unwrap();
+    let who = ada();
+    let req = SaveRequest {
+        message: Some(message),
+        who: &who,
+        command: "save",
+        accept_crlf: false,
+        git_excludes: None,
+        new_line: None,
+        only: None,
+        amend: false,
+    };
+    save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true)
 }
 
 /// Copies the folder `from`, everything in it, to `to`.

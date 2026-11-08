@@ -10,6 +10,7 @@ use std::path::Path;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
+use crate::chunks::{is_cut, is_too_long_to_cut};
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
@@ -17,6 +18,7 @@ use crate::filecache::FileCache;
 use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
 use crate::history::{current_save, tip_of};
 use crate::id::{ContentHasher, Id, hash_content};
+use crate::ingest::{self, IngestError};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
@@ -395,9 +397,10 @@ pub fn keep_safety_copies(
         {
             continue;
         }
-        let held =
-            packs.contains(&e.id) || store.has_good_copy(&e.id, ObjectKind::Content, e.size)?;
-        if !held && !copy_in(&mut disk, &a.path, e, packs)? {
+        // A big file is relied on as held only once it is cut again, which `copy_in` does.
+        let held = packs.contains(&e.id)
+            || (!is_cut(e.size) && store.has_good_copy(&e.id, ObjectKind::Content, e.size)?);
+        if !held && !copy_in(&mut disk, &a.path, e, store, packs)? {
             continue;
         }
         copies.push(SafetyCopy {
@@ -416,6 +419,7 @@ fn copy_in(
     disk: &mut Folders,
     path: &str,
     e: Expected,
+    store: &Store,
     packs: &mut PackSet,
 ) -> Result<bool, SaveError> {
     let (up, name) = split(path);
@@ -445,10 +449,21 @@ fn copy_in(
         }
         Err(err) => return Err(unreadable(path, err)),
     };
-    match packs.add_content_from(&mut file, e.id) {
-        Ok(_) => Ok(true),
-        Err(PackError::ContentChanged) => Ok(false),
-        Err(err) => Err(err.into()),
+    if is_too_long_to_cut(e.size) {
+        // Stored whole, and compared with the plan's ID as it is read.
+        return match packs.add_content_from(&mut file, e.id) {
+            Ok(_) => Ok(true),
+            Err(PackError::ContentChanged) => Ok(false),
+            Err(err) => Err(err.into()),
+        };
+    }
+    // A file that isn't what the plan found any more is left as it is, like a changed one.
+    match ingest::store_bytes(packs, store, &mut file, e.size) {
+        Ok(id) => Ok(id == e.id),
+        Err(IngestError::Changed) => Ok(false),
+        Err(IngestError::Read(err)) => Err(unreadable(path, err)),
+        Err(IngestError::Pack(err)) => Err(err.into()),
+        Err(IngestError::Store(err)) => Err(err.into()),
     }
 }
 
