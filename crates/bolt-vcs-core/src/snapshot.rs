@@ -1279,8 +1279,7 @@ fn open_scanned(
         path: path(),
         source,
     })?;
-    let what = |m: &EntryMeta| (m.file_id, stamp_of(m));
-    if seen.is_none_or(|seen| what(seen) != what(&now)) {
+    if seen.is_none_or(|seen| !same_file(seen, &now)) {
         return Err(SaveError::ChangedDuringSave { path: path() });
     }
     Ok((file, now))
@@ -1290,6 +1289,11 @@ fn open_scanned(
 /// file-state cache compares them.
 fn stamp_of(m: &EntryMeta) -> (u64, i128, i128) {
     (m.size, m.modified_ns, m.changed_ns)
+}
+
+/// Whether `now` is still the file seen as `seen`: the same file, with the same `stamp_of`.
+pub(crate) fn same_file(seen: &EntryMeta, now: &EntryMeta) -> bool {
+    seen.file_id == now.file_id && stamp_of(seen) == stamp_of(now)
 }
 
 /// The `stamp_of` the open `file` has now, to see whether it changed while it was read.

@@ -452,6 +452,41 @@ fn a_file_changed_after_the_plan_is_left_alone() {
     assert_eq!(fs::read(dir.path().join("gone")).unwrap(), b"mine too");
 }
 
+/// Carries out the switch to `to`, while another program writes `bytes` to `path` as soon as
+/// the new contents are in `.bolt/tmp`; what it left.
+#[cfg(feature = "fault-injection")]
+fn raced(
+    repo: &mut Repository,
+    from: Id,
+    to: Saved,
+    path: &'static str,
+    bytes: &'static [u8],
+) -> Applied {
+    let plan = planned(repo, from, to.0, false);
+    let at = repo.root().join(path);
+    crate::fsio::fault::act_at("switch:written", move || fs::write(at, bytes).unwrap());
+    applied(repo, &journal(to.1, &plan))
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_file_saved_while_its_new_contents_are_written_is_left() {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    // Made at a path the plan saw empty.
+    let a = planted(&mut repo, &files(&[("x", b"old")]));
+    let done = raced(&mut repo, empty, a, "x", b"theirs");
+    assert_eq!(done.changed_since_plan, ["x"]);
+    assert_eq!(fs::read(dir.path().join("x")).unwrap(), b"theirs");
+    // Saved over a file the plan saw, keeping its size.
+    fs::write(dir.path().join("x"), b"old").unwrap();
+    let b = planted(&mut repo, &files(&[("x", b"new")]));
+    let done = raced(&mut repo, a.0, b, "x", b"mxn");
+    assert_eq!(done.changed_since_plan, ["x"]);
+    assert_eq!(fs::read(dir.path().join("x")).unwrap(), b"mxn");
+    assert!(names_in(&dir.path().join(".bolt/tmp")).is_empty());
+}
+
 #[cfg(windows)]
 #[test]
 fn a_stored_link_target_holding_a_backslash_is_not_written_on_windows() {

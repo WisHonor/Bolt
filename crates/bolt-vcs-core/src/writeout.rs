@@ -24,7 +24,7 @@ use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, w
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
-use crate::snapshot::{NAMED, SaveError, listed, read_folder};
+use crate::snapshot::{NAMED, SaveError, listed, read_folder, same_file};
 use crate::store::{Store, StoreError};
 use crate::warning::{self, Warning};
 
@@ -1003,34 +1003,49 @@ impl Run<'_> {
                 }
             }
         }
+        // A file stays until the rename replaces it; a link or folder was cleared.
+        let mut there = found
+            .as_ref()
+            .filter(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
+            .map(|f| f.meta);
         // Some drives keep the old spelling when a file replaces one whose name differs only as
         // they ignore (macOS), so the old file takes the new spelling first. Only when both
         // names are that one file: a folder may keep case apart (Windows' per-folder setting, or
         // another drive mounted there), and then the old one is a file of its own, which its own
         // removal checks.
-        // A file stays until the rename replaces it.
-        let mut replacing = found
-            .as_ref()
-            .filter(|f| matches!(f.kind, Some(EntryKind::File | EntryKind::Executable)))
-            .map(|f| f.meta);
         // Both paths fold to one, so `old` is in this folder however its folders are spelled.
         if let Some((_, old)) = renaming.map(split)
             && old != name
-            && replacing.is_some()
+            && there.is_some()
             && one_entry(self.folders.here(), old, name)
         {
+            match self.unchanged(os, there) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Outcome::Changed),
+                Err(e) => return classify(e),
+            }
             let dir = self.folders.here();
             if let Err(e) = retried(|| dir.rename_into(OsStr::new(old), dir, os)) {
                 return classify(e);
             }
             // Renaming it changed its change time.
-            replacing = match self.meta_of(os) {
+            there = match self.meta_of(os) {
                 Ok(Some(meta)) => Some(meta),
                 Ok(None) => return Ok(Outcome::Changed),
                 Err(e) => return classify(e),
             };
         }
-        self.write_file(os, c, executable, replacing)
+        self.write_file(os, c, executable, there)
+    }
+
+    /// Whether `name` in the folder entered still holds what was seen there: the same file, or
+    /// nothing for `None`.
+    fn unchanged(&self, name: &OsStr, seen: Option<EntryMeta>) -> io::Result<bool> {
+        Ok(match (seen, self.meta_of(name)?) {
+            (None, None) => true,
+            (Some(seen), Some(now)) => same_file(&seen, &now),
+            _ => false,
+        })
     }
 
     /// Whether the project paths `a` and `b` name one entry on the drive.
@@ -1061,14 +1076,14 @@ impl Run<'_> {
     }
 
     /// Writes the content `c` from the store to `name` in the folder entered, through a file in
-    /// `.bolt/tmp`, flushed, then renamed over whatever file is there. `replacing`: the details
-    /// of the file it replaces as the plan's look saw them; if it changed meanwhile, it is left.
+    /// `.bolt/tmp`, flushed, then renamed into place. `there`: what the plan's look saw at
+    /// `name`, `None` for nothing; if that changed meanwhile, it is left.
     fn write_file(
         &self,
         name: &OsStr,
         c: Content,
         executable: bool,
-        replacing: Option<EntryMeta>,
+        there: Option<EntryMeta>,
     ) -> Result<Outcome, RepoError> {
         let tmp = self.repo.tmp_folder();
         let temp = bolt_platform::temp_name();
@@ -1083,18 +1098,15 @@ impl Run<'_> {
             }
             file.sync_all()?;
             fsio::fault_point("switch:written")?;
+            fsio::act_point("switch:written");
             Ok(())
         })();
         drop(file);
-        // Writing can take long: another program may have saved into the file meanwhile.
-        let still = |seen: EntryMeta| match self.meta_of(name) {
-            Ok(now) => Ok(now.is_some_and(|now| same_file(&seen, &now))),
-            Err(e) => Err(e),
-        };
+        // Writing can take long: another program may have saved there meanwhile.
         let outcome = match written {
-            Ok(()) => match replacing.map(still).transpose() {
-                Ok(Some(false)) => Ok(Outcome::Changed),
-                Ok(_) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
+            Ok(()) => match self.unchanged(name, there) {
+                Ok(false) => Ok(Outcome::Changed),
+                Ok(true) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
                     Ok(()) => return Ok(Outcome::Wrote),
                     Err(e) => classify(e),
                 },
@@ -1193,6 +1205,11 @@ impl Run<'_> {
         } else {
             target.into_owned()
         };
+        match self.unchanged(os, None) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Outcome::Changed),
+            Err(e) => return classify(e),
+        }
         let dir = self.folders.here();
         match dir.symlink(os, OsStr::new(&target), to_dir, self.repo.tmp_folder()) {
             Ok(()) => Ok(Outcome::Wrote),
@@ -1295,11 +1312,6 @@ struct Found {
     /// `None` if it wasn't read, or couldn't be.
     id: Option<Id>,
     meta: EntryMeta,
-}
-
-/// Whether `now` is still the file seen as `seen`: the same file, size and change time.
-fn same_file(seen: &EntryMeta, now: &EntryMeta) -> bool {
-    now.file_id == seen.file_id && now.size == seen.size && now.changed_ns == seen.changed_ns
 }
 
 impl Found {

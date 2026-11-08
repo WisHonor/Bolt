@@ -1,7 +1,8 @@
 //! The switch journal, `.bolt/state/journal` (storage-format.md section 10): every change a switch
 //! of the folder to another save will make, written before the first one so that the next command
 //! after a crash can finish it. It drives writes into the user's folder, so reading it trusts
-//! nothing: the checksum first, then every path against the name rules.
+//! nothing: the checksum first, then every path against the name rules. A command that only reads
+//! takes just its front.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::ffi::OsStr;
