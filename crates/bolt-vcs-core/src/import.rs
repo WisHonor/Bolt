@@ -5,8 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::config::UserLfsStorage;
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{
@@ -43,9 +44,9 @@ pub struct ImportRequest<'a> {
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
-    /// The last `lfs.storage` the user's own Git settings set, and the file that sets it
-    /// (`config::git_lfs_storage`). The repository's own setting comes after it, as in Git.
-    pub lfs_storage: Option<&'a (Vec<u8>, PathBuf)>,
+    /// The `lfs.storage` the user's own Git settings set (`config::git_lfs_storage`), around
+    /// which the repository's own setting comes, as in Git.
+    pub lfs_storage: Option<&'a UserLfsStorage>,
     /// Called as the first pass reads each commit, with how many it has read and `None`, then
     /// after each commit is converted, with how many are done and how many there are.
     pub progress: &'a mut dyn FnMut(u64, Option<u64>),
@@ -219,6 +220,12 @@ impl ImportError {
                              sections, which Bolt doesn't read: if one sets lfs.storage, the \
                              files must be in .git/lfs/objects all the same.";
                 }
+                // Fetching can't help while Git LFS keeps them where Bolt doesn't look.
+                hint += " A Git setting Bolt doesn't read (the system's Git settings, or an \
+                         [includeIf] section) may keep Git LFS's files elsewhere: `git lfs env` \
+                         shows where, on its LocalMediaDir line. If that isn't .git/lfs/objects, \
+                         remove that lfs.storage setting, or set it to lfs, before you download \
+                         them.";
                 Some(hint)
             }
             // Fetching skips an object that is there, and `fsck` looks at `HEAD` only unless
@@ -315,16 +322,19 @@ pub enum LfsElsewhere {
 }
 
 /// Where `lfs.storage` keeps Git LFS's files instead of `.git/lfs/objects`, if it does: as Git
-/// reads it (the user's own settings `users`, then the repository's own, the last found winning),
-/// set to anything but nothing or `lfs`, Git LFS's own place. A path is never resolved, since Bolt
-/// never reads there. The links `LfsRules` looks for wait for the first Git LFS file.
-fn lfs_storage_elsewhere(
-    git: &git::Repo,
-    users: Option<&(Vec<u8>, PathBuf)>,
-) -> Option<LfsElsewhere> {
-    let (value, file) = match git.lfs_storage() {
-        Some((value, file)) => (value, file.to_owned()),
-        None => users.map(|(value, file)| (value.as_slice(), file.display().to_string()))?,
+/// reads it, the last found winning: the user's own settings files, then the repository's own,
+/// then what the environment gives (`users` holds the first and last), set to anything but nothing
+/// or `lfs`, Git LFS's own place. A path is never resolved, since Bolt never reads there. The links
+/// `LfsRules` looks for wait for the first Git LFS file.
+fn lfs_storage_elsewhere(git: &git::Repo, users: Option<&UserLfsStorage>) -> Option<LfsElsewhere> {
+    let files = users.and_then(|u| u.files.as_ref());
+    let variables = users.and_then(|u| u.variables.as_ref());
+    let (value, file) = match (variables, git.lfs_storage(), files) {
+        (Some((value, file)), _, _) | (None, None, Some((value, file))) => {
+            (value.as_slice(), file.clone())
+        }
+        (None, Some((value, file)), _) => (value, file.to_owned()),
+        (None, None, None) => return None,
     };
     let value = (!matches!(value, b"" | b"lfs")).then(|| shown(value))?;
     Some(LfsElsewhere::Storage { value, file })
@@ -476,11 +486,11 @@ struct Plan {
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
-/// `lfs_storage` is the last `lfs.storage` of the user's own Git settings, with its file;
-/// `progress` hears how many commits the first pass has read.
+/// `lfs_storage` is what the user's own Git settings set; `progress` hears how many commits the
+/// first pass has read.
 fn plan(
     root: &Path,
-    lfs_storage: Option<&(Vec<u8>, PathBuf)>,
+    lfs_storage: Option<&UserLfsStorage>,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;

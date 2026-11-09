@@ -465,6 +465,36 @@ fn lfs_storage_in_the_users_own_git_settings_stops_unless_the_repository_sets_it
     assert_eq!(saved["art/big.psd"], b"a picture\n");
 }
 
+/// What the environment gives through `GIT_CONFIG_COUNT` comes after the repository's own setting,
+/// so it wins over it, as in Git.
+#[test]
+fn lfs_storage_given_through_git_config_count_wins_over_the_repositorys_own() {
+    let import = |env: &Env, value: &str| {
+        let given = [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "lfs.storage"),
+            ("GIT_CONFIG_VALUE_0", value),
+        ];
+        env.bolt().arg("import").envs(given).output().unwrap()
+    };
+    // Elsewhere, over the repository's `lfs`.
+    let env = tracked();
+    env.git(&["config", "lfs.storage", "lfs"]);
+    let commit = env.commit("art/big.psd", &keep(&env, b"a picture\n"), "Add a picture");
+    let err = text(&import(&env, "/mnt/shared-lfs").stderr);
+    let says = kept_by_setting(&commit, "GIT_CONFIG_VALUE_0");
+    assert!(err.contains(&says), "{err}");
+    assert!(!env.root().join(".bolt").exists(), "{err}");
+    // `lfs`, over the repository's elsewhere.
+    let env = tracked();
+    env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
+    env.commit("art/big.psd", &keep(&env, b"a picture\n"), "Add a picture");
+    let out = import(&env, "lfs");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let saved = saved_files(&env, main_tip(&env));
+    assert_eq!(saved["art/big.psd"], b"a picture\n");
+}
+
 /// A save keeps a file's contents, not that it was a pointer, so the summary counts the commits
 /// whose Git IDs an export can give back only by turning such files back into pointers.
 #[test]

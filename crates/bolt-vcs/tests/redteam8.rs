@@ -65,14 +65,25 @@ fn git_lfs_objects(env: &Env, vars: &[(&str, &Path)]) -> String {
     )
 }
 
-/// `lfs.storage` keeps Git LFS's objects elsewhere wherever Git reads it: the system's settings,
-/// `GIT_CONFIG_GLOBAL` in place of `~/.gitconfig`, and an `[includeIf]` of the user's own. An
-/// import must never refuse objects that are in `.git/lfs/objects`, naming a setting Git doesn't
-/// read, nor send the user to `git lfs fetch --all` when Git LFS keeps them elsewhere.
+/// `path` as a Git setting's value: Git reads a `\` there as an escape, so Windows' are written `/`.
+fn in_git_settings(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// `lfs.storage` keeps Git LFS's objects elsewhere wherever Git reads it. Bolt reads it where Git
+/// does, in the file `GIT_CONFIG_SYSTEM` names and in the one `GIT_CONFIG_GLOBAL` names in place
+/// of `~/.gitconfig`: an import brings the file in when Git LFS keeps it in `.git/lfs/objects`, and
+/// stops, naming the file that sets it, when Git LFS keeps it elsewhere. Bolt doesn't read an
+/// `[includeIf]` of the user's own, so there the stop for missing files says a setting Bolt doesn't
+/// read may keep them elsewhere, and how to find out.
 #[test]
-#[ignore = "RT8-1: lfs.storage is read from other places than Git reads it"]
-fn rt8_1_an_import_takes_lfs_storage_from_where_git_does() {
+fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_bolt_cant() {
     let mut wrong = Vec::new();
+    let elsewhere_stop = |err: &str, file: &Path| {
+        err.contains("`lfs.storage` keeps Git LFS's files outside .git/lfs/objects")
+            && err.contains(&format!(" in {}.", file.display()))
+            && err.contains("hint: Nothing was changed. Remove that setting, or set it to lfs")
+    };
 
     // GIT_CONFIG_GLOBAL: Git reads that file instead of ~/.gitconfig, so the objects are where
     // Git LFS keeps them, in .git/lfs/objects.
@@ -91,14 +102,30 @@ fn rt8_1_an_import_takes_lfs_storage_from_where_git_does() {
         git_lfs_objects(&env, &vars)
     );
     if code != Some(0) || saved_files(&env, main_tip(&env))["a.bin"] != b"the real picture\n" {
-        wrong.push("GIT_CONFIG_GLOBAL");
+        wrong.push("GIT_CONFIG_GLOBAL, with the objects in .git/lfs/objects");
+    }
+
+    // The file GIT_CONFIG_GLOBAL names keeps them elsewhere.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let env = repository(Some(elsewhere.path()));
+    let global = env.config().join("global.gitconfig");
+    let setting = format!("[lfs]\n\tstorage = {}\n", in_git_settings(elsewhere.path()));
+    fs::write(&global, &setting).unwrap();
+    let vars = [("GIT_CONFIG_GLOBAL", global.as_path())];
+    let (code, err) = import(&env, &vars);
+    eprintln!(
+        "GIT_CONFIG_GLOBAL elsewhere: Git LFS: {}\nbolt import: {code:?}\n{err}",
+        git_lfs_objects(&env, &vars)
+    );
+    if code == Some(0) || !elsewhere_stop(&err, &global) {
+        wrong.push("GIT_CONFIG_GLOBAL, with the objects elsewhere");
     }
 
     // The system's settings (GIT_CONFIG_SYSTEM names them, as /etc/gitconfig would hold them).
     let elsewhere = tempfile::tempdir().unwrap();
     let env = repository(Some(elsewhere.path()));
     let system = env.config().join("system.gitconfig");
-    let setting = format!("[lfs]\n\tstorage = {}\n", elsewhere.path().display());
+    let setting = format!("[lfs]\n\tstorage = {}\n", in_git_settings(elsewhere.path()));
     fs::write(&system, &setting).unwrap();
     let vars = [("GIT_CONFIG_SYSTEM", system.as_path())];
     let (code, err) = import(&env, &vars);
@@ -106,20 +133,38 @@ fn rt8_1_an_import_takes_lfs_storage_from_where_git_does() {
         "system settings: Git LFS: {}\nbolt import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
-    if code == Some(0) || !err.contains("lfs.storage") {
-        wrong.push("the system's settings");
+    if code == Some(0) || !elsewhere_stop(&err, &system) {
+        wrong.push("the system's settings, with the objects elsewhere");
+    }
+
+    // GIT_CONFIG_NOSYSTEM: Git doesn't read the system's settings, so the objects are in
+    // .git/lfs/objects.
+    let env = repository(None);
+    let system = env.config().join("system.gitconfig");
+    fs::write(&system, "[lfs]\n\tstorage = /nowhere/shared-lfs\n").unwrap();
+    let vars = [
+        ("GIT_CONFIG_SYSTEM", system.as_path()),
+        ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
+    ];
+    let (code, err) = import(&env, &vars);
+    eprintln!(
+        "GIT_CONFIG_NOSYSTEM: Git LFS: {}\nbolt import: {code:?}\n{err}",
+        git_lfs_objects(&env, &vars)
+    );
+    if code != Some(0) || saved_files(&env, main_tip(&env))["a.bin"] != b"the real picture\n" {
+        wrong.push("the system's settings under GIT_CONFIG_NOSYSTEM");
     }
 
     // An [includeIf] of the user's own settings, as many keep their work settings.
     let elsewhere = tempfile::tempdir().unwrap();
     let env = repository(Some(elsewhere.path()));
     let work = env.config().join("work.gitconfig");
-    let setting = format!("[lfs]\n\tstorage = {}\n", elsewhere.path().display());
+    let setting = format!("[lfs]\n\tstorage = {}\n", in_git_settings(elsewhere.path()));
     fs::write(&work, &setting).unwrap();
     let include = format!(
         "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
-        env.root().display(),
-        work.display()
+        in_git_settings(env.root()),
+        in_git_settings(&work)
     );
     fs::write(env.config().join(".gitconfig"), include).unwrap();
     let (code, err) = import(&env, &[]);
@@ -127,7 +172,11 @@ fn rt8_1_an_import_takes_lfs_storage_from_where_git_does() {
         "includeIf: Git LFS: {}\nbolt import: {code:?}\n{err}",
         git_lfs_objects(&env, &[])
     );
-    if code == Some(0) || !err.contains("lfs.storage") {
+    let says = "A Git setting Bolt doesn't read (the system's Git settings, or an [includeIf] \
+                section) may keep Git LFS's files elsewhere: `git lfs env` shows where, on its \
+                LocalMediaDir line. If that isn't .git/lfs/objects, remove that lfs.storage \
+                setting, or set it to lfs, before you download them.";
+    if code == Some(0) || !err.contains("isn't in .git/lfs/objects") || !err.contains(says) {
         wrong.push("an [includeIf] of the user's settings");
     }
 
@@ -153,7 +202,6 @@ fn git_untracked(dir: &Path, home: &Path, global: &Path) -> String {
 /// whatever that variable says: a save silently leaves out a file Git tracks, and takes in a file
 /// the user's real list keeps out of Git.
 #[test]
-#[ignore = "RT8-2: saves follow ~/.gitconfig's ignore list where Git follows GIT_CONFIG_GLOBAL's"]
 fn rt8_2_a_save_leaves_out_what_gits_own_ignore_list_leaves_out() {
     let env = Env::new();
     let home = env.config();
@@ -162,7 +210,7 @@ fn rt8_2_a_save_leaves_out_what_gits_own_ignore_list_leaves_out() {
     fs::write(home.join("real.ignore"), "*.key\n").unwrap();
     let excludes = |list: &str| {
         let list = home.join(list);
-        format!("[core]\n\texcludesFile = {}\n", list.display())
+        format!("[core]\n\texcludesFile = {}\n", in_git_settings(&list))
     };
     fs::write(home.join(".gitconfig"), excludes("old.ignore")).unwrap();
     let global = home.join("real.gitconfig");

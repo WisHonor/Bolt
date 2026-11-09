@@ -656,9 +656,17 @@ fn as_test_user(cmd: &mut Command, config: &Path) {
         .env("BOLT_USER_EMAIL", "test@example.com")
         .env_remove("BOLT_FAULT_AT")
         .env("BOLT_CONFIG_DIR", config)
-        // Git's own settings and ignore list are found from here (decision 047).
+        // Git's own settings and ignore list are found from here (decision 047), and only here.
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config);
+    for key in [
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_COUNT",
+    ] {
+        cmd.env_remove(key);
+    }
 }
 
 /// `bolt_capped_at`, with about 1.5 GB.
