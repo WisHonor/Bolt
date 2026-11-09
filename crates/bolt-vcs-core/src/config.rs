@@ -500,9 +500,8 @@ const MAX_INCLUDE_DEPTH: usize = 10;
 
 /// Reads `path`, a file of the user's own Git settings `depth` includes down, giving `each` every
 /// setting Bolt reads in it but an include, with the file that holds it. A plain include is read
-/// where it stands, as Git reads it (decision 060). As in Git, a file is skipped when it isn't
-/// there or a file stands where a folder on its path should, and, when it is the user's `own`,
-/// when Bolt may not read it.
+/// where it stands, as Git reads it (decision 060). A file Bolt can't read is skipped where Git
+/// skips it (`skipped`), the user's `own` files apart; anything else stops Bolt, naming it.
 fn read_git_settings(
     path: &Path,
     home: &Path,
@@ -510,12 +509,10 @@ fn read_git_settings(
     own: bool,
     each: &mut dyn FnMut(UserSetting, &Place),
 ) -> Result<(), ConfigError> {
-    use std::io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
     let place = Place::File(path.to_owned());
     let text = match safe_fs::read_capped_following_links(path, MAX_GIT_SETTINGS_BYTES) {
         Ok(text) => text,
-        Err(e) if matches!(e.kind(), NotFound | NotADirectory) => return Ok(()),
-        Err(e) if own && e.kind() == PermissionDenied => return Ok(()),
+        Err(e) if skipped(e.kind(), own, cfg!(windows)) => return Ok(()),
         Err(e) => return Err(place.error(e.to_string())),
     };
     if depth > MAX_INCLUDE_DEPTH {
@@ -542,6 +539,19 @@ fn read_git_settings(
         }
     }
     Ok(())
+}
+
+/// Whether Git skips a settings file it couldn't read for `kind`, as Bolt does too: one that
+/// isn't there, or has a file where a folder on its path should be, and one of the user's `own`
+/// that it may not read, but not on Windows (`windows`).
+fn skipped(kind: std::io::ErrorKind, own: bool, windows: bool) -> bool {
+    use std::io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    match kind {
+        NotFound | NotADirectory => true,
+        // Git for Windows' access check doesn't see permissions, so its read fails and Git stops.
+        PermissionDenied => own && !windows,
+        _ => false,
+    }
 }
 
 /// Whether `value`, a path a Git setting or variable gives, names no file, as Git reads it: the
@@ -1427,6 +1437,29 @@ mod tests {
                 let e = find(&[]).unwrap_err();
                 assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
             }
+        }
+    }
+
+    /// Git skips the user's own settings file it may not read, but Git for Windows can't tell that
+    /// before it reads one, and stops there; Bolt does as each does, so it never applies other
+    /// settings than Git.
+    #[test]
+    fn a_settings_file_is_skipped_where_git_skips_it() {
+        use std::io::ErrorKind::{InvalidInput, NotADirectory, NotFound, PermissionDenied};
+        for (kind, own, windows, want) in [
+            (NotFound, false, false, true),
+            (NotFound, true, true, true),
+            (NotADirectory, false, true, true),
+            (NotADirectory, true, false, true),
+            (PermissionDenied, true, false, true),
+            (PermissionDenied, true, true, false),
+            (PermissionDenied, false, false, false),
+            (PermissionDenied, false, true, false),
+            (InvalidInput, true, false, false),
+            (InvalidInput, false, true, false),
+        ] {
+            let said = format!("{kind:?}, own: {own}, on Windows: {windows}");
+            assert_eq!(skipped(kind, own, windows), want, "{said}");
         }
     }
 
