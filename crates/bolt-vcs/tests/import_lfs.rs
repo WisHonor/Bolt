@@ -814,8 +814,9 @@ fn an_amend_of_the_imported_save_stops_at_lfs_pointers_too() {
     assert_eq!(saved["readme.txt"], b"hello again\n");
 }
 
-/// A save of some paths looks at the whole folder too: a pointer it left out would be saved as it
-/// is by the next save, which doesn't look. Line endings it looks for only in the paths named.
+/// A save of some paths, an amend's too, looks at the whole folder: a pointer it left out would be
+/// saved as it is by the next save, which doesn't look. Line endings it looks for only in the
+/// paths named.
 #[test]
 fn a_save_of_some_paths_stops_at_pointers_anywhere_in_the_folder() {
     let env = imported_with_a_pointer();
@@ -824,6 +825,7 @@ fn a_save_of_some_paths_stops_at_pointers_anywhere_in_the_folder() {
     for args in [
         &["Some", "readme.txt"][..],
         &["Some", "art/a.psd", "readme.txt"],
+        &["--amend", "", "readme.txt"],
     ] {
         let out = env.save(args);
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
