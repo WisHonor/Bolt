@@ -6,20 +6,23 @@
 use std::borrow::{Borrow, Cow};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+use bolt_platform::dir::Dir;
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
 
 use super::id::Hasher;
 use super::pack::{
-    self, DeltaError, Entry, EntryKind, Pack, PackFolder, build_delta, delta_sizes, delta_start,
+    self, Bases, DeltaError, Entry, EntryKind, Pack, PackFolder, build_delta, delta_sizes,
+    delta_start,
 };
 use super::{GitError, GitId, ObjectType, Repo, broken, read_error, real_dir, shrank};
-use crate::safe_fs;
+use crate::{fsio, safe_fs};
 
 /// The most an object read whole into memory may hold, and so the most a delta may build or
 /// build on. Git never deltifies files over 512 MiB unless told to (`core.bigFileThreshold`).
@@ -53,6 +56,25 @@ const CHUNK: usize = 16 << 10;
 /// Packs kept open between reads, the last ones used: few enough for any system's limit on open
 /// files.
 const MAX_OPEN_PACKS: usize = 16;
+/// The most a delta family's objects kept in files, for more to be built on them, may hold at
+/// once.
+const MAX_KEPT_ON_DISK: u64 = 4 << 30;
+
+/// What `Repo::rebuild_family` hands each object of a family to, with the object's name.
+pub type Each<'a, E> = dyn FnMut(&GitId, &[u8]) -> Result<(), E> + 'a;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_LIMITS: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+}
+
+/// Makes the Git repositories this thread opens from now on allow `work` bytes of rebuilding
+/// through deltas, however much they inflate, and keep `cache` bytes of bases, as `(work, cache)`,
+/// so a test can reach those limits with small data; `None` goes back.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_delta_limits(limits: Option<(u64, u64)>) {
+    TEST_LIMITS.set(limits);
+}
 
 /// An object read whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +100,11 @@ pub(super) struct Objects {
     work: Cell<u64>,
     /// Compressed bytes of the pack entries inflated so far, each entry counted once.
     inflated: Cell<u64>,
+    /// The delta families rebuilt, by pack number and the number of the entry at the bottom.
+    families: RefCell<HashSet<(usize, usize)>>,
+    /// Objects built through deltas so far.
+    #[cfg(test)]
+    built: Cell<u64>,
 }
 
 impl fmt::Debug for Objects {
@@ -129,7 +156,7 @@ impl Repo {
                 object?
             }
         };
-        self.check(id, &object)?;
+        self.check(id, object.kind, &object.data)?;
         Ok(object)
     }
 
@@ -148,7 +175,7 @@ impl Repo {
                     let object = self.unpack(n, pack, &file, at);
                     self.keep_open(n, file);
                     let object = object?;
-                    self.check(id, &object)?;
+                    self.check(id, object.kind, &object.data)?;
                     is_blob(id, object.kind)?;
                     return Ok(BlobReader(Reading::Memory(io::Cursor::new(object.data))));
                 };
@@ -233,46 +260,82 @@ impl Repo {
         Err(broken(format!("missing object `{hex}`")))
     }
 
-    /// The object at `at` in pack number `n`, rebuilt through its deltas. A base comes from the
-    /// cache if it is there, and goes into it once built on. What the deltas take to inflate and
-    /// apply is counted against the import's budget before each step.
+    /// The object at `at` in pack number `n`, rebuilt through its deltas from the nearest base
+    /// the cache holds, or from the object stored whole at the bottom of its chain. A base used
+    /// stays in the cache and counts as just used; what is built goes in too.
     fn unpack(&self, n: usize, pack: &Pack, file: &File, at: u64) -> Result<Object, GitError> {
+        self.build(n, pack, file, at, true)
+    }
+
+    /// `unpack`, putting nothing new in the cache unless `keep`. What the deltas take to inflate
+    /// and apply is counted against the import's budget before each step.
+    fn build(
+        &self,
+        n: usize,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+        keep: bool,
+    ) -> Result<Object, GitError> {
         let cache = &self.objects.cache;
-        let chain = self.chain(pack, file, at, &mut |base| {
-            let base = cache.try_borrow_mut().ok()?.take((n, base))?;
-            let depth = base.depth;
-            Some((base, depth))
+        let chain = self.chain(pack, file, at, &mut |here| {
+            let depth = cache.try_borrow().ok()?.depth((n, here))?;
+            Some(((), depth))
         })?;
-        let mut base = match chain.bottom {
-            Bottom::Cached(base, _) => base,
+        let stored_whole = chain.deltas.is_empty();
+        let mut deltas = chain.deltas.into_iter().rev();
+        let mut built_at = chain.bottom_at;
+        let mut object = match chain.bottom {
+            // Read, not built, so the cache is left as it is.
+            Bottom::Whole(kind, entry) if stored_whole => {
+                let data = self.inflate_entry(pack, file, built_at, &entry)?;
+                return Ok(Object { kind, data });
+            }
             Bottom::Whole(kind, entry) => {
-                if !chain.deltas.is_empty() {
-                    self.spend(entry.size)?;
-                }
+                self.spend(entry.size)?;
                 Base {
                     kind,
-                    data: self.inflate_entry(pack, file, chain.bottom_at, &entry)?,
+                    data: self.inflate_entry(pack, file, built_at, &entry)?,
                     depth: 0,
                 }
             }
-        };
-        let mut base_at = chain.bottom_at;
-        for (delta_at, entry) in chain.deltas.into_iter().rev() {
-            let built = self.apply(pack, file, delta_at, &entry, &base.data)?;
-            let next = Base {
-                kind: base.kind,
-                data: built,
-                depth: base.depth.saturating_add(1),
-            };
-            let done = std::mem::replace(&mut base, next);
-            if let Ok(mut cache) = cache.try_borrow_mut() {
-                cache.put((n, base_at), done);
+            // Built on where it lies, so it stays in the cache.
+            Bottom::Cached((), _) => {
+                let mut cache = cache.try_borrow_mut().map_err(|_| lost(pack))?;
+                let base = cache.get((n, built_at)).ok_or_else(|| lost(pack))?;
+                let Some((delta_at, entry)) = deltas.next() else {
+                    let data = base.data.clone();
+                    return Ok(Object {
+                        kind: base.kind,
+                        data,
+                    });
+                };
+                built_at = delta_at;
+                Base {
+                    kind: base.kind,
+                    data: self.apply(pack, file, delta_at, &entry, &base.data)?,
+                    depth: base.depth.saturating_add(1),
+                }
             }
-            base_at = delta_at;
+        };
+        for (delta_at, entry) in deltas {
+            let next = Base {
+                kind: object.kind,
+                data: self.apply(pack, file, delta_at, &entry, &object.data)?,
+                depth: object.depth.saturating_add(1),
+            };
+            let base = std::mem::replace(&mut object, next);
+            if keep && let Ok(mut cache) = cache.try_borrow_mut() {
+                cache.put((n, built_at), base);
+            }
+            built_at = delta_at;
+        }
+        if keep && let Ok(mut cache) = cache.try_borrow_mut() {
+            cache.put_copy((n, built_at), &object);
         }
         Ok(Object {
-            kind: base.kind,
-            data: base.data,
+            kind: object.kind,
+            data: object.data,
         })
     }
 
@@ -321,6 +384,10 @@ impl Repo {
         let built = build_delta(base, size, &mut delta).map_err(failed)?;
         let taken = delta.into_inner().inflater.taken;
         count_inflated(&self.objects.inflated, pack, at, taken);
+        #[cfg(test)]
+        self.objects
+            .built
+            .set(self.objects.built.get().saturating_add(1));
         Ok(built)
     }
 
@@ -361,11 +428,346 @@ impl Repo {
         })
     }
 
-    /// Checks that `object` is the one `id` names.
-    fn check(&self, id: &GitId, object: &Object) -> Result<(), GitError> {
-        let mut hasher = Hasher::object(self.hash, object.kind, object.data.len() as u64);
-        hasher.update(&object.data);
+    /// Checks that `data` is the object of `kind` that `id` names.
+    fn check(&self, id: &GitId, kind: ObjectType, data: &[u8]) -> Result<(), GitError> {
+        let mut hasher = Hasher::object(self.hash, kind, data.len() as u64);
+        hasher.update(data);
         verify(id, hasher)
+    }
+
+    /// Rebuilds the delta family of the blob `id` once, if Git stored it as a delta in a pack:
+    /// the blob stored whole at the bottom of its chain and every entry of that pack built on it,
+    /// directly or not, each built once, from the bottom up, depth first, those built on one
+    /// object in pack order. Each object that is the blob its index names is handed to `each`
+    /// with that name; one that isn't, or whose delta fails, isn't, though one that was built
+    /// still serves as the base of those built on it. The work counts as `read`'s does.
+    ///
+    /// An object with more to build on it stays in the base cache while it fits, else in a file
+    /// in `tmp`, at most `MAX_KEPT_ON_DISK` bytes of them at once, else is built again from the
+    /// bottom for the next built on it.
+    pub fn rebuild_family<E: From<GitError>>(
+        &self,
+        id: &GitId,
+        tmp: &Dir,
+        each: &mut Each<'_, E>,
+    ) -> Result<(), E> {
+        let Place::Packed(n, pack, at) = self.find(id)? else {
+            return Ok(());
+        };
+        let file = self.open_pack(n, pack)?;
+        let rebuilt = self.rebuild_family_in(n, pack, &file, at, tmp, each);
+        self.keep_open(n, file);
+        rebuilt
+    }
+
+    fn rebuild_family_in<E: From<GitError>>(
+        &self,
+        n: usize,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+        tmp: &Dir,
+        each: &mut Each<'_, E>,
+    ) -> Result<(), E> {
+        // Only a delta has a family, so only then is the pack scanned.
+        match pack.entry(file, at) {
+            Ok(Entry {
+                kind: EntryKind::OfsDelta(_) | EntryKind::RefDelta(_),
+                ..
+            }) => {}
+            Ok(_) | Err(GitError::Broken { .. }) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
+        let bases = pack.bases(file)?;
+        let Some((bottom, entry)) = self.family_bottom(n, pack, file, bases, at)? else {
+            return Ok(());
+        };
+        let mut family = Family {
+            repo: self,
+            n,
+            pack,
+            file,
+            bases,
+            tmp,
+            open: Vec::new(),
+            last: None,
+            kept: HashMap::new(),
+            in_cache: 0,
+            on_disk: 0,
+        };
+        family.rebuild(bottom, &entry, each)
+    }
+
+    /// The number and entry of the blob at the bottom of the chain from the delta at `at` in
+    /// pack number `n`, if it has a family to rebuild that wasn't rebuilt yet; from here on it
+    /// counts as rebuilt. Anything else is left to be read as any object is, which says why it
+    /// can't be.
+    fn family_bottom(
+        &self,
+        n: usize,
+        pack: &Pack,
+        file: &File,
+        bases: &Bases,
+        at: u64,
+    ) -> Result<Option<(usize, Entry)>, GitError> {
+        let Some(start) = pack.number(at) else {
+            return Ok(None);
+        };
+        let mut bottom = start;
+        // A loop never gets to the bottom: this gives up past the deepest chain read.
+        for _ in 0..=MAX_DELTA_DEPTH {
+            let Some(base) = bases.base(bottom) else {
+                break;
+            };
+            bottom = base;
+        }
+        let Some((bottom_at, _)) = pack.listed(bottom) else {
+            return Ok(None);
+        };
+        if bottom == start || bases.base(bottom).is_some() {
+            return Ok(None);
+        }
+        let entry = match pack.entry(file, bottom_at) {
+            Ok(entry) => entry,
+            Err(GitError::Broken { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if !matches!(entry.kind, EntryKind::Whole(ObjectType::Blob)) {
+            return Ok(None);
+        }
+        let mut families = self
+            .objects
+            .families
+            .try_borrow_mut()
+            .map_err(|_| lost(pack))?;
+        Ok(families.insert((n, bottom)).then_some((bottom, entry)))
+    }
+}
+
+/// A delta family being rebuilt from pack number `n`.
+struct Family<'a> {
+    repo: &'a Repo,
+    n: usize,
+    pack: &'a Pack,
+    file: &'a File,
+    bases: &'a Bases,
+    tmp: &'a Dir,
+    /// The objects with more to build on them, outermost first, each by number, with how deep it
+    /// is and how many built on it are done.
+    open: Vec<(usize, u32, usize)>,
+    /// The object built last, by number, while the next is built on it.
+    last: Option<(usize, Vec<u8>)>,
+    /// Where each open object is kept for the objects built on it after the first.
+    kept: HashMap<usize, Kept<'a>>,
+    /// Bytes of the family the base cache holds, and files in `tmp`.
+    in_cache: u64,
+    on_disk: u64,
+}
+
+/// Where a family's object is kept for more to be built on it.
+enum Kept<'a> {
+    /// In the base cache, under its offset; its length.
+    Cache(u64, u64),
+    File(Spill<'a>),
+}
+
+impl Family<'_> {
+    fn rebuild<E: From<GitError>>(
+        &mut self,
+        bottom: usize,
+        entry: &Entry,
+        each: &mut Each<'_, E>,
+    ) -> Result<(), E> {
+        let (at, _) = self.listed(bottom)?;
+        self.repo.spend(entry.size)?;
+        let data = self.repo.inflate_entry(self.pack, self.file, at, entry)?;
+        self.built(bottom, 0, data, each)?;
+        while let Some(&(base, depth, done)) = self.open.last() {
+            let built_on = self.bases.built_on(base);
+            let Some(&number) = built_on.get(done) else {
+                self.open.pop();
+                self.release(base);
+                continue;
+            };
+            let done = done.saturating_add(1);
+            let last_one = done >= built_on.len();
+            match self.open.last_mut() {
+                Some(open) if !last_one => open.2 = done,
+                _ => drop(self.open.pop()),
+            }
+            let data = self.build(number as usize, base)?;
+            if last_one {
+                self.release(base);
+            }
+            if let Some(data) = data {
+                self.built(number as usize, depth.saturating_add(1), data, each)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands the object `number`, just built, to `each` if it is the blob its index names, then
+    /// holds it for what is built on it.
+    fn built<E: From<GitError>>(
+        &mut self,
+        number: usize,
+        depth: u32,
+        data: Vec<u8>,
+        each: &mut Each<'_, E>,
+    ) -> Result<(), E> {
+        let (at, name) = self.listed(number)?;
+        if self.repo.check(&name, ObjectType::Blob, &data).is_ok() {
+            each(&name, &data)?;
+        }
+        // Nothing is built deeper than an object may be read through.
+        let more = if depth < MAX_DELTA_DEPTH {
+            self.bases.built_on(number).len()
+        } else {
+            0
+        };
+        if more == 0 {
+            return Ok(());
+        }
+        self.last = match more {
+            1 => Some((number, data)),
+            _ => self
+                .keep(number, at, depth, data)
+                .map(|data| (number, data)),
+        };
+        self.open.push((number, depth, 0));
+        Ok(())
+    }
+
+    /// The object `number` built on the object `base`, or `None` if its delta is damaged.
+    fn build(&mut self, number: usize, base: usize) -> Result<Option<Vec<u8>>, GitError> {
+        let (repo, pack, file) = (self.repo, self.pack, self.file);
+        let (at, _) = self.listed(number)?;
+        // Anything else held as the object built last is let go first.
+        let last = self.last.take().filter(|(last, _)| *last == base);
+        repo.spend(ENTRY_HEADER_WORK)?;
+        let built = pack.entry(file, at).and_then(|entry| match last {
+            Some((_, data)) => repo.apply(pack, file, at, &entry, &data),
+            None => self.build_on_kept(at, &entry, base),
+        });
+        match built {
+            Ok(data) => Ok(Some(data)),
+            Err(GitError::Broken { .. } | GitError::EndedEarly { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// What the delta `entry` at `at` builds on the object `base`, kept since it was built, or
+    /// built again from the bottom if it wasn't kept or was lost from the cache.
+    fn build_on_kept(&mut self, at: u64, entry: &Entry, base: usize) -> Result<Vec<u8>, GitError> {
+        let (repo, pack, file) = (self.repo, self.pack, self.file);
+        match self.kept.get(&base) {
+            Some(Kept::Cache(base_at, _)) => {
+                if let Ok(mut cache) = repo.objects.cache.try_borrow_mut()
+                    && let Some(kept) = cache.get((self.n, *base_at))
+                {
+                    return repo.apply(pack, file, at, entry, &kept.data);
+                }
+            }
+            Some(Kept::File(spill)) => {
+                if let Ok(data) = spill.read() {
+                    return repo.apply(pack, file, at, entry, &data);
+                }
+            }
+            None => {}
+        }
+        let (base_at, _) = self.listed(base)?;
+        let base = repo.build(self.n, pack, file, base_at, false)?;
+        repo.apply(pack, file, at, entry, &base.data)
+    }
+
+    /// Keeps the object `number` at `at` for the objects built on it after the first: in the
+    /// base cache while the family's share of it has room, else in a file while there is room
+    /// for that. Gives the bytes back unless the cache took them.
+    fn keep(&mut self, number: usize, at: u64, depth: u32, data: Vec<u8>) -> Option<Vec<u8>> {
+        let len = data.len() as u64;
+        if let Ok(mut cache) = self.repo.objects.cache.try_borrow_mut()
+            && self.in_cache.saturating_add(len) <= cache.budget
+        {
+            let kind = ObjectType::Blob;
+            cache.put((self.n, at), Base { kind, data, depth });
+            self.in_cache = self.in_cache.saturating_add(len);
+            self.kept.insert(number, Kept::Cache(at, len));
+            return None;
+        }
+        // A file that can't be written only costs building it again.
+        if self.on_disk.saturating_add(len) <= MAX_KEPT_ON_DISK
+            && let Ok(spill) = Spill::write(self.tmp, &data)
+        {
+            self.on_disk = self.on_disk.saturating_add(len);
+            self.kept.insert(number, Kept::File(spill));
+        }
+        Some(data)
+    }
+
+    /// Lets go of the object `number` once the last object built on it is built.
+    fn release(&mut self, number: usize) {
+        match self.kept.remove(&number) {
+            Some(Kept::Cache(at, len)) => {
+                if let Ok(mut cache) = self.repo.objects.cache.try_borrow_mut() {
+                    cache.take((self.n, at));
+                }
+                self.in_cache = self.in_cache.saturating_sub(len);
+            }
+            Some(Kept::File(spill)) => self.on_disk = self.on_disk.saturating_sub(spill.len),
+            None => {}
+        }
+    }
+
+    /// Where entry `number` is, and its name.
+    fn listed(&self, number: usize) -> Result<(u64, GitId), GitError> {
+        self.pack.listed(number).ok_or_else(|| lost(self.pack))
+    }
+}
+
+/// An object kept in a file in `.bolt/tmp`, read back whole for each object built on it, and
+/// removed once let go. The file is open only while it is written or read, so however deep a
+/// family branches, it holds no more files open.
+struct Spill<'a> {
+    tmp: &'a Dir,
+    name: OsString,
+    len: u64,
+}
+
+impl<'a> Spill<'a> {
+    fn write(tmp: &'a Dir, data: &[u8]) -> io::Result<Spill<'a>> {
+        let (mut file, name) = fsio::create_temp(tmp)?;
+        let written = file.write_all(data);
+        // Closed before a failed one is removed: Windows doesn't remove a file that is open.
+        drop(file);
+        let len = data.len() as u64;
+        let spill = Spill { tmp, name, len };
+        written.map(|()| spill)
+    }
+
+    fn read(&self) -> io::Result<Vec<u8>> {
+        let file = self.tmp.open_file(&self.name)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(usize::try_from(self.len).unwrap_or(usize::MAX))
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
+        file.take(self.len).read_to_end(&mut data)?;
+        if data.len() as u64 != self.len {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(data)
+    }
+}
+
+impl Drop for Spill<'_> {
+    fn drop(&mut self) {
+        let _ = fsio::remove_file(self.tmp, &self.name);
+    }
+}
+
+/// What only a bug in Bolt causes: something the reader kept of `pack` went missing.
+fn lost(pack: &Pack) -> GitError {
+    GitError::Io {
+        path: pack.path.clone(),
+        source: io::Error::other("Bolt lost track of what it read of this pack"),
     }
 }
 
@@ -536,6 +938,10 @@ impl Repo {
 /// The most an import may inflate and build through deltas once it has inflated `inflated`
 /// compressed bytes of pack entries.
 fn delta_work_allowance(inflated: u64) -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((work, _)) = TEST_LIMITS.get() {
+        return work;
+    }
     MIN_DELTA_WORK.max(DELTA_WORK_PER_INFLATED_BYTE.saturating_mul(inflated))
 }
 
@@ -1024,6 +1430,10 @@ struct BaseCache {
 
 impl Default for BaseCache {
     fn default() -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((_, cache)) = TEST_LIMITS.get() {
+            return BaseCache::new(cache);
+        }
         BaseCache::new(DELTA_BASE_CACHE)
     }
 }
@@ -1039,7 +1449,23 @@ impl BaseCache {
         }
     }
 
-    /// Takes the base at `key` out, to build on.
+    /// How many deltas deep the base at `key` is, if it is kept.
+    fn depth(&self, key: (usize, u64)) -> Option<u32> {
+        self.entries.get(&key).map(|(_, base)| base.depth)
+    }
+
+    /// The base at `key`, to build on where it lies: it counts as just used.
+    fn get(&mut self, key: (usize, u64)) -> Option<&Base> {
+        let clock = self.clock.saturating_add(1);
+        let (used, base) = self.entries.get_mut(&key)?;
+        self.by_use.remove(used);
+        self.by_use.insert(clock, key);
+        *used = clock;
+        self.clock = clock;
+        Some(base)
+    }
+
+    /// Takes the base at `key` out.
     fn take(&mut self, key: (usize, u64)) -> Option<Base> {
         let (used, base) = self.entries.remove(&key)?;
         self.by_use.remove(&used);
@@ -1050,9 +1476,29 @@ impl BaseCache {
     /// Keeps a base, dropping the least recently used ones to stay within the budget. One bigger
     /// than the whole budget isn't kept.
     fn put(&mut self, key: (usize, u64), base: Base) {
-        let len = base.data.len() as u64;
-        if len > self.budget {
+        if self.make_room(key, base.data.len() as u64) {
+            self.insert(key, base);
+        }
+    }
+
+    /// `put` for a copy of `base`, made once there is room for it.
+    fn put_copy(&mut self, key: (usize, u64), base: &Base) {
+        if !self.make_room(key, base.data.len() as u64) {
             return;
+        }
+        let mut data = Vec::new();
+        if data.try_reserve_exact(base.data.len()).is_ok() {
+            data.extend_from_slice(&base.data);
+            let (kind, depth) = (base.kind, base.depth);
+            self.insert(key, Base { kind, data, depth });
+        }
+    }
+
+    /// Drops what `key` held, then the least recently used bases until `len` more bytes fit:
+    /// false if they never can.
+    fn make_room(&mut self, key: (usize, u64), len: u64) -> bool {
+        if len > self.budget {
+            return false;
         }
         self.take(key);
         while self.bytes.saturating_add(len) > self.budget {
@@ -1063,10 +1509,14 @@ impl BaseCache {
                 self.bytes = self.bytes.saturating_sub(gone.data.len() as u64);
             }
         }
+        true
+    }
+
+    fn insert(&mut self, key: (usize, u64), base: Base) {
         self.clock = self.clock.saturating_add(1);
         self.by_use.insert(self.clock, key);
+        self.bytes = self.bytes.saturating_add(base.data.len() as u64);
         self.entries.insert(key, (self.clock, base));
-        self.bytes = self.bytes.saturating_add(len);
     }
 }
 
@@ -1365,7 +1815,10 @@ mod tests {
                     e.to_string().contains("built to make importing slow"),
                     "{e}"
                 );
-                assert!(e.hint().unwrap().contains("repack -a -d -f"), "{e:?}");
+                // Honest histories fit now, so storing big files whole isn't the way out.
+                let hint = e.hint().unwrap();
+                assert!(hint.contains("git repack -a -d -f"), "{hint}");
+                assert!(!hint.contains("bigFileThreshold"), "{hint}");
             }
             other => panic!("{other:?}"),
         }
@@ -1974,5 +2427,271 @@ mod tests {
         cache.put((1, 1), base(0, 11));
         assert_eq!(cache.take((1, 1)), None);
         assert_eq!(cache.bytes, 4);
+    }
+
+    /// Where `id` is: its pack's number and its offset there.
+    fn place(repo: &Repo, id: &GitId) -> (usize, u64) {
+        match repo.find(id).unwrap() {
+            Place::Packed(n, _, at) => (n, at),
+            Place::Loose(_) => panic!("{} is loose", id.to_hex()),
+        }
+    }
+
+    #[test]
+    fn the_base_cache_keeps_what_it_builds() {
+        let (dir, git) = craft(Sha1);
+        let objects = pack_with_deltas(&git);
+        let [(_, base), (_, second), (_, third), _] = &objects[..] else {
+            unreachable!()
+        };
+        let blobs = [base, second, third];
+        let ids = blobs.map(|data| id(Blob, data, Sha1));
+        let kept = |repo: &Repo| {
+            ids.map(|id| {
+                let (n, at) = place(repo, &id);
+                repo.objects.cache.borrow().depth((n, at))
+            })
+        };
+        let repo = open(&dir);
+        repo.read(&ids[2]).unwrap();
+        // The bases it built on and what it built, each with how deep it is.
+        assert_eq!(kept(&repo), [Some(0), Some(1), Some(2)]);
+        // Each is read from where it lies, and left there: nothing is built again.
+        let work = repo.objects.work.get();
+        for _ in 0..2 {
+            for (id, data) in ids.iter().zip(blobs) {
+                assert_eq!(&repo.read(id).unwrap().data, data);
+            }
+        }
+        assert_eq!(repo.objects.work.get(), work);
+        assert_eq!(kept(&repo), [Some(0), Some(1), Some(2)]);
+        // A base used counts as just used, so it outlasts one left alone.
+        let mut cache = BaseCache::new(10);
+        let small = |byte| Base {
+            kind: Blob,
+            data: vec![byte; 4],
+            depth: 0,
+        };
+        cache.put((0, 1), small(1));
+        cache.put((0, 2), small(2));
+        assert_eq!(cache.get((0, 1)), Some(&small(1)));
+        cache.put((0, 3), small(3));
+        let held = |cache: &BaseCache| [1, 2, 3].map(|at| cache.depth((0, at)).is_some());
+        assert_eq!(held(&cache), [true, false, true]);
+        // One as big as the whole budget is kept.
+        cache.put_copy(
+            (0, 4),
+            &Base {
+                kind: Blob,
+                data: vec![4; 10],
+                depth: 0,
+            },
+        );
+        assert_eq!(cache.depth((0, 4)), Some(0));
+        assert_eq!(cache.bytes, 10);
+    }
+
+    /// Packs a family of blobs: one stored whole, one built on it, two built on that (the second
+    /// through a REF_DELTA) and one built on the last; among them another family of two blobs,
+    /// and one of two trees. Returns the first family's blobs, in the order a rebuild hands them
+    /// over, and the second tree.
+    fn pack_with_a_family(git: &Craft) -> (Vec<Vec<u8>>, Vec<u8>) {
+        let a: Vec<u8> = (0..20_000u32).flat_map(|i| i.to_le_bytes()).collect();
+        let on = |base: &[u8], tail: &str| [base, tail.as_bytes()].concat();
+        let b = on(&a, "b");
+        let (c, d) = (on(&b, "c"), on(&b, "d"));
+        let e = on(&d, "e");
+        let other = b"another file\n".to_vec();
+        let tree = |name: &[u8], data: &[u8]| {
+            [
+                b"100644 ",
+                name,
+                b"\0",
+                id(Blob, data, git.hash()).as_bytes(),
+            ]
+            .concat()
+        };
+        let (first_tree, second_tree) = (tree(b"a", &a), tree(b"b", &b));
+        git.pack(&[
+            PackEntry::Whole(Blob, a.clone()),
+            PackEntry::OfsDelta {
+                base: 0,
+                delta: delta(&a, &b),
+            },
+            PackEntry::Whole(Blob, other.clone()),
+            PackEntry::OfsDelta {
+                base: 1,
+                delta: delta(&b, &c),
+            },
+            PackEntry::RefDelta {
+                base: id(Blob, &b, git.hash()),
+                delta: delta(&b, &d),
+            },
+            PackEntry::OfsDelta {
+                base: 2,
+                delta: delta(&other, &on(&other, "changed")),
+            },
+            PackEntry::OfsDelta {
+                base: 4,
+                delta: delta(&d, &e),
+            },
+            PackEntry::Whole(Tree, first_tree.clone()),
+            PackEntry::OfsDelta {
+                base: 7,
+                delta: delta(&first_tree, &second_tree),
+            },
+        ]);
+        (vec![a, b, c, d, e], second_tree)
+    }
+
+    /// The work rebuilding `pack_with_a_family`'s family takes: the bottom, then for each object
+    /// built, its entry header, its delta and what it builds.
+    fn family_work(family: &[Vec<u8>]) -> u64 {
+        let mut work = family[0].len() as u64;
+        for (base, built) in [(0, 1), (1, 2), (1, 3), (3, 4)] {
+            let (base, built) = (&family[base], &family[built]);
+            work += ENTRY_HEADER_WORK + delta(base, built).len() as u64 + built.len() as u64;
+        }
+        work
+    }
+
+    fn tmp_folder() -> (tempfile::TempDir, Dir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Dir::open_top(tmp.path()).unwrap();
+        (tmp, dir)
+    }
+
+    /// The names `rebuild_family` hands over, asked for `id`, each checked against its bytes.
+    fn rebuilt(repo: &Repo, id: &GitId, tmp: &Dir) -> Vec<GitId> {
+        let mut handed = Vec::new();
+        let mut hand = |name: &GitId, data: &[u8]| {
+            assert_eq!(object_id(Blob, data, Sha1).unwrap(), *name);
+            handed.push(*name);
+            Ok::<_, GitError>(())
+        };
+        repo.rebuild_family(id, tmp, &mut hand).unwrap();
+        handed
+    }
+
+    #[test]
+    fn each_object_of_a_family_is_built_once() {
+        let (dir, git) = craft(Sha1);
+        let (family, tree) = pack_with_a_family(&git);
+        let ids: Vec<GitId> = family.iter().map(|data| id(Blob, data, Sha1)).collect();
+        let (_tmp, tmp) = tmp_folder();
+        let repo = open(&dir);
+        // From the bottom up, depth first, those built on one object in pack order.
+        assert_eq!(rebuilt(&repo, &ids[4], &tmp), ids);
+        assert_eq!(repo.objects.built.get(), 4);
+        assert_eq!(repo.objects.work.get(), family_work(&family));
+        // A family is rebuilt once, whichever member asks again; an object stored whole has no
+        // family, and one of trees isn't rebuilt.
+        for asked in [ids[2], ids[0], id(Tree, &tree, Sha1)] {
+            assert!(rebuilt(&repo, &asked, &tmp).is_empty());
+        }
+        assert_eq!(repo.objects.built.get(), 4);
+        // Its objects still read as any other.
+        for (id, data) in ids.iter().zip(&family) {
+            assert_eq!(&repo.read(id).unwrap().data, data);
+        }
+    }
+
+    #[test]
+    fn a_family_with_branches_keeps_memory_bounded() {
+        let (dir, git) = craft(Sha1);
+        let (family, _) = pack_with_a_family(&git);
+        let ids: Vec<GitId> = family.iter().map(|data| id(Blob, data, Sha1)).collect();
+        let (folder, tmp) = tmp_folder();
+        let files = || fs::read_dir(folder.path()).unwrap().count();
+        // The second blob has two built on it: while the first of them is built, it waits in
+        // the cache, and leaves it once the second is.
+        let repo = open(&dir);
+        let second = place(&repo, &ids[1]);
+        let mut seen = Vec::new();
+        let mut hand = |name: &GitId, _: &[u8]| {
+            let cached = repo.objects.cache.borrow().depth(second).is_some();
+            seen.push((*name, cached, files()));
+            Ok::<_, GitError>(())
+        };
+        repo.rebuild_family(&ids[4], &tmp, &mut hand).unwrap();
+        let cached = [false, false, true, false, false];
+        let want: Vec<_> = ids.iter().zip(cached).map(|(id, c)| (*id, c, 0)).collect();
+        assert_eq!(seen, want);
+        // Too big for the cache, it waits in a file in tmp instead, read back for the second:
+        // each object is still built once.
+        let repo = open(&dir);
+        *repo.objects.cache.borrow_mut() = BaseCache::new(family[1].len() as u64 - 1);
+        let mut seen = Vec::new();
+        let mut hand = |name: &GitId, _: &[u8]| {
+            seen.push((*name, files()));
+            Ok::<_, GitError>(())
+        };
+        repo.rebuild_family(&ids[4], &tmp, &mut hand).unwrap();
+        let in_files = [0, 0, 1, 0, 0];
+        let want: Vec<_> = ids.iter().zip(in_files).map(|(id, f)| (*id, f)).collect();
+        assert_eq!(seen, want);
+        assert_eq!(repo.objects.built.get(), 4);
+        assert_eq!(repo.objects.work.get(), family_work(&family));
+        assert_eq!(files(), 0);
+        // Lost from the cache before its second is built, it is built again from the bottom,
+        // and that counts.
+        let repo = open(&dir);
+        let mut seen = Vec::new();
+        let mut hand = |name: &GitId, _: &[u8]| {
+            if *name == ids[2] {
+                *repo.objects.cache.borrow_mut() = BaseCache::default();
+            }
+            seen.push(*name);
+            Ok::<_, GitError>(())
+        };
+        repo.rebuild_family(&ids[4], &tmp, &mut hand).unwrap();
+        assert_eq!(seen, ids);
+        assert_eq!(repo.objects.built.get(), 5);
+        let again = ENTRY_HEADER_WORK
+            + (family[0].len() + delta(&family[0], &family[1]).len() + family[1].len()) as u64;
+        assert_eq!(repo.objects.work.get(), family_work(&family) + again);
+    }
+
+    #[test]
+    fn the_family_scan_runs_only_for_a_pack_it_needs() {
+        let (dir, git) = craft(Sha1);
+        let (family, _) = pack_with_a_family(&git);
+        // Beside it, a pack of 5,000 objects, half of them deltas.
+        let mut entries = Vec::new();
+        for i in 0..2500 {
+            let whole = format!("file {i}\n").into_bytes();
+            let changed = format!("file {i}, changed\n").into_bytes();
+            entries.push(PackEntry::Whole(Blob, whole.clone()));
+            entries.push(PackEntry::OfsDelta {
+                base: 2 * i,
+                delta: delta(&whole, &changed),
+            });
+        }
+        git.pack(&entries);
+        let repo = open(&dir);
+        let scanned = || {
+            let folder = repo.packs().unwrap();
+            folder.packs.iter().map(Pack::scanned).collect::<Vec<_>>()
+        };
+        // Reading objects, whole, through deltas or streamed, scans no pack.
+        let last = id(Blob, &family[4], Sha1);
+        repo.read(&last).unwrap();
+        repo.header(&id(Blob, &family[3], Sha1)).unwrap();
+        read_all(repo.blob_reader(&id(Blob, &family[0], Sha1)).unwrap(), 4096).unwrap();
+        repo.read(&id(Blob, b"file 7, changed\n", Sha1)).unwrap();
+        assert_eq!(scanned(), [None, None]);
+        // Nor does asking for the family of an object stored whole, which has none.
+        let (_tmp, tmp) = tmp_folder();
+        for whole in [&family[0][..], b"file 7\n"] {
+            assert!(rebuilt(&repo, &id(Blob, whole, Sha1), &tmp).is_empty());
+        }
+        assert_eq!(scanned(), [None, None]);
+        // Rebuilding a family scans its own pack only, keeping at most 8 bytes an entry.
+        let mut hand = |_: &GitId, _: &[u8]| Ok::<_, GitError>(());
+        repo.rebuild_family(&last, &tmp, &mut hand).unwrap();
+        let (n, _) = place(&repo, &last);
+        let scans = scanned();
+        assert_eq!(scans[1 - n], None);
+        assert!(scans[n].is_some_and(|bytes| bytes <= 8 * 9), "{scans:?}");
     }
 }

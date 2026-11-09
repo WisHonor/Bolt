@@ -576,6 +576,11 @@ impl PackSet {
         self.current.contains(id)
     }
 
+    /// The folder the set builds its packs in.
+    pub(crate) fn tmp(&self) -> Arc<Dir> {
+        Arc::clone(&self.tmp)
+    }
+
     /// The kind of what the pack being built holds under `id`.
     pub(crate) fn kind_of(&self, id: &Id) -> Option<ObjectKind> {
         self.current.index.get(id).map(|e| e.kind)

@@ -19,6 +19,8 @@ pub use object::{
     lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person, parse_tag, parse_tree,
     rebuild_commit,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use odb::set_test_delta_limits;
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 // For the delta fuzz target.
 #[cfg(feature = "test-support")]
@@ -245,9 +247,8 @@ impl GitError {
                      bolt import again."
                 }
                 GitError::TooMuchWork { .. } => {
-                    "Nothing was changed. If you trust this repository, have Git store its big \
-                     files whole and make its deltas anew with `git -c core.bigFileThreshold=64m \
-                     repack -a -d -f`, then run bolt import again."
+                    "Nothing was changed. If you trust this repository, have Git make its deltas \
+                     anew with `git repack -a -d -f`, then run bolt import again."
                 }
                 GitError::Changed { .. } => {
                     "Nothing was changed. Run bolt import again once Git has finished."

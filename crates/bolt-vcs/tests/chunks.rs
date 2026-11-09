@@ -5,6 +5,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use bolt_core::chunks::set_test_cut_sizes;
+use bolt_core::git::set_test_delta_limits;
 use bolt_core::history::current_save;
 use bolt_core::id::{Flavor, Id, hash_record};
 use bolt_core::import::{ImportRequest, import_git};
@@ -186,4 +187,46 @@ fn an_import_reads_each_big_blob_once() {
         );
         repo.store().copy_content(&id, &mut io::sink()).unwrap();
     }
+}
+
+#[test]
+fn a_long_history_of_a_big_file_imports_within_the_allowance() {
+    // 50 versions of an 8 MiB file, each a few bytes on from the last, which Git stores as deltas
+    // built on a few versions stored whole.
+    let env = Env::new();
+    let path = env.root().join("big.bin");
+    write_noise(&path, 5, 8 * MIB);
+    let mut versions = Vec::new();
+    for v in 0..50u64 {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(v * 100_000)).unwrap();
+        file.write_all(format!("version {v:02}").as_bytes())
+            .unwrap();
+        drop(file);
+        versions.push(id_of(&path));
+        env.git(&["add", "big.bin"]);
+        env.git(&["commit", "-q", "-m", &format!("Version {v}")]);
+    }
+    env.git(&["repack", "-a", "-d", "-f", "--depth=50"]);
+    // With a cache of one version, as 256 MiB holds one of a 200 MiB file, rebuilding the
+    // versions one by one took 1.2 GB when measured; each once takes 420 MB.
+    set_test_delta_limits(Some((640 * MIB, 9 * MIB)));
+    let who = ada();
+    let mut req = ImportRequest {
+        who: &who,
+        command: "import",
+        lfs_storage: None,
+        progress: &mut |_, _| {},
+    };
+    let imported = import_git(env.root(), &mut req, &mut None);
+    set_test_delta_limits(None);
+    imported.unwrap();
+    let repo = Repository::open(env.root()).unwrap();
+    for id in &versions {
+        repo.store().copy_content(id, &mut io::sink()).unwrap();
+    }
+    assert_eq!(
+        top_folder(env.root()).get("big.bin").unwrap().id,
+        versions[49]
+    );
 }

@@ -135,9 +135,28 @@ impl Craft {
         self.pack_with_large_offsets(entries, 0x7fff_ffff)
     }
 
+    /// `pack`, listing the entries `renamed` gives by index under the names given, as a hostile
+    /// pack can: the entries built on them are still listed under what they build.
+    pub fn pack_renamed(
+        &self,
+        entries: &[PackEntry],
+        renamed: &[(usize, GitId)],
+    ) -> (PathBuf, PathBuf) {
+        self.write_pack(entries, 0x7fff_ffff, renamed)
+    }
+
     /// `pack`, with every offset over `limit` in the index's 64-bit table, as
     /// `git index-pack --index-version=2,<limit>` writes it.
     pub fn pack_with_large_offsets(&self, entries: &[PackEntry], limit: u64) -> (PathBuf, PathBuf) {
+        self.write_pack(entries, limit, &[])
+    }
+
+    fn write_pack(
+        &self,
+        entries: &[PackEntry],
+        limit: u64,
+        renamed: &[(usize, GitId)],
+    ) -> (PathBuf, PathBuf) {
         let count = u32::try_from(entries.len()).expect("fewer than 2^32 entries");
         let mut pack = b"PACK".to_vec();
         pack.extend_from_slice(&2u32.to_be_bytes());
@@ -183,6 +202,10 @@ impl Craft {
                 None => object_id(ObjectType::Blob, own, self.hash),
             }
             .expect("no SHA-1 collision attack");
+            let id = renamed
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map_or(id, |(_, name)| *name);
             listed.push(Listed {
                 at,
                 id,

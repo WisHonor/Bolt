@@ -13,7 +13,7 @@ use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest as _, Sha256};
 
 use super::{ImportError, LfsElsewhere};
-use crate::chunks::is_too_long_to_cut;
+use crate::chunks::{is_cut, is_too_long_to_cut};
 use crate::diary::{
     self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
 };
@@ -955,8 +955,15 @@ impl<'r> Converter<'r> {
             return Ok(*done);
         }
         let place = || format!("the file `{}` of commit `{commit}`", path());
-        // The size in the header only picks how to read it: the bytes are checked against the ID.
-        let (_, size) = self.git.header(id).map_err(|e| at(e, place))?;
+        // The header only picks how to read it: the bytes are checked against the ID. A big file
+        // Git stored as a delta brings its whole family in.
+        let (kind, size) = self.git.header(id).map_err(|e| at(e, place))?;
+        if kind == ObjectType::Blob && is_cut(size) {
+            self.family(id, &place)?;
+            if let Some(done) = self.blobs.get(&(*id, file)) {
+                return Ok(*done);
+            }
+        }
         let done = if size > MAX_WHOLE_BLOB {
             let (content, size) = self.stream(id, size, &place)?;
             (content, size, false)
@@ -982,6 +989,35 @@ impl<'r> Converter<'r> {
         };
         self.blobs.insert((*id, file), done);
         Ok(done)
+    }
+
+    /// Brings in the delta family of the blob `id`, a file big enough to be cut, the first time
+    /// one of its members is met, if Git stored it as a delta: each blob of the family not met
+    /// yet is stored as `blob` stores it, and noted, so none is rebuilt again. One that may be
+    /// read as a Git LFS pointer, or looks like one, is left for `blob` to judge where it is met.
+    fn family(&mut self, id: &GitId, place: &dyn Fn() -> String) -> Result<(), ImportError> {
+        let tmp = self.packs.tmp();
+        let (packs, store, blobs) = (&mut *self.packs, self.store, &mut self.blobs);
+        let mut each = |member: &GitId, data: &[u8]| -> Result<(), ImportError> {
+            let met = blobs.contains_key(&(*member, true));
+            if met || lfs_pointer(data).is_some() || looks_like_lfs_pointer(data) {
+                return Ok(());
+            }
+            let stored = ingest::store_held(packs, store, data);
+            let done = (
+                stored.map_err(|e| not_stored(e, member, place))?,
+                data.len() as u64,
+                false,
+            );
+            blobs.insert((*member, true), done);
+            blobs.insert((*member, false), done);
+            Ok(())
+        };
+        let rebuilt = self.git.rebuild_family(id, &tmp, &mut each);
+        rebuilt.map_err(|e| match e {
+            ImportError::Git(e) => at(e, place),
+            e => e,
+        })
     }
 
     /// Notes a file that only looks like a Git LFS pointer, listing the first few by path.
@@ -1313,8 +1349,9 @@ mod tests {
     #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     use super::*;
     use crate::chunks::set_test_cut_sizes;
-    use crate::git::craft::{Craft, PackEntry, lfs_pointer_to};
+    use crate::git::craft::{Craft, PackEntry, delta, lfs_pointer_to};
     use crate::git::{HashKind, object_id};
+    use crate::id::hash_content;
     use crate::pack::{PackReader, WRITER_PACK_OBJECTS};
     use crate::save::Person;
     use crate::test_support::{HOSTILE, assert_hostile_text_escaped, noise};
@@ -1531,6 +1568,58 @@ mod tests {
         // A store that holds them already gets neither again.
         convert(dir.path(), "a", |c| c.commit(&first).unwrap());
         assert_eq!(held(), [chunks_and_small, lists]);
+    }
+
+    #[test]
+    fn a_family_member_no_commit_needs_may_fail_its_check() {
+        let (dir, git) = repo(Sha1);
+        // A file of 1.5 MiB in four versions, Git's deltas building the rest on the first: the
+        // second listed under a name not its own, the third built on it and the one a commit
+        // names, the fourth named by none. A fifth delta on the first can't be applied.
+        let first: Vec<u8> = (0..3usize << 19).map(|i| (i % 251) as u8).collect();
+        let on = |base: &[u8], tail: &[u8]| [base, tail].concat();
+        let second = on(&first, b"second");
+        let third = on(&second, b"third");
+        let fourth = on(&first, b"fourth");
+        let id = |data: &[u8]| object_id(ObjectType::Blob, data, Sha1).unwrap();
+        let not_its_own = id(b"not the second");
+        let entries = [
+            PackEntry::Whole(ObjectType::Blob, first.clone()),
+            PackEntry::OfsDelta {
+                base: 0,
+                delta: delta(&first, &second),
+            },
+            PackEntry::OfsDelta {
+                base: 1,
+                delta: delta(&second, &third),
+            },
+            PackEntry::OfsDelta {
+                base: 0,
+                delta: delta(&first, &fourth),
+            },
+            PackEntry::OfsDelta {
+                base: 0,
+                delta: delta(b"too short a base", b"anything"),
+            },
+        ];
+        git.pack_renamed(&entries, &[(1, not_its_own)]);
+        let commit = commit_of(&git, &[(b"100644", b"big.bin", id(&third))]);
+        let (save, store) = convert(dir.path(), "a", |c| {
+            let save = c.commit(&commit).unwrap();
+            let noted = |data: &[u8]| c.blobs.contains_key(&(id(data), true));
+            assert_eq!([&first, &third, &fourth].map(|v| noted(v)), [true; 3]);
+            assert!(!c.blobs.contains_key(&(not_its_own, true)));
+            save
+        });
+        // The file came in, and so did the version no commit names, but not the one listed under
+        // another name.
+        let root = store
+            .listing(&store.save(&save, false).unwrap().root)
+            .unwrap();
+        assert!(content(&store, &root.get("big.bin").unwrap().id) == third);
+        assert!(content(&store, &hash_content(&fourth)) == fourth);
+        let second = store.copy_content(&hash_content(&second), &mut io::sink());
+        assert!(second.is_err(), "{second:?}");
     }
 
     #[test]
