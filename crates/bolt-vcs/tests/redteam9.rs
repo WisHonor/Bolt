@@ -6,7 +6,7 @@
 mod support;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use bolt_core::git::craft::lfs_pointer_to;
@@ -17,130 +17,108 @@ fn in_git_settings(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
-/// The home folder the system's account list gives this user, which Bolt falls back to.
-#[cfg(unix)]
-fn account_home() -> PathBuf {
-    let uid = Command::new("id").arg("-u").output().unwrap();
-    let uid = text(&uid.stdout).trim().to_owned();
-    let passwd = fs::read_to_string("/etc/passwd").unwrap();
-    let line = passwd
-        .lines()
-        .find(|l| l.split(':').nth(2) == Some(uid.as_str()))
-        .expect("this user is in /etc/passwd");
-    PathBuf::from(line.split(':').nth(5).unwrap())
-}
-
-/// A file this test puts in the account's home folder, taken away again however the test ends.
-#[cfg(unix)]
-struct Planted(PathBuf);
-
-#[cfg(unix)]
-impl Drop for Planted {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+/// `cmd` (Git, Git LFS through it, or Bolt) run with no home folder, as a system service or
+/// `env -i` runs it: no `HOME` (nor, on Windows, what Git for Windows makes one from), the
+/// user's other settings in `xdg` (`XDG_CONFIG_HOME`, a temporary folder), and no system settings.
+fn without_home<'c>(cmd: &'c mut Command, xdg: &Path) -> &'c mut Command {
+    for key in ["HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE"] {
+        cmd.env_remove(key);
     }
-}
-
-/// `cmd` (Git, or Git LFS through it) as a command run without `HOME` runs it: no `HOME`, no
-/// `XDG_CONFIG_HOME`, no system settings.
-#[cfg(unix)]
-fn without_home(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("HOME")
-        .env_remove("XDG_CONFIG_HOME")
+    cmd.env("XDG_CONFIG_HOME", xdg)
         .env_remove("GIT_CONFIG_GLOBAL")
         .env_remove("GIT_CONFIG_COUNT")
         .env("GIT_CONFIG_NOSYSTEM", "1")
 }
 
-/// Git takes the user's home folder from `HOME` alone: without it, Git reads no `~/.gitconfig`
-/// and no `~/.config/git/ignore` (`interpolate_path` and `xdg_config_home` give nothing), and
-/// neither does Git LFS, which asks Git. Bolt falls back to the home folder the account list
-/// gives, so a command run without `HOME` (a system service, `env -i`) applies settings Git
-/// doesn't: a save silently leaves out files Git tracks, and an import stops over an
-/// `lfs.storage` Git LFS isn't using. Run in the sandbox: it puts a `.gitconfig` in the account's
-/// home folder for the length of the test, and won't if one is there.
-#[cfg(unix)]
+/// Git takes the user's home folder from `HOME` alone (on Windows, Git for Windows makes `HOME`
+/// from `HOMEDRIVE` and `HOMEPATH`, else `USERPROFILE`): without one, `~` names nothing, so Git
+/// reads no `~/.gitconfig`, and stops at a setting that starts with `~/` ("failed to expand user
+/// dir"). Bolt fell back to the home folder the account list gives, so it read a `~/.gitconfig`
+/// Git doesn't. This test never writes a home folder: it shows that Bolt has none without `HOME`
+/// by `~/` settings in `XDG_CONFIG_HOME`'s file, a temporary folder, which stop a save and an
+/// import as they stop Git, while the settings Git does read there still apply.
 #[test]
-#[ignore = "RT9-1: without HOME, Bolt reads the account's ~/.gitconfig, which Git doesn't"]
 fn rt9_1_without_home_bolt_applies_only_the_git_settings_git_applies() {
-    let home = account_home();
-    let gitconfig = home.join(".gitconfig");
-    assert!(
-        !gitconfig.exists(),
-        "won't run where {} exists: it would replace the user's own",
-        gitconfig.display()
-    );
     let mut wrong = Vec::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let settings = xdg.path().join("git").join("config");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
     let env = Env::new();
-    let list = env.config().join("old.ignore");
-    fs::write(&list, "*.psd\n").unwrap();
-    let settings = format!(
-        "[core]\n\texcludesFile = {}\n[lfs]\n\tstorage = /nowhere/shared-lfs\n",
-        in_git_settings(&list)
-    );
-    fs::write(&gitconfig, settings).unwrap();
-    let _planted = Planted(gitconfig);
-
-    // The personal ignore list.
     write(&env, "art.psd", "a picture\n");
     write(&env, "readme.txt", "hello\n");
-    let mut status = Command::new("git");
-    without_home(&mut status).current_dir(env.root()).args([
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-    ]);
-    let status = status.output().unwrap();
-    eprintln!(
-        "git status without HOME: {}",
-        text(&status.stdout).replace('\n', " ")
-    );
     env.bolt().arg("start").assert().success();
-    let mut save = env.bolt_process_in(env.root());
-    without_home(&mut save).args(["save", "First"]);
-    let out = save.output().unwrap();
+    let git_status = || {
+        let mut status = Command::new("git");
+        without_home(&mut status, xdg.path())
+            .current_dir(env.root())
+            .args(["status", "--porcelain", "--untracked-files=all"]);
+        let out = status.output().unwrap();
+        let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        format!("{:?} {}", out.status.code(), said.replace('\n', " "))
+    };
+    let save = || {
+        let mut save = env.bolt_process_in(env.root());
+        without_home(&mut save, xdg.path()).args(["save", "First"]);
+        save.output().unwrap()
+    };
+
+    // A list named from the home folder: there is none, so Git stops, and so must Bolt.
+    fs::write(&settings, "[core]\n\texcludesFile = ~/old.ignore\n").unwrap();
+    eprintln!("git status without a home folder: {}", git_status());
+    let out = save();
+    eprintln!(
+        "bolt save without a home folder: {:?} {}",
+        out.status.code(),
+        text(&out.stderr).trim()
+    );
+    if out.status.code() == Some(0) || !text(&out.stderr).contains("~/old.ignore") {
+        wrong.push("a save expanded ~/ with no home folder, where Git stops");
+    }
+
+    // A list named in full: Git applies it without a home folder, and so must Bolt.
+    let list = xdg.path().join("old.ignore");
+    fs::write(&list, "*.psd\n").unwrap();
+    let excludes = format!("[core]\n\texcludesFile = {}\n", in_git_settings(&list));
+    fs::write(&settings, excludes).unwrap();
+    eprintln!("git status without a home folder: {}", git_status());
+    let out = save();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let saved = saved_files(&env, main_tip(&env));
     let names: Vec<&String> = saved.keys().collect();
-    eprintln!(
-        "bolt save without HOME: {}; saved: {names:?}",
-        text(&out.stdout).trim()
-    );
-    if !saved.contains_key("art.psd") {
-        wrong.push("a save left out art.psd, which Git tracks");
+    eprintln!("bolt save without a home folder: saved {names:?}");
+    if saved.contains_key("art.psd") {
+        wrong.push("a save took art.psd, which Git's list keeps out");
     }
 
-    // lfs.storage: a repository with one Git LFS file, its object in .git/lfs/objects.
+    // lfs.storage: settings included from the home folder stop Git and Git LFS, and the import.
     let env = Env::new();
     env.commit(".gitattributes", "*.bin filter=lfs -text\n", "Track");
     let picture = b"the real picture\n";
     let pointer = keep_in(&env.root().join(".git/lfs"), picture);
     write(&env, "a.bin", pointer);
     env.commit("readme.txt", "hi\n", "Add a picture");
+    fs::write(&settings, "[include]\n\tpath = ~/lfs.gitconfig\n").unwrap();
     let mut lfs_env = Command::new("git");
-    without_home(&mut lfs_env)
+    without_home(&mut lfs_env, xdg.path())
         .current_dir(env.root())
         .args(["lfs", "env"]);
     let said = lfs_env.output().map_or_else(
         |_| "git lfs isn't installed".to_owned(),
-        |out| text(&out.stdout),
+        |out| format!("{:?} {}", out.status.code(), text(&out.stderr).trim()),
     );
-    let media = said.lines().find(|l| l.starts_with("LocalMediaDir="));
-    eprintln!("git lfs env without HOME: {media:?}");
+    eprintln!("git lfs env without a home folder: {said}");
     let mut import = env.bolt_process_in(env.root());
-    without_home(&mut import).arg("import");
+    without_home(&mut import, xdg.path()).arg("import");
     let out = import.output().unwrap();
     eprintln!(
-        "bolt import without HOME: {:?} {}",
+        "bolt import without a home folder: {:?} {}",
         out.status.code(),
-        text(&out.stderr)
+        text(&out.stderr).trim()
     );
-    let imported =
-        out.status.code() == Some(0) && saved_files(&env, main_tip(&env))["a.bin"] == picture;
-    if !imported {
-        wrong.push("an import stopped over an lfs.storage Git LFS doesn't use");
+    if out.status.code() == Some(0) || !text(&out.stderr).contains("~/lfs.gitconfig") {
+        wrong.push("an import expanded an include from ~/ with no home folder");
     }
-    assert!(wrong.is_empty(), "without HOME: {wrong:?}");
+    assert!(wrong.is_empty(), "without a home folder: {wrong:?}");
 }
 
 const TRACKED: &str = "*.bin filter=lfs diff=lfs merge=lfs eol=crlf\n";

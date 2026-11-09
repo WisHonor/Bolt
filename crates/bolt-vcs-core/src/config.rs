@@ -250,22 +250,17 @@ pub fn user_config_path() -> Option<PathBuf> {
 const MAX_GIT_SETTINGS_BYTES: u64 = 1 << 20;
 
 /// The user's own Git ignore list (decision 047): the file `core.excludesFile` names in the
-/// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. `None` when there is no home
-/// folder, or the setting is empty or names no file: `/dev/null`, and `nul` on Windows.
+/// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. `None` when the setting is empty
+/// or names no file (`/dev/null`, and `nul` on Windows), or with neither a home folder nor
+/// `XDG_CONFIG_HOME` to find the default list in.
 pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigError> {
-    match UserGit::from_env(project_root) {
-        Some(git) => git_excludes_file_in(&git),
-        None => Ok(None),
-    }
+    git_excludes_file_in(&UserGit::from_env(project_root))
 }
 
 /// The `lfs.storage` the user's own Git settings set, for `bolt import` in `top`, which reads it
 /// only to tell whether Git LFS keeps its files elsewhere.
 pub fn git_lfs_storage(top: &Path) -> Result<UserLfsStorage, ConfigError> {
-    match UserGit::from_env(top) {
-        Some(git) => git_lfs_storage_in(&git),
-        None => Ok(UserLfsStorage::default()),
-    }
+    git_lfs_storage_in(&UserGit::from_env(top))
 }
 
 /// The last `lfs.storage` in the user's own Git settings files, which the repository's own
@@ -277,33 +272,52 @@ pub struct UserLfsStorage {
     pub variables: Option<(Vec<u8>, String)>,
 }
 
-/// Where Git finds the user's own settings: the home folder, `XDG_CONFIG_HOME`, the environment's
-/// variables, read through `var` (`std::env::var_os` but in tests), and the project's top, where
-/// Git runs, so a relative path is read from there.
+/// Where Git finds the user's own settings: the home folder and `XDG_CONFIG_HOME`'s folder, if
+/// there are any, the environment's variables, read through `var` (`std::env::var_os` but in
+/// tests), and the project's top, where Git runs, so a relative path is read from there.
 struct UserGit<'a> {
-    home: PathBuf,
-    xdg: PathBuf,
+    home: Option<PathBuf>,
+    xdg: Option<PathBuf>,
     top: &'a Path,
     var: &'a dyn Fn(&str) -> Option<OsString>,
 }
 
 impl<'a> UserGit<'a> {
-    /// The user's own Git settings as this process's environment places them; `None` when there
-    /// is no home folder. Git's home folder is `HOME`, as Git for Windows takes it too.
-    fn from_env(top: &'a Path) -> Option<UserGit<'a>> {
+    /// The user's own Git settings as this process's environment places them.
+    fn from_env(top: &'a Path) -> UserGit<'a> {
         fn var(key: &str) -> Option<OsString> {
             std::env::var_os(key)
         }
-        let env_path = |key| var(key).filter(|v| !v.is_empty()).map(PathBuf::from);
-        let home = env_path("HOME")
-            .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()))?;
-        let xdg = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
-        Some(UserGit {
+        let is_dir = |path: &Path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir());
+        UserGit::new(top, &var, cfg!(windows), &is_dir)
+    }
+
+    /// The user's own Git settings as the environment `var` places them, on Windows or not, with
+    /// `is_dir` telling which paths are folders.
+    fn new(
+        top: &'a Path,
+        var: &'a dyn Fn(&str) -> Option<OsString>,
+        windows: bool,
+        is_dir: &dyn Fn(&Path) -> bool,
+    ) -> UserGit<'a> {
+        let home = git_home(var, windows, is_dir).map(|home| {
+            // Git puts `~/x` at the home folder's text and `/x`, so an empty one is `/`.
+            if home.is_empty() {
+                PathBuf::from("/")
+            } else {
+                PathBuf::from(home)
+            }
+        });
+        // As Git's `xdg_config_home`: the variable when it is set to something, else `~/.config`.
+        let xdg = var("XDG_CONFIG_HOME")
+            .filter(|xdg| !xdg.is_empty())
+            .map(PathBuf::from);
+        UserGit {
+            xdg: xdg.or_else(|| Some(home.as_ref()?.join(".config"))),
             home,
-            xdg,
             top,
-            var: &var,
-        })
+            var,
+        }
     }
 
     /// The user's own Git settings files, in Git's order, each with whether it is the user's own,
@@ -322,10 +336,14 @@ impl<'a> UserGit<'a> {
         });
         let own = match global {
             Some(global) => Vec::from_iter(global),
-            None => vec![
-                self.xdg.join("git").join("config"),
-                self.home.join(".gitconfig"),
-            ],
+            // Without a home folder, there is no `~/.gitconfig`, as in Git.
+            None => [
+                self.xdg.as_ref().map(|xdg| xdg.join("git").join("config")),
+                self.home.as_ref().map(|home| home.join(".gitconfig")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         };
         files.extend(own.into_iter().map(|path| (path, true)));
         Ok(files)
@@ -341,11 +359,16 @@ impl<'a> UserGit<'a> {
             name: name.to_owned(),
             detail,
         };
+        let absolute = Path::new(&value).has_root();
         let value = value.as_encoded_bytes();
         let tidied = system_file_named(value, cfg!(windows)).map_err(|()| {
+            let fix = if absolute {
+                "write it without the `..`"
+            } else {
+                "write the full path instead"
+            };
             refused(format!(
-                "`{}` goes above its start with `..`, where Git's tidying of the path fails, so \
-                 Bolt can't tell which file Git reads; write the full path instead",
+                "`{}` goes above its start with `..`, where Git's tidying of the path fails; {fix}",
                 shown_bytes(value)
             ))
         })?;
@@ -359,7 +382,7 @@ impl<'a> UserGit<'a> {
     /// Gives `each` every setting Bolt reads in the user's own Git settings files, in Git's order.
     fn read_files(&self, each: &mut dyn FnMut(UserSetting, &Place)) -> Result<(), ConfigError> {
         for (path, own) in self.files()? {
-            read_git_settings(&path, &self.home, 0, own, each)?;
+            read_git_settings(&path, self.home.as_deref(), 0, own, each)?;
         }
         Ok(())
     }
@@ -420,9 +443,10 @@ impl<'a> UserGit<'a> {
                 // Git takes a relative include only from a file, from that file's folder.
                 Some(UserSetting::Include(value)) => {
                     let value = utf8(value, "include.path", &place)?;
-                    let path = git_path(&value, "include.path", &self.home, None, &place)?;
+                    let path =
+                        git_path(&value, "include.path", self.home.as_deref(), None, &place)?;
                     if let Some(included) = path {
-                        read_git_settings(&included, &self.home, 1, false, each)?;
+                        read_git_settings(&included, self.home.as_deref(), 1, false, each)?;
                     }
                 }
                 Some(other) => each(other, &place),
@@ -445,7 +469,7 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
     git.read_files(&mut take)?;
     git.read_variables(&mut take)?;
     let Some((value, place)) = named else {
-        return Ok(Some(git.xdg.join("git").join("ignore")));
+        return Ok(git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore")));
     };
     let value = utf8(value, "core.excludesFile", &place)?;
     // Git reads no list from an empty setting, which is how one turns it off.
@@ -455,7 +479,7 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
     git_path(
         &value,
         "core.excludesFile",
-        &git.home,
+        git.home.as_deref(),
         Some(git.top),
         &place,
     )
@@ -524,7 +548,7 @@ const MAX_INCLUDE_DEPTH: usize = 10;
 /// skips it (`skipped`), the user's `own` files apart; anything else stops Bolt, naming it.
 fn read_git_settings(
     path: &Path,
-    home: &Path,
+    home: Option<&Path>,
     depth: usize,
     own: bool,
     each: &mut dyn FnMut(UserSetting, &Place),
@@ -660,9 +684,9 @@ fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
     }
 }
 
-/// Git's `offset_1st_component`: how much of `path` `tidy_path` keeps as it is, its root: a
-/// leading `/`, and on Windows a drive (Git for Windows' `has_dos_drive_prefix`) or the
-/// `//server/share/` of a network path.
+/// Git's `offset_1st_component`: how long the root of `path` is, which `tidy_path` keeps but for
+/// its `\`, which becomes `/`: a leading `/`, and on Windows a drive (Git's `has_dos_drive_prefix`,
+/// in compat/win32/path-utils.c) or the `//server/share/` of a network path.
 fn first_component(path: &[u8], windows: bool) -> usize {
     let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
     let at = |i: usize| path.get(i).copied().unwrap_or(0);
@@ -707,12 +731,13 @@ fn names_no_file(value: &[u8], windows: bool) -> bool {
 }
 
 /// `value`, the path `setting` is set to at `place`, as Git expands it: none for a name for no
-/// file; `~` is the home folder; an absolute path stays as it is; and a relative one is from
-/// `folder`. With no folder, as for a variable's include, Git refuses a relative one.
+/// file; `~` is the `home` folder, and stops where there is none, as Git stops; an absolute path
+/// stays as it is; and a relative one is from `folder`. With no folder, as for a variable's
+/// include, Git refuses a relative one.
 fn git_path(
     value: &str,
     setting: &str,
-    home: &Path,
+    home: Option<&Path>,
     folder: Option<&Path>,
     place: &Place,
 ) -> Result<Option<PathBuf>, ConfigError> {
@@ -742,8 +767,39 @@ fn git_path(
              (~user/); write the full path instead"
         )));
     }
+    // Git dies here: "failed to expand user dir".
+    let Some(home) = home else {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}: there is no home folder for `~` (HOME \
+             isn't set), and Git stops there too; set HOME, or write the full path instead"
+        )));
+    };
     // Git puts what follows `~` after the home folder, so `~//x` is the home folder's `x`.
     Ok(Some(home.join(rest.trim_start_matches(separator))))
+}
+
+/// The home folder Git v2.56.0 takes `~` and its own files from: `HOME`, whatever it is set to;
+/// on Windows (`windows`), where Git for Windows sets `HOME` when it isn't set
+/// (`setup_windows_environment`), `HOMEDRIVE` followed by `HOMEPATH` when that names a folder
+/// (`is_dir`), else `USERPROFILE`. `None` where there is none: Git doesn't ask the system.
+fn git_home(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    windows: bool,
+    is_dir: &dyn Fn(&Path) -> bool,
+) -> Option<OsString> {
+    if let Some(home) = var("HOME") {
+        return Some(home);
+    }
+    if !windows {
+        return None;
+    }
+    if let (Some(mut home), Some(path)) = (var("HOMEDRIVE"), var("HOMEPATH")) {
+        home.push(path);
+        if is_dir(Path::new(&home)) {
+            return Some(home);
+        }
+    }
+    var("USERPROFILE")
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
@@ -1184,13 +1240,23 @@ mod tests {
         vars: &[(&str, &str)],
         read: fn(&UserGit) -> Result<T, ConfigError>,
     ) -> Result<T, ConfigError> {
+        let places = (Some(home), Some(xdg), top);
+        as_git_finds_where(places, vars, read)
+    }
+
+    /// `as_git_finds`, where there may be no home folder, or no `XDG_CONFIG_HOME` folder.
+    fn as_git_finds_where<T>(
+        (home, xdg, top): (Option<&Path>, Option<&Path>, &Path),
+        vars: &[(&str, &str)],
+        read: fn(&UserGit) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
         let var = |key: &str| {
             let (_, value) = vars.iter().find(|(name, _)| *name == key)?;
             Some(OsString::from(value))
         };
         read(&UserGit {
-            home: home.to_owned(),
-            xdg: xdg.to_owned(),
+            home: home.map(Path::to_owned),
+            xdg: xdg.map(Path::to_owned),
             top,
             var: &var,
         })
@@ -1497,7 +1563,15 @@ mod tests {
             as_git_finds(places, &vars, |git| git.files()).unwrap()
         };
         let place = Place::Variable("GIT_CONFIG_VALUE_0".into());
-        let path = |value| git_path(value, "include.path", Path::new("home"), Some(top), &place);
+        let path = |value| {
+            git_path(
+                value,
+                "include.path",
+                Some(Path::new("home")),
+                Some(top),
+                &place,
+            )
+        };
         assert_eq!(files("/dev/null"), []);
         assert_eq!(path("/dev/null").unwrap(), None);
         for name in ["nul", "NUL"] {
@@ -1749,13 +1823,17 @@ mod tests {
             vec![(PathBuf::from("C:\\project/\\dev\\null"), false)]
         };
         assert_eq!(system("\\dev\\null").unwrap(), want);
-        let e = system("../gitconfig").unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("`../gitconfig` goes above its start"),
-            "{e}"
-        );
-        assert_eq!(variable_named(e), "GIT_CONFIG_SYSTEM");
+        // A relative one needs a full path; an absolute one, only to lose its `..`.
+        for (value, fix) in [
+            ("../gitconfig", "write the full path instead"),
+            ("/../gitconfig", "write it without the `..`"),
+        ] {
+            let e = system(value).unwrap_err();
+            let said = e.to_string();
+            let goes = format!("`{value}` goes above its start with `..`");
+            assert!(said.contains(&goes) && said.ends_with(fix), "{said}");
+            assert_eq!(variable_named(e), "GIT_CONFIG_SYSTEM");
+        }
         // Git reads no system file under GIT_CONFIG_NOSYSTEM, however it is spelled.
         let unread = [
             ("GIT_CONFIG_SYSTEM", "../gitconfig"),
@@ -1763,6 +1841,109 @@ mod tests {
             ("GIT_CONFIG_GLOBAL", ""),
         ];
         assert_eq!(files(&unread).unwrap(), []);
+    }
+
+    /// The environment `vars` gives, as `std::env::var_os` would read it.
+    fn lookup<'v>(vars: &'v [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'v {
+        |key: &str| {
+            let (_, value) = vars.iter().find(|(name, _)| *name == key)?;
+            Some(OsString::from(value))
+        }
+    }
+
+    /// The home folder is `HOME`, whatever it holds; on Unix nothing else, and on Windows, where
+    /// Git for Windows fills it in, `HOMEDRIVE` and `HOMEPATH` when they name a folder, else
+    /// `USERPROFILE`. Git never asks the system for one.
+    #[test]
+    fn the_home_folder_is_found_as_git_finds_it() {
+        let find = |vars: &[(&str, &str)], windows: bool, folders: &[&str]| {
+            let is_dir = |path: &Path| folders.iter().any(|folder| Path::new(folder) == path);
+            git_home(&lookup(vars), windows, &is_dir)
+        };
+        let home = |text: &str| Some(OsString::from(text));
+        let (drive, path) = (("HOMEDRIVE", "H:"), ("HOMEPATH", "\\me"));
+        let profile = ("USERPROFILE", "C:\\Users\\me");
+        let all = [("HOME", "/h"), drive, path, profile];
+        for windows in [false, true] {
+            assert_eq!(find(&all, windows, &["H:\\me"]), home("/h"), "{windows}");
+            assert_eq!(find(&[("HOME", "")], windows, &[]), home(""), "{windows}");
+        }
+        // On Unix, `HOME` alone.
+        assert_eq!(find(&all[1..], false, &["H:\\me"]), None);
+        assert_eq!(find(&[], false, &[]), None);
+        // On Windows, the home drive's folder when it is one, else the profile.
+        assert_eq!(find(&all[1..], true, &["H:\\me"]), home("H:\\me"));
+        assert_eq!(find(&all[1..], true, &[]), home("C:\\Users\\me"));
+        assert_eq!(
+            find(&[drive, profile], true, &["H:"]),
+            home("C:\\Users\\me")
+        );
+        assert_eq!(
+            find(&[path, profile], true, &["\\me"]),
+            home("C:\\Users\\me")
+        );
+        assert_eq!(find(&[drive, path], true, &[]), None);
+        assert_eq!(find(&[], true, &[]), None);
+    }
+
+    /// Without a home folder Git reads no `~/.gitconfig` and no `~/.config/git` file, but still
+    /// reads `XDG_CONFIG_HOME`'s and what the variables give, and stops at a `~/` path.
+    #[test]
+    fn without_a_home_folder_only_what_git_reads_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path();
+        let xdg = top.join("xdg");
+        let no_folder = |_: &Path| false;
+        let places = |vars: &[(&str, &str)], windows: bool| {
+            let var = lookup(vars);
+            let git = UserGit::new(top, &var, windows, &no_folder);
+            (git.home.clone(), git.xdg.clone(), git.files().unwrap())
+        };
+        // Neither: no file at all, on either system.
+        for windows in [false, true] {
+            assert_eq!(places(&[], windows), (None, None, vec![]), "{windows}");
+        }
+        let xdg_text = xdg.display().to_string();
+        let only_xdg = [("XDG_CONFIG_HOME", xdg_text.as_str())];
+        let own = vec![(xdg.join("git").join("config"), true)];
+        assert_eq!(places(&only_xdg, false), (None, Some(xdg.clone()), own));
+        // An empty HOME is Git's `/`: `~/.gitconfig` is `/.gitconfig`.
+        let root = PathBuf::from("/");
+        let (home, xdg_folder, files) = places(&[("HOME", "")], false);
+        assert_eq!(
+            (home, xdg_folder),
+            (Some(root.clone()), Some(root.join(".config")))
+        );
+        let want = [root.join(".config/git/config"), root.join(".gitconfig")];
+        assert_eq!(files, want.map(|path| (path, true)));
+        // The list: `XDG_CONFIG_HOME`'s default, a full path, and `~/`, which stops.
+        let find = |vars: &[(&str, &str)]| {
+            as_git_finds_where((None, Some(&xdg), top), vars, git_excludes_file_in)
+        };
+        assert_eq!(find(&[]).unwrap(), Some(xdg.join("git").join("ignore")));
+        let full = top.join("mine").display().to_string().replace('\\', "/");
+        let list = excludes_file_set(&top.join("list-settings"), &full);
+        let named = [("GIT_CONFIG_GLOBAL", list.as_str())];
+        assert_eq!(find(&named).unwrap(), Some(PathBuf::from(full)));
+        let config = excludes_file_set(&xdg.join("git").join("config"), "~/mine");
+        let e = find(&[]).unwrap_err();
+        let said = e.to_string();
+        assert!(
+            said.contains(&config) && said.contains("no home folder"),
+            "{said}"
+        );
+        let given = [
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.excludesFile"),
+            ("GIT_CONFIG_VALUE_0", "~/mine"),
+        ];
+        assert_eq!(
+            variable_named(find(&given).unwrap_err()),
+            "GIT_CONFIG_VALUE_0"
+        );
+        let no_list = as_git_finds_where((None, None, top), &[], git_excludes_file_in);
+        assert_eq!(no_list.unwrap(), None);
     }
 
     /// Git puts the folder it is installed in for `%(prefix)/`, which Bolt can't tell.
