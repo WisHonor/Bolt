@@ -212,8 +212,12 @@ impl PackWriter {
         Ok(w)
     }
 
-    /// Stores an encoded structured record (any kind but `Content`).
+    /// Stores an encoded structured record: any kind but `Content` or a chunk list, which goes
+    /// under its file's ID through `add_chunk_list`.
     pub fn add_record(&mut self, kind: ObjectKind, encoded: &[u8]) -> Result<Id, PackError> {
+        if kind == ObjectKind::ChunkList {
+            return Err(misuse("add_record cannot store a chunk list"));
+        }
         let flavor = kind
             .flavor()
             .ok_or_else(|| misuse("add_record cannot store content"))?;
@@ -527,7 +531,7 @@ impl PackSet {
         })
     }
 
-    /// Stores an encoded structured record (any kind but `Content`).
+    /// Stores an encoded structured record (any kind but `Content` or a chunk list).
     pub fn add_record(&mut self, kind: ObjectKind, encoded: &[u8]) -> Result<Id, PackError> {
         self.add(|pack| pack.add_record(kind, encoded))
     }
@@ -1683,6 +1687,21 @@ mod tests {
             let reason = refusal(root.path(), &bad);
             assert!(reason.contains("fan-out"), "{reason}");
         }
+    }
+
+    /// A chunk list is stored only under its file's ID, never under a hash of its bytes.
+    #[test]
+    fn add_record_refuses_a_chunk_list() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let refused = w.add_record(ObjectKind::ChunkList, b"a list");
+        assert!(matches!(refused, Err(PackError::Io(_))), "{refused:?}");
+        assert!(w.is_empty());
+        let mut set = PackSet::with_limit(&tmp, &packs, 10).unwrap();
+        assert!(set.add_record(ObjectKind::ChunkList, b"a list").is_err());
+        // The set still takes what it may.
+        set.add_content(b"fine").unwrap();
+        assert_eq!(set.finish().unwrap().len(), 1);
     }
 
     /// A chunk list's line records its file's size, up to 1 TiB, but its own bytes are a record's.

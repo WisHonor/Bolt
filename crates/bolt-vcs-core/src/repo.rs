@@ -117,13 +117,18 @@ pub enum RepoError {
         save.map_or_else(|| "A save".to_owned(), |id| format!("Save {}", id.short_hex()))
     )]
     BoltName { save: Option<Id>, current: bool },
-    /// `tidy` found a kind of object it doesn't follow, so it can't tell what that one keeps.
+    /// `tidy` can't tell what pack `path` keeps: `why` it can't open, read or check it, or `None`
+    /// when it holds a conflict record, which this version doesn't follow.
     #[error(
-        "Bolt can't tidy this project: pack {} holds {what}, which this version of Bolt doesn't \
-         follow.",
-        escape(&path.display().to_string(), false)
+        "Bolt can't tidy this project: pack {} {}.",
+        escape(&path.display().to_string(), false),
+        escape(
+            why.as_deref()
+                .unwrap_or("holds a conflict record, which this version of Bolt doesn't follow"),
+            false
+        )
     )]
-    CantTidy { path: PathBuf, what: &'static str },
+    CantTidy { path: PathBuf, why: Option<String> },
     /// `state/head` is missing, isn't an entry's ID, or names an entry the store can't give: no
     /// command can tell which state is current, though every save is in the store.
     #[error(
@@ -238,9 +243,14 @@ impl RepoError {
                      changed: go on from another save, and ask for help before trying to repair \
                      this one."
                 }
-                RepoError::CantTidy { .. } => {
+                RepoError::CantTidy { why: None, .. } => {
                     "Nothing was removed, and the project works as before. A version of Bolt that \
                      follows them can tidy it."
+                }
+                RepoError::CantTidy { .. } => {
+                    "Nothing was removed. Check the pack's permissions. If it is damaged for good, \
+                     moving it out of .bolt/store/packs lets `bolt tidy` run, losing what only it \
+                     holds."
                 }
                 RepoError::HeadLost { .. } => {
                     "Your saves are safe. `bolt undo --list` lists the entries where the diary may \

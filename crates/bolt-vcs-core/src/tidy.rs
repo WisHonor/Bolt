@@ -1,20 +1,20 @@
 //! `bolt tidy`: removes from the store what nothing needs any more, keeping what lines, shelves,
 //! tags, server lines, the diary and the undo window reach.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use bolt_platform::dir::{Dir, EntryMeta, EntryType};
+use bolt_platform::dir::{Dir, EntryMeta};
 
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::fsio::{self, fault_point};
 use crate::id::Id;
 use crate::listing::{EntryKind, Listing};
 use crate::merge;
-use crate::pack::{self, ObjectKind, PackError, PackReader};
+use crate::pack::{self, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Save;
 use crate::store::{StoreError, is_damage};
@@ -41,19 +41,24 @@ pub struct TidyReport {
     pub packs_young: usize,
 }
 
+/// A pack in the store when `tidy` started.
+struct Listed {
+    name: OsString,
+    size: u64,
+    /// Changed in the 24 hours before: left as it is.
+    young: bool,
+}
+
 /// What a pack's index says it holds.
 #[derive(Default)]
 struct Holds {
-    /// A kind of object this version doesn't follow, if it holds one.
-    unfollowed: Option<ObjectKind>,
-    /// Why its index can't be trusted to judge it by: it fails its checksum.
-    untrusted: Option<PackError>,
     version: u32,
     /// How many of its objects are kept, and their stored bytes.
     kept: u64,
     kept_stored: u64,
     /// Whether it holds anything not kept.
     other: bool,
+    /// What it counts toward a small pack.
     uncompressed: u64,
 }
 
@@ -61,7 +66,7 @@ struct Holds {
 /// only steps older than `window_days` before `now_ms` needed. Packs changed in the 24 hours
 /// before `now_ms` are left as they are. `on_estimate` is told about how much that frees before
 /// anything is removed. Anything that must be kept but can't be read stops it before then, and so
-/// does a chunk list or a conflict record, which it can't follow.
+/// does a pack it can't open, read or check, or a conflict record, which it can't follow.
 pub fn tidy(
     repo: &mut Repository,
     window_days: u32,
@@ -76,64 +81,37 @@ pub fn tidy(
         }
     }
     let folder = Arc::clone(repo.packs_folder());
-    let listed = packs(&folder)?;
-    let entries = entries_in(&folder, repo.packs_dir(), &listed);
-    let keep = kept(repo, entries, window_days, now_ms)?;
-    fault_point("tidy:marked")?;
-
     let packs_dir = repo.packs_dir().to_owned();
     let now_ns = i128::from(now_ms).saturating_mul(1_000_000);
+    let listed = listed(&folder, &packs_dir, now_ns)?;
+    let keep = kept(repo, &listed, window_days, now_ms)?;
+    fault_point("tidy:marked")?;
+
     let mut report = TidyReport::default();
     let (mut unread, mut rewrite) = (Vec::new(), Vec::new());
-    let (mut moved, mut unfollowed) = (0u64, None);
+    let mut moved = 0u64;
     // An open file can't always be replaced or removed on Windows.
     repo.store().close_all();
-    for (name, meta) in listed {
-        let path = packs_dir.join(&name);
-        report.bytes_before = report.bytes_before.saturating_add(meta.size);
-        let young = now_ns.saturating_sub(meta.modified_ns) < GRACE_NS;
-        // A young pack is read too: a chunk list there can name chunks in older packs.
-        let holds = judge(&folder, &name, &path, &keep, !young);
-        if let Ok(Holds {
-            unfollowed: Some(kind),
-            ..
-        }) = &holds
-        {
-            unfollowed.get_or_insert((path.clone(), *kind));
-        }
-        if young {
+    for pack in listed {
+        report.bytes_before = report.bytes_before.saturating_add(pack.size);
+        if pack.young {
             report.packs_young += 1;
             continue;
         }
-        let holds = match holds {
-            Ok(Holds {
-                untrusted: Some(e), ..
-            })
-            | Err(e) => {
-                not_tidied(repo, &path, &e);
-                continue;
-            }
-            Ok(holds) => holds,
-        };
+        let path = packs_dir.join(&pack.name);
+        let holds = judge(&folder, &pack.name, &path, &keep).map_err(|e| cant_tidy(&path, &e))?;
         if holds.kept == 0 {
-            report.to_free = report.to_free.saturating_add(meta.size);
-            unread.push(name);
+            report.to_free = report.to_free.saturating_add(pack.size);
+            unread.push(pack.name);
         } else if holds.other
             || holds.version == 1
-            || merge::is_small(meta.size, holds.uncompressed)
+            || merge::is_small(pack.size, holds.uncompressed)
         {
-            let freed = meta.size.saturating_sub(holds.kept_stored);
+            let freed = pack.size.saturating_sub(holds.kept_stored);
             report.to_free = report.to_free.saturating_add(freed);
             moved = moved.saturating_add(holds.kept);
-            rewrite.push((name, holds.kept));
+            rewrite.push((pack.name, holds.kept));
         }
-    }
-    if let Some((path, kind)) = unfollowed {
-        let what = match kind {
-            ObjectKind::ChunkList => "a chunk list",
-            _ => "a conflict record",
-        };
-        return Err(RepoError::CantTidy { path, what });
     }
     if moved > 0 {
         report.to_free = report.to_free.saturating_sub(pack::v2_overhead(moved));
@@ -185,8 +163,9 @@ pub fn tidy(
     remove(repo, &folder, &packs_dir, taken, &mut report);
     repo.store_mut().refresh()?;
     report.bytes_after = packs(&folder)?
-        .iter()
-        .fold(0u64, |sum, (_, meta)| sum.saturating_add(meta.size));
+        .into_iter()
+        .filter_map(|(_, meta)| meta.ok())
+        .fold(0u64, |sum, meta| sum.saturating_add(meta.size));
     Ok(report)
 }
 
@@ -216,17 +195,15 @@ fn remove(
     }
 }
 
-/// Every `.pack` file in `folder`, by name, with its details. Anything else, and one whose details
-/// can't be read, is left for reads to report.
-fn packs(folder: &Dir) -> Result<Vec<(OsString, EntryMeta)>, RepoError> {
+/// Every entry in `folder` named like a pack, by name, with its details or why they can't be read.
+fn packs(folder: &Dir) -> io::Result<Vec<(OsString, io::Result<EntryMeta>)>> {
     let mut found = Vec::new();
     for entry in folder.entries()? {
         if Path::new(&entry.name)
             .extension()
             .is_some_and(|e| e == "pack")
-            && let Ok(meta) = folder.metadata(&entry.name)
-            && meta.kind == EntryType::File
         {
+            let meta = folder.metadata(&entry.name);
             found.push((entry.name, meta));
         }
     }
@@ -234,35 +211,26 @@ fn packs(folder: &Dir) -> Result<Vec<(OsString, EntryMeta)>, RepoError> {
     Ok(found)
 }
 
-/// The diary entries the indexes of `packs` list. A pack whose index doesn't read whole is passed
-/// over: it is left as it is, and an entry in it can't be made current anyway.
-fn entries_in(folder: &Dir, packs_dir: &Path, packs: &[(OsString, EntryMeta)]) -> HashSet<Id> {
-    let mut ids = HashSet::new();
-    for (name, _) in packs {
-        let listed = PackReader::open_in(folder, name, &packs_dir.join(name)).and_then(|pack| {
-            pack.entries()
-                .filter(|e| {
-                    e.as_ref()
-                        .map_or(true, |e| e.kind == ObjectKind::DiaryEntry)
-                })
-                .map(|e| e.map(|e| e.id))
-                .collect::<Result<Vec<_>, _>>()
+/// The packs in `folder`, at `packs_dir`, each young if changed less than a day before `now_ns`.
+/// Everything named like a pack counts as one, so one whose details can't be read stops `tidy`,
+/// and so, once it is opened, does one that isn't a pack.
+fn listed(folder: &Dir, packs_dir: &Path, now_ns: i128) -> Result<Vec<Listed>, RepoError> {
+    let mut listed = Vec::new();
+    for (name, meta) in packs(folder)? {
+        let meta = meta.map_err(|e| cant_tidy(&packs_dir.join(&name), &e.into()))?;
+        listed.push(Listed {
+            name,
+            size: meta.size,
+            young: now_ns.saturating_sub(meta.modified_ns) < GRACE_NS,
         });
-        ids.extend(listed.into_iter().flatten());
     }
-    ids
+    Ok(listed)
 }
 
-/// What the index of the pack `name` says it holds, each line checked as it is read. With
-/// `judged`, the whole index is checked against its checksum too: reads check each object
-/// against its ID, but tidying deletes by the index alone.
-fn judge(
-    folder: &Dir,
-    name: &OsStr,
-    path: &Path,
-    keep: &HashSet<Id>,
-    judged: bool,
-) -> Result<Holds, PackError> {
+/// What the index of the pack `name` says it holds of `keep`, each line checked as it is read and
+/// the whole index against its checksum again: reads check each object against its ID, but
+/// tidying deletes by the index alone.
+fn judge(folder: &Dir, name: &OsStr, path: &Path, keep: &HashSet<Id>) -> Result<Holds, PackError> {
     let pack = PackReader::open_in(folder, name, path)?;
     let mut holds = Holds {
         version: pack.version(),
@@ -270,10 +238,7 @@ fn judge(
     };
     for entry in pack.entries() {
         let entry = entry?;
-        if matches!(entry.kind, ObjectKind::ChunkList | ObjectKind::Conflict) {
-            holds.unfollowed.get_or_insert(entry.kind);
-        }
-        holds.uncompressed = holds.uncompressed.saturating_add(entry.uncompressed_size);
+        holds.uncompressed = holds.uncompressed.saturating_add(merge::counted(&entry));
         if keep.contains(&entry.id) {
             holds.kept = holds.kept.saturating_add(1);
             holds.kept_stored = holds.kept_stored.saturating_add(entry.stored_size);
@@ -281,9 +246,7 @@ fn judge(
             holds.other = true;
         }
     }
-    if judged {
-        holds.untrusted = pack.check_index().err();
-    }
+    pack.check_index()?;
     Ok(holds)
 }
 
@@ -292,13 +255,32 @@ fn shown(path: &Path) -> String {
     escape(&path.display().to_string(), false)
 }
 
-/// Notes that the pack at `path` is left as it is, since reading it failed with `e`.
-fn not_tidied(repo: &Repository, path: &Path, e: &PackError) {
+/// Why reading a pack failed with `e`, as a message says it.
+fn why(e: &PackError) -> String {
     let why = match e {
         PackError::Corrupt { reason, .. } => reason.clone(),
         other => other.to_string(),
     };
-    let why = escape(why.trim_end_matches('.'), false);
+    why.trim_end_matches('.').to_owned()
+}
+
+/// The stop for the pack at `path`, which can't be opened, read or checked: `e`. It could hold
+/// the only chunk list naming chunks in the others.
+fn cant_tidy(path: &Path, e: &PackError) -> RepoError {
+    let what = if is_damage(e) {
+        "is damaged"
+    } else {
+        "can't be read"
+    };
+    RepoError::CantTidy {
+        path: path.to_owned(),
+        why: Some(format!("{what} ({})", why(e))),
+    }
+}
+
+/// Notes that the pack at `path` is left as it is, since reading it failed with `e`.
+fn not_tidied(repo: &Repository, path: &Path, e: &PackError) {
+    let why = escape(&why(e), false);
     let said = if is_damage(e) {
         format!(
             "Pack {} wasn't tidied because it is damaged ({why}), so it is left as it is. Ask for \
@@ -316,13 +298,66 @@ fn not_tidied(repo: &Repository, path: &Path, e: &PackError) {
         .note(Warning::new(warning::PACK_NOT_TIDIED, said));
 }
 
-/// What must be kept: every object reached (fingerprints). `entries` are the diary entries stored.
+/// What marking needs from the packs' indexes.
+#[derive(Default)]
+struct Survey {
+    /// The diary entries stored.
+    entries: HashSet<Id>,
+    /// Each chunk list's index line, with its pack's place among the packs, by its file's ID.
+    lists: HashMap<Id, Vec<(usize, IndexEntry)>>,
+    /// The chunk lists whose chunks are kept, by their pack's place and offset: so far those in
+    /// young packs.
+    reads: BTreeMap<(usize, u64), IndexEntry>,
+}
+
+/// Reads the index of each of `packs`, young ones too, and checks it against its checksum. A pack
+/// that can't be opened, read or checked stops `tidy`, since it could hold the only chunk list
+/// naming chunks in the others; so does a conflict record, which this version doesn't follow.
+fn survey(repo: &Repository, packs: &[Listed]) -> Result<Survey, RepoError> {
+    let mut survey = Survey::default();
+    for (at, listed) in packs.iter().enumerate() {
+        let path = repo.packs_dir().join(&listed.name);
+        let cant = |e: PackError| cant_tidy(&path, &e);
+        let pack = PackReader::open_in(repo.packs_folder(), &listed.name, &path).map_err(cant)?;
+        for line in pack.entries() {
+            let line = line.map_err(cant)?;
+            match line.kind {
+                ObjectKind::DiaryEntry => {
+                    survey.entries.insert(line.id);
+                }
+                ObjectKind::ChunkList => {
+                    survey.lists.entry(line.id).or_default().push((at, line));
+                    if listed.young {
+                        survey.reads.insert((at, line.offset), line);
+                    }
+                }
+                ObjectKind::Conflict => {
+                    return Err(RepoError::CantTidy {
+                        path: path.clone(),
+                        why: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        pack.check_index().map_err(cant)?;
+    }
+    Ok(survey)
+}
+
+/// What must be kept: every object reached (fingerprints), and every chunk that a chunk list of a
+/// file reached, or one in a young pack, names. `packs` are the store's packs.
 fn kept(
     repo: &Repository,
-    entries: HashSet<Id>,
+    packs: &[Listed],
     window_days: u32,
     now_ms: i64,
 ) -> Result<HashSet<Id>, RepoError> {
+    let Survey {
+        entries,
+        lists,
+        reads,
+    } = survey(repo, packs)?;
     let (head, _) = repo.current()?;
     let since = now_ms.saturating_sub(i64::from(window_days).saturating_mul(DAY_MS));
     let mut marks = Marks {
@@ -331,6 +366,8 @@ fn kept(
         followed: HashSet::new(),
         saves: Vec::new(),
         listings: Vec::new(),
+        lists: &lists,
+        reads,
     };
     let mut walked = HashSet::new();
     marks.diary(head, since, &mut walked)?;
@@ -341,7 +378,19 @@ fn kept(
         }
     }
     marks.follow()?;
+    marks.chunks(packs)?;
     Ok(marks.kept)
+}
+
+/// The stop for `what` `id`, which must be kept but can't be read: `e`.
+fn unreadable(what: &str, id: &Id, e: StoreError) -> RepoError {
+    match e {
+        // Memory or I/O: the copy may be fine, so this isn't damage.
+        StoreError::Pack(e) if !is_damage(&e) => RepoError::Io(io::Error::other(format!(
+            "Bolt couldn't read {what} {id}, which must be kept: {e}"
+        ))),
+        e => damaged(format!("{what} {id} can't be read ({e})")),
+    }
 }
 
 /// What `kept` has found so far, and what it has still to read.
@@ -352,6 +401,10 @@ struct Marks<'a> {
     followed: HashSet<(u8, Id)>,
     saves: Vec<Id>,
     listings: Vec<Id>,
+    /// Every chunk list's line, by its file's ID.
+    lists: &'a HashMap<Id, Vec<(usize, IndexEntry)>>,
+    /// The chunk lists to read once all else is marked.
+    reads: BTreeMap<(usize, u64), IndexEntry>,
 }
 
 impl Marks<'_> {
@@ -410,13 +463,30 @@ impl Marks<'_> {
         self.repo
             .store()
             .read_record(id, kind)
-            .map_err(|e| match e {
-                // Memory or I/O: the copy may be fine, so this isn't damage.
-                StoreError::Pack(e) if !is_damage(&e) => RepoError::Io(io::Error::other(format!(
-                    "Bolt couldn't read {what} {id}, which must be kept: {e}"
-                ))),
-                e => damaged(format!("{what} {id} can't be read ({e})")),
-            })
+            .map_err(|e| unreadable(what, id, e))
+    }
+
+    /// Keeps every chunk the lists to read name, opening each pack once. A list names only
+    /// chunks, so nothing more is followed; one that can't be read stops `tidy`, as any record it
+    /// must keep.
+    fn chunks(&mut self, packs: &[Listed]) -> Result<(), RepoError> {
+        let unread = |id: &Id, e: PackError| unreadable("the chunk list of file", id, e.into());
+        for (at, listed) in packs.iter().enumerate() {
+            let mut lines = self.reads.range((at, 0)..=(at, u64::MAX)).peekable();
+            let Some(first) = lines.peek().map(|(_, line)| line.id) else {
+                continue;
+            };
+            let path = self.repo.packs_dir().join(&listed.name);
+            let pack = PackReader::open_in(self.repo.packs_folder(), &listed.name, &path)
+                .map_err(|e| unread(&first, e))?;
+            for (_, line) in lines {
+                let list = pack
+                    .read_chunk_list(line)
+                    .map_err(|e| unread(&line.id, e))?;
+                self.kept.extend(list.chunks.iter().map(|c| c.id));
+            }
+        }
+        Ok(())
     }
 
     /// Marks what `state` names: its lines, the save it is at, its shelves, its tags and its
@@ -492,9 +562,13 @@ impl Marks<'_> {
                     .map_err(|e| damaged(format!("folder listing {id} can't be read ({e})")))?;
                 for entry in listing.entries() {
                     match entry.kind {
-                        // Content is kept by its fingerprint, unread.
+                        // Content is kept by its fingerprint, unread; a big file's chunk lists
+                        // are read once all else is marked.
                         EntryKind::File | EntryKind::Executable | EntryKind::Symlink => {
                             self.kept.insert(entry.id);
+                            for &(at, line) in self.lists.get(&entry.id).into_iter().flatten() {
+                                self.reads.insert((at, line.offset), line);
+                            }
                         }
                         EntryKind::Folder => self.listing(entry.id),
                         EntryKind::ProjectLink => {

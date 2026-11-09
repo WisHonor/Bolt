@@ -1030,7 +1030,7 @@ mod tests {
     use crate::id::hash_content;
     use crate::pack::{PackWriter, Prepared, open_files};
     use crate::repo::RepoError;
-    use crate::test_support::plant_damaged_copies;
+    use crate::test_support::{lock_pack, plant_damaged_copies};
     use proptest::prelude::*;
 
     fn dirs() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -1445,28 +1445,6 @@ mod tests {
         assert!(told.to_string().contains("a.pack"), "{told}");
     }
 
-    /// Makes the pack at `path` one Bolt may not open while what this gives is held; `None` where
-    /// that can't be done, as root reads everything.
-    fn lock(path: &Path) -> Option<Option<std::fs::File>> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let none = std::fs::Permissions::from_mode(0o000);
-            std::fs::set_permissions(path, none).unwrap();
-            std::fs::read(path).is_err().then_some(None)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            let held = std::fs::OpenOptions::new()
-                .read(true)
-                .share_mode(0)
-                .open(path)
-                .unwrap();
-            Some(Some(held))
-        }
-    }
-
     /// A pack Bolt may not read is passed over, named in one warning however many lookups pass
     /// it, and named in the error of a lookup that finds nothing.
     #[test]
@@ -1478,7 +1456,7 @@ mod tests {
         let locked = packs.join("00.pack");
         std::fs::rename(pack_of(&tmp, &packs, &[b"locked".to_vec()]), &locked).unwrap();
         pack_of(&tmp, &packs, std::slice::from_ref(&content));
-        let Some(_held) = lock(&locked) else {
+        let Some(_held) = lock_pack(&locked) else {
             return;
         };
         let store = Store::open(&packs).unwrap();
@@ -1949,7 +1927,7 @@ mod tests {
         pack_with(&tmp, &packs, Some("00.pack"), &[&chunks[1]], &[&list]);
         let locked = pack_with(&tmp, &packs, Some("11.pack"), &[&chunks[0]], &[]);
         pack_with(&tmp, &packs, Some("ff.pack"), &[b"hello world"], &[]);
-        let Some(_held) = lock(&locked) else {
+        let Some(_held) = lock_pack(&locked) else {
             return;
         };
         let store = Store::open(&packs).unwrap();

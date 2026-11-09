@@ -222,6 +222,28 @@ pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]
     std::fs::write(packs.join("00.pack"), pack).expect("write the pack");
 }
 
+/// Makes the pack at `path` one Bolt may not open while what this gives is held; `None` where
+/// that can't be done, as root reads everything.
+pub(crate) fn lock_pack(path: &Path) -> Option<Option<std::fs::File>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let none = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(path, none).expect("lock the pack");
+        std::fs::read(path).is_err().then_some(None)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("lock the pack");
+        Some(Some(held))
+    }
+}
+
 /// A folder other accounts can write to, as `trust_hint` sees one: the root of the C: drive on
 /// Windows; elsewhere `dir`, opened to everyone.
 pub(crate) fn open_to_all(dir: &Path) -> PathBuf {
