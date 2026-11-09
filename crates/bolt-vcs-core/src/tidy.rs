@@ -65,8 +65,9 @@ struct Holds {
 /// Removes what nothing needs any more: what no line, shelf, tag or server line reaches, and what
 /// only steps older than `window_days` before `now_ms` needed. Packs changed in the 24 hours
 /// before `now_ms` are left as they are. `on_estimate` is told about how much that frees before
-/// anything is removed. Anything that must be kept but can't be read stops it before then, and so
-/// does a pack it can't open, read or check, or a conflict record, which it can't follow.
+/// anything is removed. It reads only records and chunk lists to mark what to keep, never a file's
+/// contents: one of those it can't read stops it before then, and so does a pack it can't open,
+/// read or check, or a conflict record, which it can't follow.
 pub fn tidy(
     repo: &mut Repository,
     window_days: u32,

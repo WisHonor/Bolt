@@ -880,6 +880,36 @@ fn the_journal_matches_its_vectors() {
 }
 
 #[derive(Deserialize)]
+struct FormatVector {
+    name: String,
+    text: String,
+    hex: String,
+}
+
+#[test]
+fn the_format_file_matches_its_vector() {
+    use bolt_core::repo::{Repository, parse_format};
+    let path = format!("{}/tests/vectors/format.json", env!("CARGO_MANIFEST_DIR"));
+    let vectors: Vec<FormatVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors.len(), 1);
+    let v = &vectors[0];
+    let bytes = unhex(&v.hex);
+    assert_eq!(bytes, v.text.as_bytes(), "{}", v.name);
+    // It says the store may hold chunk lists, and nothing more.
+    let read = parse_format(&v.text).unwrap();
+    assert_eq!(read.features.into_iter().collect::<Vec<_>>(), ["chunks"]);
+    // `start` writes exactly these bytes.
+    let dir = tempfile::tempdir().unwrap();
+    drop(Repository::init(dir.path(), &person()).unwrap());
+    let format = dir.path().join(".bolt").join("format");
+    assert_eq!(hex(&std::fs::read(&format).unwrap()), v.hex, "{}", v.name);
+    // A project whose format file holds them opens.
+    std::fs::write(&format, &bytes).unwrap();
+    Repository::open(dir.path()).unwrap();
+}
+
+#[derive(Deserialize)]
 struct Chunking {
     noise_context: String,
     inputs: Vec<ChunkingInput>,
