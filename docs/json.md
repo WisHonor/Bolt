@@ -75,6 +75,8 @@
 
 A file that only looks like a pointer comes in as it is, with an `lfs_lookalikes` warning (§4).
 
+**A fault in Bolt.** What only a bug in Bolt's Git reader causes, such as losing track of what it read of a pack, stops the import too (exit code 1, with the error document of §5), and nothing is committed: `error.message` ends by asking for a report, and `error.hint` says it is a bug in Bolt, not a problem with the repository.
+
 ### `bolt save --json`
 
 Saving gives one of two documents, told apart by `result`.

@@ -993,8 +993,9 @@ impl<'r> Converter<'r> {
 
     /// Brings in the delta family of the blob `id`, a file big enough to be cut, the first time
     /// one of its members is met, if Git stored it as a delta: each blob of the family not met
-    /// yet is stored as `blob` stores it, and noted, so none is rebuilt again. One that may be
-    /// read as a Git LFS pointer, or looks like one, is left for `blob` to judge where it is met.
+    /// yet is stored as `blob` stores it, and noted as a file, so none is rebuilt again where a
+    /// file holds it. One that may be read as a Git LFS pointer, or looks like one, is left for
+    /// `blob` to judge where it is met.
     fn family(&mut self, id: &GitId, place: &dyn Fn() -> String) -> Result<(), ImportError> {
         let tmp = self.packs.tmp();
         let (packs, store, blobs) = (&mut *self.packs, self.store, &mut self.blobs);
@@ -1009,8 +1010,8 @@ impl<'r> Converter<'r> {
                 data.len() as u64,
                 false,
             );
+            // Noted as a file only: a link to one takes the usual way, slower but rare.
             blobs.insert((*member, true), done);
-            blobs.insert((*member, false), done);
             Ok(())
         };
         let rebuilt = self.git.rebuild_family(id, &tmp, &mut each);
@@ -1575,7 +1576,8 @@ mod tests {
         let (dir, git) = repo(Sha1);
         // A file of 1.5 MiB in four versions, Git's deltas building the rest on the first: the
         // second listed under a name not its own, the third built on it and the one a commit
-        // names, the fourth named by none. A fifth delta on the first can't be applied.
+        // names, as a file and as a link, the fourth named by none. A fifth delta on the first
+        // can't be applied.
         let first: Vec<u8> = (0..3usize << 19).map(|i| (i % 251) as u8).collect();
         let on = |base: &[u8], tail: &[u8]| [base, tail].concat();
         let second = on(&first, b"second");
@@ -1603,20 +1605,31 @@ mod tests {
             },
         ];
         git.pack_renamed(&entries, &[(1, not_its_own)]);
-        let commit = commit_of(&git, &[(b"100644", b"big.bin", id(&third))]);
+        let commit = commit_of(
+            &git,
+            &[
+                (b"100644", b"big.bin", id(&third)),
+                (b"120000", b"big.link", id(&third)),
+            ],
+        );
         let (save, store) = convert(dir.path(), "a", |c| {
             let save = c.commit(&commit).unwrap();
             let noted = |data: &[u8]| c.blobs.contains_key(&(id(data), true));
             assert_eq!([&first, &third, &fourth].map(|v| noted(v)), [true; 3]);
             assert!(!c.blobs.contains_key(&(not_its_own, true)));
+            // Members are noted as files only.
+            assert!(!c.blobs.contains_key(&(id(&fourth), false)));
             save
         });
-        // The file came in, and so did the version no commit names, but not the one listed under
-        // another name.
+        // The file came in, and the link to it, and so did the version no commit names, but not
+        // the one listed under another name.
         let root = store
             .listing(&store.save(&save, false).unwrap().root)
             .unwrap();
         assert!(content(&store, &root.get("big.bin").unwrap().id) == third);
+        let link = root.get("big.link").unwrap();
+        assert_eq!(link.kind, EntryKind::Symlink);
+        assert!(content(&store, &link.id) == third);
         assert!(content(&store, &hash_content(&fourth)) == fourth);
         let second = store.copy_content(&hash_content(&second), &mut io::sink());
         assert!(second.is_err(), "{second:?}");

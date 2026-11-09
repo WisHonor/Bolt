@@ -192,6 +192,12 @@ pub enum GitError {
     /// much.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     TooMuchWork { what: String },
+    /// What only a bug in Bolt's reader causes; `what` says what went wrong.
+    #[error(
+        "Bolt can't import this Git repository: {}; please report this.",
+        escape(what, false)
+    )]
+    Bug { what: String },
     #[error(
         "Git changed the repository while Bolt read it: {}.",
         escape(what, false)
@@ -251,6 +257,10 @@ impl GitError {
                      over 1 MiB whole and make its other deltas anew, with `git -c \
                      core.bigFileThreshold=1m repack -a -d -f`, then run bolt import again. Git's \
                      packs stay bigger until its next `git gc`."
+                }
+                GitError::Bug { .. } => {
+                    "Nothing was changed. This is a bug in Bolt, not a problem with the \
+                     repository."
                 }
                 GitError::Changed { .. } => {
                     "Nothing was changed. Run bolt import again once Git has finished."
@@ -1079,6 +1089,9 @@ mod tests {
                 what: HOSTILE.into(),
             },
             GitError::TooMuchWork {
+                what: HOSTILE.into(),
+            },
+            GitError::Bug {
                 what: HOSTILE.into(),
             },
             GitError::NotYours {
