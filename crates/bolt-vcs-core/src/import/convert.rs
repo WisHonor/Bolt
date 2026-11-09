@@ -20,8 +20,8 @@ use crate::diary::{
 use crate::encoding::DecodeError;
 use crate::git::{
     self, Commit, GitError, GitId, LfsPointer, MAX_LFS_POINTER_BYTES, ObjectType,
-    is_exact_lfs_pointer, lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person,
-    parse_tag, parse_tree, rebuild_commit, shown, starts_with_lfs_pointer,
+    is_exact_lfs_pointer, is_lfs_lookalike, lfs_pointer, parse_commit, parse_person, parse_tag,
+    parse_tree, rebuild_commit, shown,
 };
 use crate::id::{ChangeId, ContentHasher, Id, hash_record};
 use crate::ingest::{self, IngestError};
@@ -971,9 +971,9 @@ impl<'r> Converter<'r> {
 
     /// A blob's content ID and size, stored the first time it is met as a file or as a link, and
     /// whether it is a Git LFS file: a file Git LFS's parser takes for a pointer, which is brought
-    /// in as the file it stands for. A file that only looks like one, or is longer than one may
-    /// be but starts with one, comes in as it is, noted for a warning. `path` says where, for
-    /// messages.
+    /// in as the file it stands for. Any other file Git LFS may still read as a pointer, or that
+    /// looks like one (`is_lfs_lookalike`), comes in as it is, noted for a warning. `path` says
+    /// where, for messages.
     fn blob(
         &mut self,
         id: &GitId,
@@ -996,7 +996,7 @@ impl<'r> Converter<'r> {
         }
         let done = if size > MAX_WHOLE_BLOB {
             let (content, size, start) = self.stream(id, size, &place)?;
-            if file && starts_with_lfs_pointer(&start, size) {
+            if file && is_lfs_lookalike(&start) {
                 self.lookalike(commit, path);
             }
             (content, size, false)
@@ -1012,10 +1012,7 @@ impl<'r> Converter<'r> {
                 (content, size, true)
             } else {
                 let size = object.data.len() as u64;
-                let looks = |data: &[u8]| {
-                    looks_like_lfs_pointer(data) || starts_with_lfs_pointer(data, size)
-                };
-                if file && looks(&object.data) {
+                if file && is_lfs_lookalike(&object.data) {
                     self.lookalike(commit, path);
                 }
                 // Held whole already, so a big one is cut where it lies.
@@ -1066,7 +1063,7 @@ impl<'r> Converter<'r> {
             );
             // Noted as a file only: a link to one takes the usual way, slower but rare.
             blobs.insert((*member, true), done);
-            if starts_with_lfs_pointer(data, data.len() as u64) {
+            if is_lfs_lookalike(data) {
                 lookalikes.insert(*member);
             }
             Ok(())
@@ -1589,15 +1586,17 @@ mod tests {
         }
     }
 
-    /// A streamed one that starts with a Git LFS pointer, as Git LFS's smudge filter reads it, is
-    /// noted as a look-alike from what that one read gives.
+    /// A streamed one that Git LFS's smudge filter reads as a pointer once Git turns its LFs into
+    /// CR LF is noted as a look-alike from the bytes kept as it passes.
     #[test]
     fn blobs_are_stored_and_big_ones_streamed() {
         let (dir, git) = repo(Sha1);
         let small = b"hello\n".to_vec();
-        // One byte past what is read whole.
-        let mut big = lfs_pointer_to(b"a picture\n").0.into_bytes();
-        big.resize(MAX_LFS_POINTER_BYTES, b' ');
+        // One byte past what is read whole: a pointer led by a newline, then an `X` the CRs push
+        // out of the 1,024 bytes Git LFS reads.
+        let mut big = format!("\n{}", lfs_pointer_to(b"a picture\n").0).into_bytes();
+        big.resize(MAX_LFS_POINTER_BYTES - 1, b' ');
+        big.push(b'X');
         big.extend((big.len()..(64usize << 20) + 1).map(|i| (i % 251) as u8));
         let small_id = blob(&git, &small);
         let big_id = blob(&git, &big);
