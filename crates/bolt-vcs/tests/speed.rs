@@ -13,7 +13,7 @@ use support::{Env, run_limited, text};
 const FILES: usize = 100_000;
 const PER_FOLDER: usize = 100;
 
-/// The memory gate's file, and the most memory saving it may take.
+// The memory gate's file, and the most memory saving it may take.
 const BIG: u64 = 10 << 30;
 const MOST_BYTES: u64 = 500_000_000;
 
@@ -80,6 +80,11 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum();
     assert!(stored >= BIG, "only {stored} bytes stored");
+    // A running bolt holds more than 1 MiB, so less means no peak was read.
+    assert!(
+        ended.peak_bytes >= 1 << 20,
+        "read no peak from /proc: {ended:?}"
+    );
     assert!(
         ended.peak_bytes <= MOST_BYTES,
         "peaked above {MOST_BYTES} bytes"

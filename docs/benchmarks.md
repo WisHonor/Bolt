@@ -20,13 +20,13 @@ How they are measured:
 - **Peak memory** is the most memory the `bolt save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
 - **Time** is wall-clock time from start to exit, with warm caches: the file was just written, and part of it may still be in the system's cache.
 - **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `bolt status` twice ([testing.md](testing.md) §5).
-- Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again.
+- Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, the memory gate fails its job above the limit, while the status time is printed and read, not enforced, until v0.1.
 
 ### GitHub's Linux runner, 2026-11-09
 
 - **Machine:** GitHub's `ubuntu-latest` runner, image ubuntu-24.04 20261101.360.1: AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, SSD.
-- **Bolt:** commit `bca0558`. The commit that added this page changes no Bolt code, only tests, workflows and docs.
-- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GB of the runner's disk:
+- **Bolt:** the code of commit `bca0558`. The commit that added this page changes no Bolt code, only tests, workflows and docs.
+- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. The run is at `0e93681` (on a branch since deleted): this page's commit before the docs were added, with `bca0558`'s Bolt code. The test has since gained two checks that a real measurement was made, which change nothing measured. It runs the `bolt` that `cargo test` builds, which has the core's test-support feature on; that feature only adds test overrides, off unless a test sets them, and helpers `bolt` never calls, so it doesn't change the number:
 
   ```sh
   cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb
