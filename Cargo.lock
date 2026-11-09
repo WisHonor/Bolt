@@ -152,6 +152,7 @@ name = "bolt-vcs"
 version = "0.0.0"
 dependencies = [
  "assert_cmd",
+ "blake3",
  "bolt-vcs-core",
  "bolt-vcs-platform",
  "clap",

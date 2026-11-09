@@ -674,20 +674,21 @@ pub struct Ended {
     pub code: Option<i32>,
     pub timed_out: bool,
     pub secs: f64,
-    /// Highest resident memory seen (Linux `/proc` only; 0 elsewhere).
+    /// Highest resident memory seen, in MiB and in bytes (Linux `/proc` only; 0 elsewhere).
     pub peak_mb: u64,
+    pub peak_bytes: u64,
     pub stderr: String,
 }
 
-/// The process's peak resident memory so far, in MB (Linux only).
-fn peak_mb_of(pid: u32) -> u64 {
+/// The process's peak resident memory so far, in bytes (Linux only).
+fn peak_of(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()
         .and_then(|s| {
             let line = s.lines().find(|l| l.starts_with("VmHWM:"))?.to_owned();
             line.split_whitespace().nth(1)?.parse::<u64>().ok()
         })
-        .map_or(0, |kb| kb / 1024)
+        .map_or(0, |kb| kb * 1024)
 }
 
 /// Runs `cmd`, killing it after `secs` seconds.
@@ -699,9 +700,9 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
         .spawn()
         .unwrap();
     let start = Instant::now();
-    let mut peak_mb = 0;
+    let mut peak = 0;
     loop {
-        peak_mb = peak_mb.max(peak_mb_of(child.id()));
+        peak = peak.max(peak_of(child.id()));
         if let Some(status) = child.try_wait().unwrap() {
             let mut stderr = String::new();
             std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
@@ -711,7 +712,8 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
                 code: status.code(),
                 timed_out: false,
                 secs: start.elapsed().as_secs_f64(),
-                peak_mb,
+                peak_mb: peak >> 20,
+                peak_bytes: peak,
                 stderr,
             };
         }
@@ -722,7 +724,8 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
                 code: None,
                 timed_out: true,
                 secs: start.elapsed().as_secs_f64(),
-                peak_mb,
+                peak_mb: peak >> 20,
+                peak_bytes: peak,
                 stderr: String::new(),
             };
         }

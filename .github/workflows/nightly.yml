@@ -137,3 +137,31 @@ jobs:
           cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project 2>&1 | tee speed.txt
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" speed.txt
+
+  # Saving a 10 GiB file of incompressible bytes may peak at 500,000,000 bytes of memory at most.
+  # The test prints the peak and the time. The same job as in bench.yml.
+  memory-gate:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # The test needs about 21 GiB: the file, and its pack.
+      - name: Free disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+      - name: Describe the machine
+        run: |
+          lscpu | grep -E '^(Model name|CPU\(s\)):'
+          free -h
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Save a 10 GiB file
+        shell: bash
+        run: |
+          cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb 2>&1 | tee gate.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" gate.txt
