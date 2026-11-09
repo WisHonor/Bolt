@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5 build)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 086](086-rebuilding-gits-deltas-once.md) (which objects a family rebuild stores and maps)
+- **Refined by:** [decision 093](093-a-family-rebuild-builds-every-member.md) (every member is built and checked; the small ones are let go)
 
 ## Context
 
