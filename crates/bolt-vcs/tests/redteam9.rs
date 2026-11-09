@@ -156,7 +156,6 @@ fn checked_out_with_git_lfs(env: &Env, path: &str) -> Option<Vec<u8>> {
 /// pushed past them. A blob with an `X` there comes into Bolt as its text, tail and all, without
 /// a word, while every Git LFS user checks out the pointer's file.
 #[test]
-#[ignore = "RT9-2: a blob Git LFS reads as a pointer after Git's CRLF conversion comes in silently"]
 fn rt9_2_a_blob_git_lfs_reads_as_a_pointer_once_converted_never_comes_in_silently() {
     let env = Env::new();
     env.commit(".gitattributes", TRACKED, "Track");

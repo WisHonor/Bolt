@@ -450,17 +450,16 @@ pub fn lfs_pointer(data: &[u8]) -> Option<LfsPointer> {
     })
 }
 
-/// Whether a blob of `size` bytes, too long to be a Git LFS pointer, starts with one by the test
-/// Git LFS's smudge filter applies: `DecodeFrom` reads only a blob's first 1,024 bytes and parses
-/// those as `lfs_pointer` does, whatever follows. `start` holds at least those bytes. Git LFS
-/// never writes such a blob and its other commands skip it, but its checkout gives the file that
-/// pointer names.
+/// Whether a blob of `size` bytes, too long to be a Git LFS pointer, may start with one: Git LFS's
+/// smudge filter reads only a blob's first 1,024 bytes (`DecodeFrom`) and parses those as
+/// `lfs_pointer` does, whatever follows. Git converts line endings first, which pushes bytes out
+/// of those 1,024, so the blob counts too when they only look like a pointer
+/// (`looks_like_lfs_pointer`). `start` holds at least those bytes. Git LFS never writes such a
+/// blob and its other commands skip it, but its checkout can give the file that pointer names.
 #[must_use]
 pub fn starts_with_lfs_pointer(start: &[u8], size: u64) -> bool {
-    size > MAX_LFS_POINTER_BYTES as u64
-        && start
-            .get(..MAX_LFS_POINTER_BYTES)
-            .is_some_and(|head| lfs_pointer(head).is_some())
+    let looks = |head: &[u8]| looks_like_lfs_pointer(head) || lfs_pointer(head).is_some();
+    size > MAX_LFS_POINTER_BYTES as u64 && start.get(..MAX_LFS_POINTER_BYTES).is_some_and(looks)
 }
 
 /// Whether `data` is the pointer `p` in the exact form Git LFS writes (`Encoded` in its
@@ -1741,11 +1740,16 @@ mod tests {
         // A blob that is a pointer whole is one of at most 1,024 bytes.
         assert!(!starts(blob(pointer, "").as_slice()));
         assert!(!starts(pointer.as_bytes()));
-        // What Git LFS doesn't take for a pointer in those bytes.
-        assert!(!starts(&blob(&format!("{pointer}x"), "more")));
+        // Bytes that only look like a pointer count too: Git LFS's parser refuses the `x`, but a
+        // checkout's CRLF pushes it out of the 1,024 bytes Git LFS reads.
+        assert!(starts(&blob(&format!("{pointer}x"), "more")));
+        let alpha = pointer.replace("git-lfs.github.com/spec/v1", "hawser.github.com/spec/v1");
+        assert!(starts(&blob(&format!("{alpha}x"), "more")));
+        // What doesn't look like one in those bytes.
         let late = format!("{}{pointer}", " ".repeat(MAX_LFS_POINTER_BYTES - 20));
         assert!(!starts(late.as_bytes()));
         assert!(!starts(&blob("", pointer)));
+        assert!(!starts(&blob(&pointer.replace("size ", "size="), "more")));
     }
 
     /// What the importer makes of a commit, without storing it: people and message as they
