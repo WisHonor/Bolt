@@ -79,9 +79,9 @@ fn in_git_settings(path: &Path) -> String {
 #[test]
 fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_bolt_cant() {
     let mut wrong = Vec::new();
-    let elsewhere_stop = |err: &str, file: &Path| {
+    let elsewhere_stop = |err: &str, file: &str| {
         err.contains("`lfs.storage` keeps Git LFS's files outside .git/lfs/objects")
-            && err.contains(&format!(" in {}.", file.display()))
+            && err.contains(&format!(" in {file}."))
             && err.contains("hint: Nothing was changed. Remove that setting, or set it to lfs")
     };
 
@@ -117,7 +117,7 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_bolt_can
         "GIT_CONFIG_GLOBAL elsewhere: Git LFS: {}\nbolt import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
-    if code == Some(0) || !elsewhere_stop(&err, &global) {
+    if code == Some(0) || !elsewhere_stop(&err, &global.display().to_string()) {
         wrong.push("GIT_CONFIG_GLOBAL, with the objects elsewhere");
     }
 
@@ -133,7 +133,9 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_bolt_can
         "system settings: Git LFS: {}\nbolt import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
-    if code == Some(0) || !elsewhere_stop(&err, &system) {
+    // Git tidies the path GIT_CONFIG_SYSTEM gives, `\` to `/` on Windows, and so does Bolt.
+    let tidied = system.display().to_string().replace('\\', "/");
+    if code == Some(0) || !elsewhere_stop(&err, &tidied) {
         wrong.push("the system's settings, with the objects elsewhere");
     }
 

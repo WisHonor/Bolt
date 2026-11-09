@@ -251,7 +251,7 @@ const MAX_GIT_SETTINGS_BYTES: u64 = 1 << 20;
 
 /// The user's own Git ignore list (decision 047): the file `core.excludesFile` names in the
 /// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. `None` when there is no home
-/// folder, or the setting is empty.
+/// folder, or the setting is empty or names no file: `/dev/null`, and `nul` on Windows.
 pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigError> {
     match UserGit::from_env(project_root) {
         Some(git) => git_excludes_file_in(&git),
@@ -312,20 +312,15 @@ impl<'a> UserGit<'a> {
     /// set `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`. Set to nothing, or to a name for no
     /// file, either variable names no file, as in Git.
     fn files(&self) -> Result<Vec<(PathBuf, bool)>, ConfigError> {
-        let named = |key| {
-            let path = (self.var)(key)?;
-            let none = path.is_empty() || names_no_file(path.as_encoded_bytes(), cfg!(windows));
-            Some((!none).then(|| self.top.join(path)))
-        };
         let mut files = Vec::new();
         if !self.no_system()? {
-            files.extend(
-                named("GIT_CONFIG_SYSTEM")
-                    .flatten()
-                    .map(|path| (path, false)),
-            );
+            files.extend(self.system_file()?.map(|path| (path, false)));
         }
-        let own = match named("GIT_CONFIG_GLOBAL") {
+        let global = (self.var)("GIT_CONFIG_GLOBAL").map(|path| {
+            let none = path.is_empty() || names_no_file(path.as_encoded_bytes(), cfg!(windows));
+            (!none).then(|| self.top.join(path))
+        });
+        let own = match global {
             Some(global) => Vec::from_iter(global),
             None => vec![
                 self.xdg.join("git").join("config"),
@@ -334,6 +329,31 @@ impl<'a> UserGit<'a> {
         };
         files.extend(own.into_iter().map(|path| (path, true)));
         Ok(files)
+    }
+
+    /// The file `GIT_CONFIG_SYSTEM` names, tidied first as Git tidies it, if it names one.
+    fn system_file(&self) -> Result<Option<PathBuf>, ConfigError> {
+        let name = "GIT_CONFIG_SYSTEM";
+        let Some(value) = (self.var)(name) else {
+            return Ok(None);
+        };
+        let refused = |detail: String| ConfigError::GitVariable {
+            name: name.to_owned(),
+            detail,
+        };
+        let value = value.as_encoded_bytes();
+        let tidied = system_file_named(value, cfg!(windows)).map_err(|()| {
+            refused(format!(
+                "`{}` goes above its start with `..`, where Git's tidying of the path fails, so \
+                 Bolt can't tell which file Git reads; write the full path instead",
+                shown_bytes(value)
+            ))
+        })?;
+        let Some(tidied) = tidied else {
+            return Ok(None);
+        };
+        let path = os_path(tidied).ok_or_else(|| refused("it isn't valid Unicode".to_owned()))?;
+        Ok(Some(self.top.join(path)))
     }
 
     /// Gives `each` every setting Bolt reads in the user's own Git settings files, in Git's order.
@@ -512,7 +532,7 @@ fn read_git_settings(
     let place = Place::File(path.to_owned());
     let text = match safe_fs::read_capped_following_links(path, MAX_GIT_SETTINGS_BYTES) {
         Ok(text) => text,
-        Err(e) if skipped(e.kind(), own, cfg!(windows)) => return Ok(()),
+        Err(e) if skipped(e.kind(), e.raw_os_error(), own, cfg!(windows)) => return Ok(()),
         Err(e) => return Err(place.error(e.to_string())),
     };
     if depth > MAX_INCLUDE_DEPTH {
@@ -541,17 +561,141 @@ fn read_git_settings(
     Ok(())
 }
 
-/// Whether Git skips a settings file it couldn't read for `kind`, as Bolt does too: one that
-/// isn't there, or has a file where a folder on its path should be, and one of the user's `own`
-/// that it may not read, but not on Windows (`windows`).
-fn skipped(kind: std::io::ErrorKind, own: bool, windows: bool) -> bool {
+/// Whether Git skips a settings file it couldn't read for `kind` (the system's error `raw`), as
+/// Bolt does too: one that isn't there, or has a file where a folder on its path should be, and
+/// one of the user's `own` that it may not read, but not on Windows (`windows`).
+fn skipped(kind: std::io::ErrorKind, raw: Option<i32>, own: bool, windows: bool) -> bool {
     use std::io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    // Git skips EACCES, 13 on Linux and macOS, but not EPERM, which Rust reports alike.
+    const EACCES: i32 = 13;
     match kind {
         NotFound | NotADirectory => true,
         // Git for Windows' access check doesn't see permissions, so its read fails and Git stops.
-        PermissionDenied => own && !windows,
+        PermissionDenied => own && !windows && raw == Some(EACCES),
         _ => false,
     }
+}
+
+/// `GIT_CONFIG_SYSTEM`'s value as Git takes it: tidied as `tidy_path` does, then none when it is
+/// nothing or names no file. `Err` where the tidying fails.
+fn system_file_named(value: &[u8], windows: bool) -> Result<Option<Vec<u8>>, ()> {
+    let tidied = tidy_path(value, windows).ok_or(())?;
+    if tidied.is_empty() || names_no_file(&tidied, windows) {
+        return Ok(None);
+    }
+    Ok(Some(tidied))
+}
+
+/// `bytes`, a path the environment gave once tidied, as the system's path again: only ASCII was
+/// dropped or changed, so any bytes do on Unix, and valid Unicode stays so on Windows.
+fn os_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(OsString::from_vec(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(PathBuf::from)
+    }
+}
+
+/// Git's `normalize_path_copy`, which Git runs on `GIT_CONFIG_SYSTEM` alone: on Windows (`windows`)
+/// `\` is a separator too, and a drive or `//server/share/` starts a path; each run of separators
+/// becomes one `/`; a `.` part is dropped; and a `..` part takes the part before it away. Only the
+/// text changes. `None` where a `..` would climb above the path's start, where Git's fails.
+fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
+    let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
+    // Past the end reads as the C string's closing NUL.
+    let at = |i: usize| src.get(i).copied().unwrap_or(0);
+    let skip_seps = |mut i: usize| {
+        while is_sep(at(i)) {
+            i += 1;
+        }
+        i
+    };
+    let start = first_component(src, windows);
+    let root = src.get(..start)?.iter();
+    let mut out: Vec<u8> = root.map(|&c| if is_sep(c) { b'/' } else { c }).collect();
+    let kept = out.len();
+    let mut i = skip_seps(start);
+    loop {
+        if at(i) == b'.' {
+            let up_to = match (at(i + 1), at(i + 2)) {
+                (0, _) => {
+                    i += 1;
+                    None
+                }
+                (c, _) if is_sep(c) => {
+                    i = skip_seps(i + 2);
+                    continue;
+                }
+                (b'.', 0) => Some(i + 2),
+                (b'.', c) if is_sep(c) => Some(skip_seps(i + 3)),
+                _ => None,
+            };
+            if let Some(next) = up_to {
+                // Back past the `/` that ends the part before, to the `/` before that part.
+                let end = out.len().checked_sub(1).filter(|&end| end > kept)?;
+                let part = out.get(kept..end)?.iter().rposition(|&c| c == b'/');
+                out.truncate(part.map_or(kept, |at| kept + at + 1));
+                i = next;
+                continue;
+            }
+        }
+        // A part, up to the next separator, then that run of separators as one `/`.
+        loop {
+            let c = at(i);
+            i += 1;
+            if c == 0 {
+                return Some(out);
+            }
+            if is_sep(c) {
+                out.push(b'/');
+                i = skip_seps(i);
+                break;
+            }
+            out.push(c);
+        }
+    }
+}
+
+/// Git's `offset_1st_component`: how much of `path` `tidy_path` keeps as it is, its root: a
+/// leading `/`, and on Windows a drive (Git for Windows' `has_dos_drive_prefix`) or the
+/// `//server/share/` of a network path.
+fn first_component(path: &[u8], windows: bool) -> usize {
+    let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
+    let at = |i: usize| path.get(i).copied().unwrap_or(0);
+    if !windows {
+        return usize::from(is_sep(at(0)));
+    }
+    let drive = match at(0) {
+        0 => 0,
+        c if c & 0x80 == 0 => {
+            if at(1) == b':' {
+                2
+            } else {
+                0
+            }
+        }
+        // A drive named by a letter beyond ASCII, of up to four bytes in UTF-8.
+        _ => {
+            let letter = (1..4).find(|&i| at(i) & 0x80 == 0).unwrap_or(4);
+            if at(letter) == b':' { letter + 1 } else { 0 }
+        }
+    };
+    if drive == 0 && is_sep(at(0)) && is_sep(at(1)) {
+        // Past the server's name, then the share's.
+        let Some(server) = path.iter().skip(2).position(|&c| is_sep(c)) else {
+            return 0;
+        };
+        let mut end = server + 3;
+        while at(end) != 0 && !is_sep(at(end)) {
+            end += 1;
+        }
+        return end + usize::from(is_sep(at(end)));
+    }
+    drive + usize::from(is_sep(at(drive)))
 }
 
 /// Whether `value`, a path a Git setting or variable gives, names no file, as Git reads it: the
@@ -1303,7 +1447,13 @@ mod tests {
             ("GIT_CONFIG_KEY_0", "lfs.storage"),
             ("GIT_CONFIG_VALUE_0", ""),
         ]);
-        assert_eq!(found.files, Some((b"/system".to_vec(), system)));
+        // Named as Git tidies it: on Windows with `/`.
+        let tidied = if cfg!(windows) {
+            system.replace('\\', "/")
+        } else {
+            system
+        };
+        assert_eq!(found.files, Some((b"/system".to_vec(), tidied)));
         let variable = "GIT_CONFIG_VALUE_0".to_owned();
         assert_eq!(found.variables, Some((Vec::new(), variable)));
     }
@@ -1446,21 +1596,173 @@ mod tests {
     #[test]
     fn a_settings_file_is_skipped_where_git_skips_it() {
         use std::io::ErrorKind::{InvalidInput, NotADirectory, NotFound, PermissionDenied};
-        for (kind, own, windows, want) in [
-            (NotFound, false, false, true),
-            (NotFound, true, true, true),
-            (NotADirectory, false, true, true),
-            (NotADirectory, true, false, true),
-            (PermissionDenied, true, false, true),
-            (PermissionDenied, true, true, false),
-            (PermissionDenied, false, false, false),
-            (PermissionDenied, false, true, false),
-            (InvalidInput, true, false, false),
-            (InvalidInput, false, true, false),
+        // EACCES and EPERM, as Linux and macOS number them.
+        let (eacces, eperm) = (Some(13), Some(1));
+        for (kind, raw, own, windows, want) in [
+            (NotFound, None, false, false, true),
+            (NotFound, Some(2), true, true, true),
+            (NotADirectory, Some(20), false, true, true),
+            (NotADirectory, None, true, false, true),
+            (PermissionDenied, eacces, true, false, true),
+            (PermissionDenied, eacces, true, true, false),
+            (PermissionDenied, eacces, false, false, false),
+            (PermissionDenied, eacces, false, true, false),
+            // Git skips EACCES only; Rust reports EPERM as the same kind.
+            (PermissionDenied, eperm, true, false, false),
+            (PermissionDenied, None, true, false, false),
+            (InvalidInput, None, true, false, false),
+            (InvalidInput, None, false, true, false),
         ] {
-            let said = format!("{kind:?}, own: {own}, on Windows: {windows}");
-            assert_eq!(skipped(kind, own, windows), want, "{said}");
+            let said = format!("{kind:?} ({raw:?}), own: {own}, on Windows: {windows}");
+            assert_eq!(skipped(kind, raw, own, windows), want, "{said}");
         }
+    }
+
+    /// Git's own cases for `normalize_path_copy` (t/t0060-path-utils.sh, v2.56.0), with what
+    /// Windows adds: `\`, drives and network paths.
+    #[test]
+    fn git_config_system_is_tidied_as_git_tidies_it() {
+        let failed = None;
+        let to = |text: &str| Some(text.to_owned());
+        // Run on every system; those marked POSIX there aren't run on Windows.
+        let everywhere = [
+            ("", to("")),
+            (".", to("")),
+            ("./", to("")),
+            ("./.", to("")),
+            ("./..", failed.clone()),
+            ("../.", failed.clone()),
+            ("./.././/", failed.clone()),
+            ("dir/..", to("")),
+            ("dir/sub/../..", to("")),
+            ("dir/sub/../../..", failed.clone()),
+            ("dir", to("dir")),
+            ("dir//", to("dir/")),
+            ("./dir", to("dir")),
+            ("dir/.", to("dir/")),
+            ("dir///./", to("dir/")),
+            ("dir//sub/..", to("dir/")),
+            ("dir/sub/../", to("dir/")),
+            ("dir/sub/../.", to("dir/")),
+            ("dir/s1/../s2/", to("dir/s2/")),
+            ("d1/s1///s2/..//../s3/", to("d1/s3/")),
+            ("d1/s1//../s2/../../d2", to("d2")),
+            ("d1/.../d2", to("d1/.../d2")),
+            ("d1/..././../d2", to("d1/d2")),
+            ("/", to("/")),
+            ("/.", to("/")),
+            ("/../.", failed.clone()),
+            ("/dir", to("/dir")),
+            ("/dir//", to("/dir/")),
+            ("/./dir", to("/dir")),
+            ("/dir/.", to("/dir/")),
+            ("/dir///./", to("/dir/")),
+            ("/dir//sub/..", to("/dir/")),
+            ("/dir/sub/../", to("/dir/")),
+            ("/dir/s1/../s2/", to("/dir/s2/")),
+            ("/d1/s1///s2/..//../s3/", to("/d1/s3/")),
+            ("/d1/s1//../s2/../../d2", to("/d2")),
+            ("/d1/.../d2", to("/d1/.../d2")),
+            ("/d1/..././../d2", to("/d1/d2")),
+        ];
+        let posix = [
+            ("//", to("/")),
+            ("///", to("/")),
+            ("/./", to("/")),
+            ("/./..", failed.clone()),
+            ("/./.././/", failed.clone()),
+            ("/dir/..", to("/")),
+            ("/dir/sub/../..", to("/")),
+            ("/dir/sub/../../..", failed.clone()),
+            ("//dir/sub/../.", to("/dir/")),
+            // `\` is no separator there.
+            ("\\dev\\null", to("\\dev\\null")),
+        ];
+        let windows = [
+            ("\\dev\\null", to("/dev/null")),
+            ("C:\\dir\\..\\x", to("C:/x")),
+            ("C:dir/../..", failed.clone()),
+            ("C:\\..", failed.clone()),
+            ("\\\\server\\share\\dir\\..\\x", to("//server/share/x")),
+            ("//server/share/../x", failed.clone()),
+            // A network path with no share keeps no root, as in Git.
+            ("//server", to("server")),
+            ("\u{e4}:\\x\\.\\y", to("\u{e4}:/x/y")),
+        ];
+        let tidy = |text: &str, windows| {
+            let tidied = tidy_path(text.as_bytes(), windows)?;
+            Some(String::from_utf8(tidied).unwrap())
+        };
+        for (text, want) in everywhere.iter() {
+            for on_windows in [false, true] {
+                assert_eq!(
+                    &tidy(text, on_windows),
+                    want,
+                    "{text:?}, Windows: {on_windows}"
+                );
+            }
+        }
+        for (text, want) in posix {
+            assert_eq!(tidy(text, false), want, "{text:?}");
+        }
+        for (text, want) in windows {
+            assert_eq!(tidy(text, true), want, "{text:?} on Windows");
+        }
+        // So these name no file on Windows, as they do to Git there.
+        let named = |text: &str, windows| system_file_named(text.as_bytes(), windows);
+        for text in ["\\dev\\null", "/dev//null", "/dev/./null", "/x/../dev/null"] {
+            assert_eq!(named(text, true), Ok(None), "{text:?}");
+        }
+        assert_eq!(named("/dev//null", false), Ok(None));
+        assert_eq!(named("dir/..", true), Ok(None));
+        let kept = named("C:\\Git\\etc\\gitconfig", true);
+        assert_eq!(kept, Ok(Some(b"C:/Git/etc/gitconfig".to_vec())));
+        assert_eq!(named("../gitconfig", false), Err(()));
+        // Bytes that aren't UTF-8 pass as they are, where the system takes them.
+        let latin =
+            named("/opt/caf\u{e9}/gitconfig", false).map(|path| path.map(String::from_utf8));
+        assert_eq!(latin, Ok(Some(Ok("/opt/caf\u{e9}/gitconfig".to_owned()))));
+        assert_eq!(
+            system_file_named(b"/opt/\xe9/x", false),
+            Ok(Some(b"/opt/\xe9/x".to_vec()))
+        );
+    }
+
+    /// The tidied file is the one read; where the tidying fails, the variable is named.
+    #[test]
+    fn git_config_system_names_what_git_reads() {
+        let top = Path::new("C:\\project");
+        let files = |vars: &[(&str, &str)]| {
+            let places = (Path::new("home"), Path::new("xdg"), top);
+            as_git_finds(places, vars, |git| git.files())
+        };
+        let system = |name| files(&[("GIT_CONFIG_SYSTEM", name), ("GIT_CONFIG_GLOBAL", "")]);
+        assert_eq!(system("/dev//null").unwrap(), []);
+        assert_eq!(
+            system("etc/./gitconfig").unwrap(),
+            [(top.join("etc/gitconfig"), false)]
+        );
+        // `\` separates only on Windows; elsewhere it is part of a name.
+        let want = if cfg!(windows) {
+            vec![]
+        } else {
+            vec![(PathBuf::from("C:\\project/\\dev\\null"), false)]
+        };
+        assert_eq!(system("\\dev\\null").unwrap(), want);
+        let e = system("../gitconfig").unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("`../gitconfig` goes above its start"),
+            "{e}"
+        );
+        assert_eq!(variable_named(e), "GIT_CONFIG_SYSTEM");
+        // Git reads no system file under GIT_CONFIG_NOSYSTEM, however it is spelled.
+        let unread = [
+            ("GIT_CONFIG_SYSTEM", "../gitconfig"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", ""),
+        ];
+        assert_eq!(files(&unread).unwrap(), []);
     }
 
     /// Git puts the folder it is installed in for `%(prefix)/`, which Bolt can't tell.
