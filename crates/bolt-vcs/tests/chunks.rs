@@ -5,7 +5,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use bolt_core::chunks::set_test_cut_sizes;
-use bolt_core::git::set_test_delta_limits;
+use bolt_core::git::{DELTA_BASE_CACHE, set_test_delta_limits};
 use bolt_core::history::current_save;
 use bolt_core::id::{Flavor, Id, hash_record};
 use bolt_core::import::{ImportRequest, import_git};
@@ -228,5 +228,61 @@ fn a_long_history_of_a_big_file_imports_within_the_allowance() {
     assert_eq!(
         top_folder(env.root()).get("big.bin").unwrap().id,
         versions[49]
+    );
+}
+
+#[test]
+fn a_history_past_the_allowance_imports_once_git_stores_big_files_whole() {
+    // 8 versions of a 2 MiB file in Git's deltas, and an allowance under what rebuilding each
+    // once takes, as a long history of small edits can pass the real one.
+    let env = Env::new();
+    let path = env.root().join("big.bin");
+    write_noise(&path, 6, 2 * MIB);
+    let mut versions = Vec::new();
+    for v in 0..8u64 {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(v * 100_000)).unwrap();
+        file.write_all(format!("version {v}").as_bytes()).unwrap();
+        drop(file);
+        versions.push(id_of(&path));
+        env.git(&["add", "big.bin"]);
+        env.git(&["commit", "-q", "-m", &format!("Version {v}")]);
+    }
+    env.git(&["repack", "-a", "-d", "-f"]);
+    let import = || {
+        let who = ada();
+        let mut req = ImportRequest {
+            who: &who,
+            command: "import",
+            lfs_storage: None,
+            progress: &mut |_, _| {},
+        };
+        set_test_delta_limits(Some((4 * MIB, DELTA_BASE_CACHE)));
+        let imported = import_git(env.root(), &mut req, &mut None);
+        set_test_delta_limits(None);
+        imported
+    };
+    let stop = import().unwrap_err();
+    let why = "the repository holds a long history of small edits to a big file";
+    assert!(stop.to_string().contains(why), "{stop}");
+    let way_out = ["-c", "core.bigFileThreshold=1m", "repack", "-a", "-d", "-f"];
+    let hint = stop.hint().unwrap();
+    assert!(
+        hint.contains(&format!("`git {}`", way_out.join(" "))),
+        "{hint}"
+    );
+    // Run again, it stops the same way; once Git stores each version whole, no version has
+    // anything left to rebuild.
+    let again = import().unwrap_err();
+    assert!(again.to_string().contains(why), "{again}");
+    env.git(&way_out);
+    import().unwrap();
+    let repo = Repository::open(env.root()).unwrap();
+    for id in &versions {
+        repo.store().copy_content(id, &mut io::sink()).unwrap();
+    }
+    assert_eq!(
+        top_folder(env.root()).get("big.bin").unwrap().id,
+        versions[7]
     );
 }

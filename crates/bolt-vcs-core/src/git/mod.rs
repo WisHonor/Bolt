@@ -247,8 +247,10 @@ impl GitError {
                      bolt import again."
                 }
                 GitError::TooMuchWork { .. } => {
-                    "Nothing was changed. If you trust this repository, have Git make its deltas \
-                     anew with `git repack -a -d -f`, then run bolt import again."
+                    "Nothing was changed. If you trust this repository, have Git store its files \
+                     over 1 MiB whole and make its other deltas anew, with `git -c \
+                     core.bigFileThreshold=1m repack -a -d -f`, then run bolt import again. Git's \
+                     packs stay bigger until its next `git gc`."
                 }
                 GitError::Changed { .. } => {
                     "Nothing was changed. Run bolt import again once Git has finished."

@@ -409,7 +409,8 @@ impl Repo {
 
     /// Counts `bytes` more inflated or built through deltas, stopping past the import's
     /// allowance: a delta of a few bytes can build hundreds of megabytes, again for each object
-    /// read on it.
+    /// read on it. An honest history of many small edits to a big file gets there too, since
+    /// each edit adds little to what is inflated, so the stop names both.
     fn spend(&self, bytes: u64) -> Result<(), GitError> {
         // No step does more: it refuses a bigger claim itself, in its own words.
         let bytes = bytes.min(MAX_IN_MEMORY_OBJECT);
@@ -422,7 +423,8 @@ impl Repo {
         Err(GitError::TooMuchWork {
             what: format!(
                 "rebuilding objects from Git's deltas would take more than the {} GiB of work Bolt \
-                 allows, so the repository looks built to make importing slow",
+                 allows: the repository holds a long history of small edits to a big file, or it \
+                 was built to make importing slow",
                 allowance >> 30
             ),
         })
@@ -1811,14 +1813,17 @@ mod tests {
                     MIN_DELTA_WORK >> 30
                 );
                 assert!(e.to_string().contains(&says), "{e}");
-                assert!(
-                    e.to_string().contains("built to make importing slow"),
-                    "{e}"
-                );
-                // Honest histories fit now, so storing big files whole isn't the way out.
-                let hint = e.hint().unwrap();
-                assert!(hint.contains("git repack -a -d -f"), "{hint}");
-                assert!(!hint.contains("bigFileThreshold"), "{hint}");
+                // An honest history of small edits to a big file can get here too, and the way
+                // out works for both.
+                let why = "the repository holds a long history of small edits to a big file, or \
+                           it was built to make importing slow";
+                assert!(e.to_string().contains(why), "{e}");
+                let hint = "Nothing was changed. If you trust this repository, have Git store its \
+                            files over 1 MiB whole and make its other deltas anew, with `git -c \
+                            core.bigFileThreshold=1m repack -a -d -f`, then run bolt import \
+                            again. Git's packs stay bigger until its next `git gc`.";
+                assert_eq!(e.hint().unwrap(), hint);
+                assert!(hint.contains("`git -c core.bigFileThreshold=1m repack -a -d -f`"));
             }
             other => panic!("{other:?}"),
         }
