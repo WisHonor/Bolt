@@ -994,8 +994,9 @@ impl<'r> Converter<'r> {
     /// Brings in the delta family of the blob `id`, a file big enough to be cut, the first time
     /// one of its members is met, if Git stored it as a delta: each blob of the family big enough
     /// to be cut and not met yet is stored as `blob` stores it, and noted as a file, so none is
-    /// rebuilt again where a file holds it. A smaller one is only built for what is built on it,
-    /// and comes in as any small file does where it is met, Git LFS pointers among them.
+    /// rebuilt again where a file holds it. Every member is built and checked; a smaller one is
+    /// let go once nothing more is built on it, never stored or noted here, and comes in as any
+    /// small file does where it is met, Git LFS pointers among them.
     fn family(&mut self, id: &GitId, place: &dyn Fn() -> String) -> Result<(), ImportError> {
         let tmp = self.packs.tmp();
         let (packs, store, blobs) = (&mut *self.packs, self.store, &mut self.blobs);
