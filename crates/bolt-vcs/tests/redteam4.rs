@@ -323,6 +323,12 @@ fn rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt() {
     } else {
         0
     };
+    // Before the bound is checked, so a run records the sizes either way.
+    println!(
+        "RT4-1 sizes: .git {git_bytes} bytes, .bolt {bolt_bytes} bytes; the import took {:.1} s, \
+         peaked at {} bytes, and exited with {:?}",
+        end.secs, end.peak_bytes, end.code
+    );
     // The bound redteam3.rs's RT3-2 test holds a ~1 MB repository to: decision 043's "under
     // about 35 MB" for a history at the parent limit. A stop at a limit is safe too; a stop that
     // calls this valid repository damaged is not.
