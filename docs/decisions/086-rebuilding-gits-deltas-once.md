@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5 planning; scheduled by decision 044's review)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 044](044-red-team-m2-final-rulings.md) (RT3-4: option C, rebuilding each chain once, which its review scheduled for milestone 5) and [decision 031](031-own-git-reader.md) (how the Git reader rebuilds objects)
+- **Refined by:** [decision 091](091-the-work-stop-names-a-way-out-for-long-histories.md) (the stop past the allowance says it may be a long history of small edits to a big file, and its hint has Git store files over 1 MiB whole)
 
 ## Context
 
