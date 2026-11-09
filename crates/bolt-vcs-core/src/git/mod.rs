@@ -488,7 +488,7 @@ impl Repo {
     }
 
     /// Which of `.git/lfs` and `.git/lfs/objects` is a link, or isn't a folder, if one is: Git
-    /// LFS's files are then kept behind it, where Bolt never reads. Neither there is no link.
+    /// LFS's files are then kept behind it, where Bolt never reads. A missing one isn't a link.
     pub fn lfs_folder_link(&self) -> Result<Option<&'static str>, GitError> {
         let lfs = self.git.join("lfs");
         let objects = lfs.join("objects");

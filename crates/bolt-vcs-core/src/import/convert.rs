@@ -347,6 +347,88 @@ impl io::Write for Hashing<'_> {
     }
 }
 
+/// Whether an entry of `kind` can be a Git LFS file: only a file can, as Git LFS's filter runs
+/// only on files, and Git checks a link out as it is.
+pub(super) fn may_be_lfs(kind: EntryKind) -> bool {
+    matches!(kind, EntryKind::File | EntryKind::Executable)
+}
+
+/// The rules for a Git LFS pointer, which both passes follow, so the first never lets through
+/// what the second stops at.
+pub(super) struct LfsRules<'g> {
+    git: &'g git::Repo,
+    /// Where `lfs.storage` keeps Git LFS's files instead of `.git/lfs/objects`, if it does.
+    setting: Option<LfsElsewhere>,
+    /// Whether `.git/lfs` and `.git/lfs/objects` were found to be no link.
+    folders_checked: bool,
+}
+
+impl<'g> LfsRules<'g> {
+    pub(super) fn new(git: &'g git::Repo, setting: Option<LfsElsewhere>) -> LfsRules<'g> {
+        LfsRules {
+            git,
+            setting,
+            folders_checked: false,
+        }
+    }
+
+    /// Whether the pointer `p`, at `path` in the commit `commit` (hex), needs its object read. A
+    /// pointer with extensions stops the import; one of size 0 is an empty file; any other stops
+    /// it while Git LFS keeps its objects elsewhere. The folders are looked at only here, so an
+    /// import with no Git LFS file is never stopped by them, nor by an error reading them.
+    pub(super) fn needs_object(
+        &mut self,
+        p: &LfsPointer,
+        commit: &str,
+        path: &dyn Fn() -> String,
+    ) -> Result<bool, ImportError> {
+        if p.extensions {
+            return Err(ImportError::LfsExtension {
+                commit: commit.to_owned(),
+                path: path(),
+            });
+        }
+        if p.size == 0 {
+            return Ok(false);
+        }
+        let kept = match &self.setting {
+            Some(kept) => Some(kept.clone()),
+            None if self.folders_checked => None,
+            None => {
+                let linked = self.git.lfs_folder_link()?;
+                self.folders_checked = linked.is_none();
+                linked.map(|folder| LfsElsewhere::Linked {
+                    folder: folder.to_owned(),
+                })
+            }
+        };
+        match kept {
+            Some(kept) => Err(ImportError::LfsElsewhere {
+                kept,
+                commit: commit.to_owned(),
+                path: path(),
+            }),
+            None => Ok(true),
+        }
+    }
+
+    /// The stop for Git LFS files whose objects are missing: the first, by commit (hex), path
+    /// and size, how many objects in all, and their total size.
+    pub(super) fn missing(
+        &self,
+        first: Vec<(String, String, u64)>,
+        count: u64,
+        bytes: u64,
+    ) -> ImportError {
+        ImportError::LfsMissing {
+            first,
+            count,
+            bytes,
+            config_includes: self.git.has_config_includes(),
+        }
+    }
+}
+
 /// Reads a Git LFS object, computing as the bytes pass the SHA-256 that Git LFS names it by.
 struct Sha256Reading<R> {
     inner: R,
@@ -375,8 +457,8 @@ pub struct Converter<'r> {
     blobs: HashMap<(GitId, bool), (Id, u64, bool)>,
     /// The content of each Git LFS object stored, by oid and size.
     lfs: HashMap<([u8; 32], u64), Id>,
-    /// Where Git LFS keeps its objects, if not in `.git/lfs/objects`, where they are read.
-    lfs_elsewhere: Option<LfsElsewhere>,
+    /// What a Git LFS pointer needs, as the first pass judges it too.
+    lfs_rules: LfsRules<'r>,
     /// Each submodule commit's link record.
     links: HashMap<GitId, Id>,
     /// Each tree converted whole, wherever it was met.
@@ -402,15 +484,15 @@ pub struct Converter<'r> {
 impl<'r> Converter<'r> {
     /// A converter into `packs`. `own_change_ids` are the change IDs that commits' own IDs give
     /// and some commit's `change-id` header gives too, as the import's first pass finds them.
-    /// `lfs_elsewhere` says where Git LFS keeps its objects, if not in `.git/lfs/objects`, so the
-    /// first Git LFS file met stops the conversion.
+    /// `lfs_storage` says where `lfs.storage` keeps Git LFS's objects instead of
+    /// `.git/lfs/objects`, if it does, so the first Git LFS file met stops the conversion.
     #[must_use]
     pub fn new(
         git: &'r git::Repo,
         store: &'r Store,
         packs: &'r mut PackSet,
         own_change_ids: HashSet<ChangeId>,
-        lfs_elsewhere: Option<LfsElsewhere>,
+        lfs_storage: Option<LfsElsewhere>,
     ) -> Converter<'r> {
         Converter {
             git,
@@ -418,7 +500,7 @@ impl<'r> Converter<'r> {
             packs,
             blobs: HashMap::new(),
             lfs: HashMap::new(),
-            lfs_elsewhere,
+            lfs_rules: LfsRules::new(git, lfs_storage),
             links: HashMap::new(),
             trees: HashMap::new(),
             saves: HashMap::new(),
@@ -828,10 +910,8 @@ impl<'r> Converter<'r> {
         let (id, size, lfs) = if item.kind == EntryKind::ProjectLink {
             (self.link(&item.id)?, 0, false)
         } else {
-            // Git LFS's filter runs only on files: Git checks a link out as it is.
-            let file = matches!(item.kind, EntryKind::File | EntryKind::Executable);
             let path = || path_of(stack, &[item.name.as_str()]);
-            self.blob(&item.id, file, commit, &path)?
+            self.blob(&item.id, may_be_lfs(item.kind), commit, &path)?
         };
         let entry = Entry {
             name: item.name,
@@ -913,38 +993,23 @@ impl<'r> Converter<'r> {
     }
 
     /// The content ID and size of the file the Git LFS pointer `p`, at `path` in the commit
-    /// `commit` (hex), stands for, stored from its object the first time it is met. One of size
-    /// 0 is an empty file, whose object isn't read. A pointer with extensions stops the import,
-    /// and so does any other while the objects are kept elsewhere.
+    /// `commit` (hex), stands for, stored from its object the first time it is met, as
+    /// `LfsRules` allows: one of size 0 is an empty file, whose object isn't read.
     fn lfs_file(
         &mut self,
         p: &LfsPointer,
         commit: &str,
         path: &dyn Fn() -> String,
     ) -> Result<(Id, u64), ImportError> {
-        if p.extensions {
-            return Err(ImportError::LfsExtension {
-                commit: commit.to_owned(),
-                path: path(),
-            });
-        }
-        if p.size > 0
-            && let Some(kept) = &self.lfs_elsewhere
-        {
-            return Err(ImportError::LfsElsewhere {
-                kept: kept.clone(),
-                commit: commit.to_owned(),
-                path: path(),
-            });
-        }
+        let needs_object = self.lfs_rules.needs_object(p, commit, path)?;
         if let Some(content) = self.lfs.get(&(p.oid, p.size)) {
             return Ok((*content, p.size));
         }
-        let content = if p.size == 0 {
+        let content = if needs_object {
+            self.lfs_object(p, commit, path)?
+        } else {
             let stored = ingest::store_held(self.packs, self.store, &[]);
             stored.map_err(|e| lfs_not_stored(e, &self.git.lfs_object_path(p)))?
-        } else {
-            self.lfs_object(p, commit, path)?
         };
         self.lfs.insert((p.oid, p.size), content);
         let counts = &mut self.counts;
@@ -963,10 +1028,9 @@ impl<'r> Converter<'r> {
         commit: &str,
         path: &dyn Fn() -> String,
     ) -> Result<Id, ImportError> {
-        let missing = || ImportError::LfsMissing {
-            first: vec![(commit.to_owned(), path(), p.size)],
-            count: 1,
-            bytes: p.size,
+        let missing = || {
+            let first = vec![(commit.to_owned(), path(), p.size)];
+            self.lfs_rules.missing(first, 1, p.size)
         };
         let at = self.git.lfs_object_path(p);
         let file = self.git.lfs_object(p)?.ok_or_else(missing)?;
@@ -2656,6 +2720,7 @@ mod tests {
                 first: vec![(HOSTILE.into(), HOSTILE.into(), 1)],
                 count: 2,
                 bytes: 2,
+                config_includes: true,
             },
             ImportError::LfsMismatch {
                 commit: HOSTILE.into(),

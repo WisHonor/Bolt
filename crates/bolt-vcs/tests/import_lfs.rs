@@ -237,12 +237,18 @@ fn an_object_whose_sha256_differs_stops_the_import() {
 }
 
 /// An object counts only as a plain file of its pointer's size, so a folder, a link, or a file
-/// shorter or far longer than its pointer says is missing, and stops the import before `.bolt`
-/// is made.
+/// shorter or longer than its pointer says, by a byte or by far, is missing, and stops the import
+/// before `.bolt` is made.
 #[test]
 fn an_object_of_the_wrong_size_or_kind_is_missing() {
     let real = b"the real picture\n";
-    for case in ["folder", "link", "shorter file", "longer file"] {
+    for case in [
+        "folder",
+        "link",
+        "shorter file",
+        "a byte longer",
+        "longer file",
+    ] {
         let env = tracked();
         let at = object_path(&env, real);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
@@ -256,6 +262,7 @@ fn an_object_of_the_wrong_size_or_kind_is_missing() {
                 }
             }
             "shorter file" => std::fs::write(&at, &real[1..]).unwrap(),
+            "a byte longer" => std::fs::write(&at, [&real[..], b"!"].concat()).unwrap(),
             _ => std::fs::write(&at, noise(5, 1 << 20)).unwrap(),
         }
         env.commit("art/big.psd", &pointer(real), "Add a picture");
@@ -537,15 +544,80 @@ fn a_lookalike_comes_in_as_it_is_with_a_warning() {
     assert_eq!(json["lfs_files"]["count"], 0);
 }
 
-/// A pointer of size 0 is an empty file, and its object, which Git LFS never keeps, isn't read.
+/// A pointer of size 0 is an empty file, and its object, which Git LFS never keeps, isn't read:
+/// so where the objects are kept doesn't matter to it, in either pass. It counts as a Git LFS
+/// file, and as a pointer not in Git LFS's form, which writes an empty file as an empty blob.
 #[test]
 fn a_pointer_of_size_zero_is_an_empty_file() {
+    for sign in [true, false] {
+        let env = if sign { tracked() } else { Env::new() };
+        env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
+        env.commit("art/empty.psd", &pointer(b""), "Add an empty picture");
+        assert!(!object_path(&env, b"").exists());
+        let json = imported_json(&env);
+        assert_eq!(json["lfs_files"]["count"], 1, "{sign}");
+        assert_eq!(json["lfs_files"]["bytes"], 0, "{sign}");
+        assert_eq!(json["inexact_lfs_pointers"], 1, "{sign}");
+        let saved = saved_files(&env, main_tip(&env));
+        assert_eq!(saved["art/empty.psd"], b"", "{sign}");
+    }
+}
+
+/// Bolt doesn't read a config's `[include]` or `[includeIf]` sections, so when the repository's
+/// config has one, the hint for missing objects says that one setting `lfs.storage` changes
+/// nothing for Bolt: in either pass.
+#[test]
+fn the_hint_for_missing_objects_names_config_includes() {
+    let note = "This repository's Git config has [include] or [includeIf] sections, which Bolt \
+                doesn't read: if one sets lfs.storage, the files must be in .git/lfs/objects all \
+                the same.";
+    for sign in [true, false] {
+        let env = if sign { tracked() } else { Env::new() };
+        env.git(&["config", "include.path", "lfs.inc"]);
+        env.commit("art/big.psd", &pointer(b"a picture\n"), "Add a picture");
+        let err = env.refused_import();
+        assert!(err.contains("isn't in .git/lfs/objects"), "{sign}: {err}");
+        assert!(err.contains(note), "{sign}: {err}");
+    }
     let env = tracked();
-    env.commit("art/empty.psd", &pointer(b""), "Add an empty picture");
-    assert!(!object_path(&env, b"").exists());
-    env.import();
-    let saved = saved_files(&env, main_tip(&env));
-    assert_eq!(saved["art/empty.psd"], b"");
+    env.commit("art/big.psd", &pointer(b"a picture\n"), "Add a picture");
+    let err = env.refused_import();
+    assert!(!err.contains("[include]"), "{err}");
+}
+
+/// A `.git/lfs` Bolt can't look into is looked at only once an import has a Git LFS file to bring
+/// in, so an import with none comes in.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_git_lfs_folder_stops_only_an_import_with_lfs_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let lock = |env: &Env, mode| {
+        let lfs = env.root().join(".git/lfs");
+        std::fs::set_permissions(lfs, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let import = |env: &Env| {
+        std::fs::create_dir_all(env.root().join(".git/lfs/objects")).unwrap();
+        lock(env, 0o000);
+        let readable = std::fs::read_dir(env.root().join(".git/lfs")).is_ok();
+        let out = env.bolt().arg("import").output().unwrap();
+        lock(env, 0o755);
+        (readable, out)
+    };
+    let env = tracked();
+    env.commit("a.txt", "a\n", "First");
+    let (readable, out) = import(&env);
+    if readable {
+        eprintln!("note: skipped, this account can read any folder");
+        return;
+    }
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let env = tracked();
+    env.commit("art/big.psd", &pointer(b"a picture\n"), "Add a picture");
+    let (_, out) = import(&env);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("error: Bolt couldn't read "), "{err}");
+    assert!(!env.root().join(".bolt").exists(), "{err}");
 }
 
 /// A later export can give a pointer back only in the form Git LFS writes, so the others are

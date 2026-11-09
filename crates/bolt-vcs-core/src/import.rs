@@ -29,8 +29,8 @@ mod names;
 
 pub use convert::{Converter, Counts, MAX_LISTED, TagOutcome};
 use convert::{
-    MAX_EXTRA_PARENTS, TagBudget, at, bug, check_tag_chain, check_tag_object, expect_kind, outline,
-    shown_path, tag_message,
+    LfsRules, MAX_EXTRA_PARENTS, TagBudget, at, bug, check_tag_chain, check_tag_object,
+    expect_kind, may_be_lfs, outline, shown_path, tag_message,
 };
 use names::{Named, Names};
 // For tests that check an import's names against Git's refs.
@@ -123,12 +123,14 @@ pub enum ImportError {
     },
     /// Git LFS files whose objects aren't in `.git/lfs/objects` as plain files of their pointers'
     /// sizes: the first 20 as the commit (hex), the path and the size its pointer gives, then how
-    /// many objects are missing in all, and their total size.
+    /// many objects are missing in all, and their total size. `config_includes`: the repository's
+    /// config has `[include]` or `[includeIf]` sections, which Bolt doesn't read.
     #[error("{}", lfs_missing_message(first, *count, *bytes))]
     LfsMissing {
         first: Vec<(String, String, u64)>,
         count: u64,
         bytes: u64,
+        config_includes: bool,
     },
     /// The Git LFS file at `path` in the commit `commit` (hex): its object `oid` (hex) doesn't
     /// have the SHA-256 its pointer gives.
@@ -202,12 +204,23 @@ impl ImportError {
                  bolt import again."
                     .to_owned(),
             ),
-            ImportError::LfsMissing { .. } => Some(format!(
-                "{NOTHING_CHANGED} Download every version Git LFS keeps with `git lfs fetch \
-                 --all`, then run bolt import again. Bolt reads a Git LFS file only from \
-                 .git/lfs/objects, as a plain file of the size its pointer gives, never through \
-                 a link."
-            )),
+            ImportError::LfsMissing {
+                config_includes, ..
+            } => {
+                let mut hint = format!(
+                    "{NOTHING_CHANGED} Download every version Git LFS keeps with `git lfs fetch \
+                     --all`, then run bolt import again. Bolt reads a Git LFS file only from \
+                     .git/lfs/objects, as a plain file of the size its pointer gives, never \
+                     through a link."
+                );
+                // An include could set `lfs.storage`, which the stop would otherwise name.
+                if *config_includes {
+                    hint += " This repository's Git config has [include] or [includeIf] \
+                             sections, which Bolt doesn't read: if one sets lfs.storage, the \
+                             files must be in .git/lfs/objects all the same.";
+                }
+                Some(hint)
+            }
             // Fetching skips an object that is there, and `fsck` looks at `HEAD` only unless
             // given the commit.
             ImportError::LfsMismatch { commit, .. } => Some(format!(
@@ -301,28 +314,20 @@ pub enum LfsElsewhere {
     Linked { folder: String },
 }
 
-/// Where Git LFS keeps its files, if not in `.git/lfs/objects`: as Git reads `lfs.storage` (the
-/// user's own settings `users`, then the repository's own, the last found winning), set to
-/// anything but nothing or `lfs`, Git LFS's own place; else behind a `.git/lfs` or
-/// `.git/lfs/objects` that is a link. A path is never resolved, since Bolt never reads there.
-fn lfs_elsewhere(
+/// Where `lfs.storage` keeps Git LFS's files instead of `.git/lfs/objects`, if it does: as Git
+/// reads it (the user's own settings `users`, then the repository's own, the last found winning),
+/// set to anything but nothing or `lfs`, Git LFS's own place. A path is never resolved, since Bolt
+/// never reads there. The links `LfsRules` looks for wait for the first Git LFS file.
+fn lfs_storage_elsewhere(
     git: &git::Repo,
     users: Option<&(Vec<u8>, PathBuf)>,
-) -> Result<Option<LfsElsewhere>, ImportError> {
-    let setting = match git.lfs_storage() {
-        Some((value, file)) => Some((value, file.to_owned())),
-        None => users.map(|(value, file)| (value.as_slice(), file.display().to_string())),
+) -> Option<LfsElsewhere> {
+    let (value, file) = match git.lfs_storage() {
+        Some((value, file)) => (value, file.to_owned()),
+        None => users.map(|(value, file)| (value.as_slice(), file.display().to_string()))?,
     };
-    if let Some((value, file)) = setting
-        && !matches!(value, b"" | b"lfs")
-    {
-        let value = shown(value);
-        return Ok(Some(LfsElsewhere::Storage { value, file }));
-    }
-    let linked = git.lfs_folder_link()?;
-    Ok(linked.map(|folder| LfsElsewhere::Linked {
-        folder: folder.to_owned(),
-    }))
+    let value = (!matches!(value, b"" | b"lfs")).then(|| shown(value))?;
+    Some(LfsElsewhere::Storage { value, file })
 }
 
 /// What an import says of the Git LFS file at `path` in `commit`, kept elsewhere as `kept` says.
@@ -466,8 +471,8 @@ struct Plan {
     head_line: Option<String>,
     head_commit: GitId,
     grafts: bool,
-    /// Where Git LFS keeps its files, if not in `.git/lfs/objects`.
-    lfs_elsewhere: Option<LfsElsewhere>,
+    /// Where `lfs.storage` keeps Git LFS's files instead of `.git/lfs/objects`, if it does.
+    lfs_storage: Option<LfsElsewhere>,
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
@@ -480,7 +485,7 @@ fn plan(
 ) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
-    let lfs_elsewhere = lfs_elsewhere(&git, lfs_storage)?;
+    let lfs_storage = lfs_storage_elsewhere(&git, lfs_storage);
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
     let mut tag_budget = TagBudget::new();
@@ -504,8 +509,8 @@ fn plan(
         return Err(tracked_stop(&name));
     }
     let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS, progress)?;
-    let elsewhere = lfs_elsewhere.as_ref();
-    check_lfs_objects(&git, &head_commit, &order, elsewhere, &SaveLimits::default)?;
+    let setting = lfs_storage.as_ref();
+    check_lfs_objects(&git, &head_commit, &order, setting, &SaveLimits::default)?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -519,7 +524,7 @@ fn plan(
         head_line,
         head_commit,
         grafts,
-        lfs_elsewhere,
+        lfs_storage,
     })
 }
 
@@ -542,11 +547,11 @@ fn carry_out(
         head_line,
         head_commit,
         grafts,
-        lfs_elsewhere,
+        lfs_storage,
     } = plan;
     let mut packs = repo.new_packs()?;
     let store = repo.store();
-    let mut converter = Converter::new(&git, store, &mut packs, own_change_ids, lfs_elsewhere);
+    let mut converter = Converter::new(&git, store, &mut packs, own_change_ids, lfs_storage);
     let total = order.len() as u64;
     for (done, id) in (1..).zip(&order) {
         converter.commit(id)?;
@@ -1076,27 +1081,27 @@ const MAX_MISSING_LISTED: usize = 20;
 /// Checks, before anything is written, that every Git LFS file of the commits `order` has its
 /// object in `.git/lfs/objects`, when the repository shows a sign of Git LFS: a `.git/lfs`
 /// folder, or `filter=lfs` in the top `.gitattributes` of `HEAD`'s commit `head`.
-/// Without one, the converter stops at the first missing object it meets. A pointer with
-/// extensions stops the import here, and so does the first Git LFS file when `elsewhere` says
-/// where its objects are kept instead. Each commit's walk counts against fresh `limits`, never
-/// more than the converter counts; past them this stops looking, and the converter stops the
-/// import at that commit.
+/// Without one, the converter stops at the first missing object it meets. Each pointer goes
+/// through the `LfsRules` the converter follows, from `setting`, so what stops one stops the
+/// other. Each commit's walk counts only trees not walked before, against fresh `limits`, so it
+/// may let through a commit the converter will refuse; past them it stops looking.
 fn check_lfs_objects(
     git: &git::Repo,
     head: &GitId,
     order: &[GitId],
-    elsewhere: Option<&LfsElsewhere>,
+    setting: Option<&LfsElsewhere>,
     limits: &dyn Fn() -> SaveLimits,
 ) -> Result<(), ImportError> {
     let tree = outline(git, head)?.tree;
     if !git.has_lfs_folder()? && !lfs_attribute(git, &tree)? {
         return Ok(());
     }
+    // Its sets go when it returns, before the converter makes its own.
     let mut check = LfsCheck {
         git,
-        elsewhere,
+        rules: LfsRules::new(git, setting.cloned()),
         trees: HashSet::new(),
-        small: HashSet::new(),
+        blobs: HashSet::new(),
         objects: HashSet::new(),
         first: Vec::new(),
         count: 0,
@@ -1110,22 +1115,17 @@ fn check_lfs_objects(
     if check.count == 0 {
         return Ok(());
     }
-    Err(ImportError::LfsMissing {
-        first: check.first,
-        count: check.count,
-        bytes: check.bytes,
-    })
+    Err(check.rules.missing(check.first, check.count, check.bytes))
 }
 
-/// The first pass's look for Git LFS files whose objects are missing. Each folder and each small
-/// file is read once, and each object looked for once, whichever commits hold them.
+/// The first pass's look for Git LFS files whose objects are missing. Each folder and each file
+/// is looked at once, and each object looked for once, whichever commits hold them.
 struct LfsCheck<'g> {
     git: &'g git::Repo,
-    /// Where Git LFS keeps its objects, if not in `.git/lfs/objects`.
-    elsewhere: Option<&'g LfsElsewhere>,
+    rules: LfsRules<'g>,
     trees: HashSet<GitId>,
-    /// Files of at most 1,024 bytes, read already.
-    small: HashSet<GitId>,
+    /// Files looked at already, whatever their size.
+    blobs: HashSet<GitId>,
     /// Objects looked for, by oid and size.
     objects: HashSet<([u8; 32], u64)>,
     /// The first missing, as the commit (hex), the path and the size, and how many in all, with
@@ -1173,8 +1173,7 @@ impl LfsCheck<'_> {
                     }
                     stack.push((name, path_len.saturating_add(1), inner.into_iter()));
                 }
-                // Only a file can be a Git LFS file: Git checks a link out as it is.
-                EntryKind::File | EntryKind::Executable if !self.small.contains(&id) => {
+                kind if may_be_lfs(kind) && self.blobs.insert(id) => {
                     let path = || {
                         let folders = stack.iter().skip(1).map(|(n, ..)| n.as_str());
                         let mut path: Vec<&str> = folders.collect();
@@ -1202,30 +1201,15 @@ impl LfsCheck<'_> {
         if size > MAX_LFS_POINTER_BYTES as u64 {
             return Ok(());
         }
-        self.small.insert(*id);
         let object = self.git.read(id).map_err(|e| at(e, place))?;
         expect_kind(object.kind, ObjectType::Blob, id, place)?;
         let Some(p) = lfs_pointer(&object.data) else {
             return Ok(());
         };
-        if p.extensions {
-            return Err(ImportError::LfsExtension {
-                commit: commit.to_owned(),
-                path: path(),
-            });
-        }
-        // A pointer of size 0 is an empty file, whose object isn't read.
-        if p.size == 0 {
-            return Ok(());
-        }
-        if let Some(kept) = self.elsewhere {
-            return Err(ImportError::LfsElsewhere {
-                kept: kept.clone(),
-                commit: commit.to_owned(),
-                path: path(),
-            });
-        }
-        if !self.objects.insert((p.oid, p.size)) || self.git.lfs_object(&p)?.is_some() {
+        if !self.rules.needs_object(&p, commit, path)?
+            || !self.objects.insert((p.oid, p.size))
+            || self.git.lfs_object(&p)?.is_some()
+        {
             return Ok(());
         }
         self.count = self.count.saturating_add(1);
@@ -2007,6 +1991,91 @@ mod tests {
         assert!(missing(scan(dir.path(), &commit, &small(2, 4))));
     }
 
+    /// Git checks a link out as it is, so the import passes over one holding a pointer's text,
+    /// whose object is missing, and brings it in as it is; a file holding that text is a Git LFS
+    /// file.
+    #[test]
+    fn a_link_holding_a_pointer_is_no_git_lfs_file() {
+        let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:\
+            4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+        let made = |mode: &[u8]| {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Craft::new(dir.path(), HashKind::Sha1);
+            std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
+            let blob = git.object(ObjectType::Blob, pointer);
+            let tree = git.tree(&[(mode, b"big.psd", blob)]);
+            let commit = commit_on(&git, &tree, &[], "One\n");
+            git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
+            (dir, commit)
+        };
+        let (dir, commit) = made(b"120000");
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let first = check_lfs_objects(&repo, &commit, &[commit], None, &SaveLimits::default);
+        assert!(first.is_ok(), "{first:?}");
+        drop(repo);
+        let report = import(dir.path()).unwrap();
+        assert_eq!(report.lfs_files, 0);
+        let project = Repository::open(dir.path()).unwrap();
+        let save = project.current().unwrap().1.state.lines["main"];
+        let root = project.store().save(&save, false).unwrap().root;
+        let link = project
+            .store()
+            .listing(&root)
+            .unwrap()
+            .get("big.psd")
+            .cloned();
+        let mut target = Vec::new();
+        project
+            .store()
+            .copy_content(&link.unwrap().id, &mut target)
+            .unwrap();
+        assert_eq!(target, pointer);
+        let (dir, commit) = made(b"100644");
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let first = check_lfs_objects(&repo, &commit, &[commit], None, &SaveLimits::default);
+        assert!(matches!(
+            first,
+            Err(ImportError::LfsMissing { count: 1, .. })
+        ));
+    }
+
+    /// Each commit's walk counts only the trees not walked before, so a folder two commits share
+    /// counts once: the first pass can let through a commit the converter will refuse, and looks
+    /// on. Past its limits, it stops looking.
+    #[test]
+    fn the_first_pass_counts_each_commits_new_trees_against_its_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
+        let shared = git.tree(&[(b"100644", b"x.txt", git.object(ObjectType::Blob, b"x\n"))]);
+        let one = commit_on(&git, &git.tree(&[(b"40000", b"a", shared)]), &[], "One\n");
+        // The shared folder twice: 4 entries to the converter, 2 new ones here.
+        let both = git.tree(&[(b"40000", b"a", shared), (b"40000", b"b", shared)]);
+        let two = commit_on(&git, &both, &[one], "Two\n");
+        let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:\
+            4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+        let big = git.object(ObjectType::Blob, pointer);
+        let art = git.tree(&[(b"100644", b"big.psd", big)]);
+        let three = commit_on(
+            &git,
+            &git.tree(&[(b"40000", b"art", art)]),
+            &[two],
+            "Three\n",
+        );
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let order = [one, two, three];
+        let scan = |entries| {
+            let limits = move || SaveLimits::new(10, entries);
+            check_lfs_objects(&repo, &three, &order, None, &limits)
+        };
+        assert!(matches!(
+            scan(3),
+            Err(ImportError::LfsMissing { count: 1, .. })
+        ));
+        // `one` alone has 2 entries.
+        assert!(scan(1).is_ok());
+    }
+
     /// Each object is looked for once, however many files and commits point to it, so the count
     /// and total size are of objects; sizes from pointers, which are untrusted, add up without
     /// overflowing.
@@ -2046,6 +2115,7 @@ mod tests {
                 first: listed,
                 count,
                 bytes,
+                ..
             }) => {
                 assert_eq!((count, bytes), (3, u64::MAX));
                 let paths: Vec<&str> = listed.iter().map(|(_, path, _)| path.as_str()).collect();
