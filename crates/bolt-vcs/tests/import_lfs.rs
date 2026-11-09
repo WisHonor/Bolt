@@ -224,7 +224,14 @@ fn an_object_whose_sha256_differs_stops_the_import() {
             )),
             "{len}: {err}"
         );
-        assert!(err.contains("git lfs fsck"), "{len}: {err}");
+        // Fetching skips an object that is there, so `fsck` moves the bad copy aside first; it
+        // looks at `HEAD` only unless given the commit.
+        let fsck = err.find(&format!("run `git lfs fsck {commit}`, which moves"));
+        let fetch = err.find("then `git lfs fetch --all`");
+        assert!(
+            fsck.zip(fetch).is_some_and(|(fsck, fetch)| fsck < fetch),
+            "{len}: {err}"
+        );
         committed_nothing(&env, &err);
     }
 }
@@ -262,13 +269,19 @@ fn an_object_of_the_wrong_size_or_kind_is_missing() {
     }
 }
 
-/// A link at `.git/lfs`, or at a folder inside it, is never followed, even to the right object.
+/// A link in `.git/lfs` is never followed, even to the right object. One at `.git/lfs` or
+/// `.git/lfs/objects` keeps the objects elsewhere, so the import stops naming it; behind one at a
+/// folder below, the object is missing.
 #[test]
 fn a_link_inside_git_lfs_is_never_followed() {
     let real = b"the real picture\n";
     let (_, path) = lfs_pointer_to(real);
     let parts: Vec<&str> = path.split('/').collect();
-    for linked in [2, 0] {
+    for (linked, kept_by) in [
+        (0, Some(".git/lfs")),
+        (1, Some(".git/lfs/objects")),
+        (2, None),
+    ] {
         let env = tracked();
         // The object, kept right, in a folder outside the repository.
         let elsewhere = env.config().join("elsewhere");
@@ -282,13 +295,17 @@ fn a_link_inside_git_lfs_is_never_followed() {
             .fold(env.root().join(".git"), |at, part| at.join(part));
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         link_folder(&elsewhere, &link);
-        env.commit("art/big.psd", &pointer(real), "Add a picture");
+        let commit = env.commit("art/big.psd", &pointer(real), "Add a picture");
         let err = env.refused_import();
-        assert!(
-            err.contains("error: A Git LFS file in this history isn't in .git/lfs/objects:\n"),
-            "{}: {err}",
-            parts[linked]
-        );
+        let says = match kept_by {
+            Some(folder) => format!(
+                "error: Commit `{commit}` holds a Git LFS file at `art/big.psd`, but Git LFS's \
+                 files are kept outside .git/lfs/objects, where Bolt reads them: {folder} is a \
+                 link, or isn't a folder, and Bolt never follows a link in .git.\n"
+            ),
+            None => "error: A Git LFS file in this history isn't in .git/lfs/objects:\n".to_owned(),
+        };
+        assert!(err.contains(&says), "{}: {err}", parts[linked]);
         assert!(!env.root().join(".bolt").exists(), "{}", parts[linked]);
     }
 }
@@ -323,32 +340,100 @@ fn a_pointer_with_extensions_stops_the_import() {
     committed_nothing(&env, &err);
 }
 
-#[test]
-fn lfs_storage_in_the_repository_config_is_refused() {
-    let env = Env::new();
-    env.commit("a.txt", "a\n", "First");
-    env.git(&["config", "lfs.storage", "../shared-lfs"]);
-    let err = env.refused_import();
-    assert!(
-        err.contains(
-            "error: Git LFS is set to keep its files outside this repository: `lfs.storage` is \
-             set in .git/config, and Bolt reads Git LFS files only from .git/lfs/objects.\n"
-        ),
-        "{err}"
-    );
-    assert!(err.contains("hint: Nothing was changed."), "{err}");
-    assert!(!env.root().join(".bolt").exists(), "{err}");
+/// What an import that stops at `art/big.psd` in `commit` says when `lfs.storage` is set to
+/// `/mnt/shared-lfs` in `file`.
+fn kept_by_setting(commit: &str, file: &str) -> String {
+    format!(
+        "error: Commit `{commit}` holds a Git LFS file at `art/big.psd`, but `lfs.storage` keeps \
+         Git LFS's files outside .git/lfs/objects, where Bolt reads them: it is set to \
+         `/mnt/shared-lfs` in {file}.\n"
+    )
 }
 
-/// The user's own Git settings, as Bolt finds them (decision 060): here in the test's own home
-/// folder, never the user's.
+/// `lfs.storage` naming Git LFS's own place, `lfs` or nothing, keeps nothing elsewhere.
 #[test]
-fn lfs_storage_in_the_users_own_git_settings_is_refused() {
+fn lfs_storage_set_to_git_lfss_own_place_imports_as_usual() {
+    for value in ["lfs", ""] {
+        let env = tracked();
+        env.git(&["config", "lfs.storage", value]);
+        env.commit("art/big.psd", &keep(&env, b"a picture\n"), "Add a picture");
+        env.import();
+        let saved = saved_files(&env, main_tip(&env));
+        assert_eq!(saved["art/big.psd"], b"a picture\n", "{value:?}");
+    }
+}
+
+/// `lfs.storage` set elsewhere stops only an import that has a Git LFS file to bring in.
+#[test]
+fn lfs_storage_elsewhere_never_stops_a_repository_without_lfs_files() {
+    // Set for other repositories, in the user's own Git settings.
+    let env = Env::new();
+    let storage = "[lfs]\n\tstorage = /mnt/shared-lfs\n";
+    std::fs::write(env.config().join(".gitconfig"), storage).unwrap();
+    env.commit("a.txt", "a\n", "First");
+    env.import();
+    // Set in the repository, whose `.gitattributes` names Git LFS's filter for files it hasn't.
+    let env = tracked();
+    env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
+    env.commit("a.txt", "a\n", "First");
+    env.import();
+}
+
+/// With a sign of Git LFS, `lfs.storage` set elsewhere stops the import at the first Git LFS file,
+/// before `.bolt` is made, even with its object at hand, saying where it is set: `.git/config`,
+/// or `config.worktree`, which Git reads after it.
+#[test]
+fn lfs_storage_elsewhere_stops_an_import_of_lfs_files_before_writing() {
+    for file in [".git/config", ".git/config.worktree"] {
+        let env = tracked();
+        if file == ".git/config" {
+            env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
+        } else {
+            env.git(&["config", "lfs.storage", "lfs"]);
+            env.git(&["config", "extensions.worktreeConfig", "true"]);
+            env.git(&["config", "--worktree", "lfs.storage", "/mnt/shared-lfs"]);
+        }
+        let commit = env.commit("art/big.psd", &keep(&env, b"a picture\n"), "Add a picture");
+        let err = env.refused_import();
+        assert!(
+            err.contains(&kept_by_setting(&commit, file)),
+            "{file}: {err}"
+        );
+        assert!(
+            err.contains(
+                "hint: Nothing was changed. Remove that setting, or set it to lfs, download the \
+                 files into .git/lfs/objects with `git lfs fetch --all`, then run bolt import \
+                 again."
+            ),
+            "{file}: {err}"
+        );
+        assert!(!env.root().join(".bolt").exists(), "{file}: {err}");
+    }
+}
+
+/// Without a sign, the import stops at the first Git LFS file the second pass meets.
+#[test]
+fn without_a_sign_lfs_storage_elsewhere_stops_at_the_first_lfs_file() {
+    let env = Env::new();
+    env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
+    env.commit("a.txt", "a\n", "First");
+    let commit = env.commit("art/big.psd", &pointer(b"a picture\n"), "Add a picture");
+    let err = env.refused_import();
+    assert!(
+        err.contains(&kept_by_setting(&commit, ".git/config")),
+        "{err}"
+    );
+    committed_nothing(&env, &err);
+}
+
+/// The user's own Git settings, as Bolt finds them (here in the test's own home folder, never the
+/// user's), come first, so the repository's own setting wins over them, as in Git.
+#[test]
+fn lfs_storage_in_the_users_own_git_settings_stops_unless_the_repository_sets_its_own() {
+    let storage = "[lfs]\n\tstorage = /mnt/shared-lfs\n";
     for included in [true, false] {
-        let env = Env::new();
-        env.commit("a.txt", "a\n", "First");
+        let env = tracked();
         let home = env.config();
-        let storage = "[lfs]\n\tstorage = /mnt/shared-lfs\n";
         let set_in = if included {
             // In a file `~/.gitconfig` includes.
             std::fs::write(home.join(".gitconfig"), "[include]\n\tpath = lfs.inc\n").unwrap();
@@ -358,16 +443,19 @@ fn lfs_storage_in_the_users_own_git_settings_is_refused() {
             home.join("git").join("config")
         };
         std::fs::write(&set_in, storage).unwrap();
+        let commit = env.commit("art/big.psd", &keep(&env, b"a picture\n"), "Add a picture");
         let err = env.refused_import();
-        assert!(
-            err.contains(&format!(
-                "`lfs.storage` is set in {}, and Bolt",
-                set_in.display()
-            )),
-            "{included}: {err}"
-        );
+        let says = kept_by_setting(&commit, &set_in.display().to_string());
+        assert!(err.contains(&says), "{included}: {err}");
         assert!(!env.root().join(".bolt").exists(), "{included}");
     }
+    let env = tracked();
+    std::fs::write(env.config().join(".gitconfig"), storage).unwrap();
+    env.git(&["config", "lfs.storage", "lfs"]);
+    env.commit("art/big.psd", &keep(&env, b"a picture\n"), "Add a picture");
+    env.import();
+    let saved = saved_files(&env, main_tip(&env));
+    assert_eq!(saved["art/big.psd"], b"a picture\n");
 }
 
 /// A save keeps a file's contents, not that it was a pointer, so the summary counts the commits

@@ -401,8 +401,8 @@ pub struct Repo {
     hash: HashKind,
     /// Whether its config has `[include]` or `[includeIf]` sections, which Bolt doesn't follow.
     includes: bool,
-    /// Whether its config sets `lfs.storage`.
-    lfs_storage: bool,
+    /// The last `lfs.storage` its config sets, and the file that sets it.
+    lfs_storage: Option<(Vec<u8>, &'static str)>,
     objects: odb::Objects,
 }
 
@@ -478,11 +478,29 @@ impl Repo {
         exists(&self.git.join("lfs"))
     }
 
-    /// Whether `.git/config` sets `lfs.storage`, which keeps Git LFS's files elsewhere. Read only
-    /// so the import can refuse.
+    /// The `lfs.storage` this repository's own config sets, as Git reads it (`config.worktree`
+    /// after `.git/config`), empty for one with no value, and the file that sets it. Read only to
+    /// tell whether Git LFS keeps its files elsewhere.
     #[must_use]
-    pub fn sets_lfs_storage(&self) -> bool {
-        self.lfs_storage
+    pub fn lfs_storage(&self) -> Option<(&[u8], &'static str)> {
+        let (value, file) = self.lfs_storage.as_ref()?;
+        Some((value, file))
+    }
+
+    /// Which of `.git/lfs` and `.git/lfs/objects` is a link, or isn't a folder, if one is: Git
+    /// LFS's files are then kept behind it, where Bolt never reads. Neither there is no link.
+    pub fn lfs_folder_link(&self) -> Result<Option<&'static str>, GitError> {
+        let lfs = self.git.join("lfs");
+        let objects = lfs.join("objects");
+        for (folder, shown) in [(lfs, ".git/lfs"), (objects, ".git/lfs/objects")] {
+            match safe_fs::check_real_dir(&folder) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => return Ok(Some(shown)),
+                Err(e) => return Err(read_error(&folder, e)),
+            }
+        }
+        Ok(None)
     }
 
     /// Where Git LFS keeps the object of `p`: `.git/lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`.
@@ -550,8 +568,8 @@ fn check_owner(
     repo::owner_allows([owner], work_tree, &safe).map_err(refused)
 }
 
-/// What `.git/config` says, with whether `config.worktree` has include sections too, after
-/// refusing a format, extension or sparse checkout Bolt can't import.
+/// What `.git/config` says, with what `config.worktree` adds when Git reads it too, after refusing
+/// a format, extension or sparse checkout Bolt can't import.
 fn read_format(git: &Path) -> Result<config::Format, GitError> {
     // Git reads a repository without a config with its defaults.
     let text = read_optional(&git.join("config"), MAX_CONFIG_BYTES)?.unwrap_or_default();
@@ -559,9 +577,10 @@ fn read_format(git: &Path) -> Result<config::Format, GitError> {
     if format.worktree_config
         && let Some(text) = read_optional(&git.join("config.worktree"), MAX_CONFIG_BYTES)?
     {
-        let (value, more) = config::read_sparse(&text, ".git/config.worktree")?;
-        format.sparse = value.or(format.sparse);
-        format.includes |= more;
+        let worktree = config::read_worktree(&text, ".git/config.worktree")?;
+        format.sparse = worktree.sparse.or(format.sparse);
+        format.includes |= worktree.includes;
+        format.lfs_storage = worktree.lfs_storage.or(format.lfs_storage);
     }
     if format.sparse == Some(true) {
         return Err(GitError::Refused(Refusal::SparseCheckout));

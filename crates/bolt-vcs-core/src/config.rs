@@ -245,22 +245,22 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
     git_excludes_file_in(&home, &xdg, project_root)
 }
 
-/// Where the user's own Git settings set `lfs.storage`, if they do: Git LFS then keeps its
-/// files elsewhere, which `bolt import` refuses. Read only to refuse, from the files and plain
-/// includes `git_excludes_file` reads.
-pub fn git_lfs_storage() -> Result<Option<PathBuf>, ConfigError> {
+/// The last `lfs.storage` the user's own Git settings set, empty for one with no value, and the
+/// file that sets it, from the files and plain includes `git_excludes_file` reads. `bolt import`
+/// reads it only to tell whether Git LFS keeps its files elsewhere.
+pub fn git_lfs_storage() -> Result<Option<(Vec<u8>, PathBuf)>, ConfigError> {
     let Some((home, xdg)) = git_homes() else {
         return Ok(None);
     };
-    let mut set_in = None;
+    let mut last = None;
     for path in git_settings_files(&home, &xdg) {
         read_git_settings(&path, &home, 0, &mut |setting, file| {
-            if setting == UserSetting::LfsStorage {
-                set_in = Some(file.to_owned());
+            if let UserSetting::LfsStorage(value) = setting {
+                last = Some((value, file.to_owned()));
             }
         })?;
     }
-    Ok(set_in)
+    Ok(last)
 }
 
 /// Git's home folder, `HOME`, as Git for Windows takes it too, and `XDG_CONFIG_HOME`; `None`

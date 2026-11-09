@@ -340,7 +340,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         &mut ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: lfs_storage.as_deref(),
+            lfs_storage: lfs_storage.as_ref(),
             // The first pass can't say how many commits there are; the second can.
             progress: &mut |done, total| match total {
                 None => reading.update(done, None),

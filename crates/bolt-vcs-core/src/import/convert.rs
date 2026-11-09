@@ -12,7 +12,7 @@ use std::path::Path;
 use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest as _, Sha256};
 
-use super::ImportError;
+use super::{ImportError, LfsElsewhere};
 use crate::chunks::is_too_long_to_cut;
 use crate::diary::{
     self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
@@ -375,6 +375,8 @@ pub struct Converter<'r> {
     blobs: HashMap<(GitId, bool), (Id, u64, bool)>,
     /// The content of each Git LFS object stored, by oid and size.
     lfs: HashMap<([u8; 32], u64), Id>,
+    /// Where Git LFS keeps its objects, if not in `.git/lfs/objects`, where they are read.
+    lfs_elsewhere: Option<LfsElsewhere>,
     /// Each submodule commit's link record.
     links: HashMap<GitId, Id>,
     /// Each tree converted whole, wherever it was met.
@@ -400,12 +402,15 @@ pub struct Converter<'r> {
 impl<'r> Converter<'r> {
     /// A converter into `packs`. `own_change_ids` are the change IDs that commits' own IDs give
     /// and some commit's `change-id` header gives too, as the import's first pass finds them.
+    /// `lfs_elsewhere` says where Git LFS keeps its objects, if not in `.git/lfs/objects`, so the
+    /// first Git LFS file met stops the conversion.
     #[must_use]
     pub fn new(
         git: &'r git::Repo,
         store: &'r Store,
         packs: &'r mut PackSet,
         own_change_ids: HashSet<ChangeId>,
+        lfs_elsewhere: Option<LfsElsewhere>,
     ) -> Converter<'r> {
         Converter {
             git,
@@ -413,6 +418,7 @@ impl<'r> Converter<'r> {
             packs,
             blobs: HashMap::new(),
             lfs: HashMap::new(),
+            lfs_elsewhere,
             links: HashMap::new(),
             trees: HashMap::new(),
             saves: HashMap::new(),
@@ -908,7 +914,8 @@ impl<'r> Converter<'r> {
 
     /// The content ID and size of the file the Git LFS pointer `p`, at `path` in the commit
     /// `commit` (hex), stands for, stored from its object the first time it is met. One of size
-    /// 0 is an empty file, whose object isn't read. A pointer with extensions stops the import.
+    /// 0 is an empty file, whose object isn't read. A pointer with extensions stops the import,
+    /// and so does any other while the objects are kept elsewhere.
     fn lfs_file(
         &mut self,
         p: &LfsPointer,
@@ -917,6 +924,15 @@ impl<'r> Converter<'r> {
     ) -> Result<(Id, u64), ImportError> {
         if p.extensions {
             return Err(ImportError::LfsExtension {
+                commit: commit.to_owned(),
+                path: path(),
+            });
+        }
+        if p.size > 0
+            && let Some(kept) = &self.lfs_elsewhere
+        {
+            return Err(ImportError::LfsElsewhere {
+                kept: kept.clone(),
                 commit: commit.to_owned(),
                 path: path(),
             });
@@ -1269,6 +1285,7 @@ mod tests {
             &store,
             &mut packs,
             HashSet::new(),
+            None,
         ));
         packs.finish().unwrap();
         (result, Store::open(&packs_dir).unwrap())
@@ -2649,11 +2666,40 @@ mod tests {
                 commit: HOSTILE.into(),
                 path: HOSTILE.into(),
             },
-            ImportError::LfsStorageElsewhere {
-                file: HOSTILE.into(),
+            ImportError::LfsElsewhere {
+                kept: LfsElsewhere::Storage {
+                    value: HOSTILE.into(),
+                    file: HOSTILE.into(),
+                },
+                commit: HOSTILE.into(),
+                path: HOSTILE.into(),
+            },
+            ImportError::LfsElsewhere {
+                kept: LfsElsewhere::Linked {
+                    folder: HOSTILE.into(),
+                },
+                commit: HOSTILE.into(),
+                path: HOSTILE.into(),
             },
         ] {
             assert_hostile_text_escaped(&e.to_string());
+        }
+        // Hints that name the commit or the folder escape them too.
+        for e in [
+            ImportError::LfsMismatch {
+                commit: HOSTILE.into(),
+                path: String::new(),
+                oid: String::new(),
+            },
+            ImportError::LfsElsewhere {
+                kept: LfsElsewhere::Linked {
+                    folder: HOSTILE.into(),
+                },
+                commit: String::new(),
+                path: String::new(),
+            },
+        ] {
+            assert_hostile_text_escaped(&e.hint().unwrap());
         }
         // A name too long, from a real tree.
         let (dir, git) = repo(Sha1);
