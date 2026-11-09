@@ -1,6 +1,6 @@
 //! Integrity check: reads every object of every pack. The core of the later `bolt verify`.
 use crate::pack::{ObjectKind, PackReader};
-use crate::store::Store;
+use crate::store::{Store, is_pack_name};
 use crate::text::escape;
 use std::io;
 use std::path::Path;
@@ -34,7 +34,7 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
         Ok(rd) => {
             for entry in rd {
                 match entry {
-                    Ok(e) if e.path().extension().is_some_and(|x| x == "pack") => {
+                    Ok(e) if is_pack_name(&e.file_name()) => {
                         paths.push(e.path());
                     }
                     Ok(_) => {}

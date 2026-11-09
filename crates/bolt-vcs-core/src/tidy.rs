@@ -17,7 +17,7 @@ use crate::merge;
 use crate::pack::{self, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, damaged};
 use crate::save::Save;
-use crate::store::{StoreError, is_damage};
+use crate::store::{StoreError, is_damage, is_pack_name};
 use crate::text::{escape, thousands};
 use crate::undo;
 use crate::warning::{self, Warning};
@@ -199,10 +199,7 @@ fn remove(
 fn packs(folder: &Dir) -> io::Result<Vec<(OsString, io::Result<EntryMeta>)>> {
     let mut found = Vec::new();
     for entry in folder.entries()? {
-        if Path::new(&entry.name)
-            .extension()
-            .is_some_and(|e| e == "pack")
-        {
+        if is_pack_name(&entry.name) {
             let meta = folder.metadata(&entry.name);
             found.push((entry.name, meta));
         }
@@ -264,8 +261,8 @@ fn why(e: &PackError) -> String {
     why.trim_end_matches('.').to_owned()
 }
 
-/// The stop for the pack at `path`, which can't be opened, read or checked: `e`. It could hold
-/// the only chunk list naming chunks in the others.
+/// The stop for the pack at `path`, which can't be opened, read or checked, or holds a chunk list
+/// that must be read but can't be: `e`. It could hold the only list naming chunks in the others.
 fn cant_tidy(path: &Path, e: &PackError) -> RepoError {
     let what = if is_damage(e) {
         "is damaged"
@@ -382,17 +379,6 @@ fn kept(
     Ok(marks.kept)
 }
 
-/// The stop for `what` `id`, which must be kept but can't be read: `e`.
-fn unreadable(what: &str, id: &Id, e: StoreError) -> RepoError {
-    match e {
-        // Memory or I/O: the copy may be fine, so this isn't damage.
-        StoreError::Pack(e) if !is_damage(&e) => RepoError::Io(io::Error::other(format!(
-            "Bolt couldn't read {what} {id}, which must be kept: {e}"
-        ))),
-        e => damaged(format!("{what} {id} can't be read ({e})")),
-    }
-}
-
 /// What `kept` has found so far, and what it has still to read.
 struct Marks<'a> {
     repo: &'a Repository,
@@ -463,26 +449,29 @@ impl Marks<'_> {
         self.repo
             .store()
             .read_record(id, kind)
-            .map_err(|e| unreadable(what, id, e))
+            .map_err(|e| match e {
+                // Memory or I/O: the copy may be fine, so this isn't damage.
+                StoreError::Pack(e) if !is_damage(&e) => RepoError::Io(io::Error::other(format!(
+                    "Bolt couldn't read {what} {id}, which must be kept: {e}"
+                ))),
+                e => damaged(format!("{what} {id} can't be read ({e})")),
+            })
     }
 
     /// Keeps every chunk the lists to read name, opening each pack once. A list names only
-    /// chunks, so nothing more is followed; one that can't be read stops `tidy`, as any record it
-    /// must keep.
+    /// chunks, so nothing more is followed. One that can't be read stops `tidy`, naming its pack.
     fn chunks(&mut self, packs: &[Listed]) -> Result<(), RepoError> {
-        let unread = |id: &Id, e: PackError| unreadable("the chunk list of file", id, e.into());
         for (at, listed) in packs.iter().enumerate() {
             let mut lines = self.reads.range((at, 0)..=(at, u64::MAX)).peekable();
-            let Some(first) = lines.peek().map(|(_, line)| line.id) else {
+            if lines.peek().is_none() {
                 continue;
-            };
+            }
             let path = self.repo.packs_dir().join(&listed.name);
-            let pack = PackReader::open_in(self.repo.packs_folder(), &listed.name, &path)
-                .map_err(|e| unread(&first, e))?;
+            let cant = |e: PackError| cant_tidy(&path, &e);
+            let pack =
+                PackReader::open_in(self.repo.packs_folder(), &listed.name, &path).map_err(cant)?;
             for (_, line) in lines {
-                let list = pack
-                    .read_chunk_list(line)
-                    .map_err(|e| unread(&line.id, e))?;
+                let list = pack.read_chunk_list(line).map_err(cant)?;
                 self.kept.extend(list.chunks.iter().map(|c| c.id));
             }
         }

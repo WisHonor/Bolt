@@ -12,7 +12,7 @@ use crate::save::Save;
 use crate::text::escape;
 use crate::warning::{self, Warning};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -259,10 +259,7 @@ impl Store {
     fn list(&self) -> Result<(), StoreError> {
         let mut names = Vec::new();
         for entry in self.dir.entries().map_err(PackError::from)? {
-            if Path::new(&entry.name)
-                .extension()
-                .is_some_and(|e| e == "pack")
-            {
+            if is_pack_name(&entry.name) {
                 names.push(entry.name);
             }
         }
@@ -958,6 +955,12 @@ pub(crate) fn read_whole(
         ObjectKind::Content => pack.copy_content(entry, &mut io::sink()),
         _ => pack.read_record(entry).map(drop),
     }
+}
+
+/// Whether `name`, in the packs folder, is a pack's. Reads look in every one, so `tidy` must
+/// judge every one: this is the one place that says which.
+pub(crate) fn is_pack_name(name: &OsStr) -> bool {
+    Path::new(name).extension().is_some_and(|e| e == "pack")
 }
 
 /// A copy that fails its own checks is damage; an I/O error or a lack of memory says nothing

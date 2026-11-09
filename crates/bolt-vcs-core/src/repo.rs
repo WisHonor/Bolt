@@ -117,8 +117,8 @@ pub enum RepoError {
         save.map_or_else(|| "A save".to_owned(), |id| format!("Save {}", id.short_hex()))
     )]
     BoltName { save: Option<Id>, current: bool },
-    /// `tidy` can't tell what pack `path` keeps: `why` it can't open, read or check it, or `None`
-    /// when it holds a conflict record, which this version doesn't follow.
+    /// `tidy` can't tell what pack `path` keeps: `why` it can't open, read or check it, or a chunk
+    /// list in it, or `None` when it holds a conflict record, which this version doesn't follow.
     #[error(
         "Bolt can't tidy this project: pack {} {}.",
         escape(&path.display().to_string(), false),
@@ -250,7 +250,7 @@ impl RepoError {
                 RepoError::CantTidy { .. } => {
                     "Nothing was removed. Check the pack's permissions. If it is damaged for good, \
                      moving it out of .bolt/store/packs lets `bolt tidy` run, losing what only it \
-                     holds."
+                     holds, and the chunks only its chunk lists name."
                 }
                 RepoError::HeadLost { .. } => {
                     "Your saves are safe. `bolt undo --list` lists the entries where the diary may \

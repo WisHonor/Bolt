@@ -148,6 +148,7 @@ fn tidy_stops_at_a_pack_it_cannot_read() {
     );
     let hint = doc["error"]["hint"].as_str().unwrap();
     assert!(hint.contains(".bolt/store/packs"), "{doc}");
+    assert!(hint.contains("only its chunk lists name"), "{doc}");
     // Nothing was removed.
     assert_eq!(env.standing(), before);
 }

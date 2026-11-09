@@ -5,7 +5,7 @@ use crate::fsio::{self, fault_point};
 use crate::id::Id;
 use crate::pack::{IndexEntry, ObjectKind, PackError, PackReader, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository};
-use crate::store::{is_damage, read_whole};
+use crate::store::{is_damage, is_pack_name, read_whole};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 use bolt_platform::dir::{Dir, EntryType};
@@ -59,10 +59,7 @@ pub(crate) fn merge_small_packs(
     let packs_dir = repo.packs_dir().to_owned();
     let mut on_disk = Vec::new();
     for entry in folder.entries()? {
-        if Path::new(&entry.name)
-            .extension()
-            .is_none_or(|e| e != "pack")
-        {
+        if !is_pack_name(&entry.name) {
             continue;
         }
         // Anything but a file is left for reads to report.

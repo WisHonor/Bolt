@@ -95,7 +95,29 @@ fn two_versions(dir: &Path, repo: &mut Repository) -> (Id, Id, Vec<Id>) {
     let drops = chunks_of(repo, &dropped);
     let own: Vec<Id> = drops.difference(&keeps).copied().collect();
     assert!(!own.is_empty() && own.len() < drops.len(), "{own:?}");
+    let shared_in = holding(repo, &dropped);
+    assert_eq!(shared_in.len(), 1);
+    for id in keeps.intersection(&drops) {
+        assert_eq!(holding(repo, id), shared_in, "{id}");
+    }
     (kept, dropped, own)
+}
+
+/// The packs that hold `id`, by name.
+fn holding(repo: &Repository, id: &Id) -> Vec<String> {
+    let holds = |name: &String| {
+        let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+        pack.find(id).unwrap().is_some()
+    };
+    pack_names(repo).into_iter().filter(holds).collect()
+}
+
+/// Stores `list` again in a pack of its own, as a command a crash stopped can leave it.
+fn store_again(repo: &mut Repository, list: &ChunkList) {
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    packs.add_chunk_list(list).unwrap();
+    repo.store_packs(&lock, packs).unwrap();
 }
 
 /// Every chunk list stored under `file`, from every pack.
@@ -144,9 +166,19 @@ fn discard_text(dir: &Path, repo: &mut Repository, text: &str, days: i64) -> Id 
     repo.current().unwrap().1.folder_change.unwrap().from
 }
 
-/// Sets the modified time of the pack at `path` `hours` back.
+/// Sets the modified time of the pack, or folder, at `path` `hours` back.
 fn set_age(path: &Path, hours: u64) {
-    let file = fs::File::options().write(true).open(path).unwrap();
+    // A folder opens on Windows only with FILE_FLAG_BACKUP_SEMANTICS, and elsewhere only to read,
+    // which lets its owner change its times.
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut options = fs::File::options();
+        options.write(true).custom_flags(0x0200_0000);
+        options.open(path).unwrap()
+    };
+    #[cfg(not(windows))]
+    let file = fs::File::open(path).unwrap();
     let then = SystemTime::now() - Duration::from_secs(hours * 3600);
     file.set_modified(then).unwrap();
 }
@@ -638,8 +670,13 @@ fn tidy_stopped_at_every_step_loses_no_chunk() {
         assert!(n < 100, "tidy never finished");
         let (dir, mut repo) = project(50);
         let (kept, dropped, own) = two_versions(dir.path(), &mut repo);
+        // A file nothing keeps any more, but for its list stored again in a young pack.
+        let young = save_big(dir.path(), &mut repo, &noise(6, 256 << 10), 40);
+        step(&mut repo, 40, false).unwrap();
         crash_leftover(&mut repo);
         age_packs(&repo, 48);
+        let list = lists_of(&repo, &young).remove(0);
+        store_again(&mut repo, &list);
         let objects = stored(&repo, &marked(&repo));
         assert_eq!(objects.get(&kept), Some(&ObjectKind::ChunkList));
         fault::arm(n);
@@ -650,12 +687,13 @@ fn tidy_stopped_at_every_step_loses_no_chunk() {
             for (id, kind) in &objects {
                 assert!(reads(repo, id, *kind), "{why}: {kind:?} {id}");
             }
+            assert!(reads(repo, &young, ObjectKind::ChunkList), "{why}: young");
         };
         all_read(&repo);
         let done = ran_to_the_end(&repo, &result, &why, &mut stopped);
         tidied(&mut repo);
         all_read(&repo);
-        assert!(!reads(&repo, &dropped, ObjectKind::ChunkList), "{why}");
+        assert!(lists_of(&repo, &dropped).is_empty(), "{why}");
         for id in &own {
             assert!(!reads(&repo, id, ObjectKind::Content), "{why}: {id}");
         }
@@ -819,14 +857,7 @@ fn tidy_stops_at_a_pack_it_cannot_read() {
             // What tidy would remove, were it to go on.
             let (entry, _) = crash_leftover(&mut repo);
             age_packs(&repo, 48);
-            let shared = pack_names(&repo)
-                .into_iter()
-                .map(|name| repo.packs_dir().join(name))
-                .find(|path| {
-                    let pack = PackReader::open(path).unwrap();
-                    pack.find(&dropped).unwrap().is_some()
-                })
-                .unwrap();
+            let shared = repo.packs_dir().join(&holding(&repo, &dropped)[0]);
             let junk = repo.packs_dir().join("zz.pack");
             let path = match damage {
                 "not a pack" => {
@@ -847,9 +878,7 @@ fn tidy_stops_at_a_pack_it_cannot_read() {
                 }
                 _ => shared,
             };
-            if damage != "a folder" {
-                set_age(&path, if young { 1 } else { 48 });
-            }
+            set_age(&path, if young { 1 } else { 48 });
             let held = (damage == "locked").then(|| lock_pack(&path));
             if held.as_ref().is_some_and(Option::is_none) {
                 // Root reads everything.
@@ -867,12 +896,64 @@ fn tidy_stops_at_a_pack_it_cannot_read() {
                     let hint = e.hint().unwrap();
                     assert!(hint.starts_with("Nothing was removed"), "{why}: {hint}");
                     assert!(hint.contains(".bolt/store/packs"), "{why}: {hint}");
+                    assert!(hint.contains("only its chunk lists name"), "{why}: {hint}");
                 }
                 other => panic!("{why}: {other:?}"),
             }
             assert_eq!(pack_names(&repo), before, "{why}");
             assert!(reads(&repo, &entry, ObjectKind::DiaryEntry), "{why}");
         }
+    }
+}
+
+/// A chunk list that can't be read stops `tidy`, naming its pack: one in a young pack, and one of
+/// a file it keeps.
+#[test]
+fn a_chunk_list_tidy_cannot_read_stops_it_naming_its_pack() {
+    for young in [true, false] {
+        let (_dir, mut repo) = project(50);
+        let file = hash_content(b"a file");
+        // Compressed, so it fails its check.
+        let list = crate::pack::Prepared {
+            id: file,
+            size: 6,
+            zstd: true,
+            stored: zstd::bulk::compress(b"a list", 3).unwrap(),
+        };
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        packs.add_prepared(ObjectKind::ChunkList, &list).unwrap();
+        let path = packs.finish().unwrap().remove(0);
+        drop(lock);
+        if !young {
+            plant_root(&mut repo, |packs| {
+                let entry = Entry {
+                    name: "a.bin".into(),
+                    kind: EntryKind::File,
+                    id: file,
+                    size: 6,
+                };
+                add_listing(packs, vec![entry]).0
+            });
+        }
+        age_packs(&repo, 48);
+        if young {
+            set_age(&path, 1);
+        }
+        let before = pack_names(&repo);
+        let stopped = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {
+            panic!("an estimate was given")
+        });
+        match stopped {
+            Err(e @ RepoError::CantTidy { .. }) => {
+                let said = e.to_string();
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(said.contains(name) && said.contains("compressed"), "{said}");
+                assert!(!said.contains("must be kept"), "{said}");
+            }
+            other => panic!("young: {young}: {other:?}"),
+        }
+        assert_eq!(pack_names(&repo), before, "young: {young}");
     }
 }
 
@@ -1028,12 +1109,8 @@ fn tidy_keeps_the_chunks_a_young_packs_list_names() {
     step(&mut repo, 40, false).unwrap();
     let list = lists_of(&repo, &file).remove(0);
     age_packs(&repo, 48);
-    // A command a crash stopped stored the list again, but not its chunks, which the store held.
-    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
-    let mut packs = repo.new_packs().unwrap();
-    packs.add_chunk_list(&list).unwrap();
-    repo.store_packs(&lock, packs).unwrap();
-    drop(lock);
+    // Not its chunks, which the store held.
+    store_again(&mut repo, &list);
     let report = tidied(&mut repo);
     assert_eq!(report.packs_young, 1, "{report:?}");
     assert!(reads(&repo, &file, ObjectKind::ChunkList));
