@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5's red-team fixes)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 047](047-git-personal-ignore-lists-read.md) (a `core.excludesFile` Bolt can't read stops the save) and [decision 094](094-red-team-m5-rulings.md) (`GIT_CONFIG_SYSTEM` and `GIT_CONFIG_GLOBAL` follow Git's rules)
+- **Refined by:** [decision 096](096-git-config-system-is-tidied-as-git-tidies-it.md) (`GIT_CONFIG_SYSTEM` is tidied as Git tidies it before it is judged; and Git documents `/dev/null` only for the two variables, not for `core.excludesFile`)
 
 ## Context
 
