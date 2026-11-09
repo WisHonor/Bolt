@@ -22,7 +22,8 @@ use crate::store::Store;
 /// Fails, naming the first few, if any file in `folders`, read through `handles`, is a Git LFS
 /// pointer in place of the base save's file, matched by name as `drive` compares names: it isn't
 /// that file, Git LFS's parser takes it for a pointer, and the pointer gives that file's size.
-/// Only files a save reads are looked at, so none that `trusted` vouches for.
+/// It looks at the files a full save would read, even when the save names paths, so none that
+/// `trusted` vouches for.
 pub(super) fn pointers(
     store: &Store,
     drive: Drive,
