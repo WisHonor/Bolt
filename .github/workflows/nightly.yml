@@ -83,6 +83,24 @@ jobs:
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" sweep.txt
 
+  # A chunk list of the most chunks a list may hold, each one byte, written out as its 8 MiB
+  # file. Too slow for every push, so it is ignored there and runs here.
+  most-chunks:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Write out a list of 8,388,608 one-byte chunks
+        shell: bash
+        run: |
+          cargo test --release -p bolt-vcs --test corpus_chunks -- --ignored --nocapture --exact a_list_of_the_most_chunks_a_list_may_hold_is_written_out_whole 2>&1 | tee chunks.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" chunks.txt
+
   # The model test of edits, saves, switches, shelves and undos (testing.md §3) with 1,024
   # cases, not the 64 of every push.
   model:

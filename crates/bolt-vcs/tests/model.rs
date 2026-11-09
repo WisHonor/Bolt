@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use bolt_core::diary::{self, Action, FolderChange, Position};
@@ -25,7 +26,7 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 
 mod support;
-use support::Env;
+use support::{Env, noise};
 
 // Names differ in more than letter case, so every drive holds them all. No file name is ever a
 // folder's.
@@ -33,6 +34,8 @@ const FILES: [&str; 6] = ["a", "b", "d/a", "d/c", "d/e/b", "e/a"];
 const FOLDERS: [&str; 3] = ["d", "d/e", "e"];
 // Few lengths, so files often keep their size when they change.
 const LENGTHS: [usize; 3] = [1, 2, 5];
+/// A big file is cut into chunks when saved, from 1 MiB.
+const BIG: usize = 1 << 20;
 /// The shelf numbers `unshelf` asks for.
 const LABELS: [&str; 3] = ["1", "2", "3"];
 /// How many of the steps undo can take `bolt undo --list` shows.
@@ -55,6 +58,17 @@ enum Act {
     Write(&'static str, u8, usize, When),
     /// Writes other bytes of the same length over a file that is there.
     Rewrite(&'static str, u8, When),
+    /// Writes a big file whole, of 1 to 3 MiB that look random, made from the seed.
+    Big(&'static str, u64, usize),
+    /// Puts three bytes into the big file `pick` chooses, at the place `at` picks, moving the rest
+    /// along; or writes them over its own there.
+    Edit {
+        pick: usize,
+        at: usize,
+        bytes: [u8; 3],
+        insert: bool,
+        when: When,
+    },
     /// Turns the executable bit on or off (Unix only; elsewhere it does nothing).
     Flip(&'static str),
     Delete(&'static str),
@@ -123,6 +137,9 @@ fn act() -> impl Strategy<Value = Act> {
         5 => (file(), any::<u8>(), prop::sample::select(&LENGTHS[..]), when())
             .prop_map(|(p, b, n, w)| Act::Write(p, b, n, w)),
         3 => (file(), any::<u8>(), when()).prop_map(|(p, b, w)| Act::Rewrite(p, b, w)),
+        3 => (file(), any::<u64>(), BIG..=3 * BIG).prop_map(|(p, seed, n)| Act::Big(p, seed, n)),
+        4 => (any::<usize>(), any::<usize>(), any::<[u8; 3]>(), any::<bool>(), when())
+            .prop_map(|(pick, at, bytes, insert, when)| Act::Edit { pick, at, bytes, insert, when }),
         1 => file().prop_map(Act::Flip),
         2 => file().prop_map(Act::Delete),
         2 => (file(), file()).prop_map(|(a, b)| Act::Rename(a, b)),
@@ -144,10 +161,30 @@ fn act() -> impl Strategy<Value = Act> {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a file holds, shared by the trees that hold it, as a big one is costly to copy.
+#[derive(Clone, PartialEq, Eq)]
 struct File {
-    bytes: Vec<u8>,
+    bytes: Rc<[u8]>,
     exec: bool,
+}
+
+impl std::fmt::Debug for File {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A big one by its size and ID, so a failure doesn't print megabytes.
+        if self.bytes.len() >= BIG {
+            let id = bolt_core::id::hash_content(&self.bytes).short_hex();
+            return write!(
+                f,
+                "File({} bytes, {id}, exec: {})",
+                self.bytes.len(),
+                self.exec
+            );
+        }
+        f.debug_struct("File")
+            .field("bytes", &self.bytes)
+            .field("exec", &self.exec)
+            .finish()
+    }
 }
 
 /// Files by path, and every folder, a file's included.
@@ -538,6 +575,31 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             let len = m.folder.files.get(path)?.bytes.len();
             write(m, root, path, b, len, when)
         }
+        Act::Big(path, seed, len) => put(m, root, path, noise(seed, len), When::Now),
+        Act::Edit {
+            pick,
+            at,
+            bytes,
+            insert,
+            when,
+        } => {
+            let big: Vec<(&String, &File)> = m
+                .folder
+                .files
+                .iter()
+                .filter(|(_, f)| f.bytes.len() >= BIG)
+                .collect();
+            let (path, old) = big.get(pick % big.len().max(1))?;
+            let (path, old) = ((*path).clone(), &old.bytes);
+            let edited = if insert {
+                let at = at % (old.len() + 1);
+                [&old[..at], &bytes, &old[at..]].concat()
+            } else {
+                let at = at % (old.len() - bytes.len());
+                [&old[..at], &bytes, &old[at + bytes.len()..]].concat()
+            };
+            put(m, root, &path, edited, when)
+        }
         Act::Flip(path) => {
             flip(m, root, path);
             None
@@ -697,9 +759,17 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
 
 /// Writes `len` bytes to `path`, leaving the modified time `when` says.
 fn write(m: &mut Model, root: &Path, path: &str, b: u8, len: usize, when: When) -> Option<String> {
-    let mut bytes: Vec<u8> = (0..len).map(|i| b.wrapping_add(37 * i as u8)).collect();
+    let bytes: Vec<u8> = (0..len)
+        .map(|i| b.wrapping_add((i as u8).wrapping_mul(37)))
+        .collect();
+    put(m, root, path, bytes, when)
+}
+
+/// Writes `bytes` to `path` whole, leaving the modified time `when` says.
+fn put(m: &mut Model, root: &Path, path: &str, mut bytes: Vec<u8>, when: When) -> Option<String> {
+    let len = bytes.len();
     let old = m.folder.files.get(path).cloned();
-    if when != When::Same && old.as_ref().is_some_and(|o| o.bytes == bytes) {
+    if when != When::Same && old.as_ref().is_some_and(|o| *o.bytes == *bytes) {
         bytes[0] ^= 1;
     }
     let at = root.join(path);
@@ -721,22 +791,17 @@ fn write(m: &mut Model, root: &Path, path: &str, b: u8, len: usize, when: When) 
         f.set_modified(t).unwrap();
     }
     let exec = old.as_ref().is_some_and(|o| o.exec);
-    m.folder.put(
-        path,
-        File {
-            bytes: bytes.clone(),
-            exec,
-        },
-    );
     let kept_time = when == When::Same && old.is_some();
+    let missable = kept_time
+        && old_time.is_some_and(long_ago)
+        && old.is_some_and(|o| o.bytes.len() == len && *o.bytes != *bytes);
+    let bytes = bytes.into();
+    m.folder.put(path, File { bytes, exec });
     if kept_time {
         m.shared_time.insert(path.to_owned());
     } else {
         m.shared_time.remove(path);
     }
-    let missable = kept_time
-        && old_time.is_some_and(long_ago)
-        && old.is_some_and(|o| o.bytes.len() == len && o.bytes != bytes);
     missable.then(|| path.to_owned())
 }
 
@@ -1527,7 +1592,7 @@ fn folder_tree(root: &Path) -> Tree {
                 tree.folders.insert(path.clone());
                 todo.push((e.path(), format!("{path}/")));
             } else {
-                let bytes = std::fs::read(e.path()).unwrap();
+                let bytes = std::fs::read(e.path()).unwrap().into();
                 let exec = executable(&meta);
                 tree.files.insert(path, File { bytes, exec });
             }
@@ -1556,6 +1621,7 @@ fn saved_tree(store: &Store, save: Id) -> Tree {
             };
             let mut bytes = Vec::new();
             store.copy_content(&e.id, &mut bytes).unwrap();
+            let bytes = bytes.into();
             tree.files.insert(path, File { bytes, exec });
         }
     }

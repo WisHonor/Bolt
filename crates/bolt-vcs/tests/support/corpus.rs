@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bolt_core::id::hash_content;
 use tempfile::TempDir;
 
 use super::{Env, text};
@@ -12,11 +13,26 @@ use super::{Env, text};
 pub const PAYLOAD: &[u8] = b"PWNED by a hostile save";
 
 /// An entry as `seen` finds it, links never followed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Seen {
     Folder,
     File(Vec<u8>),
     Link(PathBuf),
+}
+
+impl std::fmt::Debug for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Seen::Folder => f.write_str("Folder"),
+            // A big one by its size and ID, so a failure doesn't print megabytes.
+            Seen::File(bytes) if bytes.len() > 4096 => {
+                let id = hash_content(bytes).short_hex();
+                write!(f, "File({} bytes, {id})", bytes.len())
+            }
+            Seen::File(bytes) => f.debug_tuple("File").field(bytes).finish(),
+            Seen::Link(target) => f.debug_tuple("Link").field(target).finish(),
+        }
+    }
 }
 
 /// Everything below `dir`, by path with `/` between names; empty if there is no `dir`.
@@ -80,7 +96,17 @@ impl Case {
         Case::with(|_| {})
     }
 
+    /// A case still on `main`, so a save planted there is the one the project is on, though the
+    /// folder doesn't hold its files.
+    pub fn on_main() -> Case {
+        Case::make(|_| {}, false)
+    }
+
     pub fn with(before_git: impl FnOnce(&Path)) -> Case {
+        Case::make(before_git, true)
+    }
+
+    fn make(before_git: impl FnOnce(&Path), off_main: bool) -> Case {
         let env = Env::empty();
         env.bolt().arg("start").assert().success();
         before_git(env.root());
@@ -88,9 +114,11 @@ impl Case {
         std::fs::create_dir_all(&hooks).unwrap();
         std::fs::write(env.root().join(".git/config"), b"[core]\n").unwrap();
         std::fs::write(hooks.join("pre-commit.sample"), b"#!/bin/sh\n").unwrap();
-        let first = env.state().1.lines["main"].to_hex();
-        let out = env.bolt().args(["goto", &first]).output().unwrap();
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        if off_main {
+            let first = env.state().1.lines["main"].to_hex();
+            let out = env.bolt().args(["goto", &first]).output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        }
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("theirs.txt"), b"theirs").unwrap();
         let mut case = Case {

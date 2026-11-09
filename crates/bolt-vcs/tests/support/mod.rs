@@ -10,16 +10,17 @@ pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command as Bolt;
+use bolt_core::chunks::{Chunk, ChunkList, chunk_len, is_cut};
 use bolt_core::diary::{Action, DiaryEntry, State};
 use bolt_core::history::current_save;
-use bolt_core::id::{ChangeId, ContentHasher, Id};
+use bolt_core::id::{ChangeId, ContentHasher, Id, hash_content};
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackReader, PackSet};
+use bolt_core::pack::{ObjectKind, PackReader, PackSet, Prepared};
 use bolt_core::repo::Repository;
 use bolt_core::save::{EXTRA_GIT_COMMIT, Person, Save};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
@@ -265,22 +266,38 @@ pub fn saved_files(env: &Env, save: Id) -> Files {
 pub fn write_noise(path: &Path, seed: u64, size: u64) -> Id {
     let mut file = std::fs::File::create(path).unwrap();
     let mut hasher = ContentHasher::new();
-    let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut state = noise_from(seed);
     let mut block = vec![0u8; 1 << 20];
     let mut left = size;
     while left > 0 {
         let n = left.min(block.len() as u64) as usize;
-        for word in block[..n].chunks_mut(8) {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
-        }
+        fill_noise(&mut state, &mut block[..n]);
         file.write_all(&block[..n]).unwrap();
         hasher.update(&block[..n]);
         left -= n as u64;
     }
     hasher.finish()
+}
+
+/// `len` bytes that look random, made from `seed`: what `write_noise` writes.
+pub fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut bytes = vec![0; len];
+    fill_noise(&mut noise_from(seed), &mut bytes);
+    bytes
+}
+
+fn noise_from(seed: u64) -> u64 {
+    seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1
+}
+
+/// Fills `block` with the generator's next bytes; any block but the last a multiple of 8 long.
+fn fill_noise(state: &mut u64, block: &mut [u8]) {
+    for word in block.chunks_mut(8) {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
+    }
 }
 
 /// The ID of the file at `path`.
@@ -370,7 +387,7 @@ pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id
 }
 
 /// Stores the folder listings that hold `entries` (a path, a kind, and a file's bytes or a link's
-/// target) and returns the top one's ID.
+/// target, each stored as `add_file` stores it) and returns the top one's ID.
 pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
     let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
     for &(path, kind, bytes) in entries {
@@ -378,7 +395,7 @@ pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id 
         folders.entry(up.to_owned()).or_default().push(Entry {
             name: name.to_owned(),
             kind,
-            id: pack.add_content(bytes).unwrap(),
+            id: add_file(pack, bytes),
             size: bytes.len() as u64,
         });
         // Every folder above, even one that holds only folders.
@@ -514,6 +531,90 @@ pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
         folder_change: None,
     };
     repo.commit(&lock, pack, &diary).unwrap();
+}
+
+// Big files as Bolt stores them, and chunk lists no honest writer makes.
+
+/// `bytes` cut as Bolt cuts a big file: its chunk list, and its chunks.
+pub fn cut(bytes: &[u8]) -> (ChunkList, Vec<&[u8]>) {
+    let mut chunks = Vec::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let (chunk, after) = rest.split_at(chunk_len(rest));
+        chunks.push(chunk);
+        rest = after;
+    }
+    let list = ChunkList {
+        file: hash_content(bytes),
+        size: bytes.len() as u64,
+        chunks: chunks
+            .iter()
+            .map(|c| Chunk {
+                id: hash_content(c),
+                size: c.len() as u64,
+            })
+            .collect(),
+    };
+    (list, chunks)
+}
+
+/// Stores `bytes` as Bolt stores a big file, its chunks and then its chunk list; the file's ID.
+pub fn add_chunked(pack: &mut PackSet, bytes: &[u8]) -> Id {
+    let (list, chunks) = cut(bytes);
+    for chunk in chunks {
+        pack.add_content(chunk).unwrap();
+    }
+    pack.add_chunk_list(&list).unwrap();
+    list.file
+}
+
+/// Stores a file's bytes as Bolt stores them: cut into chunks if this thread's cut sizes take
+/// them, else whole; its ID.
+pub fn add_file(pack: &mut PackSet, bytes: &[u8]) -> Id {
+    if is_cut(bytes.len() as u64) {
+        add_chunked(pack, bytes)
+    } else {
+        pack.add_content(bytes).unwrap()
+    }
+}
+
+/// Stores `record` as it is, however it decodes, as a chunk list of the file `file` of `size`
+/// bytes.
+pub fn add_list_record(pack: &mut PackSet, file: Id, size: u64, record: Vec<u8>) {
+    let entry = Prepared {
+        id: file,
+        size,
+        zstd: false,
+        stored: record,
+    };
+    pack.add_prepared(ObjectKind::ChunkList, &entry).unwrap();
+}
+
+/// Stores a top listing of files, each named by the ID and size it is saved with, whatever the
+/// store holds for them; its ID.
+pub fn top_listing(pack: &mut PackSet, files: &[(&str, Id, u64)]) -> Id {
+    let entries = files
+        .iter()
+        .map(|&(name, id, size)| Entry {
+            name: name.to_owned(),
+            kind: EntryKind::File,
+            id,
+            size,
+        })
+        .collect();
+    let listing = Listing::new(entries).unwrap();
+    pack.add_record(ObjectKind::FolderListing, &listing.encode())
+        .unwrap()
+}
+
+/// Moves packs of what `add` stores into the store of the project at `root`, though nothing names
+/// it; their paths.
+pub fn add_pack(root: &Path, add: impl FnOnce(&mut PackSet)) -> Vec<PathBuf> {
+    let mut repo = Repository::open(root).unwrap();
+    let _lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    add(&mut pack);
+    pack.finish().unwrap()
 }
 
 // Commands that run under a limit: of time, or of memory.
