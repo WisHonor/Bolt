@@ -34,20 +34,7 @@ impl Case {
 
     /// `bolt goto main --json`: its exit code, its document and what it printed to stderr.
     fn goto_main(&self) -> (Option<i32>, serde_json::Value, String) {
-        self.goto("main")
-    }
-
-    /// `bolt goto <target> --json`, as `goto_main`.
-    fn goto(&self, target: &str) -> (Option<i32>, serde_json::Value, String) {
-        let out = self
-            .env
-            .bolt()
-            .args(["goto", target, "--json"])
-            .output()
-            .unwrap();
-        let doc = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stdout)));
-        (out.status.code(), doc, text(&out.stderr))
+        self.run_json(&["goto", "main"])
     }
 }
 
@@ -700,7 +687,7 @@ fn a_hard_link_at_a_written_path_keeps_the_other_names_file() {
     let mut case = Case::new();
     let (old, new) = (big(1), big(2));
     case.plant(&[("big.bin", File, &old), ("small.txt", File, b"old")]);
-    let (code, doc, _) = case.goto(&main_tip(&case.env).to_hex());
+    let (code, doc, _) = case.run_json(&["goto", &main_tip(&case.env).to_hex()]);
     assert_eq!(code, Some(0), "{doc}");
     // Each file is now a hard link to one beside the project, holding what the save expects.
     for (name, bytes) in [("big.bin", &old[..]), ("small.txt", b"old")] {

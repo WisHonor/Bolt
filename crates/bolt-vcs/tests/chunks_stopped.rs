@@ -1,6 +1,6 @@
-//! Saves of a big file that stop part way. The pack limit these tests lower, so that a save fills
-//! several packs while it reads one file, reaches every command in their process, so they keep a
-//! file of their own.
+//! Saves, discards and shelves of a big file that stop part way. The pack limit these tests lower,
+//! so that a command fills several packs while it stores one file, reaches every command in their
+//! process, so they keep a file of their own.
 #![cfg(feature = "fault-injection")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -65,40 +65,6 @@ fn a_big_file_changed_during_the_save_stops_it() {
     );
 }
 
-#[test]
-fn a_save_stopped_between_chunks_leaves_the_project_as_it_was() {
-    let mut between_chunks = false;
-    for n in 1.. {
-        assert!(n < 300, "the save never finished");
-        let (dir, id) = with_a_big_file();
-        let before = head(&dir);
-        fault::arm(n);
-        let saved = save_here(dir.path(), "Big");
-        fault::disarm();
-        // Once a stop no longer stops it, it has saved.
-        let Err(stop) = saved else {
-            assert_eq!(top_folder(dir.path()).get("big.bin").unwrap().id, id);
-            break;
-        };
-        between_chunks |= format!("{stop:?}").contains("packs:rolled-over");
-        assert_eq!(head(&dir), before, "fault {n}");
-        assert_eq!(id_of(&dir.path().join("big.bin")), id, "fault {n}");
-        // The next save stores it, with what the stopped one left or without.
-        save_here(dir.path(), "Big").unwrap();
-        assert_eq!(
-            top_folder(dir.path()).get("big.bin").unwrap().id,
-            id,
-            "fault {n}"
-        );
-        let report = verify_store(&dir.path().join(".bolt/store/packs"));
-        assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
-    }
-    assert!(
-        between_chunks,
-        "no stop fell between two of the file's chunks"
-    );
-}
-
 /// Every file of every save the diary names, from `head` back to the start, each read back whole:
 /// the lines', the position's, the shelves' and both of each folder change.
 fn files_named(root: &Path) -> HashSet<Id> {
@@ -133,6 +99,42 @@ fn files_named(root: &Path) -> HashSet<Id> {
         }
     }
     files
+}
+
+#[test]
+fn a_save_stopped_between_chunks_leaves_the_project_as_it_was() {
+    let mut between_chunks = false;
+    for n in 1.. {
+        assert!(n < 300, "the save never finished");
+        let (dir, id) = with_a_big_file();
+        let before = head(&dir);
+        fault::arm(n);
+        let saved = save_here(dir.path(), "Big");
+        fault::disarm();
+        // Once a stop no longer stops it, it has saved.
+        let Err(stop) = saved else {
+            assert_eq!(top_folder(dir.path()).get("big.bin").unwrap().id, id);
+            assert!(files_named(dir.path()).contains(&id));
+            break;
+        };
+        between_chunks |= format!("{stop:?}").contains("packs:rolled-over");
+        assert_eq!(head(&dir), before, "fault {n}");
+        assert_eq!(id_of(&dir.path().join("big.bin")), id, "fault {n}");
+        // The next save stores it, with what the stopped one left or without, and it reads back.
+        save_here(dir.path(), "Big").unwrap();
+        assert_eq!(
+            top_folder(dir.path()).get("big.bin").unwrap().id,
+            id,
+            "fault {n}"
+        );
+        assert!(files_named(dir.path()).contains(&id), "fault {n}");
+        let report = verify_store(&dir.path().join(".bolt/store/packs"));
+        assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
+    }
+    assert!(
+        between_chunks,
+        "no stop fell between two of the file's chunks"
+    );
 }
 
 #[test]

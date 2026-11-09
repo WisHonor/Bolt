@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bolt_core::id::hash_content;
 use tempfile::TempDir;
@@ -134,6 +135,23 @@ impl Case {
 
     pub fn root(&self) -> &Path {
         self.env.root()
+    }
+
+    /// `bolt <args> --json` in the project, stopped if it runs a minute: its exit code, its
+    /// document and what it printed to stderr.
+    pub fn run_json(&self, args: &[&str]) -> (Option<i32>, serde_json::Value, String) {
+        let out = self
+            .env
+            .bolt()
+            .args(args)
+            .arg("--json")
+            .timeout(Duration::from_secs(60))
+            .output()
+            .unwrap();
+        let stderr = text(&out.stderr);
+        let doc = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}: {}{stderr}", text(&out.stdout)));
+        (out.status.code(), doc, stderr)
     }
 
     /// Notes what `.git`, `.bolt` and the folder beside hold now.

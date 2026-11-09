@@ -8,7 +8,7 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bolt_core::chunks::{Chunk, ChunkList, MAX_CHUNKS};
 use bolt_core::encoding::Writer;
@@ -57,35 +57,20 @@ fn store_all(pack: &mut PackSet, chunks: &[&[u8]]) {
     }
 }
 
-/// `bolt <args> --json`, stopped if it runs a minute: its exit code and document.
-fn json(case: &Case, args: &[&str]) -> (Option<i32>, Value) {
-    let out = case
-        .env
-        .bolt()
-        .args(args)
-        .arg("--json")
-        .timeout(Duration::from_secs(60))
-        .output()
-        .unwrap();
-    let doc = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", text(&out.stderr)));
-    (out.status.code(), doc)
-}
-
 /// What the commands should come to: a refusal saying this, or the file read from a good copy,
 /// with the pack holding a bad one named in a warning when there is one.
-enum Read {
+enum Expect {
     Refused(String),
     Good { named: bool },
 }
 
 /// A refusal of the chunk `c`, which the store doesn't hold as content of its size.
-fn not_held(c: Chunk) -> Read {
+fn not_held(c: Chunk) -> Expect {
     let why = format!(
         "names chunk {} of {} bytes, which isn't in the store",
         c.id, c.size
     );
-    Read::Refused(why)
+    Expect::Refused(why)
 }
 
 /// Fails unless `doc` refuses the file `p` names as damage in its pack, saying `why`, after
@@ -115,19 +100,19 @@ fn read_well(doc: &Value, p: &Planted, named: bool) {
 /// Runs the commands over what `make` plants: `goto` onto the save from the project's first one;
 /// then, in a project on the save with its own `big.bin` unsaved, `status`, `show`, `changes` and
 /// `discard`.
-fn over(make: impl Fn(&Path) -> Planted, read: Read) {
+fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
     let stopped = "A switch between saves stopped at big.bin: ";
     let holding = |bytes: &[u8]| BTreeMap::from([("big.bin".to_owned(), file(bytes))]);
     let case = Case::new();
     let p = make(case.root());
-    let (code, doc) = json(&case, &["goto", "main"]);
-    match &read {
-        Read::Refused(why) => {
+    let (code, doc, _) = case.run_json(&["goto", "main"]);
+    match &expect {
+        Expect::Refused(why) => {
             assert_eq!(code, Some(1), "{doc}");
             refused(&doc, &p, stopped, why);
             assert!(project_entries(&case.env).is_empty());
         }
-        Read::Good { named } => {
+        Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
             read_well(&doc, &p, *named);
             assert_eq!(project_entries(&case.env), holding(&big()));
@@ -139,7 +124,7 @@ fn over(make: impl Fn(&Path) -> Planted, read: Read) {
     let p = make(case.root());
     std::fs::write(case.root().join("big.bin"), MINE).unwrap();
     // Neither reads the file's contents, only its ID and size.
-    let (code, doc) = json(&case, &["status"]);
+    let (code, doc, _) = case.run_json(&["status"]);
     assert_eq!(code, Some(0), "{doc}");
     let modified = json!([{"path": "big.bin", "change": "modified", "kind": "file",
         "old_size": p.size, "new_size": MINE.len()}]);
@@ -148,32 +133,32 @@ fn over(make: impl Fn(&Path) -> Planted, read: Read) {
         (&modified, 0),
         "{doc}"
     );
-    let (code, doc) = json(&case, &["show"]);
+    let (code, doc, _) = case.run_json(&["show"]);
     assert_eq!(code, Some(0), "{doc}");
     let added = json!([{"path": "big.bin", "change": "added", "kind": "file",
         "old_size": null, "new_size": p.size}]);
     assert_eq!((&doc["changes"], kinds(&doc).len()), (&added, 0), "{doc}");
-    let (code, doc) = json(&case, &["changes"]);
-    match &read {
-        Read::Refused(why) => {
+    let (code, doc, _) = case.run_json(&["changes"]);
+    match &expect {
+        Expect::Refused(why) => {
             assert_eq!(code, Some(1), "{doc}");
             refused(&doc, &p, "", why);
         }
-        Read::Good { named } => {
+        Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
             assert_eq!(doc["changes"][0]["lines"], "binary", "{doc}");
             read_well(&doc, &p, *named);
         }
     }
-    let (code, doc) = json(&case, &["discard"]);
-    match &read {
-        Read::Refused(why) => {
+    let (code, doc, _) = case.run_json(&["discard"]);
+    match &expect {
+        Expect::Refused(why) => {
             assert_eq!(code, Some(1), "{doc}");
             refused(&doc, &p, stopped, why);
             // The unsaved file stays as it was.
             assert_eq!(project_entries(&case.env), holding(MINE));
         }
-        Read::Good { named } => {
+        Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
             assert_eq!(doc["restored"], json!(["big.bin"]), "{doc}");
             read_well(&doc, &p, *named);
@@ -194,7 +179,7 @@ fn a_chunk_list_naming_another_files_chunks_is_never_written_out() {
     };
     over(
         |root| plant_list(root, &list, &chunks),
-        Read::Refused("names build another file".into()),
+        Expect::Refused("names build another file".into()),
     );
 }
 
@@ -235,18 +220,26 @@ fn a_chunk_list_naming_a_missing_chunk_is_refused() {
 fn a_chunk_list_under_a_chunks_id_is_never_read_as_the_chunk() {
     let big = big();
     let (list, mut chunks) = cut(&big);
-    // The second chunk is held only as a chunk list naming that chunk itself, which a read that
-    // took it for the chunk would follow for ever.
+    // The second chunk is held only as a chunk list of its two halves, each stored whole. They
+    // build its bytes, so a read that took the list for the chunk would write the file.
     let second = list.chunks[1];
+    let held = chunks.remove(1);
+    let halves: Vec<&[u8]> = held.chunks(held.len().div_ceil(2)).collect();
     let inner = ChunkList {
         file: second.id,
         size: second.size,
-        chunks: vec![second],
+        chunks: halves
+            .iter()
+            .map(|h| Chunk {
+                id: hash_content(h),
+                size: h.len() as u64,
+            })
+            .collect(),
     };
-    let held = chunks.remove(1);
     let make = |root: &Path| {
         plant(root, list.file, list.size, |pack| {
             store_all(pack, &chunks);
+            store_all(pack, &halves);
             pack.add_chunk_list(&inner).unwrap();
             pack.add_chunk_list(&list).unwrap();
         })
@@ -258,7 +251,7 @@ fn a_chunk_list_under_a_chunks_id_is_never_read_as_the_chunk() {
         add_pack(root, |pack| store_all(pack, &[held]));
         p
     };
-    over(with_the_chunk, Read::Good { named: false });
+    over(with_the_chunk, Expect::Good { named: false });
 }
 
 #[test]
@@ -279,7 +272,7 @@ fn a_chunk_list_claiming_10_gib_for_3_small_chunks_is_refused() {
     let why = "is invalid: invalid value: the chunk sizes don't add up to the file size";
     over(
         |root| plant_list(root, &list, &thirds),
-        Read::Refused(why.into()),
+        Expect::Refused(why.into()),
     );
 }
 
@@ -305,7 +298,7 @@ fn a_chunk_count_far_past_its_bytes_is_refused() {
         })
     };
     let why = "is invalid: invalid value: the chunk count is more than the record holds";
-    over(make, Read::Refused(why.into()));
+    over(make, Expect::Refused(why.into()));
 }
 
 #[test]
@@ -331,7 +324,7 @@ fn a_damaged_chunk_list_beside_a_good_whole_copy_is_passed_over_and_named() {
             pack: name_of(&damaged[0]),
         }
     };
-    over(make, Read::Good { named: true });
+    over(make, Expect::Good { named: true });
 }
 
 /// The ID of `size` bytes of `byte`, hashed a block at a time.
