@@ -306,28 +306,40 @@ impl<'a> UserGit<'a> {
         })
     }
 
-    /// Gives `each` every setting Bolt reads in the user's own Git settings files, in Git's
-    /// order: the file `GIT_CONFIG_SYSTEM` names, unless `GIT_CONFIG_NOSYSTEM` is true, then the
-    /// file `GIT_CONFIG_GLOBAL` names, or when that isn't set `$XDG_CONFIG_HOME/git/config` and
-    /// `~/.gitconfig`. Set to nothing, either variable names no file, as in Git.
-    fn read_files(&self, each: &mut dyn FnMut(UserSetting, &Place)) -> Result<(), ConfigError> {
+    /// The user's own Git settings files, in Git's order, each with whether it is the user's own,
+    /// which Git skips when it may not read it: the file `GIT_CONFIG_SYSTEM` names, unless
+    /// `GIT_CONFIG_NOSYSTEM` is true, then the file `GIT_CONFIG_GLOBAL` names, or when that isn't
+    /// set `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`. Set to nothing, or to a name for no
+    /// file, either variable names no file, as in Git.
+    fn files(&self) -> Result<Vec<(PathBuf, bool)>, ConfigError> {
         let named = |key| {
             let path = (self.var)(key)?;
-            Some((!path.is_empty()).then(|| self.top.join(path)))
+            let none = path.is_empty() || names_no_file(path.as_encoded_bytes(), cfg!(windows));
+            Some((!none).then(|| self.top.join(path)))
         };
         let mut files = Vec::new();
         if !self.no_system()? {
-            files.extend(named("GIT_CONFIG_SYSTEM").flatten());
+            files.extend(
+                named("GIT_CONFIG_SYSTEM")
+                    .flatten()
+                    .map(|path| (path, false)),
+            );
         }
-        match named("GIT_CONFIG_GLOBAL") {
-            Some(global) => files.extend(global),
-            None => files.extend([
+        let own = match named("GIT_CONFIG_GLOBAL") {
+            Some(global) => Vec::from_iter(global),
+            None => vec![
                 self.xdg.join("git").join("config"),
                 self.home.join(".gitconfig"),
-            ]),
-        }
-        for path in files {
-            read_git_settings(&path, &self.home, 0, each)?;
+            ],
+        };
+        files.extend(own.into_iter().map(|path| (path, true)));
+        Ok(files)
+    }
+
+    /// Gives `each` every setting Bolt reads in the user's own Git settings files, in Git's order.
+    fn read_files(&self, each: &mut dyn FnMut(UserSetting, &Place)) -> Result<(), ConfigError> {
+        for (path, own) in self.files()? {
+            read_git_settings(&path, &self.home, 0, own, each)?;
         }
         Ok(())
     }
@@ -387,13 +399,11 @@ impl<'a> UserGit<'a> {
             match setting {
                 // Git takes a relative include only from a file, from that file's folder.
                 Some(UserSetting::Include(value)) => {
-                    let included = git_path(
-                        &utf8(value, "include.path", &place)?,
-                        &self.home,
-                        None,
-                        &place,
-                    )?;
-                    read_git_settings(&included, &self.home, 1, each)?;
+                    let value = utf8(value, "include.path", &place)?;
+                    let path = git_path(&value, "include.path", &self.home, None, &place)?;
+                    if let Some(included) = path {
+                        read_git_settings(&included, &self.home, 1, false, each)?;
+                    }
                 }
                 Some(other) => each(other, &place),
                 None => {}
@@ -422,7 +432,13 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
     if value.is_empty() {
         return Ok(None);
     }
-    git_path(&value, &git.home, Some(git.top), &place).map(Some)
+    git_path(
+        &value,
+        "core.excludesFile",
+        &git.home,
+        Some(git.top),
+        &place,
+    )
 }
 
 /// `git_lfs_storage` with the places given, so tests can choose them.
@@ -484,21 +500,22 @@ const MAX_INCLUDE_DEPTH: usize = 10;
 
 /// Reads `path`, a file of the user's own Git settings `depth` includes down, giving `each` every
 /// setting Bolt reads in it but an include, with the file that holds it. A plain include is read
-/// where it stands, as Git reads it (decision 060); one that isn't there is skipped, as in Git.
-/// `/dev/null` holds nothing, as Git reads it everywhere, so it can stand for no file at all.
+/// where it stands, as Git reads it (decision 060). As in Git, a file is skipped when it isn't
+/// there or a file stands where a folder on its path should, and, when it is the user's `own`,
+/// when Bolt may not read it.
 fn read_git_settings(
     path: &Path,
     home: &Path,
     depth: usize,
+    own: bool,
     each: &mut dyn FnMut(UserSetting, &Place),
 ) -> Result<(), ConfigError> {
-    if path.as_os_str() == "/dev/null" {
-        return Ok(());
-    }
+    use std::io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
     let place = Place::File(path.to_owned());
     let text = match safe_fs::read_capped_following_links(path, MAX_GIT_SETTINGS_BYTES) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory) => return Ok(()),
+        Err(e) if own && e.kind() == PermissionDenied => return Ok(()),
         Err(e) => return Err(place.error(e.to_string())),
     };
     if depth > MAX_INCLUDE_DEPTH {
@@ -515,8 +532,11 @@ fn read_git_settings(
                 // A relative include is from the including file's folder.
                 let folder = path.parent().unwrap_or(Path::new(""));
                 let value = utf8(value, "include.path", &place)?;
-                let included = git_path(&value, home, Some(folder), &place)?;
-                read_git_settings(&included, home, depth + 1, each)?;
+                if let Some(included) =
+                    git_path(&value, "include.path", home, Some(folder), &place)?
+                {
+                    read_git_settings(&included, home, depth + 1, false, each)?;
+                }
             }
             other => each(other, &place),
         }
@@ -524,22 +544,39 @@ fn read_git_settings(
     Ok(())
 }
 
-/// `value`, a path set at `place`, as Git expands it: `~` is the home folder, an absolute path
-/// stays as it is, and a relative one is from `folder`. With no folder, as for a variable's, Git
-/// refuses a relative one.
+/// Whether `value`, a path a Git setting or variable gives, names no file, as Git reads it: the
+/// exact text `/dev/null`, and on Windows (`windows`) `nul` in any case, which Git opens as the
+/// null device. It is judged on the value as written, before `~/` is expanded or it is joined to
+/// a folder, which on Windows would make `/dev/null` a file on the project's drive.
+fn names_no_file(value: &[u8], windows: bool) -> bool {
+    value == b"/dev/null" || (windows && value.eq_ignore_ascii_case(b"nul"))
+}
+
+/// `value`, the path `setting` is set to at `place`, as Git expands it: none for a name for no
+/// file; `~` is the home folder; an absolute path stays as it is; and a relative one is from
+/// `folder`. With no folder, as for a variable's include, Git refuses a relative one.
 fn git_path(
     value: &str,
+    setting: &str,
     home: &Path,
     folder: Option<&Path>,
     place: &Place,
-) -> Result<PathBuf, ConfigError> {
+) -> Result<Option<PathBuf>, ConfigError> {
+    if names_no_file(value.as_bytes(), cfg!(windows)) {
+        return Ok(None);
+    }
     let Some(rest) = value.strip_prefix('~') else {
         return match folder {
-            Some(folder) => Ok(folder.join(value)),
-            None if Path::new(value).has_root() => Ok(PathBuf::from(value)),
+            Some(folder) => Ok(Some(folder.join(value))),
+            None if Path::new(value).has_root() => Ok(Some(PathBuf::from(value))),
+            // Git puts the folder it is installed in there.
+            None if value.starts_with("%(prefix)/") => Err(place.error(format!(
+                "Bolt can't expand its {setting}, {value}: %(prefix)/ stands for the folder Git is \
+                 installed in, which Bolt can't tell; write the full path instead"
+            ))),
             None => Err(place.error(format!(
-                "`{value}` is a relative path, which Git takes only from a file and refuses here \
-                 too"
+                "its {setting}, `{value}`, is a relative path, which Git takes only from a file \
+                 and refuses here too"
             ))),
         };
     };
@@ -547,12 +584,12 @@ fn git_path(
     // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
     if rest.starts_with(|c: char| !separator(c)) {
         return Err(place.error(format!(
-            "Bolt can't expand {value}, which names a home folder by its user (~user/); write the \
-             full path instead"
+            "Bolt can't expand its {setting}, {value}, which names a home folder by its user \
+             (~user/); write the full path instead"
         )));
     }
     // Git puts what follows `~` after the home folder, so `~//x` is the home folder's `x`.
-    Ok(home.join(rest.trim_start_matches(separator)))
+    Ok(Some(home.join(rest.trim_start_matches(separator))))
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
@@ -1259,6 +1296,160 @@ mod tests {
         assert_eq!(found.files, Some((b"/system".to_vec(), system)));
         let variable = "GIT_CONFIG_VALUE_0".to_owned();
         assert_eq!(found.variables, Some((Vec::new(), variable)));
+    }
+
+    /// `/dev/null`, and `nul` in any case on Windows, names no file wherever a Git setting or
+    /// variable names one, judged as written: joined to a folder on Windows, `/dev/null` would be
+    /// `C:\dev\null`, which anyone may make.
+    #[test]
+    fn a_name_for_no_file_is_judged_before_it_is_joined_to_a_folder() {
+        for (value, on_windows, elsewhere) in [
+            ("/dev/null", true, true),
+            ("nul", true, false),
+            ("NUL", true, false),
+            ("Nul", true, false),
+            ("C:\\dev\\null", false, false),
+            ("C:/dev/null", false, false),
+            ("\\dev\\null", false, false),
+            ("//dev/null", false, false),
+            ("/dev/null/", false, false),
+            ("/DEV/NULL", false, false),
+            ("nul.txt", false, false),
+            ("C:\\x\\nul", false, false),
+            ("", false, false),
+        ] {
+            assert_eq!(
+                names_no_file(value.as_bytes(), true),
+                on_windows,
+                "{value:?}"
+            );
+            assert_eq!(
+                names_no_file(value.as_bytes(), false),
+                elsewhere,
+                "{value:?}"
+            );
+        }
+        // Where the project's top is on a drive, no name for no file becomes a path on it.
+        let top = Path::new("C:\\project");
+        let files = |name: &'static str| {
+            let vars = [("GIT_CONFIG_SYSTEM", name), ("GIT_CONFIG_GLOBAL", name)];
+            let places = (Path::new("home"), Path::new("xdg"), top);
+            as_git_finds(places, &vars, |git| git.files()).unwrap()
+        };
+        let place = Place::Variable("GIT_CONFIG_VALUE_0".into());
+        let path = |value| git_path(value, "include.path", Path::new("home"), Some(top), &place);
+        assert_eq!(files("/dev/null"), []);
+        assert_eq!(path("/dev/null").unwrap(), None);
+        for name in ["nul", "NUL"] {
+            let want_files = if cfg!(windows) {
+                vec![]
+            } else {
+                vec![(top.join(name), false), (top.join(name), true)]
+            };
+            assert_eq!(files(name), want_files, "{name}");
+            let want_path = (!cfg!(windows)).then(|| top.join(name));
+            assert_eq!(path(name).unwrap(), want_path, "{name}");
+        }
+        // So `core.excludesFile = /dev/null` is no list, and an include of it no include.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let find = |text: &str| {
+            std::fs::write(home.join(".gitconfig"), text).unwrap();
+            excludes(home, &home.join("xdg"), &home.join("project"), &[])
+        };
+        assert_eq!(find("[core]\n\texcludesFile = /dev/null\n").unwrap(), None);
+        let included = "[core]\n\texcludesFile = ~/mine\n[include]\n\tpath = /dev/null\n";
+        assert_eq!(find(included).unwrap(), Some(home.join("mine")));
+        let named = if cfg!(windows) {
+            None
+        } else {
+            Some(home.join("project").join("NUL"))
+        };
+        assert_eq!(find("[core]\n\texcludesFile = NUL\n").unwrap(), named);
+    }
+
+    /// As in Git, a settings file is skipped when a file stands where a folder on its path should
+    /// be, and the user's own when Bolt may not read it; anything else that keeps one from being
+    /// read stops Bolt, a folder or a device included.
+    #[test]
+    fn settings_files_git_skips_are_skipped_and_others_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let xdg = home.join("xdg");
+        std::fs::write(home.join("plain"), "not a folder").unwrap();
+        let under_a_file = home.join("plain").join("config").display().to_string();
+        let find = |vars: &[(&str, &str)]| excludes(home, &xdg, home, vars);
+        let unset = Some(xdg.join("git").join("ignore"));
+        for name in ["GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"] {
+            assert_eq!(
+                find(&[(name, under_a_file.as_str())]).unwrap(),
+                unset,
+                "{name}"
+            );
+        }
+        let include = format!(
+            "[include]\n\tpath = {}\n",
+            home.join("plain").join("x").display()
+        );
+        std::fs::write(home.join("included"), include.replace('\\', "/")).unwrap();
+        let included = home.join("included").display().to_string();
+        assert_eq!(
+            find(&[("GIT_CONFIG_GLOBAL", included.as_str())]).unwrap(),
+            unset
+        );
+        let folder = home.display().to_string();
+        let e = find(&[("GIT_CONFIG_GLOBAL", folder.as_str())]).unwrap_err();
+        assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for device in ["/dev/zero", "//dev/null"] {
+                let e = find(&[("GIT_CONFIG_GLOBAL", device)]).unwrap_err();
+                assert!(
+                    matches!(e, ConfigError::GitSettings { .. }),
+                    "{device}: {e}"
+                );
+            }
+            let locked = home.join("locked");
+            std::fs::write(&locked, "[core]\n\texcludesFile = ~/locked-list\n").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Whoever may read it anyway (root) can't show what Git skips.
+            if std::fs::read(&locked).is_err() {
+                let locked = locked.display().to_string();
+                assert_eq!(
+                    find(&[("GIT_CONFIG_GLOBAL", locked.as_str())]).unwrap(),
+                    unset
+                );
+                let e = find(&[("GIT_CONFIG_SYSTEM", locked.as_str())]).unwrap_err();
+                assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+                let include = format!("[include]\n\tpath = {locked}\n");
+                std::fs::write(home.join(".gitconfig"), include).unwrap();
+                let e = find(&[]).unwrap_err();
+                assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+            }
+        }
+    }
+
+    /// Git puts the folder it is installed in for `%(prefix)/`, which Bolt can't tell.
+    #[test]
+    fn an_include_from_where_git_is_installed_stops_and_asks_for_the_full_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let vars = [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "include.path"),
+            ("GIT_CONFIG_VALUE_0", "%(prefix)/etc/gitconfig"),
+        ];
+        let e = excludes(home, &home.join("xdg"), home, &vars).unwrap_err();
+        let said = e.to_string();
+        assert!(
+            said.contains(
+                "include.path, %(prefix)/etc/gitconfig: %(prefix)/ stands for the folder"
+            ) && said.contains("installed in, which Bolt can't tell; write the full path"),
+            "{said}"
+        );
+        assert!(!said.contains("refuses"), "{said}");
+        assert_eq!(variable_named(e), "GIT_CONFIG_VALUE_0");
     }
 
     #[test]
