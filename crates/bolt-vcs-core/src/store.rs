@@ -1,5 +1,6 @@
 //! One view over every pack in the store. Packs are listed when the store opens, opened when first
-//! searched, and searched on disk; at most `MAX_OPEN` are open at once, however many threads read.
+//! searched, and searched on disk; at most `MAX_OPEN` are open at once, unless every open one is
+//! being read.
 use bolt_platform::dir::Dir;
 
 use crate::chunks::ChunkList;
@@ -77,8 +78,8 @@ impl Wanted {
     }
 }
 
-/// A copy found in pack `n`. It doesn't hold the pack open: however many packs hold an object,
-/// at most `MAX_OPEN` stay open.
+/// A copy found in pack `n`. It doesn't hold the pack open, so the packs holding an object don't
+/// all stay open.
 #[derive(Clone)]
 struct Copy {
     n: usize,
@@ -182,13 +183,14 @@ struct Checked {
     /// Copies that failed, each with the pack its problem was found in (its own, or for a chunk
     /// list a chunk's) and the problem. They are never read again.
     bad: HashMap<At, (PathBuf, String)>,
-    /// Each pack that held a bad copy, with the first problem found in it (`keep_first`).
+    /// Each pack that held a bad copy, with one problem found in it, the first by its text
+    /// (`keep_first`).
     damaged: BTreeMap<PathBuf, String>,
     /// Each pack with a copy that couldn't be read for a reason other than damage, though another
-    /// copy of the same object could, with the first reason found (`keep_first`).
+    /// copy of the same object could, with one reason, the first by its text (`keep_first`).
     unreadable: BTreeMap<PathBuf, String>,
-    /// Each pack that couldn't be opened or searched for a reason other than damage, with the
-    /// first reason found (`keep_first`) and its kind.
+    /// Each pack that couldn't be opened or searched for a reason other than damage, with one
+    /// reason, the first by its text (`keep_first`), and its kind.
     unreadable_packs: BTreeMap<PathBuf, (String, io::ErrorKind)>,
     /// Warnings about the store from the command itself, such as a merge that didn't finish.
     notes: Vec<Warning>,
@@ -410,7 +412,8 @@ impl Store {
         }
     }
 
-    /// The packs found holding a bad copy of an object, each with the first problem found in it.
+    /// The packs found holding a bad copy of an object, each with one problem found in it, the
+    /// first by its text.
     #[must_use]
     pub fn damaged_packs(&self) -> Vec<PackError> {
         self.checked()
@@ -876,7 +879,7 @@ impl Store {
                 return Err(again(e));
             }
             // Closed first, and counted while it opens, so no more than `MAX_OPEN` are open even
-            // for a moment, however many threads look things up.
+            // for a moment, unless every open one is being read.
             packs.make_room();
             packs.opening += 1;
             packs.names.get(n).cloned().flatten()
@@ -973,8 +976,8 @@ fn is_gone(e: &PackError) -> bool {
 
 /// The failure of `failed` that matters most: one that says nothing about the copy, which may be
 /// fine (calling it damage would mislead), then damage, then a pack gone, which says nothing at
-/// all. Of those alike, the first by what it says, which names its pack first: lookups on several
-/// threads meet copies in other orders, and still tell the same one.
+/// all. Of those alike, the first by what it says, so lookups on several threads, which meet
+/// copies in other orders, still tell the same one.
 fn most(failed: impl IntoIterator<Item = PackError>) -> Option<PackError> {
     let rank = |e: &PackError| match e {
         e if is_gone(e) => 0,

@@ -327,7 +327,8 @@ where
     W: Fn(J) -> T + Sync,
 {
     fn drop(&mut self) {
-        // Jobs still running end early, so a stop doesn't wait for long reads.
+        // A job that looks (`stopped`), as a status's hashing does, ends early, so a stop doesn't
+        // wait for its long read. Others run to their end.
         self.shared.stop.store(true, Ordering::Relaxed);
         let mut state = self.shared.lock();
         state.closed = true;
