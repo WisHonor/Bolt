@@ -1078,7 +1078,8 @@ impl<'r> Converter<'r> {
         })
     }
 
-    /// Notes a file that only looks like a Git LFS pointer, listing the first few by path.
+    /// Notes a file that looks like a Git LFS pointer but isn't a Git LFS file, listing the first
+    /// few by path.
     fn lookalike(&mut self, commit: &str, path: &dyn Fn() -> String) {
         let counts = &mut self.counts;
         counts.lfs_lookalike_count = counts.lfs_lookalike_count.saturating_add(1);
