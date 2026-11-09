@@ -97,6 +97,7 @@ See [testing.md](testing.md) §3: fuzz targets for the decoders and parsers list
 - Milestone 4, session 1 (2026-11-08): [findings](redteam/2026-11-08-milestone-4.md); proof tests in `crates/bolt-vcs/tests/redteam6.rs`.
 - Milestone 4, session 2, on the fixes (2026-11-08): [findings](redteam/2026-11-08-milestone-4-session-2.md); proof tests in `crates/bolt-vcs/tests/redteam7.rs`.
 - Milestone 5, session 1 (2026-11-09): [findings](redteam/2026-11-09-milestone-5.md); proof tests in `crates/bolt-vcs/tests/redteam8.rs`, and Windows checks in `redteam8_windows.rs`; rulings in [decision 094](decisions/094-red-team-m5-rulings.md).
+- Milestone 5, session 2, on the fixes (2026-11-09): [findings](redteam/2026-11-09-milestone-5-session-2.md); proof tests in `crates/bolt-vcs/tests/redteam9.rs`, and Windows checks in `redteam9_windows.rs`; rulings in decisions [095](decisions/095-a-git-setting-naming-dev-null-names-no-file.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md).
 
 **Windows name rules.** Checked on 2026-11-01 against Microsoft's "Naming Files, Paths, and Namespaces" page (dated 2024-08-28): Bolt refuses everything on that list, plus the console devices `CONIN$` and `CONOUT$`, while `COM0` and `LPT0`, which are not on it, stay ordinary names. Bolt also refuses `.bolt`'s short names (`bolt~1` to `bolt~4`) and its stream syntax (`.bolt::$INDEX_ALLOCATION`), because Windows treats both as `.bolt`.
 
