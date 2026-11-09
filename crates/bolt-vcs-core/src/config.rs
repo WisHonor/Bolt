@@ -288,8 +288,7 @@ impl<'a> UserGit<'a> {
         fn var(key: &str) -> Option<OsString> {
             std::env::var_os(key)
         }
-        let is_dir = |path: &Path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir());
-        UserGit::new(top, &var, cfg!(windows), &is_dir)
+        UserGit::new(top, &var, cfg!(windows), &Path::is_dir)
     }
 
     /// The user's own Git settings as the environment `var` places them, on Windows or not, with
@@ -460,15 +459,24 @@ impl<'a> UserGit<'a> {
 /// `git_excludes_file` with the places given, so tests can choose them. The repository's own
 /// config is never read for this: it could name any file on the computer.
 fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
-    let mut named = None;
+    let (mut named, mut stop) = (None, None);
     let mut take = |setting: UserSetting, place: &Place| {
         if let UserSetting::ExcludesFile(value) = setting {
+            // Git expands every value as it reads it, so with no home folder the first `~/` stops it.
+            if git.home.is_none() && stop.is_none() && from_home(&value) {
+                stop = Some((value.clone(), place.clone()));
+            }
             named = Some((value, place.clone()));
         }
     };
-    git.read_files(&mut take)?;
-    git.read_variables(&mut take)?;
-    let Some((value, place)) = named else {
+    let read = git
+        .read_files(&mut take)
+        .and_then(|()| git.read_variables(&mut take));
+    // Nothing Git would read after that value counts, an error included.
+    if stop.is_none() {
+        read?;
+    }
+    let Some((value, place)) = stop.or(named) else {
         return Ok(git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore")));
     };
     let value = utf8(value, "core.excludesFile", &place)?;
@@ -759,9 +767,8 @@ fn git_path(
             ))),
         };
     };
-    let separator = |c: char| c == '/' || (cfg!(windows) && c == '\\');
     // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
-    if rest.starts_with(|c: char| !separator(c)) {
+    if !from_home(value.as_bytes()) {
         return Err(place.error(format!(
             "Bolt can't expand its {setting}, {value}, which names a home folder by its user \
              (~user/); write the full path instead"
@@ -775,7 +782,15 @@ fn git_path(
         )));
     };
     // Git puts what follows `~` after the home folder, so `~//x` is the home folder's `x`.
-    Ok(Some(home.join(rest.trim_start_matches(separator))))
+    Ok(Some(
+        home.join(rest.trim_start_matches(std::path::is_separator)),
+    ))
+}
+
+/// Whether Git puts the home folder at the start of `value`: `~` alone or before a separator.
+fn from_home(value: &[u8]) -> bool {
+    let separator = |&c: &u8| std::path::is_separator(char::from(c));
+    value.first() == Some(&b'~') && value.get(1).is_none_or(separator)
 }
 
 /// The home folder Git v2.56.0 takes `~` and its own files from: `HOME`, whatever it is set to;
@@ -1868,6 +1883,8 @@ mod tests {
             assert_eq!(find(&all, windows, &["H:\\me"]), home("/h"), "{windows}");
             assert_eq!(find(&[("HOME", "")], windows, &[]), home(""), "{windows}");
         }
+        let empty_first = [("HOME", ""), drive, path, profile];
+        assert_eq!(find(&empty_first, true, &["H:\\me"]), home(""));
         // On Unix, `HOME` alone.
         assert_eq!(find(&all[1..], false, &["H:\\me"]), None);
         assert_eq!(find(&[], false, &[]), None);
@@ -1924,14 +1941,21 @@ mod tests {
         let full = top.join("mine").display().to_string().replace('\\', "/");
         let list = excludes_file_set(&top.join("list-settings"), &full);
         let named = [("GIT_CONFIG_GLOBAL", list.as_str())];
-        assert_eq!(find(&named).unwrap(), Some(PathBuf::from(full)));
-        let config = excludes_file_set(&xdg.join("git").join("config"), "~/mine");
-        let e = find(&[]).unwrap_err();
-        let said = e.to_string();
-        assert!(
-            said.contains(&config) && said.contains("no home folder"),
-            "{said}"
-        );
+        assert_eq!(find(&named).unwrap(), Some(PathBuf::from(&full)));
+        let config = excludes_file_set(&xdg.join("git").join("config"), "~/old.ignore");
+        // Git stops at the first `~/` value, before a full path set after it, or an error.
+        let set_later = [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.excludesFile"),
+            ("GIT_CONFIG_VALUE_0", full.as_str()),
+        ];
+        for later in [&[][..], &set_later[..], &set_later[..1]] {
+            let said = find(later).unwrap_err().to_string();
+            assert!(
+                said.contains(&config) && said.contains("~/old.ignore: there is no home folder"),
+                "{said}"
+            );
+        }
         let given = [
             ("GIT_CONFIG_GLOBAL", "/dev/null"),
             ("GIT_CONFIG_COUNT", "1"),
