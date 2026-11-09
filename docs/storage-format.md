@@ -260,14 +260,14 @@ Server names and their line names follow the line-name rules, and no two server 
 
 **Shape of `.bolt/` itself** ([decision 025](decisions/025-red-team-m1-rulings.md)). A shared project can arrive with links planted inside `.bolt/`, so a reader must refuse a repository unless `.bolt/`, `store/`, `store/packs/`, `state/`, `cache/` and `tmp/` are real folders (never symbolic links, Windows junctions or any other Windows reparse point), and report a repository whose `store/packs/` or `state/` is missing as damaged. A missing `tmp/` or `cache/` is made again, since neither holds anything worth keeping. Every file Bolt reads or writes in `.bolt/` is opened without following links and must be a regular file (never a pipe, device, folder or Windows reparse point), and reads are capped: `format` at most 4 KiB, `state/head` at most 65 bytes, `state/lock-info` and `config.toml` at most 4 KiB and 1 MiB. Clearing `tmp/` removes only Bolt's own temporary names (`tmp-` followed by 16 lowercase hex digits, optionally followed by `-e` and U+0301, the name under which a command briefly tests whether the drive treats `é` written as one character and as `e` plus an accent as one file).
 
-**`format`** is UTF-8 text, one item per line:
+**`format`** is UTF-8 text, one item per line, each line ending in a single LF, the last one too:
 
 ```text
 bolt-repository 1
 hash blake3
 ```
 
-Further lines of the form `feature <name>` list features the repository uses (for example `feature conflicts` or `feature deltas`). `feature chunks` says the store may hold chunk lists (§6): from milestone 5, `bolt start` and `bolt import` write it, and every command that changes a repository whose `format` lacks it adds it first, right after taking the lock, writing `format` whole through `tmp/` and a rename, before it stores anything ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). A reader must refuse to open a repository whose first line, `hash` line or any `feature` line it doesn't understand, and say that a newer Bolt is needed (decision 008).
+Further lines of the form `feature <name>` list features the repository uses (for example `feature conflicts` or `feature deltas`). `feature chunks` says the store may hold chunk lists (§6): from milestone 5, `bolt start` and `bolt import` write it, and every command that changes a repository whose `format` lacks it adds it first, right after taking the lock, writing `format` whole through `tmp/` and a rename, before it stores anything ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). A reader must refuse to open a repository whose first line, `hash` line or any `feature` line it doesn't understand, and say that a newer Bolt is needed (decision 008). A `format` that doesn't end in an LF, or holds a CR, a blank line, a feature named twice or any other line, is damaged.
 
 **`state/head`** holds the lowercase hex ID of the newest diary entry followed by a newline. It is always replaced whole: written to `tmp/`, flushed to disk, then renamed.
 
