@@ -38,6 +38,8 @@ How they are measured:
   cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project
   ```
 
+  The same log gives the test's first save of the 100,000 files, made before it times `status`: 1.93 s.
+
 ### Windows laptop, 2026-11-09
 
 - **Machine:** AMD Ryzen 7 7730U, 8 cores (16 threads), 16 GB of RAM, a 1 TB NVMe SSD (WD PC SN560); Windows 11 Home 10.0.26200.
@@ -69,6 +71,8 @@ How they are measured:
   ```sh
   cargo test --release -p bolt-vcs --test speed -j 2 -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project --test-threads=2
   ```
+
+  Its first save of the 100,000 files, made before it times `status`, took 5.10 s.
 
 ## 2. Against Git and Git LFS
 
@@ -269,7 +273,7 @@ The whole history of Git's own repository is imported by `bolt` built from `main
 
 **In plain words.** A save does three things to each piece of a big file: finds where to cut, fingerprints it, and tries to shrink it. Timed alone, on one thread, they show which part is slow. Shrinking at zstd's level 19 is, by far.
 
-| On one thread, 64 KiB pieces | Windows laptop | GitHub's Linux runner | GitHub's Windows runner |
+| On one thread | Windows laptop | GitHub's Linux runner | GitHub's Windows runner |
 |---|---|---|---|
 | The cutter, on noise | 1,696 MB/s | 1,491 MB/s | 1,449 MB/s |
 | BLAKE3, on noise | 4,394 MB/s | 3,526 MB/s | 3,552 MB/s |
@@ -280,6 +284,7 @@ The whole history of Git's own repository is imported by `bolt` built from `main
 | zstd level 9, on sound | 752 MB/s | 582 MB/s | 473 MB/s |
 | zstd level 19, on sound | 13 MB/s | 11 MB/s | 10 MB/s |
 
+- The cutter runs over all of the noise as one stream, as a save cuts a big file. BLAKE3 is fed the same noise 64 KiB at a time, and zstd compresses each 64 KiB piece on its own, about the size of a chunk.
 - A MB is a million bytes. Noise is 256 MiB of BLAKE3's extendable output, and sound is 64 MiB of the WAV-like data of §5. How fast zstd gives up on noise depends on the level and the machine, so its noise figures say little about real data.
 - The tests are `speeds_of_the_parts` and `what_compressing_again_would_save` in `crates/bolt-vcs-core/tests/throughput.rs`, ignored, run in a release build:
 
