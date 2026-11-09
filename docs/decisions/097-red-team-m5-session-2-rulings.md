@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5's red-team gate, [decision 024](024-red-team-gate.md))
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 094](094-red-team-m5-rulings.md) (where the user's Git settings are read, and which long blobs are look-alikes), and with it [decision 047](047-git-personal-ignore-lists-read.md) and [decision 060](060-user-git-settings-includes-and-paths.md) (the home folder those settings are found in)
+- **Refined by:** [decision 098](098-a-blob-is-also-judged-in-its-crlf-form.md) (a blob is also judged as Git LFS would read it with CRLF line ends, since a conversion can do more than push bytes out)
 
 ## Context
 
