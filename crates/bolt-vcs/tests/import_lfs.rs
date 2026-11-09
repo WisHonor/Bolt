@@ -680,7 +680,8 @@ fn versions_of_a_big_lfs_file_share_their_chunks() {
 }
 
 const POINTERS_HINT: &str = "Nothing was saved. Run `git lfs checkout` to have Git LFS write the \
-                             files, then save again.";
+                             files, then save again. If Git LFS can't, `bolt discard` with those \
+                             paths puts back the files the import brought in.";
 
 /// The folder holds the pointers Git checked out, as it does where Git LFS wasn't installed.
 #[test]
@@ -783,6 +784,89 @@ fn only_the_first_save_after_an_import_looks() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let saved = saved_files(&env, main_tip(&env));
     assert_eq!(saved["art/a.psd"], pointer(picture).as_bytes());
+}
+
+/// An imported save with one Git LFS file, whose pointer the folder still holds, and an edit.
+fn imported_with_a_pointer() -> Env {
+    let env = tracked();
+    write(&env, "art/a.psd", keep(&env, b"a picture\n"));
+    env.commit("readme.txt", "hello\n", "Add a picture");
+    env.import();
+    env.overwrite("readme.txt", "hello again\n");
+    env
+}
+
+#[test]
+fn an_amend_of_the_imported_save_stops_at_lfs_pointers_too() {
+    let env = imported_with_a_pointer();
+    let before = env.standing();
+    let out = env.save(&["--amend"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("Git LFS pointer"), "{err}");
+    assert!(err.contains("\n  art/a.psd\n"), "{err}");
+    assert_eq!(env.standing(), before);
+    write(&env, "art/a.psd", b"a picture\n");
+    let out = env.save(&["--amend"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let saved = saved_files(&env, main_tip(&env));
+    assert_eq!(saved["art/a.psd"], b"a picture\n");
+    assert_eq!(saved["readme.txt"], b"hello again\n");
+}
+
+/// A save of some paths looks only at those, and saves only those.
+#[test]
+fn a_save_of_some_paths_stops_only_at_pointers_among_them() {
+    let env = imported_with_a_pointer();
+    let before = env.standing();
+    let out = env.save(&["Some", "art/a.psd", "readme.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("\n  art/a.psd\n"), "{err}");
+    assert_eq!(env.standing(), before);
+    let out = env.save(&["Some", "readme.txt"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let saved = saved_files(&env, main_tip(&env));
+    assert_eq!(saved["art/a.psd"], b"a picture\n");
+    assert_eq!(saved["readme.txt"], b"hello again\n");
+}
+
+/// The hint's second way, for when Git LFS can't write the files any more.
+#[test]
+fn discarding_the_pointers_puts_back_what_the_import_brought_in() {
+    let env = tracked();
+    let (a, b) = (noise(1, 50), noise(2, 60));
+    write(&env, "art/a.psd", keep(&env, &a));
+    write(&env, "art/b.psd", keep(&env, &b));
+    env.commit("readme.txt", "hello\n", "Add pictures");
+    env.import();
+    // Git LFS's own copies gone, so `git lfs checkout` can't help.
+    std::fs::remove_dir_all(env.root().join(".git/lfs")).unwrap();
+    env.overwrite("readme.txt", "hello again\n");
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("\n  art/a.psd\n  art/b.psd\n"), "{err}");
+    assert!(err.contains(&format!("hint: {POINTERS_HINT}\n")), "{err}");
+
+    let out = env
+        .bolt()
+        .args(["discard", "art/a.psd", "art/b.psd"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(std::fs::read(env.root().join("art/a.psd")).unwrap() == a);
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(1 file)"),
+        "{}",
+        text(&out.stdout)
+    );
+    let saved = saved_files(&env, main_tip(&env));
+    assert_eq!(saved["art/a.psd"], a);
+    assert_eq!(saved["art/b.psd"], b);
+    assert_eq!(saved["readme.txt"], b"hello again\n");
 }
 
 /// Whether `git lfs` runs here.

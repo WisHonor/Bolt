@@ -382,12 +382,10 @@ impl SaveError {
                 );
             }
             SaveError::LfsPointersInFolder { .. } => {
-                let checkout = "Run `git lfs checkout` to have Git LFS write the files";
-                if saving {
-                    format!("{checkout}, then save again.")
-                } else {
-                    format!("{checkout}.")
-                }
+                "Run `git lfs checkout` to have Git LFS write the files, then save again. If Git \
+                 LFS can't, `bolt discard` with those paths puts back the files the import \
+                 brought in."
+                    .into()
             }
             SaveError::NeedsMessage => {
                 "Say what you changed: bolt save \"describe your change\"".into()

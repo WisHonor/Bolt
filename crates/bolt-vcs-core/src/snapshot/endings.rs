@@ -1,5 +1,5 @@
-//! The first save after an import stops where the folder doesn't hold what Git stored: at Git LFS
-//! pointers left in place of their files, and at files that differ only in line endings, since
+//! The first save after an import stops at files Git wrote out unlike what the import brought
+//! in: Git LFS pointers in place of their files, and files that differ only in line endings, since
 //! Git on Windows writes LF as CRLF and stores LF. Bolt keeps bytes as they are (decision 039).
 
 use std::collections::HashMap;
@@ -500,6 +500,10 @@ mod tests {
         // Only the size is compared: the oid is a SHA-256, which a save doesn't keep.
         let other = pointer(&noise(2, 5000));
         assert_eq!(pointers_found(pointers_checked(&picture, &other)), one);
+        // Git LFS's parser takes up to 1,024 bytes, blank lines and all.
+        let mut padded = pointer(&picture);
+        padded.resize(MAX_LFS_POINTER_BYTES, b'\n');
+        assert_eq!(pointers_found(pointers_checked(&picture, &padded)), one);
         // A pointer of size 0 stands for an empty file.
         assert_eq!(pointers_found(pointers_checked(b"", &pointer(b""))), one);
         // A 128-byte file's pointer is 128 bytes long too.
@@ -580,6 +584,38 @@ mod tests {
             matches!(read, Err(SaveError::Unreadable { .. })),
             "{read:?}"
         );
+    }
+
+    /// A file over 1,024 bytes can't be a pointer, so it isn't opened, however it changed; one of
+    /// 1,024 bytes is.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_over_1024_bytes_is_not_opened() {
+        let picture = noise(1, 5000);
+        for (len, opened) in [
+            (MAX_LFS_POINTER_BYTES, true),
+            (MAX_LFS_POINTER_BYTES + 1, false),
+        ] {
+            let (dir, mut repo) = project();
+            write(dir.path(), "f.psd", &picture);
+            saved_root(save_now(&mut repo).unwrap());
+            let mut disk = pointer(&picture);
+            disk.resize(len, b'\n');
+            write(dir.path(), "f.psd", &disk);
+            let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+            crate::fsio::fault::unreadable(Some("f.psd"));
+            let checked = pointers(
+                repo.store(),
+                this_drive(),
+                &FileCache::default(),
+                &mut scan.handles,
+                &scan.folders,
+                &scan.old,
+            );
+            crate::fsio::fault::unreadable(None);
+            let refused = matches!(checked, Err(SaveError::Unreadable { .. }));
+            assert_eq!(refused, opened, "{len}: {checked:?}");
+        }
     }
 
     /// Whether `Compare`, given `saved` in pieces of the lengths in `cuts` (round and round), and
