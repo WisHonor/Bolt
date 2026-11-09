@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning: a question milestone 2's final review left, and the owner's import check)
 - **Decided by:** Claude, at the owner's request ("do what you think is best", 2026-11-04). The owner can reverse any part.
 - **Partly supersedes:** [decision 038](038-gitignore-and-saved-files.md) ("Git's personal lists are not read")
-- **Refined by:** [decision 060](060-user-git-settings-includes-and-paths.md) (plain includes in the user's settings are followed; a list inside the project is read without following links) and [decision 094](094-red-team-m5-rulings.md) (the user's settings are read where Git reads them: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_COUNT`)
+- **Refined by:** [decision 060](060-user-git-settings-includes-and-paths.md) (plain includes in the user's settings are followed; a list inside the project is read without following links) and [decision 094](094-red-team-m5-rulings.md) (the user's settings are read where Git reads them: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_COUNT`) and [decision 095](095-a-git-setting-naming-dev-null-names-no-file.md) (`core.excludesFile = /dev/null` names no list)
 
 ## Context
 

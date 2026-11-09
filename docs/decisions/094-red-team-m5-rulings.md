@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5's red-team gate, [decision 024](024-red-team-gate.md))
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 047](047-git-personal-ignore-lists-read.md) and [decision 060](060-user-git-settings-includes-and-paths.md) (where the user's own Git settings are read), [decision 089](089-git-lfs-objects-kept-elsewhere.md) (where `lfs.storage` is read, and what the stop for missing Git LFS files says) and [decision 085](085-importing-git-lfs-files.md) (what counts as a look-alike)
+- **Refined by:** [decision 095](095-a-git-setting-naming-dev-null-names-no-file.md) (`/dev/null`, and `nul` on Windows, names no file, judged before it is joined to a folder)
 
 ## Context
 
