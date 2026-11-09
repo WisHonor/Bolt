@@ -3,7 +3,8 @@ name: Bench
 on:
   workflow_dispatch:
   push:
-    branches: ["bench/**", "redteam/**"]
+    # A redteam/<name>-sizes branch runs only rt4-1-sizes; other red-team branches start nothing.
+    branches: ["bench/**", "redteam/*-sizes"]
 
 permissions:
   contents: read
@@ -36,10 +37,10 @@ jobs:
           df -h
           data=$RUNNER_TEMP/bench results=$RUNNER_TEMP/results
           if [ "$RUNNER_OS" = Windows ]; then
-            # Paths both Git's bash and Windows programs read, on the drive with more room.
+            # Paths both Git's bash and Windows programs read. RUNNER_TEMP is on D:, which had the
+            # more room in every run so far.
             results=$(cygpath -m "$RUNNER_TEMP")/results
             data=$(cygpath -m "$RUNNER_TEMP")/bench
-            if [ "$(df -B1 --output=avail /c | tail -1)" -gt "$(df -B1 --output=avail /d | tail -1)" ]; then data=C:/bench; fi
           fi
           echo "BENCH_DATA=$data" >>"$GITHUB_ENV"
           echo "BENCH_RESULTS=$results" >>"$GITHUB_ENV"

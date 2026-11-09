@@ -26,7 +26,7 @@ How they are measured:
 
 - **Machine:** GitHub's `ubuntu-latest` runner, image ubuntu-24.04 20261101.360.1: AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, SSD.
 - **Bolt:** the code of commit `bca0558`. The commit that added this page changes no Bolt code, only tests, workflows and docs.
-- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. The run is at `0e93681` (on a branch since deleted): this page's commit before the docs were added, with `bca0558`'s Bolt code. The test and its job have since gained one check each that a real measurement was made, which change nothing measured. It runs the `bolt` that `cargo test` builds, which has the core's test-support feature on; that feature only adds test overrides, off unless a test sets them, and helpers `bolt` never calls, so it doesn't change the number:
+- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. That job is now `.github/workflows/memory-gate.yml`, which the bench and nightly workflows both call. The run is at `0e93681`, on a branch since deleted: this page's commit before the docs were added, with `bca0558`'s Bolt code. The test and its job have since gained one check each that a real measurement was made; neither changes what is measured. The test runs the `bolt` that `cargo test` builds, which has the core's test-support feature on. That feature only adds test overrides, off unless a test sets them, and helpers `bolt` never calls, so it doesn't change the number:
 
   ```sh
   cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb
@@ -72,12 +72,12 @@ How they are measured:
 
 ## 2. Against Git and Git LFS
 
-**In plain words.** The same files go through the same steps three times: with Bolt, with Git, and with Git using Git LFS for every file of 1 MiB or more. Big files are where Bolt pulls ahead. Ten versions of a 1 GiB file take 1 GiB in Bolt and 10 GiB in Git or Git LFS, and saving one more version takes Bolt 1.4 to 2.9 seconds, where Git takes over half a minute. Git LFS is quickest at the first save of big files full of new bytes, since it neither compresses them nor waits for the disk. Git is quickest at `status` and small saves on small projects, and on Linux at going back to an old version of a 1 GiB file. Git's deltas also keep scattered edits to a big file in less space than Bolt's chunks (§3).
+**In plain words.** The same files go through the same steps three times: with Bolt, with Git, and with Git using Git LFS for every file of 1 MiB or more. Big files are where Bolt pulls ahead. Ten versions of a 1 GiB file take 1 GiB in Bolt and 10 GiB in Git or Git LFS. Saving one more version takes Bolt 1.4 to 2.9 seconds, where Git takes over half a minute. Git LFS is quickest at the first save of big files full of new bytes, since it neither compresses them nor waits for the disk. On the two small projects, Git is quickest at `status`, small saves and going back to an old version, on both runners. Of those steps, Bolt wins only `status` after touching Godot's biggest file, on Linux. Git is also quickest at going back to an old version of the repeated 1 GiB file on both runners, and of the 10-version one on Linux. On Linux it is quicker at `status` with nothing changed on the big-file sets too, by a millisecond or two. And Git's deltas keep scattered edits to a big file in less space than Bolt's chunks (§3).
 
 ### How it was measured
 
 - **The data sets,** built by `bench/data.sh`. Each tool works on its own copy, every file set an hour old first:
-  - **Code:** Git's own source at tag `v2.56.0` (commit `a018953`), from GitHub's tarball. On Linux that is 4,850 files, 47.8 MiB; Windows's `tar` writes the tarball's three links as copies of what they point to, so there it is 4,964 files, 50.0 MiB.
+  - **Code:** Git's own source at tag `v2.56.0` (commit `a018953`), from GitHub's tarball. On Linux that is 4,850 files, 47.8 MiB. On Windows, Git Bash's `tar` (MSYS2's) writes the tarball's three links as copies of what they point to, so there it is 4,964 files, 50.0 MiB.
   - **Godot's demo projects** at tag `4.7-6ad6167` (commit `6ad6167`), a real game project: 4,018 files, 298.3 MiB, 47 of them 1 MiB or more (201.4 MiB together).
   - **Noise:** 20 files of 50 MiB.
   - **Versions:** one 1 GiB file of noise, then nine more versions of it, each overwriting 1 MiB and inserting 4 KiB, at offsets fixed for each version.
@@ -92,11 +92,11 @@ How they are measured:
   5. **Back to the first version,** from the newest: `bolt goto` with the first save's fingerprint (not the empty save `bolt start` makes), `git checkout` with the first commit.
 
   Then the space each one takes: `.bolt`, or `.git` with Git LFS's objects in it, as `du -sb` gives it (the files' bytes; on Linux each folder's own few KiB too).
-- **Timing:** `hyperfine` runs each step once to warm up, then 5 times (3 if the warm-up took over a minute), and gives the mean, the fastest and the slowest run, with warm caches. It runs each command with bash (Git's own on Windows) and takes the shell's start-up time off. Before every run, untimed: the step's setup (a new repository for the first save, the change for the next one), a wait for Git's background housekeeping, and `sync`, so that no run pays for writing an earlier one left. Every command is in `bench/run.sh`.
+- **Timing:** `run.sh` runs each step once to warm up. `hyperfine` then times 5 runs and gives the mean, the fastest and the slowest, with warm caches. A step whose warm-up took over a minute would get 3 runs instead, but none did. `hyperfine` runs each command with bash (Git's own on Windows) and takes the shell's start-up time off. Before every run, untimed, comes the step's setup: a new repository for the first save, or the change for the next one. Then come a wait for Git's background housekeeping and a `sync`, so that no run pays for writing what an earlier one left. Every command is in `bench/run.sh`.
 - **To keep it fair:**
   - Git's `core.autocrlf` is off, so all three store the same bytes; every other setting is the tool's default.
-  - **Waiting for the disk.** Bolt writes each pack through to the disk before it says a save is done, so a crash can't lose it. Git does that for packs, which is where it puts files over 512 MiB (`core.bigFileThreshold`), but not for the loose objects it writes smaller files as: its default is `core.fsync=committed,-loose-object`. Git LFS's code syncs none of the objects it stores. Their saves of big files can end before the disk has the data, and the next run's untimed `sync` writes it.
-  - **Git's housekeeping.** From Git 2.54, a commit can start a repack (the `geometric` maintenance strategy) when its packs no longer grow geometrically. On Linux it runs in the background, out of the commit's time, and each run waits for it to end. Git for Windows can't detach a process, so there it most likely runs inside `git commit`, in its time, as the spread of its commits of a 1 GiB file (33 to 61 s) suggests.
+  - **Waiting for the disk.** Bolt writes each pack through to the disk before it says a save is done, so a crash can't lose it. Git does that for packs, which is where it puts files over 512 MiB (`core.bigFileThreshold`). It doesn't for the loose objects it writes smaller files as: its default is `core.fsync=committed,-loose-object` (Git's documentation for `core.fsync`). Git LFS syncs none of the objects it stores: it writes each to a temporary file and renames it into place, with no sync between (`lfs/gitfilter_clean.go` and `commands/command_clean.go` in Git LFS's source). So their saves of big files can end before the disk has the data, and the next run's untimed `sync` writes it.
+  - **Git's housekeeping.** From Git 2.54, a commit can start a repack (the `geometric` maintenance strategy) when its packs no longer grow geometrically. On Linux it runs in the background, out of the commit's time, and each run waits for it to end. Git for Windows can't move it to the background: Git's Windows builds have no `daemonize` (`setup.c` and `config.mak.uname` in Git's source), and `git maintenance` then runs its tasks in the foreground (`builtin/gc.c`). So there it is part of `git commit`'s time.
   - **A file just changed.** Bolt's cache doesn't vouch for a file changed in the last 2 seconds, so a change made in that time can't slip by; Git reads again a file changed no earlier than its index was written. That is why step 3 waits.
 
 ### GitHub's Linux runner, 2026-11-09
@@ -161,7 +161,7 @@ The repeated file stores almost nothing new in Bolt (below), yet its first save 
 
 ### GitHub's Windows runner, 2026-11-09
 
-- **Machine:** GitHub's `windows-latest`, image windows-2025-vs2026 20261103.298.1: Windows Server 2025 Datacenter, AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, two 150 GB virtual disks, Windows Defender's real-time protection off. The data is on `D:`, the drive with more room.
+- **Machine:** GitHub's `windows-latest`, image windows-2025-vs2026 20261103.298.1: Windows Server 2025 Datacenter, AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, two 150 GB virtual disks, Windows Defender's real-time protection off. The data is under the runner's temporary folder, on `D:`, the drive with more room.
 - **Versions:** Bolt at `a2ba223`, Git 2.56.0.windows.4, Git LFS 3.8.1, hyperfine 1.20.0.
 - **Run:** [run 42616742873](https://github.com/WisHonor/Bolt/actions/runs/42616742873), job `against-git (windows-latest)`.
 
@@ -230,7 +230,7 @@ After the steps: the first save and six small changes, or the 10 versions of the
 | Repeated | 1,024.0 MiB | 5.2 MiB | 7.00 GiB | 7.00 GiB |
 
 - Git and Git LFS keep every version of a changed file whole; Bolt keeps its changed chunks, about 64 KiB each, and a list of the file's chunks.
-- Godot's demos take 3% more in Bolt than in Git, most likely because Bolt compresses each chunk of a big file on its own and keeps a piece raw unless zstd gets it under 95% of its size, where Git deflates each file whole and keeps whatever that saves.
+- Godot's demos take 3% more in Bolt than in Git. Most likely that is because Bolt compresses each chunk of a big file on its own, and keeps a piece raw unless zstd gets it under 95% of its size. Git deflates each file whole and keeps whatever that saves.
 
 ## 3. Imports
 
@@ -251,7 +251,7 @@ After the steps: the first save and six small changes, or the 10 versions of the
 
 ### git/git: main against milestone 5
 
-The whole history of Git's own repository, imported by `bolt` built from `main` and from this branch in turn, three times each on the same machine, with the first save after each import: a line added to `README.md`, saved with `--accept-crlf`, since Git wrote three `.bat` files with CRLF as their `.gitattributes` asks. The repository is a clone of `https://github.com/git/git` made at the run, at `fb25501` (2026-11-06): 86,059 commits and 1,022 refs. Time and peak memory are GNU `time`'s (`%e`, `%M`); `run.sh import` has the commands.
+The whole history of Git's own repository is imported by `bolt` built from `main` and from this branch, in turn, three times each on the same machine. After each import comes its first save: a line added to `README.md`, saved with `--accept-crlf`. That flag is needed because Git wrote three `.bat` files with CRLF, as their `.gitattributes` asks. The repository is a clone of `https://github.com/git/git` made at the run, at `fb25501` (2026-11-06): 86,059 commits and 1,022 refs. Time and peak memory are GNU `time`'s (`%e`, `%M`), and `run.sh import` has the commands. The branch's commits `c519636` and `a2ba223` both have `ba513aa`'s Bolt code.
 
 | Machine and run | `bolt` from | Import: 3 runs | Mean | Peak memory | First save after it |
 |---|---|---|---|---|---|
@@ -260,9 +260,10 @@ The whole history of Git's own repository, imported by `bolt` built from `main` 
 | AMD EPYC 9V74, [run 42616742873](https://github.com/WisHonor/Bolt/actions/runs/42616742873) | `main` (`400e09e`) | 168.63, 168.78, 169.31 s | 168.9 s | 573.2–573.8 MB | 0.95, 0.94, 0.93 s |
 | | this branch (`a2ba223`) | 171.31, 171.22, 170.92 s | 171.2 s (+1.3%) | 674.4–680.2 MB | 0.72, 0.73, 0.73 s |
 
-- Milestone 5 imports as fast as before, within 1.3%, and its first save after an import is about a quarter faster, though it now reads each file the cache doesn't vouch for twice (once to look for Git LFS pointers, once to save).
-- Its import's peak memory is 17 to 18% higher: about 100 MB more than `main`'s 573 MB.
-- Both machines are `ubuntu-latest`, image ubuntu-24.04 20261101.360.1, 4 virtual CPUs. An earlier run of the same job ([run 42609326597](https://github.com/WisHonor/Bolt/actions/runs/42609326597), stopped by the CRLF files before `--accept-crlf` was added), on an AMD EPYC 9V45, took 101.3 s for `main`'s first import, with a peak of 571.6 MB.
+- Milestone 5 imports as fast as before, within 1.3%.
+- Its first save after an import is about a quarter faster, though it reads some files twice. The import leaves the file-state cache empty, so the save reads every file. Before that, milestone 5 also reads each file of at most 1,024 bytes that the imported save holds too, to see whether it is a Git LFS pointer standing in for that file ([decision 090](decisions/090-the-first-save-looks-at-the-whole-folder-for-pointers.md)). `main` has no such look. (The line-ending check, which also reads files, is skipped by `--accept-crlf` on both.)
+- Its import's peak memory is higher: about 573 MB on `main` and 669–680 MB on milestone 5, about 100 MB more. Most likely it is the Git reader's cache of rebuilt objects. On milestone 5 that cache keeps a base it builds on and a copy of every object it builds, so it stays near its fixed 256 MiB budget. On `main` it took a base out of the cache to use it, and kept no object it built, so it drained. Nothing measured how full the cache was.
+- Both machines are `ubuntu-latest`, image ubuntu-24.04 20261101.360.1, with 4 virtual CPUs. An earlier run of the same job, [run 42609326597](https://github.com/WisHonor/Bolt/actions/runs/42609326597), stopped at the CRLF files, before `--accept-crlf` was added. On its AMD EPYC 9V45, `main`'s first import took 101.3 s, with a peak of 571.6 MB.
 
 ## 4. The parts of a save
 
@@ -279,7 +280,7 @@ The whole history of Git's own repository, imported by `bolt` built from `main` 
 | zstd level 9, on sound | 752 MB/s | 582 MB/s | 473 MB/s |
 | zstd level 19, on sound | 13 MB/s | 11 MB/s | 10 MB/s |
 
-- A MB is a million bytes. Noise is 256 MiB of BLAKE3's extendable output; sound is 64 MiB of the WAV-like data of §5. zstd gives up on noise at a speed that depends on the level and the machine, so its noise figures say little about real data.
+- A MB is a million bytes. Noise is 256 MiB of BLAKE3's extendable output, and sound is 64 MiB of the WAV-like data of §5. How fast zstd gives up on noise depends on the level and the machine, so its noise figures say little about real data.
 - The tests are `speeds_of_the_parts` and `what_compressing_again_would_save` in `crates/bolt-vcs-core/tests/throughput.rs`, ignored, run in a release build:
 
   ```sh
@@ -304,18 +305,19 @@ What each level stores, on the laptop:
 
 - **Level 9** stores the code and uncompressed sets in 2.6% fewer bytes than level 3 (1,880,725 of 71,386,789), in 4.4 times its time: within the time, far short of 10%.
 - **Level 19** saves 8.8% (6,297,265 bytes), in 53.5 times level 3's time: short of 10%, and more than ten times the time allowed.
-- Set by set it is no closer: level 9 saves 7.9% of the code set and 1.2% of the uncompressed one; level 19 saves 12.4% of the code set, but in about 57 times level 3's time.
-- GitHub's runners store exactly the same bytes, but for the code set on Linux, whose three links aren't followed (4,850 files): level 9 saves 2.6% in 4.0 times level 3's time on Linux and 3.8 times on Windows; level 19, 8.8% in 60.4 and 49.5 times.
+- Set by set it is no closer. Level 9 saves 7.9% of the code set and 1.2% of the uncompressed one. Level 19 saves 12.4% of the code set, but in about 57 times level 3's time.
+- GitHub's runners store exactly the same bytes as the laptop, except the code set on Linux, whose three links aren't followed (4,850 files). On the runners, level 9 saves 2.6% in 4.0 times level 3's time on Linux, and in 3.8 times on Windows. Level 19 saves 8.8%, in 60.4 and 49.5 times.
 
-How it is measured: each set is cut into the pieces a save stores, a file under 1 MiB whole and a bigger one into chunks by Bolt's own cutter, and each piece is compressed on its own at each level with zstd's one-shot compression, as a pack stores it, kept compressed only when that is under 95% of its size. The time is the compressing alone, on one thread; the times in the test's own verdict lines are summed before rounding. Repeated pieces are counted each time, as they would be compressed again. The sets:
+How it is measured: each set is cut into the pieces a save stores, a file under 1 MiB whole and a bigger one into chunks by Bolt's own cutter. Each piece is compressed on its own at each level with zstd's one-shot compression, as a pack stores it. It is kept compressed only when that is under 95% of its size. The time is the compressing alone, on one thread. The test's own verdict lines add up the times before rounding them. Repeated pieces are counted each time, as they would be compressed again. The sets:
 
 - **Code:** Git's source at `v2.56.0`, as in §2.
-- **Uncompressed assets:** two generated files of 32 MiB each, standing in for WAV and BMP files: 16-bit stereo samples at 44.1 kHz of three tones under a noise of about 6 bits, and 24-bit pixels 4,096 wide of smooth shading with a noise of about 3 bits, a quarter of them flat colour. Their bytes are the same on every machine the test ran on.
+- **Uncompressed assets:** two generated files of 32 MiB each, standing in for WAV and BMP files. The first holds 16-bit stereo samples at 44.1 kHz: three tones under a noise of about 6 bits. The second holds 24-bit pixels in rows 4,096 wide: smooth shading with a noise of about 3 bits, a quarter of it flat colour. Their bytes are the same on every machine the test ran on.
 - **Compressed assets:** the PNG and OGG files of Godot's demo projects at `4.7-6ad6167`.
 
 ## 6. How much GitHub's numbers vary
 
-- **Within one run,** a step's slowest timed run is within 3% of its fastest for half the steps on the Linux runner and within 4% on the Windows one, and within 21% and 38% for nine in ten. The widest are steps of a few milliseconds, checkouts, and Git's commits on Windows that repack.
-- **From one machine to another,** much more: from run to run, `ubuntu-latest` was an AMD EPYC 7763, 9V45 or 9V74, and `windows-latest` an AMD EPYC 7763 or 9V74 or an Intel Xeon Platinum 8573C. `main`'s import of git/git took 101.3 s on an EPYC 9V45, 165.0 s on an EPYC 7763 and 168.9 s on an EPYC 9V74; nightly runs on `main` have taken 95 to 168 s. The memory gate's 10 GiB save took 28.6 to 28.7 s in three runs on EPYC 7763s (runs 42598494181, 42609326597 and 42611120400) and 55.1 s on an EPYC 9V74 (run 42616742873), its peak memory 43,372,544 to 43,515,904 bytes in all four.
+- **Within one run,** for half the steps the slowest timed run is within 3.1% of the fastest on the Linux runner, and within 3.8% on the Windows one. For nine steps in ten it is within 22% and 44%. The widest are steps of a few milliseconds, checkouts, and Git's commits on Windows that repack.
+- **From one machine to another,** much more: from run to run, `ubuntu-latest` was an AMD EPYC 7763, 9V45 or 9V74, and `windows-latest` an AMD EPYC 7763 or 9V74 or an Intel Xeon Platinum 8573C. `main`'s import of git/git took 101.3 s on an EPYC 9V45, 165.0 s on an EPYC 7763 and 168.9 s on an EPYC 9V74; nightly runs on `main` have taken 95 to 168 s. The memory gate's 10 GiB save took 28.6 to 28.7 s in three runs on EPYC 7763s (runs 42598494181, 42609326597 and 42611120400). It took 55.1 s on an EPYC 9V74 (run 42616742873). Its peak memory was 43,372,544 to 43,515,904 bytes in all four.
 - **On the same kind of machine** the numbers agree: the code and Godot sets' first saves, in two Linux runs on EPYC 7763s (runs 42609326597 and 42616742873), came within 1% of each other for each tool.
+- **A run not published:** [run 42611120400](https://github.com/WisHonor/Bolt/actions/runs/42611120400) timed the same steps, at `c519636`, before two fixes to the method. Git's background repack was still running during the later steps, competing with them, and the versions set's `.git` measured 17 GiB for 10 versions. And `status` started within Bolt's 2-second window, so Bolt read the file just changed again: 150 ms for the repeated set, where its steady state is about 3 ms. Its against-git tables were replaced by run 42616742873's. Its git/git import is in §3, and its memory gate in this section.
 - So compare tools within one table, which is one machine and one run; between tables, differences of up to about 2 times can be the machine.

@@ -108,6 +108,11 @@ fn what_compressing_again_would_save() {
             }
         }
     }
+    // The rule counts the code set too, so without it there is no verdict to give.
+    if !sets.iter().any(|(name, _)| *name == "code") {
+        println!("No verdict: set BOLT_BENCH_CODE to count the code set.");
+        return;
+    }
     let (base_bytes, base_secs) = ruled[0];
     for (level, (stored, secs)) in LEVELS.into_iter().zip(ruled).skip(1) {
         let saves = 1.0 - stored as f64 / base_bytes as f64;

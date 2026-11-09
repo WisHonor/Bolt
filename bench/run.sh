@@ -12,6 +12,8 @@ export GIT_AUTHOR_NAME=Bench GIT_AUTHOR_EMAIL=bench@example.com
 export GIT_COMMITTER_NAME=Bench GIT_COMMITTER_EMAIL=bench@example.com
 BOLT_CONFIG_DIR=$(mktemp -d)
 export BOLT_CONFIG_DIR
+# Only this folder goes on exit; the data folder is the caller's, and stays after a failure too.
+trap 'rm -rf "$BOLT_CONFIG_DIR"' EXIT
 
 # hyperfine runs each command with bash -c; on Windows, Git's own bash, named by its path.
 if command -v cygpath >/dev/null; then shell="'$(cygpath -m "$BASH")'"; else shell=bash; fi
