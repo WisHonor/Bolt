@@ -166,6 +166,12 @@ pub enum SaveError {
         count: u64,
         first: Vec<String>,
     },
+    #[error("{}", lfs_pointers_in_folder(paths, *count))]
+    LfsPointersInFolder {
+        /// The first few by project path, of `count` files.
+        paths: Vec<String>,
+        count: u64,
+    },
     #[error("A save needs a message.")]
     NeedsMessage,
     #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
@@ -297,6 +303,21 @@ fn line_endings_changed(count: u64, first: &[String]) -> String {
     text + &listed(first, count)
 }
 
+/// What Git LFS didn't do, then the files named, one to a line, and how many more there are.
+fn lfs_pointers_in_folder(paths: &[String], count: u64) -> String {
+    let text = if count == 1 {
+        "1 file is a Git LFS pointer, not the file it stands for: Git LFS wasn't installed when \
+         the folder was checked out, or was told to skip it."
+            .to_owned()
+    } else {
+        format!(
+            "{count} files are Git LFS pointers, not the files they stand for: Git LFS wasn't \
+             installed when the folder was checked out, or was told to skip them."
+        )
+    };
+    text + &listed(paths, count)
+}
+
 /// Names the first few of those that show the save an amend would replace, and counts the rest.
 fn shown_too(by: &[String]) -> String {
     let mut named: Vec<String> = by.iter().take(NAMED).map(|b| escape(b, false)).collect();
@@ -359,6 +380,14 @@ impl SaveError {
                      same command again with --accept-crlf."
                         .to_owned(),
                 );
+            }
+            SaveError::LfsPointersInFolder { .. } => {
+                let checkout = "Run `git lfs checkout` to have Git LFS write the files";
+                if saving {
+                    format!("{checkout}, then save again.")
+                } else {
+                    format!("{checkout}.")
+                }
             }
             SaveError::NeedsMessage => {
                 "Say what you changed: bolt save \"describe your change\"".into()
@@ -484,9 +513,13 @@ pub fn save_folder(
         only::check_matched(&scope, given, &narrowed, &mut handles)?;
     }
     check_names(&folders, &old)?;
-    // Before anything is stored, so that a stop leaves nothing behind (decision 039).
-    if !req.accept_crlf && parent.extra.contains_key(EXTRA_GIT_COMMIT) {
-        endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
+    // Before anything is stored, so that a stop leaves nothing behind (decision 039). Pointers
+    // first: saving line endings as they are can't help while pointers stand in for files.
+    if parent.extra.contains_key(EXTRA_GIT_COMMIT) {
+        endings::pointers(repo.store(), drive, &trusted, &mut handles, &folders, &old)?;
+        if !req.accept_crlf {
+            endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
+        }
     }
     if let Some(large) = large_save(repo.store(), drive, &folders, &old)? {
         // New files mean something to save, so a missing line name is asked for now: the
@@ -1014,12 +1047,18 @@ struct Storing<'a> {
     seen: FileCache,
 }
 
+/// The ID and size `trusted` gives the file `c`, which the base save holds as `was`, if it vouches
+/// for it: then a save doesn't read it.
+fn vouched_by(trusted: &FileCache, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
+    // The cache never names content to a save: it only says the base save's entry still holds.
+    let known = trusted.matches(&c.rel, c.meta.as_ref()?)?;
+    was.filter(|e| (e.id, e.size) == (known.id, known.size))
+        .map(|_| (known.id, known.size))
+}
+
 impl Contents for Storing<'_> {
     fn vouched(&self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
-        // The cache never names content to a save: it only says the base save's entry still holds.
-        let known = self.trusted.matches(&c.rel, c.meta.as_ref()?)?;
-        was.filter(|e| (e.id, e.size) == (known.id, known.size))
-            .map(|_| (known.id, known.size))
+        vouched_by(&self.trusted, c, was)
     }
 
     fn file(
@@ -1226,11 +1265,20 @@ impl Iterator for Jobs<'_> {
 
 /// Reads the small file `at` whole, as `store_file` does, and makes it ready for a pack.
 fn read_small(store: &Store, at: &At) -> Result<Ready, SaveError> {
-    let rel = at.rel.as_str();
-    let (mut file, opened) = open_scanned(&at.dir, &at.name, rel, at.meta.as_ref())?;
-    let ready = ingest::read_whole(&mut file, opened.size)
-        .and_then(|bytes| ingest::ready(store, &bytes))
-        .map_err(|e| ingest_failed(e, rel))?;
+    let bytes = read_scanned(&at.dir, &at.name, &at.rel, at.meta.as_ref())?;
+    ingest::ready(store, &bytes).map_err(|e| ingest_failed(e, &at.rel))
+}
+
+/// The bytes of the file `name` in `dir`, at the project path `rel`, read whole, if it is the file
+/// the walk saw (`seen`; see `open_scanned`) and doesn't change while it is read.
+fn read_scanned(
+    dir: &Dir,
+    name: &str,
+    rel: &str,
+    seen: Option<&EntryMeta>,
+) -> Result<Vec<u8>, SaveError> {
+    let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
+    let bytes = ingest::read_whole(&mut file, opened.size).map_err(|e| ingest_failed(e, rel))?;
     let now = stamp(&file).map_err(|source| SaveError::Unreadable {
         path: rel.to_owned(),
         source,
@@ -1240,7 +1288,7 @@ fn read_small(store: &Store, at: &At) -> Result<Ready, SaveError> {
             path: rel.to_owned(),
         });
     }
-    Ok(ready)
+    Ok(bytes)
 }
 
 /// What a save says when bytes of the project path `rel` couldn't be stored.
@@ -2534,6 +2582,10 @@ mod tests {
             SaveError::LineEndingsChanged {
                 count: 2,
                 first: vec!["fine".into(), hostile()],
+            },
+            SaveError::LfsPointersInFolder {
+                paths: vec!["fine".into(), hostile()],
+                count: 2,
             },
             SaveError::AmendShared {
                 by: vec!["line fine".into(), format!("tag {HOSTILE}")],

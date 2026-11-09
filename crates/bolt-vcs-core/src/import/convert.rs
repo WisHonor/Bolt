@@ -29,6 +29,7 @@ use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{MAX_NAME_BYTES, NameError, is_git_alias, validate_name};
 use crate::pack::{MAX_RECORD_SIZE, ObjectKind, PackError, PackSet};
+use crate::repo::RepoError;
 use crate::save::{
     EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_EXTRA_VALUE_BYTES,
     MAX_MESSAGE_BYTES, Save,
@@ -1005,11 +1006,15 @@ impl<'r> Converter<'r> {
         if let Some(content) = self.lfs.get(&(p.oid, p.size)) {
             return Ok((*content, p.size));
         }
-        let content = if needs_object {
-            self.lfs_object(p, commit, path)?
-        } else {
+        let content = if p.size == 0 {
             let stored = ingest::store_held(self.packs, self.store, &[]);
             stored.map_err(|e| lfs_not_stored(e, &self.git.lfs_object_path(p)))?
+        } else if needs_object {
+            self.lfs_object(p, commit, path)?
+        } else {
+            // Only a pointer of size 0 needs no object.
+            let fault = io::Error::other("a Git LFS file with contents needed no object");
+            return Err(RepoError::from(fault).into());
         };
         self.lfs.insert((p.oid, p.size), content);
         let counts = &mut self.counts;
