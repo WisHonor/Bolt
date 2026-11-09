@@ -992,16 +992,16 @@ impl<'r> Converter<'r> {
     }
 
     /// Brings in the delta family of the blob `id`, a file big enough to be cut, the first time
-    /// one of its members is met, if Git stored it as a delta: each blob of the family not met
-    /// yet is stored as `blob` stores it, and noted as a file, so none is rebuilt again where a
-    /// file holds it. One that may be read as a Git LFS pointer, or looks like one, is left for
-    /// `blob` to judge where it is met.
+    /// one of its members is met, if Git stored it as a delta: each blob of the family big enough
+    /// to be cut and not met yet is stored as `blob` stores it, and noted as a file, so none is
+    /// rebuilt again where a file holds it. A smaller one is only built for what is built on it,
+    /// and comes in as any small file does where it is met, Git LFS pointers among them.
     fn family(&mut self, id: &GitId, place: &dyn Fn() -> String) -> Result<(), ImportError> {
         let tmp = self.packs.tmp();
         let (packs, store, blobs) = (&mut *self.packs, self.store, &mut self.blobs);
         let mut each = |member: &GitId, data: &[u8]| -> Result<(), ImportError> {
-            let met = blobs.contains_key(&(*member, true));
-            if met || lfs_pointer(data).is_some() || looks_like_lfs_pointer(data) {
+            // Each one stored has cost a MiB of the work allowed, which bounds how many there are.
+            if !is_cut(data.len() as u64) || blobs.contains_key(&(*member, true)) {
                 return Ok(());
             }
             let stored = ingest::store_held(packs, store, data);
@@ -1633,6 +1633,52 @@ mod tests {
         assert!(content(&store, &hash_content(&fourth)) == fourth);
         let second = store.copy_content(&hash_content(&second), &mut io::sink());
         assert!(second.is_err(), "{second:?}");
+    }
+
+    #[test]
+    fn a_family_of_tiny_members_stores_only_the_big_ones() {
+        let (dir, git) = repo(Sha1);
+        // A file of 1 MiB, a bigger one built on it, and 3,000 files of a few bytes each built on
+        // it too, as a hostile pack can make them. A commit names the bigger one and a tiny one.
+        let bottom: Vec<u8> = (0..1usize << 20).map(|i| (i % 251) as u8).collect();
+        let big = [&bottom[..], b"bigger"].concat();
+        let tiny: Vec<Vec<u8>> = (0..3000)
+            .map(|i| format!("tiny {i}\n").into_bytes())
+            .collect();
+        let mut entries = vec![
+            PackEntry::Whole(ObjectType::Blob, bottom.clone()),
+            PackEntry::OfsDelta {
+                base: 0,
+                delta: delta(&bottom, &big),
+            },
+        ];
+        entries.extend(tiny.iter().map(|small| PackEntry::OfsDelta {
+            base: 0,
+            delta: delta(&bottom, small),
+        }));
+        git.pack(&entries);
+        let id = |data: &[u8]| object_id(ObjectType::Blob, data, Sha1).unwrap();
+        let commit = commit_of(
+            &git,
+            &[
+                (b"100644", b"big.bin", id(&big)),
+                (b"100644", b"small.txt", id(&tiny[7])),
+            ],
+        );
+        let (save, store) = convert(dir.path(), "a", |c| {
+            let save = c.commit(&commit).unwrap();
+            // The family noted the two big ones only; the tiny one came in as small files do.
+            assert_eq!(c.blobs.len(), 3);
+            for data in [&bottom, &big, &tiny[7]] {
+                assert!(c.blobs.contains_key(&(id(data), true)));
+            }
+            save
+        });
+        let root = store
+            .listing(&store.save(&save, false).unwrap().root)
+            .unwrap();
+        assert!(content(&store, &root.get("big.bin").unwrap().id) == big);
+        assert_eq!(content(&store, &root.get("small.txt").unwrap().id), tiny[7]);
     }
 
     #[test]
