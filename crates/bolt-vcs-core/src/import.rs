@@ -368,17 +368,19 @@ fn lfs_extension_message(commit: &str, path: &str) -> String {
     )
 }
 
-/// The warning for files that only look like Git LFS pointers: the first ones, as the commit
-/// (hex) and the path, and how many in all.
+/// The warning for files that look like Git LFS pointers but aren't Git LFS files: the first
+/// ones, as the commit (hex) and the path, and how many in all.
 fn lfs_lookalikes(first: &[(String, String)], count: u64) -> Warning {
     let mut message = if count == 1 {
-        "A file looks like a Git LFS pointer, though Git LFS doesn't read it as one, so Bolt \
-         imported it as it is, as Git LFS checks it out:"
+        "A file looks like a Git LFS pointer but isn't one Git LFS writes, so Bolt imported it as \
+         it is. Git LFS checks it out as it is too or, if it is over 1,024 bytes, as the file its \
+         start points to:"
             .to_owned()
     } else {
         format!(
-            "{} files look like Git LFS pointers, though Git LFS doesn't read them as such, so \
-             Bolt imported them as they are, as Git LFS checks them out:",
+            "{} files look like Git LFS pointers but aren't ones Git LFS writes, so Bolt imported \
+             them as they are. Git LFS checks them out as they are too or, for one over 1,024 \
+             bytes, as the file its start points to:",
             thousands(count)
         )
     };

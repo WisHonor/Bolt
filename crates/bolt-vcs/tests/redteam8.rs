@@ -245,7 +245,6 @@ fn rt8_2_a_save_leaves_out_what_gits_own_ignore_list_leaves_out() {
 /// trims), so a blob that starts with a pointer and spaces is smudged into its object, whatever
 /// follows. The import must bring in what Git LFS checks out, or at least say it didn't.
 #[test]
-#[ignore = "RT8-3: a blob Git LFS smudges as a pointer comes in silently as its text"]
 fn rt8_3_a_blob_git_lfs_reads_as_a_pointer_never_comes_in_silently_as_text() {
     let env = Env::new();
     env.commit(".gitattributes", TRACKED, "Track");

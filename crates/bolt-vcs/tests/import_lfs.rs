@@ -545,8 +545,9 @@ fn a_lookalike_comes_in_as_it_is_with_a_warning() {
     let (_, err) = env.import();
     assert!(
         err.contains(
-            "warning: 6 files look like Git LFS pointers, though Git LFS doesn't read them as \
-             such, so Bolt imported them as they are, as Git LFS checks them out:\n"
+            "warning: 6 files look like Git LFS pointers but aren't ones Git LFS writes, so Bolt \
+             imported them as they are. Git LFS checks them out as they are too or, for one over \
+             1,024 bytes, as the file its start points to:\n"
         ),
         "{err}"
     );

@@ -17,7 +17,7 @@ pub use id::{GitId, HashKind, ObjectType, object_id};
 pub use object::{
     Commit, LfsPointer, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_exact_lfs_pointer,
     lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person, parse_tag, parse_tree,
-    rebuild_commit,
+    rebuild_commit, starts_with_lfs_pointer,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use odb::set_test_delta_limits;
