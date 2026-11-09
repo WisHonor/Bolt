@@ -39,7 +39,8 @@ pub enum ConfigError {
         escape(&path.display().to_string(), false)
     )]
     NotAtTop { key: &'static str, path: PathBuf },
-    /// The user's own Git settings, read for their ignore list (decision 047), can't be read.
+    /// The user's own Git settings, read for their ignore list (decision 047) and for
+    /// `lfs.storage`, can't be read.
     #[error(
         "Bolt can't read your Git settings in {}: {}",
         escape(&path.display().to_string(), false),
@@ -67,8 +68,9 @@ impl ConfigError {
                 Some("Move that line above [user] and every other [section].".to_owned())
             }
             ConfigError::GitSettings { .. } => Some(
-                "Bolt reads them only for core.excludesFile, your own list of files Git ignores. \
-                 Fix that file; `git config --global --list` shows what Git makes of it."
+                "Bolt reads them only for core.excludesFile, your own list of files Git ignores, \
+                 and for lfs.storage. Fix that file; `git config --global --list` shows what Git \
+                 makes of it."
                     .to_owned(),
             ),
         }
@@ -237,18 +239,47 @@ const MAX_GIT_SETTINGS_BYTES: u64 = 1 << 20;
 /// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. Git's home folder is `HOME`, as
 /// Git for Windows takes it too. `None` when there is no home folder, or the setting is empty.
 pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigError> {
+    let Some((home, xdg)) = git_homes() else {
+        return Ok(None);
+    };
+    git_excludes_file_in(&home, &xdg, project_root)
+}
+
+/// Where the user's own Git settings set `lfs.storage`, if they do: Git LFS then keeps its
+/// files elsewhere, which `bolt import` refuses. Read only to refuse, from the files and plain
+/// includes `git_excludes_file` reads.
+pub fn git_lfs_storage() -> Result<Option<PathBuf>, ConfigError> {
+    let Some((home, xdg)) = git_homes() else {
+        return Ok(None);
+    };
+    let mut set_in = None;
+    for path in git_settings_files(&home, &xdg) {
+        read_git_settings(&path, &home, 0, &mut |setting, file| {
+            if setting == UserSetting::LfsStorage {
+                set_in = Some(file.to_owned());
+            }
+        })?;
+    }
+    Ok(set_in)
+}
+
+/// Git's home folder, `HOME`, as Git for Windows takes it too, and `XDG_CONFIG_HOME`; `None`
+/// when there is no home folder.
+fn git_homes() -> Option<(PathBuf, PathBuf)> {
     let env_path = |key| {
         std::env::var_os(key)
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
     let home = env_path("HOME")
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()));
-    let Some(home) = home else {
-        return Ok(None);
-    };
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()))?;
     let xdg = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
-    git_excludes_file_in(&home, &xdg, project_root)
+    Some((home, xdg))
+}
+
+/// The user's own Git settings files, in Git's order, so that `~/.gitconfig` wins.
+fn git_settings_files(home: &Path, xdg: &Path) -> [PathBuf; 2] {
+    [xdg.join("git").join("config"), home.join(".gitconfig")]
 }
 
 /// How many includes deep Git reads settings, its `MAX_INCLUDE_DEPTH`.
@@ -263,9 +294,12 @@ fn git_excludes_file_in(
     project_root: &Path,
 ) -> Result<Option<PathBuf>, ConfigError> {
     let mut named = None;
-    // In Git's order, so that `~/.gitconfig` wins.
-    for path in [xdg.join("git").join("config"), home.join(".gitconfig")] {
-        read_git_settings(&path, home, 0, &mut named)?;
+    for path in git_settings_files(home, xdg) {
+        read_git_settings(&path, home, 0, &mut |setting, file| {
+            if let UserSetting::ExcludesFile(value) = setting {
+                named = Some((value, file.to_owned()));
+            }
+        })?;
     }
     let Some((value, path)) = named else {
         return Ok(Some(xdg.join("git").join("ignore")));
@@ -281,14 +315,14 @@ fn git_excludes_file_in(
     git_path(&value, home, project_root, &path).map(Some)
 }
 
-/// Reads `path`, a file of the user's own Git settings `depth` includes down, into `named`: the
-/// last `core.excludesFile` so far, and the file that set it. A plain include is read where it
-/// stands, as Git reads it (decision 060); one that isn't there is skipped, as in Git.
+/// Reads `path`, a file of the user's own Git settings `depth` includes down, giving `each` every
+/// setting Bolt reads in it but an include, with the file that holds it. A plain include is read
+/// where it stands, as Git reads it (decision 060); one that isn't there is skipped, as in Git.
 fn read_git_settings(
     path: &Path,
     home: &Path,
     depth: usize,
-    named: &mut Option<(Vec<u8>, PathBuf)>,
+    each: &mut dyn FnMut(UserSetting, &Path),
 ) -> Result<(), ConfigError> {
     let fail = |detail: String| ConfigError::GitSettings {
         path: path.to_owned(),
@@ -309,15 +343,15 @@ fn read_git_settings(
         .map_err(|line| fail(format!("line {line} can't be read as Git reads it")))?;
     for setting in settings {
         match setting {
-            UserSetting::ExcludesFile(value) => *named = Some((value, path.to_owned())),
             UserSetting::Include(value) => {
                 let value = String::from_utf8(value)
                     .map_err(|_| fail("an include.path in it isn't valid UTF-8".to_owned()))?;
                 // A relative include is from the including file's folder.
                 let folder = path.parent().unwrap_or(Path::new(""));
                 let included = git_path(&value, home, folder, path)?;
-                read_git_settings(&included, home, depth + 1, named)?;
+                read_git_settings(&included, home, depth + 1, each)?;
             }
+            other => each(other, path),
         }
     }
     Ok(())

@@ -121,6 +121,33 @@ pub fn junction(link: &Path, target: &Path) {
     );
 }
 
+/// Makes `link` a link to the folder `target`: on Windows a junction, which needs no rights.
+pub fn link_folder(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    junction(link, target);
+}
+
+/// Makes `link` a link to the file `target`; false, with a note, where Windows lacks the right.
+pub fn link_file(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+    #[cfg(windows)]
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => true,
+        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights, which CI has.
+        Err(e) if e.raw_os_error() == Some(1314) && std::env::var_os("CI").is_none() => {
+            eprintln!("note: skipped, this account can't make links");
+            false
+        }
+        Err(e) => panic!("can't make a link: {e}"),
+    }
+}
+
 pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

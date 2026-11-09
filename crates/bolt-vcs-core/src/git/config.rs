@@ -1,8 +1,9 @@
 //! `.git/config`, read as Git reads it, keeping only what decides how to read the repository:
 //! `core.repositoryformatversion`, the `extensions.*` keys and `core.sparsecheckout` (decisions
-//! 031 and 039). Includes aren't followed, as Git's own format check doesn't follow them, but
-//! whether there are any is noted: they can set `core.sparsecheckout` (decision 043). The user's
-//! own Git settings are read with the same parser, for their ignore list (decisions 047 and 060).
+//! 031 and 039), and whether `lfs.storage` keeps Git LFS's files elsewhere. Includes aren't
+//! followed, as Git's own format check doesn't follow them, but whether there are any is noted:
+//! they can set `core.sparsecheckout` (decision 043). The user's own Git settings are read with
+//! the same parser, for their ignore list (decisions 047 and 060) and `lfs.storage`.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use super::{GitError, HashKind, Refusal, broken, is_git_space};
@@ -16,6 +17,8 @@ pub(super) struct Format {
     pub sparse: Option<bool>,
     /// Whether it has an `[include]` or `[includeIf]` section, whose files Bolt doesn't read.
     pub includes: bool,
+    /// Whether it sets `lfs.storage`, to any value.
+    pub lfs_storage: bool,
 }
 
 /// Reads `text`, the config named `file` in messages, as Git's `read_repository_format` and
@@ -41,19 +44,21 @@ pub(super) fn read_sparse(text: &[u8], file: &str) -> Result<(Option<bool>, bool
     Ok((sparse, includes))
 }
 
-/// A setting in the user's own Git settings that decides their ignore list (decisions 047 and
-/// 060).
+/// A setting in the user's own Git settings that Bolt reads: one that decides their ignore list
+/// (decisions 047 and 060), or `lfs.storage`, read only so an import can refuse.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UserSetting {
     /// A `core.excludesfile`.
     ExcludesFile(Vec<u8>),
     /// A plain `[include]` path, whose file Git reads at this place.
     Include(Vec<u8>),
+    /// An `lfs.storage`, to any value.
+    LfsStorage,
 }
 
-/// The settings in `text`, the user's own Git settings, that decide their ignore list, in order,
-/// or the number of the first line Git couldn't read. A key with no value is refused, as Git
-/// refuses it for a path. `[includeIf]` paths aren't given: their conditions need a repository.
+/// The settings in `text`, the user's own Git settings, that Bolt reads, in order, or the number
+/// of the first line Git couldn't read. A path with no value is refused, as Git refuses it.
+/// `[includeIf]` paths aren't given: their conditions need a repository.
 pub(crate) fn read_user_settings(text: &[u8]) -> Result<Vec<UserSetting>, usize> {
     let mut found = Vec::new();
     parse(text, &mut |name, value| {
@@ -61,6 +66,8 @@ pub(crate) fn read_user_settings(text: &[u8]) -> Result<Vec<UserSetting>, usize>
             found.push(UserSetting::ExcludesFile(value?.to_vec()));
         } else if name == b"include.path" {
             found.push(UserSetting::Include(value?.to_vec()));
+        } else if name == b"lfs.storage" {
+            found.push(UserSetting::LfsStorage);
         }
         Some(())
     })?;
@@ -92,12 +99,14 @@ struct Found {
     v1_only: Vec<String>,
     unknown: Vec<String>,
     includes: bool,
+    lfs_storage: bool,
 }
 
 impl Found {
     /// Takes one setting; `None` for a value Git refuses too, or one Bolt can't read as Git does.
     fn take(&mut self, name: &[u8], value: Option<&[u8]>) -> Option<()> {
         self.includes |= is_include(name);
+        self.lfs_storage |= name == b"lfs.storage";
         if name == b"core.repositoryformatversion" {
             self.version = Some(parse_int(value?)?);
         } else if name == b"core.sparsecheckout" {
@@ -171,6 +180,7 @@ impl Found {
                 worktree_config: false,
                 sparse: self.sparse,
                 includes: self.includes,
+                lfs_storage: self.lfs_storage,
             });
         };
         match version {
@@ -207,6 +217,7 @@ impl Found {
             worktree_config: self.worktree_config,
             sparse: self.sparse,
             includes: self.includes,
+            lfs_storage: self.lfs_storage,
         })
     }
 }
@@ -835,6 +846,11 @@ mod tests {
             storage("\trefStorage = files:///x\n\trefStorage = reftable://y\n"),
             Err(GitError::Refused(Refusal::Reftable))
         ));
+        // `lfs.storage` set to anything, or to nothing, keeps Git LFS's files elsewhere.
+        for text in ["[lfs]\n\tstorage = ../shared\n", "[LFS]\n\tStorage\n"] {
+            assert!(format(text).unwrap().lfs_storage, "{text}");
+        }
+        assert!(!format("[lfs]\n\turl = x\n").unwrap().lfs_storage);
         // Keys Bolt doesn't keep are still read, so a bad line among them refuses.
         assert!(format("[remote \"origin\"]\n\turl = \"x\n").is_err());
         assert!(format("[remote \"origin\"]\n\turl = x\n\tpromisor = maybe\n").is_ok());
@@ -897,6 +913,11 @@ mod tests {
         assert_eq!(
             read("[includeIf \"gitdir:~/\"]\n\tpath = x\n[include \"y\"]\n\tpath = z\n"),
             Ok(vec![])
+        );
+        // `lfs.storage` is noted whatever it holds.
+        assert_eq!(
+            read("[lfs]\n\tstorage = x\n[lfs]\n\tstorage\n"),
+            Ok(vec![UserSetting::LfsStorage, UserSetting::LfsStorage])
         );
         // A path needs a value, and a line Git can't read is refused.
         assert_eq!(read("[core]\n\texcludesFile\n"), Err(2));

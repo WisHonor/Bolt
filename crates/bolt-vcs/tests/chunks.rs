@@ -162,6 +162,7 @@ fn an_import_reads_each_big_blob_once() {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
+        lfs_storage: None,
         progress: &mut |_, _| {},
     };
     import_git(env.root(), &mut req, &mut None).unwrap();

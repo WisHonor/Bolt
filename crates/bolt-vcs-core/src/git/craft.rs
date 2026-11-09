@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::Digest as _;
+
 use super::id::{Hasher, object_header};
 use super::pack::apply_delta;
 use super::{GitId, HashKind, ObjectType, object_id};
@@ -115,6 +117,13 @@ impl Craft {
 
     pub fn commit(&self, raw: &[u8]) -> GitId {
         self.object(ObjectType::Commit, raw)
+    }
+
+    /// Keeps `contents` in `.git/lfs/objects`, as `git lfs fetch` does; the pointer to them.
+    pub fn lfs_object(&self, contents: &[u8]) -> String {
+        let (pointer, path) = lfs_pointer_to(contents);
+        self.file(&path, contents);
+        pointer
     }
 
     /// Writes `entries` as a pack and its index in `objects/pack`, as Git would, and returns
@@ -233,6 +242,23 @@ impl Craft {
         out.extend_from_slice(&checksum);
         out
     }
+}
+
+/// The pointer Git LFS writes for a file holding `contents`, and where under `.git` its object
+/// goes: `lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`.
+#[must_use]
+pub fn lfs_pointer_to(contents: &[u8]) -> (String, String) {
+    let oid: String = sha2::Sha256::digest(contents)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let (first, second) = (oid.get(..2), oid.get(2..4));
+    let (first, second) = (first.unwrap_or_default(), second.unwrap_or_default());
+    let pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+        contents.len()
+    );
+    (pointer, format!("lfs/objects/{first}/{second}/{oid}"))
 }
 
 /// What `Craft::pack` knows of an entry it wrote.

@@ -1,13 +1,16 @@
-//! Turning Git's objects into Bolt's (decisions 032, 035, 036 and 037): blobs into content, trees
-//! into folder listings, commits into saves and tags into Bolt tags. Each Git object is converted
-//! once, and the same repository always gives the same saves.
+//! Turning Git's objects into Bolt's (decisions 032, 035 and 036): blobs into content, Git LFS
+//! pointers into the files they stand for, trees into folder listings, commits into saves and
+//! tags into Bolt tags. Each Git object is converted once, and the same repository always gives
+//! the same saves.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io;
+use std::io::{self, Read};
+use std::path::Path;
 
 use encoding_rs::{Encoding, UTF_8};
+use sha2::{Digest as _, Sha256};
 
 use super::ImportError;
 use crate::chunks::is_too_long_to_cut;
@@ -16,8 +19,9 @@ use crate::diary::{
 };
 use crate::encoding::DecodeError;
 use crate::git::{
-    self, Commit, GitError, GitId, ObjectType, is_lfs_pointer, looks_like_lfs_pointer,
-    parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit, shown,
+    self, Commit, GitError, GitId, LfsPointer, ObjectType, is_exact_lfs_pointer, lfs_pointer,
+    looks_like_lfs_pointer, parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit,
+    shown,
 };
 use crate::id::{ChangeId, ContentHasher, Id, hash_record};
 use crate::ingest::{self, IngestError};
@@ -47,6 +51,9 @@ pub(super) const MAX_EXTRA_PARENTS: u64 = 1_000_000;
 /// entries, names that aren't UTF-8, refs, `.bolt` folders, and in its summary, renamed names and
 /// skipped tags. The rest are counted.
 pub const MAX_LISTED: usize = 100;
+
+/// How many files that only look like Git LFS pointers an import's warning names.
+const MAX_LOOKALIKES_LISTED: usize = 5;
 
 /// About the most bytes of a path a list or message holds.
 const MAX_SHOWN_PATH: usize = 1024;
@@ -121,6 +128,18 @@ pub struct Counts {
     /// Commits whose `change-id` header gives a change ID another commit has too, so their saves
     /// took their own commits' change IDs instead (decision 043).
     pub duplicate_change_ids: u64,
+    /// Git LFS files brought in from `.git/lfs/objects`, each object once, and their total size,
+    /// which saturates.
+    pub lfs_files: u64,
+    pub lfs_bytes: u64,
+    /// Commits that hold Git LFS files.
+    pub lfs_commits: u64,
+    /// Git LFS pointers not in the exact form Git LFS writes.
+    pub inexact_lfs_pointers: u64,
+    /// The first 5 files that only look like Git LFS pointers, each as the commit (hex) and the
+    /// path where it was met first, and how many in all.
+    pub lfs_lookalikes: Vec<(String, String)>,
+    pub lfs_lookalike_count: u64,
 }
 
 /// What a Git tag becomes.
@@ -134,8 +153,8 @@ pub enum TagOutcome {
 }
 
 /// A converted Git tree: its listing, the entries in it and below it counting every path, how
-/// many levels of folders are below it, how long the longest path below it is from it, and whether
-/// an export gives its Git ID back.
+/// many levels of folders are below it, how long the longest path below it is from it, whether
+/// an export gives its Git ID back, and whether it holds a Git LFS file.
 #[derive(Clone, Copy)]
 struct Folder {
     listing: Id,
@@ -143,6 +162,7 @@ struct Folder {
     depth: usize,
     longest: usize,
     exact: bool,
+    lfs: bool,
 }
 
 /// A folder on the walk's stack, with the entries of its Git tree still to convert. `prefix` is
@@ -157,6 +177,7 @@ struct Frame {
     depth: usize,
     longest: usize,
     exact: bool,
+    lfs: bool,
 }
 
 /// A tree entry whose name passed.
@@ -326,6 +347,21 @@ impl io::Write for Hashing<'_> {
     }
 }
 
+/// Reads a Git LFS object, computing as the bytes pass the SHA-256 that Git LFS names it by.
+struct Sha256Reading<R> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R: Read> Read for Sha256Reading<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        // A reader that says it gave more than `buf` holds hashes nothing, and can't match.
+        self.hasher.update(buf.get(..n).unwrap_or_default());
+        Ok(n)
+    }
+}
+
 /// Converts one Git repository's objects into one command's packs. The packs only know the
 /// objects of the pack being written, and the store only what was committed before, so memo
 /// tables keep each Git object to one conversion, and a set of the records stored keeps a record
@@ -334,8 +370,11 @@ pub struct Converter<'r> {
     git: &'r git::Repo,
     store: &'r Store,
     packs: &'r mut PackSet,
-    /// Each blob's content ID and size.
-    blobs: HashMap<GitId, (Id, u64)>,
+    /// Each blob's content ID and size, and whether it was a Git LFS file, by whether it was met
+    /// as a file: a link is never a Git LFS file.
+    blobs: HashMap<(GitId, bool), (Id, u64, bool)>,
+    /// The content of each Git LFS object stored, by oid and size.
+    lfs: HashMap<([u8; 32], u64), Id>,
     /// Each submodule commit's link record.
     links: HashMap<GitId, Id>,
     /// Each tree converted whole, wherever it was met.
@@ -373,6 +412,7 @@ impl<'r> Converter<'r> {
             store,
             packs,
             blobs: HashMap::new(),
+            lfs: HashMap::new(),
             links: HashMap::new(),
             trees: HashMap::new(),
             saves: HashMap::new(),
@@ -481,6 +521,9 @@ impl<'r> Converter<'r> {
         let save_id = self.put(ObjectKind::Save, &encoded)?;
         if !root.exact {
             self.counts.inexact_commits = self.counts.inexact_commits.saturating_add(1);
+        }
+        if root.lfs {
+            self.counts.lfs_commits = self.counts.lfs_commits.saturating_add(1);
         }
         self.saves.insert(*id, save_id);
         Ok(save_id)
@@ -594,9 +637,10 @@ impl<'r> Converter<'r> {
                     done = self.enter(&mut stack, &mut walk, item.name, &item.id)?;
                 }
                 Some(item) => {
-                    let entry = self.leaf(item, &stack, commit)?;
+                    let (entry, lfs) = self.leaf(item, &stack, commit)?;
                     if let Some(top) = stack.last_mut() {
                         top.entries.push(entry);
+                        top.lfs |= lfs;
                     }
                 }
                 None => {
@@ -651,6 +695,7 @@ impl<'r> Converter<'r> {
             depth: 0,
             longest: 0,
             exact: true,
+            lfs: false,
         });
         self.read_folder(stack, walk)?;
         Ok(None)
@@ -760,24 +805,35 @@ impl<'r> Converter<'r> {
             depth: frame.depth,
             longest: frame.longest,
             exact: frame.exact,
+            lfs: frame.lfs,
         };
         self.trees.insert(frame.git, done);
         Ok((frame.name, done))
     }
 
-    /// The entry of a file, symlink or submodule in the folder on top of the stack.
-    fn leaf(&mut self, item: Item, stack: &[Frame], commit: &str) -> Result<Entry, ImportError> {
-        let (id, size) = if item.kind == EntryKind::ProjectLink {
-            (self.link(&item.id)?, 0)
+    /// The entry of a file, symlink or submodule in the folder on top of the stack, and whether
+    /// it is a Git LFS file.
+    fn leaf(
+        &mut self,
+        item: Item,
+        stack: &[Frame],
+        commit: &str,
+    ) -> Result<(Entry, bool), ImportError> {
+        let (id, size, lfs) = if item.kind == EntryKind::ProjectLink {
+            (self.link(&item.id)?, 0, false)
         } else {
-            self.blob(&item.id, commit, &|| path_of(stack, &[item.name.as_str()]))?
+            // Git LFS's filter runs only on files: Git checks a link out as it is.
+            let file = matches!(item.kind, EntryKind::File | EntryKind::Executable);
+            let path = || path_of(stack, &[item.name.as_str()]);
+            self.blob(&item.id, file, commit, &path)?
         };
-        Ok(Entry {
+        let entry = Entry {
             name: item.name,
             kind: item.kind,
             id,
             size,
-        })
+        };
+        Ok((entry, lfs))
     }
 
     /// A submodule's link: just the commit, with an empty address (decision 036).
@@ -797,40 +853,148 @@ impl<'r> Converter<'r> {
         Ok(id)
     }
 
-    /// A blob's content ID and size, stored the first time it is met. `path` says where, for
-    /// messages. A Git LFS pointer, or a file that looks like one, stops the import (decision 037).
+    /// A blob's content ID and size, stored the first time it is met as a file or as a link, and
+    /// whether it is a Git LFS file: a file Git LFS's parser takes for a pointer, which is brought
+    /// in as the file it stands for. A file that only looks like one comes in as it is, noted for
+    /// a warning. `path` says where, for messages.
     fn blob(
         &mut self,
         id: &GitId,
+        file: bool,
         commit: &str,
         path: &dyn Fn() -> String,
-    ) -> Result<(Id, u64), ImportError> {
-        if let Some(done) = self.blobs.get(id) {
+    ) -> Result<(Id, u64, bool), ImportError> {
+        if let Some(done) = self.blobs.get(&(*id, file)) {
             return Ok(*done);
         }
         let place = || format!("the file `{}` of commit `{commit}`", path());
         // The size in the header only picks how to read it: the bytes are checked against the ID.
         let (_, size) = self.git.header(id).map_err(|e| at(e, place))?;
-        let done = if size <= MAX_WHOLE_BLOB {
+        let done = if size > MAX_WHOLE_BLOB {
+            let (content, size) = self.stream(id, size, &place)?;
+            (content, size, false)
+        } else {
             let object = self.git.read(id).map_err(|e| at(e, place))?;
             expect_kind(object.kind, ObjectType::Blob, id, place)?;
-            let pointer = is_lfs_pointer(&object.data);
-            if pointer || looks_like_lfs_pointer(&object.data) {
-                return Err(ImportError::LfsPointer {
-                    commit: commit.to_owned(),
-                    path: path(),
-                    lookalike: !pointer,
-                });
+            if let Some(p) = file.then(|| lfs_pointer(&object.data)).flatten() {
+                if !is_exact_lfs_pointer(&object.data, &p) {
+                    let counts = &mut self.counts;
+                    counts.inexact_lfs_pointers = counts.inexact_lfs_pointers.saturating_add(1);
+                }
+                let (content, size) = self.lfs_file(&p, commit, path)?;
+                (content, size, true)
+            } else {
+                if file && looks_like_lfs_pointer(&object.data) {
+                    self.lookalike(commit, path);
+                }
+                let size = object.data.len() as u64;
+                // Held whole already, so a big one is cut where it lies.
+                let stored = ingest::store_held(self.packs, self.store, &object.data);
+                (stored.map_err(|e| not_stored(e, id, &place))?, size, false)
             }
-            let size = object.data.len() as u64;
-            // Held whole already, so a big one is cut where it lies.
-            let stored = ingest::store_held(self.packs, self.store, &object.data);
-            (stored.map_err(|e| not_stored(e, id, &place))?, size)
-        } else {
-            self.stream(id, size, &place)?
         };
-        self.blobs.insert(*id, done);
+        self.blobs.insert((*id, file), done);
         Ok(done)
+    }
+
+    /// Notes a file that only looks like a Git LFS pointer, listing the first few by path.
+    fn lookalike(&mut self, commit: &str, path: &dyn Fn() -> String) {
+        let counts = &mut self.counts;
+        counts.lfs_lookalike_count = counts.lfs_lookalike_count.saturating_add(1);
+        if counts.lfs_lookalikes.len() < MAX_LOOKALIKES_LISTED {
+            counts.lfs_lookalikes.push((commit.to_owned(), path()));
+        }
+    }
+
+    /// The content ID and size of the file the Git LFS pointer `p`, at `path` in the commit
+    /// `commit` (hex), stands for, stored from its object the first time it is met. One of size
+    /// 0 is an empty file, whose object isn't read. A pointer with extensions stops the import.
+    fn lfs_file(
+        &mut self,
+        p: &LfsPointer,
+        commit: &str,
+        path: &dyn Fn() -> String,
+    ) -> Result<(Id, u64), ImportError> {
+        if p.extensions {
+            return Err(ImportError::LfsExtension {
+                commit: commit.to_owned(),
+                path: path(),
+            });
+        }
+        if let Some(content) = self.lfs.get(&(p.oid, p.size)) {
+            return Ok((*content, p.size));
+        }
+        let content = if p.size == 0 {
+            let stored = ingest::store_held(self.packs, self.store, &[]);
+            stored.map_err(|e| lfs_not_stored(e, &self.git.lfs_object_path(p)))?
+        } else {
+            self.lfs_object(p, commit, path)?
+        };
+        self.lfs.insert((p.oid, p.size), content);
+        let counts = &mut self.counts;
+        counts.lfs_files = counts.lfs_files.saturating_add(1);
+        counts.lfs_bytes = counts.lfs_bytes.saturating_add(p.size);
+        Ok((content, p.size))
+    }
+
+    /// Stores the object of the Git LFS pointer `p` from `.git/lfs/objects` as any file is stored,
+    /// computing its SHA-256 as it is read, and gives its content ID only once that is found to
+    /// be the oid. One too long to cut is read twice: once for both hashes, then again to store
+    /// it unless a good copy is stored already, which refuses any other bytes.
+    fn lfs_object(
+        &mut self,
+        p: &LfsPointer,
+        commit: &str,
+        path: &dyn Fn() -> String,
+    ) -> Result<Id, ImportError> {
+        let missing = || ImportError::LfsMissing {
+            first: vec![(commit.to_owned(), path(), p.size)],
+            count: 1,
+            bytes: p.size,
+        };
+        let at = self.git.lfs_object_path(p);
+        let file = self.git.lfs_object(p)?.ok_or_else(missing)?;
+        let mut reading = Sha256Reading {
+            inner: file,
+            hasher: Sha256::new(),
+        };
+        let long = is_too_long_to_cut(p.size);
+        let content = if long {
+            let mut hasher = ContentHasher::new();
+            let read = io::copy(&mut reading, &mut Hashing(&mut hasher));
+            let read = read.map_err(|source| GitError::Io {
+                path: at.clone(),
+                source,
+            })?;
+            if read != p.size {
+                return Err(lfs_changed(&at));
+            }
+            hasher.finish()
+        } else {
+            let stored = ingest::store_bytes(self.packs, self.store, &mut reading, p.size);
+            stored.map_err(|e| lfs_not_stored(e, &at))?
+        };
+        let sha256: [u8; 32] = reading.hasher.finalize().into();
+        if sha256 != p.oid {
+            return Err(ImportError::LfsMismatch {
+                commit: commit.to_owned(),
+                path: path(),
+                oid: p.oid_hex(),
+            });
+        }
+        if long
+            && !self.packs.contains(&content)
+            && !self
+                .store
+                .has_good_copy(&content, ObjectKind::Content, p.size)?
+        {
+            let mut again = self.git.lfs_object(p)?.ok_or_else(|| lfs_changed(&at))?;
+            match self.packs.add_content_from(&mut again, content) {
+                Err(PackError::ContentChanged) => return Err(lfs_changed(&at)),
+                other => other?,
+            };
+        }
+        Ok(content)
     }
 
     /// Stores a blob too big to read whole, of the `size` its header gives, reading it once. One
@@ -912,6 +1076,26 @@ fn not_stored(e: IngestError, id: &GitId, place: &dyn Fn() -> String) -> ImportE
     }
 }
 
+/// What stops the import when the Git LFS object at `at` couldn't be stored.
+fn lfs_not_stored(e: IngestError, at: &Path) -> ImportError {
+    match e {
+        IngestError::Changed => lfs_changed(at),
+        IngestError::Read(source) => GitError::Io {
+            path: at.to_owned(),
+            source,
+        }
+        .into(),
+        IngestError::Pack(e) => e.into(),
+        IngestError::Store(e) => e.into(),
+    }
+}
+
+/// The Git LFS object at `at` changed while Bolt read it.
+fn lfs_changed(at: &Path) -> ImportError {
+    let what = format!("the Git LFS file {} changed", at.display());
+    GitError::Changed { what }.into()
+}
+
 /// Adds a finished folder to the folder above it, or returns it if it is the top one.
 fn attach(stack: &mut [Frame], name: String, done: Folder) -> Option<Folder> {
     let Some(parent) = stack.last_mut() else {
@@ -930,6 +1114,7 @@ fn attach(stack: &mut [Frame], name: String, done: Folder) -> Option<Folder> {
     parent.total = parent.total.saturating_add(done.total);
     parent.depth = parent.depth.max(done.depth.saturating_add(1));
     parent.exact &= done.exact;
+    parent.lfs |= done.lfs;
     None
 }
 
@@ -1042,11 +1227,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     use super::*;
-    use crate::git::craft::{Craft, PackEntry};
+    use crate::chunks::set_test_cut_sizes;
+    use crate::git::craft::{Craft, PackEntry, lfs_pointer_to};
     use crate::git::{HashKind, object_id};
     use crate::pack::{PackReader, WRITER_PACK_OBJECTS};
     use crate::save::Person;
-    use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
+    use crate::test_support::{HOSTILE, assert_hostile_text_escaped, noise};
     use std::fs;
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -2021,53 +2207,96 @@ mod tests {
         assert_refused(huge_header_r, &[&huge_header.to_hex(), "64 KiB"]);
     }
 
-    #[test]
-    fn an_lfs_pointer_or_a_lookalike_stops_the_import_naming_it() {
-        let pointer = "version https://git-lfs.github.com/spec/v1\noid \
-                       sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
-                       size 12345\n";
-        // Git LFS reads nothing after `size`.
-        let lookalike = format!("{pointer}and more\n");
-        for (bytes, is_lookalike, says) in [
-            (
-                pointer,
-                false,
-                "holds a Git LFS pointer at `assets/hero.psd`",
-            ),
-            (
-                lookalike.as_str(),
-                true,
-                "holds a file at `assets/hero.psd` that looks like a Git LFS pointer",
-            ),
-        ] {
-            let (dir, git) = repo(Sha1);
-            let assets = git.tree(&[(b"100644", b"hero.psd", blob(&git, bytes.as_bytes()))]);
-            let id = commit_of(&git, &[(b"40000", b"assets", assets)]);
-            let (result, _) = convert(dir.path(), "a", |c| c.commit(&id));
-            let e = result.unwrap_err();
-            match &e {
-                ImportError::LfsPointer {
-                    commit,
-                    path,
-                    lookalike,
-                } => {
-                    assert_eq!(
-                        (commit.as_str(), path.as_str(), *lookalike),
-                        (id.to_hex().as_str(), "assets/hero.psd", is_lookalike)
-                    );
-                }
-                other => panic!("{other:?}"),
+    /// The entry at `path` (names joined by `/`) of the save `save`.
+    fn entry_at(store: &Store, save: &Id, path: &str) -> Entry {
+        let mut listing = store
+            .listing(&store.save(save, false).unwrap().root)
+            .unwrap();
+        let mut names = path.split('/').peekable();
+        loop {
+            let entry = listing.get(names.next().unwrap()).unwrap().clone();
+            if names.peek().is_none() {
+                return entry;
             }
-            assert!(e.to_string().contains(says), "{e}");
-            // `migrate export` can't convert a lookalike, so only a pointer's hint offers it.
-            let hint = e.hint().unwrap();
-            assert_eq!(
-                hint.contains("git lfs migrate export"),
-                !is_lookalike,
-                "{hint}"
-            );
-            assert_eq!(hint.contains("won't convert it"), is_lookalike, "{hint}");
+            listing = store.listing(&entry.id).unwrap();
         }
+    }
+
+    /// A file Git LFS's parser takes for a pointer comes in as the file it stands for, once for
+    /// each object however many pointers name it; a link holding a pointer's text, and a file
+    /// that only looks like one, come in as they are.
+    #[test]
+    fn git_lfs_files_come_in_as_what_they_stand_for() {
+        let (dir, git) = repo(Sha1);
+        let real = b"the real picture\n";
+        let pointer = git.lfs_object(real);
+        let pointer_blob = blob(&git, pointer.as_bytes());
+        let crlf = blob(&git, pointer.replace('\n', "\r\n").as_bytes());
+        let lookalike = format!("{pointer}and more\n");
+        let assets = git.tree(&[
+            (b"100644", b"again.psd", crlf),
+            (b"100644", b"hero.psd", pointer_blob),
+            (b"120000", b"link", pointer_blob),
+            (b"100644", b"looks.psd", blob(&git, lookalike.as_bytes())),
+        ]);
+        let id = commit_of(&git, &[(b"40000", b"assets", assets)]);
+        let ((save, counts), store) = convert(dir.path(), "a", |c| {
+            let save = c.commit(&id).unwrap();
+            (save, c.counts().clone())
+        });
+        for name in ["again.psd", "hero.psd"] {
+            let entry = entry_at(&store, &save, &format!("assets/{name}"));
+            assert_eq!(entry.size, real.len() as u64, "{name}");
+            assert_eq!(content(&store, &entry.id), real, "{name}");
+        }
+        let link = entry_at(&store, &save, "assets/link");
+        assert_eq!(content(&store, &link.id), pointer.as_bytes());
+        let looks = entry_at(&store, &save, "assets/looks.psd");
+        assert_eq!(content(&store, &looks.id), lookalike.as_bytes());
+        assert_eq!(
+            (counts.lfs_files, counts.lfs_bytes, counts.lfs_commits),
+            (1, real.len() as u64, 1)
+        );
+        assert_eq!(counts.inexact_lfs_pointers, 1);
+        assert_eq!(counts.lfs_lookalike_count, 1);
+        assert_eq!(
+            counts.lfs_lookalikes,
+            [(id.to_hex(), "assets/looks.psd".to_owned())]
+        );
+    }
+
+    /// A Git LFS object too long to cut is read once for both its hashes, then again to store it
+    /// whole. One whose SHA-256 isn't its pointer's stops the import before anything is stored;
+    /// bytes that change between the reads are refused by `add_content_from`, which stores nothing
+    /// that isn't the ID it was given.
+    #[test]
+    fn an_lfs_object_too_long_to_cut_is_read_twice_and_checked() {
+        // Files of 1 to 2 MiB are cut; a longer one is too long to cut.
+        set_test_cut_sizes(Some((1 << 20, 2 << 20)));
+        let (dir, git) = repo(Sha1);
+        let real = noise(9, 3 << 20);
+        let pointer = git.lfs_object(&real);
+        let id = commit_of(
+            &git,
+            &[(b"100644", b"big.bin", blob(&git, pointer.as_bytes()))],
+        );
+        let (save, store) = convert(dir.path(), "a", |c| c.commit(&id).unwrap());
+        let entry = entry_at(&store, &save, "big.bin");
+        assert_eq!(entry.id, crate::id::hash_content(&real));
+        assert!(content(&store, &entry.id) == real);
+        assert_eq!(stored(dir.path(), "a", ObjectKind::Content), 1);
+        assert_eq!(stored(dir.path(), "a", ObjectKind::ChunkList), 0);
+        // Other bytes of the same length where its object goes.
+        let at = dir.path().join(".git").join(lfs_pointer_to(&real).1);
+        fs::write(&at, noise(10, 3 << 20)).unwrap();
+        let (result, _) = convert(dir.path(), "b", |c| c.commit(&id));
+        let e = result.unwrap_err();
+        assert!(
+            matches!(&e, ImportError::LfsMismatch { path, .. } if path == "big.bin"),
+            "{e:?}"
+        );
+        assert_eq!(stored(dir.path(), "b", ObjectKind::Content), 0);
+        set_test_cut_sizes(None);
     }
 
     #[test]
@@ -2406,15 +2635,22 @@ mod tests {
                 first: vec![(HOSTILE.into(), HOSTILE.into())],
                 count: 1,
             },
-            ImportError::LfsPointer {
-                commit: HOSTILE.into(),
-                path: HOSTILE.into(),
-                lookalike: false,
+            ImportError::LfsMissing {
+                first: vec![(HOSTILE.into(), HOSTILE.into(), 1)],
+                count: 2,
+                bytes: 2,
             },
-            ImportError::LfsPointer {
+            ImportError::LfsMismatch {
                 commit: HOSTILE.into(),
                 path: HOSTILE.into(),
-                lookalike: true,
+                oid: HOSTILE.into(),
+            },
+            ImportError::LfsExtension {
+                commit: HOSTILE.into(),
+                path: HOSTILE.into(),
+            },
+            ImportError::LfsStorageElsewhere {
+                file: HOSTILE.into(),
             },
         ] {
             assert_hostile_text_escaped(&e.to_string());

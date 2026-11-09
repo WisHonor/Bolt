@@ -824,6 +824,7 @@ mod tests {
             git: dir.path().join(".git"),
             hash: HashKind::Sha1,
             includes: false,
+            lfs_storage: false,
             objects: Default::default(),
         }
     }

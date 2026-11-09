@@ -15,8 +15,9 @@ mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
 pub use object::{
-    Commit, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_lfs_pointer, looks_like_lfs_pointer,
-    parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit,
+    Commit, LfsPointer, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_exact_lfs_pointer,
+    lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person, parse_tag, parse_tree,
+    rebuild_commit,
 };
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 // For the delta fuzz target.
@@ -26,7 +27,7 @@ pub use refs::{Head, Refs};
 
 pub(crate) use config::{UserSetting, read_user_settings};
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -400,6 +401,8 @@ pub struct Repo {
     hash: HashKind,
     /// Whether its config has `[include]` or `[includeIf]` sections, which Bolt doesn't follow.
     includes: bool,
+    /// Whether its config sets `lfs.storage`.
+    lfs_storage: bool,
     objects: odb::Objects,
 }
 
@@ -434,12 +437,13 @@ impl Repo {
         check_owner(work_tree, &git, owner_of, safe_folders)?;
         // Looked at again: it may have become a link while its owner was asked.
         safe_fs::check_real_dir(&git).map_err(|e| read_error(&git, e))?;
-        let (hash, includes) = read_format(&git)?;
+        let format = read_format(&git)?;
         refuse_layouts(&git)?;
         Ok(Repo {
             git,
-            hash,
-            includes,
+            hash: format.hash,
+            includes: format.includes,
+            lfs_storage: format.lfs_storage,
             objects: odb::Objects::default(),
         })
     }
@@ -473,6 +477,55 @@ impl Repo {
     pub fn has_lfs_folder(&self) -> Result<bool, GitError> {
         exists(&self.git.join("lfs"))
     }
+
+    /// Whether `.git/config` sets `lfs.storage`, which keeps Git LFS's files elsewhere. Read only
+    /// so the import can refuse.
+    #[must_use]
+    pub fn sets_lfs_storage(&self) -> bool {
+        self.lfs_storage
+    }
+
+    /// Where Git LFS keeps the object of `p`: `.git/lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`.
+    #[must_use]
+    pub fn lfs_object_path(&self, p: &LfsPointer) -> PathBuf {
+        let oid = p.oid_hex();
+        let (first, second) = (oid.get(..2), oid.get(2..4));
+        let folder = self.git.join("lfs").join("objects");
+        folder
+            .join(first.unwrap_or_default())
+            .join(second.unwrap_or_default())
+            .join(&oid)
+    }
+
+    /// The Git LFS object of `p`, opened as every file in `.git` is, without following a link, if
+    /// it is a regular file of the size `p` gives. `None` if it isn't there as that: missing, a
+    /// folder, a link (to it or to a folder on the way), or a file of another length.
+    pub fn lfs_object(&self, p: &LfsPointer) -> Result<Option<File>, GitError> {
+        let path = self.lfs_object_path(p);
+        // What isn't a real folder or a plain file is never followed: the object isn't there.
+        let absent = |e: &io::Error| {
+            matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
+            )
+        };
+        // `lfs`, `objects` and the two folders the oid names; `open` checked `.git` itself.
+        let folders: Vec<&Path> = path.ancestors().skip(1).take(4).collect();
+        for folder in folders.into_iter().rev() {
+            match safe_fs::check_real_dir(folder) {
+                Ok(()) => {}
+                Err(e) if absent(&e) => return Ok(None),
+                Err(e) => return Err(read_error(folder, e)),
+            }
+        }
+        let file = match safe_fs::open_regular(&path, fs::OpenOptions::new().read(true)) {
+            Ok(file) => file,
+            Err(e) if absent(&e) => return Ok(None),
+            Err(e) => return Err(read_error(&path, e)),
+        };
+        let len = file.metadata().map_err(|e| read_error(&path, e))?.len();
+        Ok((len == p.size).then_some(file))
+    }
 }
 
 /// Refuses a `.git` that isn't the user's, unless they listed the work tree in safe-folders, as
@@ -497,24 +550,23 @@ fn check_owner(
     repo::owner_allows([owner], work_tree, &safe).map_err(refused)
 }
 
-/// The repository's hash, and whether its config has include sections, after refusing a format,
-/// extension or sparse checkout Bolt can't import.
-fn read_format(git: &Path) -> Result<(HashKind, bool), GitError> {
+/// What `.git/config` says, with whether `config.worktree` has include sections too, after
+/// refusing a format, extension or sparse checkout Bolt can't import.
+fn read_format(git: &Path) -> Result<config::Format, GitError> {
     // Git reads a repository without a config with its defaults.
     let text = read_optional(&git.join("config"), MAX_CONFIG_BYTES)?.unwrap_or_default();
-    let format = config::read_format(&text, ".git/config")?;
-    let (mut sparse, mut includes) = (format.sparse, format.includes);
+    let mut format = config::read_format(&text, ".git/config")?;
     if format.worktree_config
         && let Some(text) = read_optional(&git.join("config.worktree"), MAX_CONFIG_BYTES)?
     {
         let (value, more) = config::read_sparse(&text, ".git/config.worktree")?;
-        sparse = value.or(sparse);
-        includes |= more;
+        format.sparse = value.or(format.sparse);
+        format.includes |= more;
     }
-    if sparse == Some(true) {
+    if format.sparse == Some(true) {
         return Err(GitError::Refused(Refusal::SparseCheckout));
     }
-    Ok((format.hash, includes))
+    Ok(format)
 }
 
 /// Refuses the files and folders that mean refs, history or objects Bolt doesn't read.

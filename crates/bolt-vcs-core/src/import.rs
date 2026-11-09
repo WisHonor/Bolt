@@ -10,8 +10,8 @@ use std::path::Path;
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{
-    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, is_lfs_pointer,
-    looks_like_lfs_pointer, parse_tag, parse_tree, shown,
+    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, lfs_pointer, parse_tag,
+    parse_tree, shown,
 };
 use crate::id::{ChangeId, Id, hash_record};
 use crate::listing::{EntryKind, SaveLimits};
@@ -21,7 +21,7 @@ use crate::repo::{self, ChangeLock, RepoError, Repository};
 use crate::safe_fs;
 use crate::save::Person;
 use crate::store::{Store, StoreError};
-use crate::text::{escape, thousands};
+use crate::text::{bytes, escape, thousands};
 use crate::warning::{self, Warning};
 
 mod convert;
@@ -43,6 +43,9 @@ pub struct ImportRequest<'a> {
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
+    /// The file of the user's own Git settings that sets `lfs.storage`, if one does
+    /// (`config::git_lfs_storage`): Git LFS keeps its files elsewhere then, so the import refuses.
+    pub lfs_storage: Option<&'a Path>,
     /// Called as the first pass reads each commit, with how many it has read and `None`, then
     /// after each commit is converted, with how many are done and how many there are.
     pub progress: &'a mut dyn FnMut(u64, Option<u64>),
@@ -72,6 +75,16 @@ pub struct ImportReport {
     pub skipped_entry_count: u64,
     /// Commits a later export can't recreate with their Git IDs.
     pub inexact_commits: u64,
+    /// The Git LFS files brought in from `.git/lfs/objects`, each object once, and their total
+    /// size.
+    pub lfs_files: u64,
+    pub lfs_bytes: u64,
+    /// The commits that hold Git LFS files, whose Git IDs a later export can give back only by
+    /// turning those files back into pointers.
+    pub lfs_commits: u64,
+    /// The Git LFS pointers not in the exact form Git LFS writes, which a later export can't
+    /// give back as they were.
+    pub inexact_lfs_pointers: u64,
     pub warnings: Vec<Warning>,
 }
 
@@ -108,14 +121,35 @@ pub enum ImportError {
         first: Vec<(String, String)>,
         count: u64,
     },
-    /// A Git LFS pointer (decision 037) in the commit `commit` (hex) at `path`, or, when
-    /// `lookalike`, a file that only looks like one, which stops the import too.
-    #[error("{}", lfs_message(commit, path, *lookalike))]
-    LfsPointer {
+    /// Git LFS files whose objects aren't in `.git/lfs/objects` as plain files of their pointers'
+    /// sizes: the first 20 as the commit (hex), the path and the size its pointer gives, then how
+    /// many objects are missing in all, and their total size.
+    #[error("{}", lfs_missing_message(first, *count, *bytes))]
+    LfsMissing {
+        first: Vec<(String, String, u64)>,
+        count: u64,
+        bytes: u64,
+    },
+    /// The Git LFS file at `path` in the commit `commit` (hex): its object `oid` (hex) doesn't
+    /// have the SHA-256 its pointer gives.
+    #[error("{}", lfs_mismatch_message(commit, path, oid))]
+    LfsMismatch {
         commit: String,
         path: String,
-        lookalike: bool,
+        oid: String,
     },
+    /// A Git LFS pointer with extension lines at `path` in the commit `commit` (hex): only Git
+    /// LFS can rebuild its file, by running a program.
+    #[error("{}", lfs_extension_message(commit, path))]
+    LfsExtension { commit: String, path: String },
+    /// `lfs.storage` is set in `file` (`.git/config`, or a file of the user's own Git settings),
+    /// so Git LFS keeps its files outside the repository.
+    #[error(
+        "Git LFS is set to keep its files outside this repository: `lfs.storage` is set in {}, \
+         and Bolt reads Git LFS files only from .git/lfs/objects.",
+        escape(file, false)
+    )]
+    LfsStorageElsewhere { file: String },
     /// The import stopped after it began the project, before `format`: the `.bolt` it began
     /// stays, for a later run to finish from what it stored (decision 041). `committed`: it holds
     /// a head, whose entry may hold the whole import.
@@ -168,7 +202,27 @@ impl ImportError {
                  bolt import again."
                     .to_owned(),
             ),
-            ImportError::LfsPointer { lookalike, .. } => Some(lfs_hint(*lookalike)),
+            ImportError::LfsMissing { .. } => Some(format!(
+                "{NOTHING_CHANGED} Download every version Git LFS keeps with `git lfs fetch \
+                 --all`, then run bolt import again. Bolt reads a Git LFS file only from \
+                 .git/lfs/objects, as a plain file of the size its pointer gives, never through \
+                 a link."
+            )),
+            ImportError::LfsMismatch { .. } => Some(format!(
+                "{NOTHING_CHANGED} Git LFS's copy is damaged or was replaced: check its copies \
+                 with `git lfs fsck`, download them again with `git lfs fetch --all`, then run \
+                 bolt import again."
+            )),
+            // `migrate export` runs the extensions' programs, as a checkout does.
+            ImportError::LfsExtension { .. } => Some(format!(
+                "{NOTHING_CHANGED} Turn the Git LFS files back into ordinary Git files in a copy \
+                 of the repository with `git lfs migrate export --everything --include=\"*\"`, \
+                 which rewrites its history, then run bolt import in that copy."
+            )),
+            ImportError::LfsStorageElsewhere { .. } => Some(format!(
+                "{NOTHING_CHANGED} Remove that setting, download the files into the repository \
+                 with `git lfs fetch --all`, then run bolt import again."
+            )),
         }
     }
 
@@ -185,37 +239,75 @@ impl ImportError {
     }
 }
 
-/// What an import says of the Git LFS pointer at `path` in `commit`, or of a file there that
-/// only looks like one.
-fn lfs_message(commit: &str, path: &str, lookalike: bool) -> String {
-    let (commit, path) = (escape(commit, false), escape(path, false));
-    if lookalike {
-        format!(
-            "Commit `{commit}` holds a file at `{path}` that looks like a Git LFS pointer, though \
-             Git LFS wouldn't read it as one; Bolt stops rather than guess whether it is a Git LFS \
-             file."
-        )
+/// What an import says of Git LFS files whose objects are missing: the first ones, as the commit
+/// (hex), the path and the size, then how many in all, and their total size.
+fn lfs_missing_message(first: &[(String, String, u64)], count: u64, total: u64) -> String {
+    let mut out = if count == 1 {
+        "A Git LFS file in this history isn't in .git/lfs/objects:".to_owned()
     } else {
         format!(
-            "Commit `{commit}` holds a Git LFS pointer at `{path}`, and this version of Bolt \
-             can't import Git LFS files yet: Git LFS repositories come in milestone 5."
+            "{} Git LFS files in this history, {} in all, aren't in .git/lfs/objects:",
+            thousands(count),
+            bytes(total)
         )
+    };
+    for (commit, path, size) in first {
+        let (path, commit) = (escape(path, false), escape(commit, false));
+        let _ = write!(out, "\n  `{path}` in commit `{commit}` ({})", bytes(*size));
     }
+    let more = count.saturating_sub(first.len() as u64);
+    if more > 0 {
+        let _ = write!(out, "\n  and {} more", thousands(more));
+    }
+    out
 }
 
-/// What to do about a Git LFS pointer, or about a file that only looks like one. `git lfs migrate
-/// export` reads files with the parser that rejects a lookalike, so it can't convert one.
-fn lfs_hint(lookalike: bool) -> String {
-    if lookalike {
-        "Nothing was changed. Git LFS won't convert it either, since it doesn't read it as a \
-         pointer: rewrite the Git history that holds it, with the real file in its place if it \
-         stands for one, so that it no longer looks like a pointer, then run bolt import again."
+/// What an import says of the Git LFS file at `path` in `commit` whose object `oid` doesn't match
+/// its pointer.
+fn lfs_mismatch_message(commit: &str, path: &str, oid: &str) -> String {
+    let (commit, path, oid) = (
+        escape(commit, false),
+        escape(path, false),
+        escape(oid, false),
+    );
+    format!(
+        "The Git LFS file `{path}` in commit `{commit}` doesn't match its pointer: what \
+         .git/lfs/objects holds for object `{oid}` has another SHA-256."
+    )
+}
+
+/// What an import says of the Git LFS pointer with extensions at `path` in `commit`.
+fn lfs_extension_message(commit: &str, path: &str) -> String {
+    let (commit, path) = (escape(commit, false), escape(path, false));
+    format!(
+        "Commit `{commit}` holds a Git LFS pointer at `{path}` with extensions (`ext-` lines): \
+         only Git LFS can rebuild its file, by running a program, which Bolt never does."
+    )
+}
+
+/// The warning for files that only look like Git LFS pointers: the first ones, as the commit
+/// (hex) and the path, and how many in all.
+fn lfs_lookalikes(first: &[(String, String)], count: u64) -> Warning {
+    let mut message = if count == 1 {
+        "A file looks like a Git LFS pointer, though Git LFS doesn't read it as one, so Bolt \
+         imported it as it is, as Git LFS checks it out:"
+            .to_owned()
     } else {
-        "Nothing was changed. To import now, turn the Git LFS files back into ordinary Git files \
-         in a copy of the repository with `git lfs migrate export --everything --include=\"*\"`, \
-         which rewrites its history, then run bolt import in that copy."
+        format!(
+            "{} files look like Git LFS pointers, though Git LFS doesn't read them as such, so \
+             Bolt imported them as they are, as Git LFS checks them out:",
+            thousands(count)
+        )
+    };
+    for (commit, path) in first {
+        let (path, commit) = (escape(path, false), escape(commit, false));
+        let _ = write!(message, "\n  `{path}` in commit `{commit}`");
     }
-    .to_owned()
+    let more = count.saturating_sub(first.len() as u64);
+    if more > 0 {
+        let _ = write!(message, "\n  and {} more", thousands(more));
+    }
+    Warning::new(warning::LFS_LOOKALIKES, message)
 }
 
 fn not_utf8_message(first: &[(String, String)], count: u64) -> String {
@@ -250,7 +342,7 @@ pub fn import_git(
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
     let root = &repo::resolved(root);
-    let plan = plan(root, req.progress)?;
+    let plan = plan(root, req.lfs_storage, req.progress)?;
     let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);
     carry_out(plan, repo, &lock, req).map_err(|e| after_begin(root, e))
@@ -309,10 +401,24 @@ struct Plan {
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
+/// `lfs_storage` is the file of the user's own Git settings that sets `lfs.storage`, if one does;
 /// `progress` hears how many commits the first pass has read.
-fn plan(root: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Plan, ImportError> {
+fn plan(
+    root: &Path,
+    lfs_storage: Option<&Path>,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
+    // Git LFS's files kept elsewhere would all look missing, and fetching wouldn't bring them.
+    let set_in = if git.sets_lfs_storage() {
+        Some(".git/config".to_owned())
+    } else {
+        lfs_storage.map(|file| file.display().to_string())
+    };
+    if let Some(file) = set_in {
+        return Err(ImportError::LfsStorageElsewhere { file });
+    }
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
     let mut tag_budget = TagBudget::new();
@@ -335,8 +441,8 @@ fn plan(root: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Plan,
     if let Some(name) = tracked_bolt(&git, &head_commit)? {
         return Err(tracked_stop(&name));
     }
-    stop_at_lfs_in_head(&git, &head_commit, SaveLimits::default())?;
     let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS, progress)?;
+    check_lfs_objects(&git, &head_commit, &order, &SaveLimits::default)?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -440,6 +546,12 @@ fn carry_out(
     if counts.duplicate_change_ids > 0 {
         warnings.push(duplicate_change_ids(counts.duplicate_change_ids));
     }
+    if counts.lfs_lookalike_count > 0 {
+        warnings.push(lfs_lookalikes(
+            &counts.lfs_lookalikes,
+            counts.lfs_lookalike_count,
+        ));
+    }
     if git.has_config_includes() {
         warnings.push(Warning::new(
             warning::CONFIG_INCLUDES_IGNORED,
@@ -468,6 +580,10 @@ fn carry_out(
         skipped_entries: counts.skipped_entries,
         skipped_entry_count: counts.skipped_entry_count,
         inexact_commits: counts.inexact_commits,
+        lfs_files: counts.lfs_files,
+        lfs_bytes: counts.lfs_bytes,
+        lfs_commits: counts.lfs_commits,
+        inexact_lfs_pointers: counts.inexact_lfs_pointers,
         warnings,
     };
     let entry = DiaryEntry {
@@ -888,79 +1004,159 @@ fn tracked_bolt(git: &git::Repo, head: &GitId) -> Result<Option<String>, ImportE
 /// as a sign of it.
 const MAX_ATTRIBUTES_BYTES: u64 = 1 << 20;
 
-/// Stops at the first Git LFS pointer, or file that looks like one, in the snapshot of `HEAD`'s
-/// commit `head` (decision 037), before anything is written, when the repository shows a sign of
-/// Git LFS: a `.git/lfs` folder, or `filter=lfs` in the top `.gitattributes`. A sign alone doesn't
-/// stop it: `.git/lfs` stays after `git lfs migrate export` has turned the pointers back into
-/// files, and a `.gitattributes` can name the filter for files a repository doesn't have. The
-/// converter stops at a pointer anywhere else. Each tree read counts against `limits`, never
-/// more than the converter counts; past them this gives up, and the converter stops the import.
-fn stop_at_lfs_in_head(
+/// How many Git LFS files whose objects are missing an import's stop lists.
+const MAX_MISSING_LISTED: usize = 20;
+
+/// Checks, before anything is written, that every Git LFS file of the commits `order` has its
+/// object in `.git/lfs/objects`, when the repository shows a sign of Git LFS: a `.git/lfs`
+/// folder, or `filter=lfs` in the top `.gitattributes` of `HEAD`'s commit `head`.
+/// Without one, the converter stops at the first missing object it meets. A pointer with
+/// extensions stops the import here. Each commit's walk counts against fresh `limits`, never
+/// more than the converter counts; past them this stops looking, and the converter stops the
+/// import at that commit.
+fn check_lfs_objects(
     git: &git::Repo,
     head: &GitId,
-    mut limits: SaveLimits,
+    order: &[GitId],
+    limits: &dyn Fn() -> SaveLimits,
 ) -> Result<(), ImportError> {
     let tree = outline(git, head)?.tree;
     if !git.has_lfs_folder()? && !lfs_attribute(git, &tree)? {
         return Ok(());
     }
-    let commit = head.to_hex();
-    // Each tree and blob is looked at once, so this counts no more than the converter does.
-    let mut seen = HashSet::from([tree]);
-    let top = kept_entries(git, &tree)?;
-    if limits.add(top.len()).is_err() {
+    let mut check = LfsCheck {
+        git,
+        trees: HashSet::new(),
+        small: HashSet::new(),
+        objects: HashSet::new(),
+        first: Vec::new(),
+        count: 0,
+        bytes: 0,
+    };
+    for commit in order {
+        if !check.commit(commit, limits())? {
+            break;
+        }
+    }
+    if check.count == 0 {
         return Ok(());
     }
-    // Each folder on the way down, by name and with how long its path is with a `/` after it, and
-    // the entries in it still to look at.
-    let mut stack = vec![(String::new(), 0usize, top.into_iter())];
-    while let Some((_, prefix, left)) = stack.last_mut() {
-        let prefix = *prefix;
-        let Some((name, kind, id)) = left.next() else {
-            stack.pop();
-            continue;
-        };
-        if kind == EntryKind::ProjectLink || !seen.insert(id) {
-            continue;
+    Err(ImportError::LfsMissing {
+        first: check.first,
+        count: check.count,
+        bytes: check.bytes,
+    })
+}
+
+/// The first pass's look for Git LFS files whose objects are missing. Each folder and each small
+/// file is read once, and each object looked for once, whichever commits hold them.
+struct LfsCheck<'g> {
+    git: &'g git::Repo,
+    trees: HashSet<GitId>,
+    /// Files of at most 1,024 bytes, read already.
+    small: HashSet<GitId>,
+    /// Objects looked for, by oid and size.
+    objects: HashSet<([u8; 32], u64)>,
+    /// The first missing, as the commit (hex), the path and the size, and how many in all, with
+    /// their total size; pointers are untrusted, so it saturates.
+    first: Vec<(String, String, u64)>,
+    count: u64,
+    bytes: u64,
+}
+
+impl LfsCheck<'_> {
+    /// Looks at the folders and files of the commit `commit` not looked at before; `false` once
+    /// past `limits`.
+    fn commit(&mut self, commit: &GitId, mut limits: SaveLimits) -> Result<bool, ImportError> {
+        let tree = outline(self.git, commit)?.tree;
+        if !self.trees.insert(tree) {
+            return Ok(true);
         }
-        let path_len = prefix.saturating_add(name.len());
-        if limits.check_path(path_len).is_err() {
+        let hex = commit.to_hex();
+        let top = kept_entries(self.git, &tree)?;
+        if limits.add(top.len()).is_err() {
+            return Ok(false);
+        }
+        // Each folder on the way down, by name and with how long its path is with a `/` after
+        // it, and the entries in it still to look at.
+        let mut stack = vec![(String::new(), 0usize, top.into_iter())];
+        while let Some((_, prefix, left)) = stack.last_mut() {
+            let prefix = *prefix;
+            let Some((name, kind, id)) = left.next() else {
+                stack.pop();
+                continue;
+            };
+            let path_len = prefix.saturating_add(name.len());
+            if limits.check_path(path_len).is_err() {
+                return Ok(false);
+            }
+            match kind {
+                EntryKind::Folder if self.trees.insert(id) => {
+                    // The new folder's level: the top folder is level 0.
+                    if limits.check_depth(stack.len()).is_err() {
+                        return Ok(false);
+                    }
+                    let inner = kept_entries(self.git, &id)?;
+                    if limits.add(inner.len()).is_err() {
+                        return Ok(false);
+                    }
+                    stack.push((name, path_len.saturating_add(1), inner.into_iter()));
+                }
+                // Only a file can be a Git LFS file: Git checks a link out as it is.
+                EntryKind::File | EntryKind::Executable if !self.small.contains(&id) => {
+                    let path = || {
+                        let folders = stack.iter().skip(1).map(|(n, ..)| n.as_str());
+                        let mut path: Vec<&str> = folders.collect();
+                        path.push(&name);
+                        shown_path(&path)
+                    };
+                    self.file(&id, &hex, &path)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(true)
+    }
+
+    /// Reads the file `id`, at `path` in the commit `commit` (hex), if it is small enough to be a
+    /// pointer, and notes the object it points to if that is missing.
+    fn file(
+        &mut self,
+        id: &GitId,
+        commit: &str,
+        path: &dyn Fn() -> String,
+    ) -> Result<(), ImportError> {
+        let place = || format!("the file `{}` of commit `{commit}`", path());
+        let (_, size) = self.git.header(id).map_err(|e| at(e, place))?;
+        if size > MAX_LFS_POINTER_BYTES as u64 {
             return Ok(());
         }
-        if kind == EntryKind::Folder {
-            // The new folder's level: the top folder is level 0.
-            if limits.check_depth(stack.len()).is_err() {
-                return Ok(());
-            }
-            let inner = kept_entries(git, &id)?;
-            if limits.add(inner.len()).is_err() {
-                return Ok(());
-            }
-            stack.push((name, path_len.saturating_add(1), inner.into_iter()));
-            continue;
-        }
-        let path = || {
-            let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, ..)| n.as_str()).collect();
-            path.push(&name);
-            shown_path(&path)
+        self.small.insert(*id);
+        let object = self.git.read(id).map_err(|e| at(e, place))?;
+        expect_kind(object.kind, ObjectType::Blob, id, place)?;
+        let Some(p) = lfs_pointer(&object.data) else {
+            return Ok(());
         };
-        let place = || format!("the file `{}` of commit `{commit}`", path());
-        let (_, size) = git.header(&id).map_err(|e| at(e, place))?;
-        if size > MAX_LFS_POINTER_BYTES as u64 {
-            continue;
-        }
-        let object = git.read(&id).map_err(|e| at(e, place))?;
-        expect_kind(object.kind, ObjectType::Blob, &id, place)?;
-        let pointer = is_lfs_pointer(&object.data);
-        if pointer || looks_like_lfs_pointer(&object.data) {
-            return Err(ImportError::LfsPointer {
-                commit,
+        if p.extensions {
+            return Err(ImportError::LfsExtension {
+                commit: commit.to_owned(),
                 path: path(),
-                lookalike: !pointer,
             });
         }
+        // A pointer of size 0 is an empty file, whose object isn't read.
+        if p.size == 0
+            || !self.objects.insert((p.oid, p.size))
+            || self.git.lfs_object(&p)?.is_some()
+        {
+            return Ok(());
+        }
+        self.count = self.count.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(p.size);
+        if self.first.len() < MAX_MISSING_LISTED {
+            self.first.push((commit.to_owned(), path(), p.size));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Whether a line of the top `.gitattributes` in the tree `tree` that isn't a comment names Git
@@ -1131,6 +1327,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
+                lfs_storage: None,
                 progress: &mut |_, _| {},
             },
             &mut None,
@@ -1633,6 +1830,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
+                lfs_storage: None,
                 progress: &mut progress,
             },
             &mut opened,
@@ -1665,11 +1863,11 @@ mod tests {
         assert!(opened.is_some());
     }
 
-    /// The look for Git LFS pointers before anything is written counts each tree it reads
-    /// against a save's limits, no more than the converter counts, and past them leaves the stop
-    /// to the converter. A comment in `.gitattributes` is no sign of Git LFS.
+    /// The first pass's look for missing Git LFS objects counts each commit's new trees against a
+    /// save's limits, no more than the converter counts, and past them leaves the stop to the
+    /// converter. A comment in `.gitattributes` is no sign of Git LFS.
     #[test]
-    fn the_look_for_lfs_pointers_keeps_to_a_saves_limits() {
+    fn the_look_for_missing_lfs_objects_keeps_to_a_saves_limits() {
         let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:\
             4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
         // `art/deep/big.psd`: two levels below the top, and three entries with the top's one.
@@ -1692,33 +1890,92 @@ mod tests {
             let commit = commit_on(&git, &tree, &[], "One\n");
             (dir, commit)
         };
-        let scan = |dir: &Path, commit: &GitId, depth, entries| {
+        let scan = |dir: &Path, commit: &GitId, limits: &dyn Fn() -> SaveLimits| {
             let repo = git::Repo::open(dir).unwrap();
-            stop_at_lfs_in_head(&repo, commit, SaveLimits::new(depth, entries))
+            check_lfs_objects(&repo, commit, &[*commit], limits)
         };
-        let pointer_found = |r| matches!(r, Err(ImportError::LfsPointer { .. }));
+        let small = |depth, entries| move || SaveLimits::new(depth, entries);
+        let missing = |r| matches!(r, Err(ImportError::LfsMissing { count: 1, .. }));
         let (dir, commit) = made(None);
         assert!(
-            scan(dir.path(), &commit, 2, 3).is_ok(),
+            scan(dir.path(), &commit, &small(2, 3)).is_ok(),
             "no sign of Git LFS"
         );
         std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
-        assert!(pointer_found(scan(dir.path(), &commit, 2, 3)));
-        assert!(scan(dir.path(), &commit, 1, 3).is_ok(), "a level short");
-        assert!(scan(dir.path(), &commit, 2, 2).is_ok(), "an entry short");
+        assert!(missing(scan(dir.path(), &commit, &small(2, 3))));
+        assert!(
+            scan(dir.path(), &commit, &small(1, 3)).is_ok(),
+            "a level short"
+        );
+        assert!(
+            scan(dir.path(), &commit, &small(2, 2)).is_ok(),
+            "an entry short"
+        );
         // `art/deep/big.psd` is 16 bytes.
-        let within = |bytes| {
-            let repo = git::Repo::open(dir.path()).unwrap();
-            stop_at_lfs_in_head(&repo, &commit, SaveLimits::default().with_max_path(bytes))
-        };
-        assert!(pointer_found(within(16)));
-        assert!(within(15).is_ok(), "a byte short");
+        let within = |bytes| move || SaveLimits::default().with_max_path(bytes);
+        assert!(missing(scan(dir.path(), &commit, &within(16))));
+        assert!(
+            scan(dir.path(), &commit, &within(15)).is_ok(),
+            "a byte short"
+        );
         let line = b"*.psd filter=lfs diff=lfs merge=lfs -text\n";
         let commented = [&b" \t# "[..], line].concat();
         let (dir, commit) = made(Some(commented.as_slice()));
-        assert!(scan(dir.path(), &commit, 2, 4).is_ok(), "only a comment");
+        assert!(
+            scan(dir.path(), &commit, &small(2, 4)).is_ok(),
+            "only a comment"
+        );
         let (dir, commit) = made(Some(line));
-        assert!(pointer_found(scan(dir.path(), &commit, 2, 4)));
+        assert!(missing(scan(dir.path(), &commit, &small(2, 4))));
+    }
+
+    /// Each object is looked for once, however many files and commits point to it, so the count
+    /// and total size are of objects; sizes from pointers, which are untrusted, add up without
+    /// overflowing.
+    #[test]
+    fn missing_lfs_objects_are_counted_once_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        let oid = |n: u8| format!("{n:02x}").repeat(32);
+        let pointer = |n: u8, size: u64| {
+            let text = format!(
+                "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {size}\n",
+                oid(n)
+            );
+            git.object(ObjectType::Blob, text.as_bytes())
+        };
+        let huge = i64::MAX as u64;
+        let (a, b, c) = (pointer(1, huge), pointer(2, huge), pointer(3, huge));
+        // The same object again, by a pointer written another way.
+        let crlf = format!(
+            "version https://git-lfs.github.com/spec/v1\r\noid sha256:{}\r\nsize {huge}\r\n",
+            oid(1)
+        );
+        let again = git.object(ObjectType::Blob, crlf.as_bytes());
+        let first = git.tree(&[
+            (b"100644", b"a.psd", a),
+            (b"100644", b"b.psd", b),
+            (b"100755", b"c.psd", c),
+        ]);
+        let first = commit_on(&git, &first, &[], "One\n");
+        let second = git.tree(&[(b"100644", b"again.psd", again), (b"100644", b"b.psd", b)]);
+        let second = commit_on(&git, &second, &[first], "Two\n");
+        std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
+        let repo = git::Repo::open(dir.path()).unwrap();
+        let order = [first, second];
+        match check_lfs_objects(&repo, &second, &order, &SaveLimits::default) {
+            Err(ImportError::LfsMissing {
+                first: listed,
+                count,
+                bytes,
+            }) => {
+                assert_eq!((count, bytes), (3, u64::MAX));
+                let paths: Vec<&str> = listed.iter().map(|(_, path, _)| path.as_str()).collect();
+                assert_eq!(paths, ["a.psd", "b.psd", "c.psd"]);
+                assert!(listed.iter().all(|(commit, ..)| *commit == first.to_hex()));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The first pass says how many commits it has read, as it goes, before it knows how many
@@ -1737,6 +1994,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
+                lfs_storage: None,
                 progress: &mut |done, total| heard.push((done, total)),
             },
             &mut None,

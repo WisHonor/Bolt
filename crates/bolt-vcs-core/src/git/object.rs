@@ -377,53 +377,90 @@ fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
 /// Most bytes a Git LFS pointer may have (decision 037).
 pub const MAX_LFS_POINTER_BYTES: usize = 1024;
 
+/// The `version` Git LFS writes.
+const LFS_SPEC: &str = "https://git-lfs.github.com/spec/v1";
+
 /// The `version` values of Git LFS's pointers: its own and its pre-release's.
-const LFS_SPECS: [&str; 2] = [
-    "https://git-lfs.github.com/spec/v1",
-    "https://hawser.github.com/spec/v1",
-];
+const LFS_SPECS: [&str; 2] = [LFS_SPEC, "https://hawser.github.com/spec/v1"];
 
 /// The `version` of Git LFS's alpha, which it reads too.
 const LFS_ALPHA: &str = "http://git-media.io/v/2";
 
-/// Whether a blob is a Git LFS pointer, by the test Git LFS's own parser applies (`DecodeFrom`
-/// in its lfs/pointer.go): `version`, `oid` and `size` lines in that order, extension lines
-/// before `size` and nothing after, blank lines and surrounding whitespace ignored. An empty
-/// blob, or one over 1,024 bytes, isn't one.
+/// What a Git LFS pointer says: the SHA-256 and size of the file it stands for, and whether it
+/// has extension lines, whose programs Git LFS would run to rebuild that file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LfsPointer {
+    pub oid: [u8; 32],
+    pub size: u64,
+    pub extensions: bool,
+}
+
+impl LfsPointer {
+    /// The oid in lowercase hex, as Git LFS names the object's file.
+    #[must_use]
+    pub fn oid_hex(&self) -> String {
+        let mut hex = String::with_capacity(64);
+        for b in self.oid {
+            let _ = write!(hex, "{b:02x}");
+        }
+        hex
+    }
+}
+
+/// The pointer a blob is, by the test Git LFS's own parser applies (`DecodeFrom` in its
+/// lfs/pointer.go): `version`, `oid` and `size` lines in that order, extension lines before
+/// `size` and nothing after, blank lines and surrounding whitespace ignored. An empty blob, or
+/// one over 1,024 bytes, isn't one.
 #[must_use]
-pub fn is_lfs_pointer(data: &[u8]) -> bool {
+pub fn lfs_pointer(data: &[u8]) -> Option<LfsPointer> {
     if data.is_empty() || data.len() > MAX_LFS_POINTER_BYTES {
-        return false;
+        return None;
     }
     // Git LFS reads bytes: a U+FFFD where a byte isn't UTF-8 matches no more than the byte did.
     let text = String::from_utf8_lossy(data);
     let mut values: Vec<&str> = Vec::new();
     let mut extensions = BTreeMap::new();
     for line in text.trim().lines().filter(|line| !line.is_empty()) {
-        let Some((key, value)) = line.split_once(' ') else {
-            return false;
-        };
-        let expected = ["version", "oid", "size"].get(values.len());
-        if expected.is_none() {
-            return false;
-        } else if expected == Some(&key) {
+        let (key, value) = line.split_once(' ')?;
+        if ["version", "oid", "size"].get(values.len())? == &key {
             values.push(value);
         } else if is_lfs_extension(key) {
             // A key given twice keeps its last value, as in Git LFS.
             extensions.insert(key, value);
         } else {
-            return false;
+            return None;
         }
     }
     let [version, oid, size] = values[..] else {
-        return false;
+        return None;
     };
     let priorities: BTreeSet<_> = extensions.keys().map(|key| key.as_bytes().get(4)).collect();
-    (LFS_SPECS.contains(&version) || version == LFS_ALPHA)
-        && is_lfs_oid(oid)
-        && size.parse::<i64>().is_ok_and(|size| size >= 0)
-        && extensions.values().all(|oid| is_lfs_oid(oid))
-        && priorities.len() == extensions.len()
+    let valid = (LFS_SPECS.contains(&version) || version == LFS_ALPHA)
+        && extensions.values().all(|oid| lfs_oid(oid).is_some())
+        && priorities.len() == extensions.len();
+    if !valid {
+        return None;
+    }
+    // Git LFS reads the size as a signed 64-bit number, which can't be negative.
+    let size = size.parse::<i64>().ok()?;
+    Some(LfsPointer {
+        oid: lfs_oid(oid)?,
+        size: u64::try_from(size).ok()?,
+        extensions: !extensions.is_empty(),
+    })
+}
+
+/// Whether `data` is the pointer `p` in the exact form Git LFS writes (`Encoded` in its
+/// lfs/pointer.go): its own version, the oid and the size, each line ending in LF. Git LFS keeps
+/// an empty file as an empty blob, so no pointer of size 0 is in that form.
+#[must_use]
+pub fn is_exact_lfs_pointer(data: &[u8], p: &LfsPointer) -> bool {
+    let exact = format!(
+        "version {LFS_SPEC}\noid sha256:{}\nsize {}\n",
+        p.oid_hex(),
+        p.size
+    );
+    !p.extensions && p.size > 0 && data == exact.as_bytes()
 }
 
 /// Whether a blob looks like a Git LFS pointer, whether or not Git LFS would read it as one
@@ -459,11 +496,17 @@ fn is_lfs_extension(key: &str) -> bool {
     )
 }
 
-/// `sha256:` and 64 lowercase hex digits.
-fn is_lfs_oid(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    })
+/// The SHA-256 `value` gives: `sha256:` and 64 lowercase hex digits.
+fn lfs_oid(value: &str) -> Option<[u8; 32]> {
+    let hex = value.strip_prefix("sha256:")?;
+    if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let mut oid = [0; 32];
+    for (byte, pair) in oid.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(oid)
 }
 
 /// A person as Git's `split_ident_line` reads an author, committer or tagger: the name up to the
@@ -1318,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn lfs_pointers_and_lookalikes() {
+    fn pointers_parse_as_git_lfs_parses_them() {
         // Cases from Git LFS's own tests (lfs/pointer_test.go), and the edges of its parser.
         let oid = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
         let v1 = "version https://git-lfs.github.com/spec/v1\n";
@@ -1490,8 +1533,32 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(is_lfs_pointer(data.as_bytes()), want, "{what}");
+            assert_eq!(lfs_pointer(data.as_bytes()).is_some(), want, "{what}");
         }
+        // What a pointer says.
+        let parsed = |data: &str| lfs_pointer(data.as_bytes()).unwrap();
+        let mut want = [0u8; 32];
+        for (byte, pair) in want.iter_mut().zip(oid.as_bytes().chunks(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+        }
+        let plain = LfsPointer {
+            oid: want,
+            size: 12345,
+            extensions: false,
+        };
+        assert_eq!(parsed(&pointer), plain);
+        assert_eq!(parsed(&pointer).oid_hex(), oid);
+        assert_eq!(parsed(&pointer.replace("12345", "+12345")), plain);
+        assert_eq!(parsed(&pointer.replace("12345", "000")).size, 0);
+        assert_eq!(parsed(&pointer.replace("12345", "-0")).size, 0);
+        let with_extension = format!("{}{pointer}", ext("0", "foo", 'f'));
+        assert_eq!(
+            parsed(&with_extension),
+            LfsPointer {
+                extensions: true,
+                ..plain
+            }
+        );
         // Bytes that aren't UTF-8 count as Git LFS counts them: as characters that match nothing.
         let named = [
             ext("0", "foo", 'f')
@@ -1500,7 +1567,7 @@ mod tests {
             pointer.as_bytes(),
         ]
         .concat();
-        assert!(is_lfs_pointer(&named));
+        assert!(lfs_pointer(&named).is_some());
         let raw = [
             &ext("0", "foo", 'f').as_bytes()[..9],
             b"\xff",
@@ -1508,8 +1575,46 @@ mod tests {
             pointer.as_bytes(),
         ]
         .concat();
-        assert!(is_lfs_pointer(&raw));
-        assert!(!is_lfs_pointer(&[b"\xff", pointer.as_bytes()].concat()));
+        assert!(lfs_pointer(&raw).is_some());
+        assert!(lfs_pointer(&[b"\xff", pointer.as_bytes()].concat()).is_none());
+    }
+
+    #[test]
+    fn the_exact_form_is_what_git_lfs_writes() {
+        let oid = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
+        let exact =
+            format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 12345\n");
+        let p = lfs_pointer(exact.as_bytes()).unwrap();
+        assert!(is_exact_lfs_pointer(exact.as_bytes(), &p));
+        for (what, data) in [
+            ("no LF at the end", exact.trim_end().to_owned()),
+            ("CRLF", exact.replace('\n', "\r\n")),
+            ("a blank line", exact.replace("\noid", "\n\noid")),
+            ("a space before it", format!(" {exact}")),
+            (
+                "the pre-release version",
+                exact.replace("git-lfs.github.com", "hawser.github.com"),
+            ),
+            ("a size with a plus sign", exact.replace("12345", "+12345")),
+            ("a zero-padded size", exact.replace("12345", "012345")),
+            (
+                "an extension",
+                exact.replace(
+                    "\noid",
+                    &format!("\next-0-foo sha256:{}\noid", "f".repeat(64)),
+                ),
+            ),
+        ] {
+            let p = lfs_pointer(data.as_bytes()).unwrap();
+            assert!(!is_exact_lfs_pointer(data.as_bytes(), &p), "{what}");
+        }
+        // Another pointer's bytes aren't this one's.
+        let other = lfs_pointer(exact.replace("12345", "1").as_bytes()).unwrap();
+        assert!(!is_exact_lfs_pointer(exact.as_bytes(), &other));
+        // Git LFS keeps an empty file as an empty blob, never as a pointer of size 0.
+        let empty = exact.replace("12345", "0");
+        let p = lfs_pointer(empty.as_bytes()).unwrap();
+        assert!(!is_exact_lfs_pointer(empty.as_bytes(), &p));
     }
 
     #[test]

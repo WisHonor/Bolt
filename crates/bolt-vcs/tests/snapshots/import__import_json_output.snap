@@ -6,6 +6,12 @@ expression: json
   "bolt_json": 1,
   "commits": 2,
   "inexact_commits": 1,
+  "inexact_lfs_pointers": 0,
+  "lfs_commits": 0,
+  "lfs_files": {
+    "bytes": 0,
+    "count": 0
+  },
   "lines": 2,
   "position": {
     "line": "main"
