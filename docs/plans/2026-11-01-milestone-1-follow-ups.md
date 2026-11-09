@@ -118,7 +118,7 @@ What milestone 4's decisions left for later, and what its task reviews and rulin
 
 ## Deferred by milestone 5 (2026-11-09)
 
-What milestone 5's decisions left for later, and what its task reviews, rulings and benchmarks deferred. None loses data; the ones that cost time are bounded, and those marked "measure" wait for a number before anything changes.
+What milestone 5's decisions left for later, and what its task reviews, rulings and benchmarks deferred, with its first red-team session's "Not proven" list ([decision 094](../decisions/094-red-team-m5-rulings.md)). None loses data; the ones that cost time are bounded, and those marked "measure" wait for a number before anything changes.
 
 | By | Item |
 |---|---|
@@ -135,6 +135,12 @@ What milestone 5's decisions left for later, and what its task reviews, rulings 
 | Before v0.1, measure | Where Git wins ([benchmarks.md](../benchmarks.md) §2, and §3 for the imports). `status` and small saves on small projects: on Git's own source, on Linux, `status` takes 62 ms against Git's 13 ms, and a small save 69 ms against 30 ms. Profile first: with 20 files or fewer, Bolt's `status` takes 3–4 ms there, so most of the time grows with the number of files. Going back to an old version, on both small projects and on the repeated 1 GiB file (and on the 10-version one on Linux). And space: Godot's demos take 3% more in Bolt, most likely from compressing each chunk on its own, and the 200 MiB file in 50 versions 18% more, chunks against Git's deltas. |
 | Should do (tests) | The corpus tests' other `bolt --json` runners have no timeout, so a read that looped would hang the test rather than fail it: `run` in `corpus_diary.rs`, and three `goto` runs in `corpus_writeout.rs`. `Case::run_json` in the test support stops at 60 s. |
 | Watch (Windows) | The undo test `a_redo_that_fails_after_a_step_lists_that_step_in_its_document` failed once on the Windows laptop with "Access is denied" on `.bolt/state/head`, and passed three times when run again; never in CI. Milestone 4's watch row above asks for exactly this: the state writes now name their file, and this one names `head`. |
+| Measure | A big file whose chunks are spread over many packs reads slowly: at most 16 packs stay open, and a chunk in a closed pack opens the closed ones by name until found. 1,674 chunks (128 MiB) dealt round-robin over 1, 16, 17, 40 and 80 packs read in 0.20, 0.20, 0.21, 0.72 and 1.65 s, linear past 16 ([red-team report](../redteam/2026-11-09-milestone-5.md), not proven). An honest big file edited all over can spread so; a benchmark with [decision 088](../decisions/088-benchmarks-and-the-speed-gates.md)'s sets, which hold at most 10 versions, would say whether it matters. |
+| Red team | Several bad chunk lists for one file multiply its read: each is tried once per command, and one whose chunks all exist but build another file is read to its end before its final check, so N planted lists cost N reads of the file on every `goto`. Only a hostile `.bolt` holds them, and it can cost as much in other ways. Not proven. |
+| Red team | A link below `.git/lfs/objects` (at `objects/ab`, say) makes its objects missing, so the import's stop says to fetch, where [decision 089](../decisions/089-git-lfs-objects-kept-elsewhere.md) names only `.git/lfs` and `.git/lfs/objects`. Not run; nobody links there by accident. |
+| Red team | Invalid UTF-8 in two extension keys: `lfs_pointer` reads a pointer's text lossily, so `ext-0-a\xff` and `ext-0-a\xfe` become one key, where Git LFS sees two keys with one priority and refuses the pointer. The import would then stop at "a pointer with extensions" for a blob Git LFS checks out as text. Reasoned, not run; only a hostile blob does this. |
+| Red team | `tidy`'s memory grows by about 40 bytes for each distinct chunk ID it keeps, on top of one decoded list at a time: a planted young list naming 8,388,608 distinct IDs adds about 320 MB until `tidy` ends. Honest stores scale the same way. Not run at that size. |
+| Red team (Windows) | A program can set a file's change time back: a file changed during a save, then given back all its old times, isn't seen. It takes a program set on fooling Bolt. Not proven. |
 
 ## For the owner to decide
 
