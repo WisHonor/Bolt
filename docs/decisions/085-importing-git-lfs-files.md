@@ -6,7 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Supersedes:** [decision 037](037-lfs-waits-for-milestone-5.md) (an import stops at any Git LFS pointer until milestone 5)
 - **Refines:** [decision 032](032-exact-repeatable-commit-import.md) (a commit holding Git LFS files can give back its Git ID only if an export turns them back into pointers), [decision 060](060-user-git-settings-includes-and-paths.md) (the user's own Git settings are read for `lfs.storage` too, only to refuse) and [decision 020](020-lfs-import.md) (when the check that every Git LFS file is on disk runs, and what counts as one) and [decision 039](039-first-save-after-import.md) (the first save after an import also stops at pointer files)
-- **Refined by:** [decision 089](089-git-lfs-objects-kept-elsewhere.md) (`lfs.storage` and a linked `.git/lfs` stop an import only when it has a Git LFS file to bring in; the hint for a damaged object runs `git lfs fsck` first) and [decision 090](090-the-first-save-looks-at-the-whole-folder-for-pointers.md) (the first save's pointer stop looks at the whole folder, and names `bolt discard` as a way out)
+- **Refined by:** [decision 089](089-git-lfs-objects-kept-elsewhere.md) (`lfs.storage` and a linked `.git/lfs` stop an import only when it has a Git LFS file to bring in; the hint for a damaged object runs `git lfs fsck` first) and [decision 090](090-the-first-save-looks-at-the-whole-folder-for-pointers.md) (the first save's pointer stop looks at the whole folder, and names `bolt discard` as a way out) and [decision 094](094-red-team-m5-rulings.md) (a blob over 1,024 bytes that Git LFS checks out as a pointer is a look-alike)
 
 ## Context
 

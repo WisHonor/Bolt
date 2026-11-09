@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5 build)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 085](085-importing-git-lfs-files.md) (when `lfs.storage` stops an import, and the hint for an object that doesn't match its pointer)
+- **Refined by:** [decision 094](094-red-team-m5-rulings.md) (`lfs.storage` is read where Git reads it, and the stop for missing Git LFS files says when a setting Bolt doesn't read may keep them elsewhere)
 
 ## Context
 
