@@ -1,6 +1,6 @@
 # Terminal-UI canvas review
 
-The owner's [terminal-UI design canvas](https://claude.ai/artifact/7EsY5fiSavfbM1NWcnYW3h), reviewed on 2026-11-08 screen by screen against Bolt's decisions, [json.md](../json.md) and the code of that day. The correction prompt at the end also takes in decisions [089](../decisions/089-git-lfs-objects-kept-elsewhere.md) and [090](../decisions/090-the-first-save-looks-at-the-whole-folder-for-pointers.md), made the next day.
+The owner's [terminal-UI design canvas](https://claude.ai/artifact/7EsY5fiSavfbM1NWcnYW3h), reviewed on 2026-11-08 screen by screen against Bolt's decisions, [json.md](../json.md) and the code of that day. The correction prompt at the end also takes in decisions [089](../decisions/089-git-lfs-objects-kept-elsewhere.md) and [090](../decisions/090-the-first-save-looks-at-the-whole-folder-for-pointers.md), made after it. It doesn't yet cover two of milestone 5's other stops: `tidy` stopping at a pack it can't read, and the import's stop past its work allowance, with the hint of [decision 091](../decisions/091-the-work-stop-names-a-way-out-for-long-histories.md).
 
 ## Verdict
 
