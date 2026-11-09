@@ -504,6 +504,14 @@ pub fn save_folder(
         req.git_excludes,
     )?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
+    let imported = parent.extra.contains_key(EXTRA_GIT_COMMIT);
+    // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
+    // it is by the next save, which doesn't look. Told after the save's own checks.
+    let pointers = if imported {
+        endings::pointers(repo.store(), drive, &trusted, &mut handles, &folders, &old)
+    } else {
+        Ok(())
+    };
     if let Some(given) = req.only {
         let scope = Scope::new(given, drive);
         let store = repo.store();
@@ -513,11 +521,9 @@ pub fn save_folder(
     check_names(&folders, &old)?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039). Pointers
     // first: saving line endings as they are can't help while pointers stand in for files.
-    if parent.extra.contains_key(EXTRA_GIT_COMMIT) {
-        endings::pointers(repo.store(), drive, &trusted, &mut handles, &folders, &old)?;
-        if !req.accept_crlf {
-            endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
-        }
+    pointers?;
+    if imported && !req.accept_crlf {
+        endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
     }
     if let Some(large) = large_save(repo.store(), drive, &folders, &old)? {
         // New files mean something to save, so a missing line name is asked for now: the
