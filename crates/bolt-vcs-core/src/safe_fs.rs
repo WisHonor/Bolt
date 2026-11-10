@@ -13,6 +13,8 @@ use bolt_platform::dir::{Dir, EntryType};
 pub const MAX_FORMAT_BYTES: u64 = 4096;
 pub const MAX_HEAD_BYTES: u64 = 65;
 pub const MAX_LOCK_INFO_BYTES: u64 = 4096;
+/// `state/tidied`: a number of milliseconds and an LF.
+pub const MAX_TIDIED_BYTES: u64 = 32;
 pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
 /// One `.gitignore` or `.boltignore`.
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1 << 20;

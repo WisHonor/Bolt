@@ -74,6 +74,9 @@ pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 pub const RULES_FILE_SKIPPED: &str = "rules_file_skipped";
 /// Parts of `bolt.toml` couldn't be used and were passed over; the rest of it counts.
 pub const RULES_IGNORED: &str = "rules_ignored";
+/// `tidy` passed over a diary cut off from the current entry that names an entry the store lacks,
+/// keeping what it reached from its end.
+pub const DIARY_END_UNREADABLE: &str = "diary_end_unreadable";
 
 /// Whether people see a warning of `kind` when the command then fails: it tells of files
 /// already written, by a switch the command finished first or by the command itself before it

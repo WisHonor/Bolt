@@ -268,8 +268,14 @@ fn append(
 /// Stores an entry after the current one, holding a save of its own, without moving `head`, as a
 /// command a crash stopped leaves them. Gives the entry and the save.
 fn crash_leftover(repo: &mut Repository) -> (Id, Id) {
+    let head = repo.head().unwrap();
+    leftover_after(repo, head)
+}
+
+/// `crash_leftover`, with `parent` as the entry's parent, which may be one the store lacks.
+fn leftover_after(repo: &mut Repository, parent: Id) -> (Id, Id) {
     let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
-    let (head, mut entry) = repo.current().unwrap();
+    let (_, mut entry) = repo.current().unwrap();
     let mut packs = repo.new_packs().unwrap();
     let text = b"left by a crash";
     let content = packs.add_content(text).unwrap();
@@ -281,7 +287,7 @@ fn crash_leftover(repo: &mut Repository) -> (Id, Id) {
     };
     let (root, _) = add_listing(&mut packs, vec![file]);
     let save = a_save(&mut packs, root, vec![tip_of(&entry).unwrap()], "Crashed");
-    entry.parent = Some(head);
+    entry.parent = Some(parent);
     entry.command = "save".into();
     entry.folder_change = None;
     entry.state.lines.insert("main".into(), save);
@@ -564,11 +570,187 @@ fn tidy_stops_before_removing_anything_when_something_to_keep_is_missing() {
     assert!(reads(&repo, &entry, ObjectKind::DiaryEntry));
 }
 
+fn tidied_file(dir: &Path) -> std::path::PathBuf {
+    dir.join(".bolt").join("state").join("tidied")
+}
+
+#[test]
+fn tidy_writes_the_window_it_used_before_it_removes_anything() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    discard_text(dir.path(), &mut repo, "thrown away", 40);
+    age_packs(&repo, 48);
+    let at = now();
+    let file = tidied_file(dir.path());
+    #[cfg(feature = "fault-injection")]
+    {
+        use crate::fsio::fault;
+        let before = pack_names(&repo);
+        // Stopped right after marking: the window is written, and nothing is gone.
+        for n in 1.. {
+            assert!(n < 50, "tidy never reached tidy:marked");
+            fault::arm(n);
+            let result = tidy(&mut repo, 30, at, &mut |_| {}, &mut |_| {});
+            fault::disarm();
+            let said = result.unwrap_err().to_string();
+            if said.contains("injected fault at tidy:marked") {
+                break;
+            }
+        }
+        let written = fs::read_to_string(&file).unwrap();
+        assert_eq!(written, format!("{}\n", at - 30 * DAY));
+        assert_eq!(pack_names(&repo), before);
+        assert!(text_reads(&repo, "thrown away"));
+        fs::remove_file(&file).unwrap();
+    }
+    tidy(&mut repo, 30, at, &mut |_| {}, &mut |_| {}).unwrap();
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        format!("{}\n", at - 30 * DAY)
+    );
+    assert!(!text_reads(&repo, "thrown away"));
+}
+
+#[test]
+fn a_longer_window_after_a_tidy_asks_only_for_what_it_kept() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    discard_text(dir.path(), &mut repo, "thrown away", 10);
+    age_packs(&repo, 48);
+    let at = now();
+    tidy(&mut repo, 5, at, &mut |_| {}, &mut |_| {}).unwrap();
+    assert!(!text_reads(&repo, "thrown away"));
+    // The window made longer again, a little later: the discard is inside it, but what it kept
+    // went with the earlier window.
+    tidy(&mut repo, 30, at + 1000, &mut |_| {}, &mut |_| {}).unwrap();
+    assert_eq!(
+        fs::read_to_string(tidied_file(dir.path())).unwrap(),
+        format!("{}\n", at - 5 * DAY)
+    );
+}
+
+#[test]
+fn a_save_missing_inside_the_window_still_stops_tidy() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    fs::write(tidied_file(dir.path()), format!("{}\n", now() - 5 * DAY)).unwrap();
+    // Two days ago, a step whose folder change names a save the store lacks.
+    let missing = Id([9; 32]);
+    let state = repo.current().unwrap().1.state;
+    let change = FolderChange {
+        from: missing,
+        to: tip(&repo),
+    };
+    append(&mut repo, 2, Action::Command, state, Some(change));
+    age_packs(&repo, 48);
+    let before = pack_names(&repo);
+    match tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {}) {
+        Err(e @ RepoError::Damaged { .. }) => {
+            assert!(e.to_string().contains(&missing.to_hex()), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(pack_names(&repo), before);
+}
+
+#[test]
+fn a_missing_save_the_current_state_needs_still_stops_tidy() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    let missing = Id([9; 32]);
+    plant_root(&mut repo, |_| missing);
+    // However late the last tidy says its window started.
+    fs::write(tidied_file(dir.path()), format!("{}\n", now())).unwrap();
+    age_packs(&repo, 48);
+    let before = pack_names(&repo);
+    match tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {}) {
+        Err(e @ RepoError::Damaged { .. }) => {
+            assert!(e.to_string().contains(&missing.to_hex()), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(pack_names(&repo), before);
+}
+
+#[test]
+fn a_tidied_file_of_junk_or_from_the_future_counts_as_absent() {
+    let (dir, repo) = project(50);
+    let file = tidied_file(dir.path());
+    let at = now();
+    let own = at - 30 * DAY;
+    let later = at - DAY;
+    fs::write(&file, format!("{later}\n")).unwrap();
+    assert_eq!(window_start(&repo, 30, at), later);
+    // Earlier than the window's own start: the window's own start.
+    fs::write(&file, format!("{}\n", own - DAY)).unwrap();
+    assert_eq!(window_start(&repo, 30, at), own);
+    let junk: [Vec<u8>; 6] = [
+        vec![b'7'; 1 << 20],
+        b"soon\n".to_vec(),
+        format!("{later}").into_bytes(),
+        format!("{later}\r\n").into_bytes(),
+        format!("-{later}\n").into_bytes(),
+        format!("{}\n", at + DAY).into_bytes(),
+    ];
+    for bytes in junk {
+        fs::write(&file, &bytes).unwrap();
+        let shown = String::from_utf8_lossy(&bytes[..bytes.len().min(16)]).into_owned();
+        assert_eq!(window_start(&repo, 30, at), own, "{shown}");
+    }
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    assert_eq!(window_start(&repo, 30, at), own);
+}
+
+#[test]
+fn a_planted_tidied_file_cannot_free_undo_data_newer_than_it_names() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    discard_text(dir.path(), &mut repo, "thrown away long ago", 25);
+    discard_text(dir.path(), &mut repo, "thrown away lately", 10);
+    fs::write(tidied_file(dir.path()), format!("{}\n", now() - 20 * DAY)).unwrap();
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(!text_reads(&repo, "thrown away long ago"));
+    assert!(text_reads(&repo, "thrown away lately"));
+}
+
+#[test]
+fn a_diary_end_whose_parent_is_missing_is_passed_over_with_a_warning() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 1);
+    let gone = Id([7; 32]);
+    let (end, _) = leftover_after(&mut repo, gone);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    let warned: Vec<Warning> = repo
+        .store()
+        .warnings()
+        .into_iter()
+        .filter(|w| w.kind == warning::DIARY_END_UNREADABLE)
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].message.contains(&end.short_hex()), "{warned:?}");
+    assert!(warned[0].message.contains(&gone.short_hex()), "{warned:?}");
+}
+
+#[test]
+fn tidy_keeps_what_it_reached_from_such_an_end() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 1);
+    let (end, save) = leftover_after(&mut repo, Id([7; 32]));
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(reads(&repo, &end, ObjectKind::DiaryEntry));
+    assert!(reads(&repo, &save, ObjectKind::Save));
+    assert!(text_reads(&repo, "left by a crash"));
+}
+
 /// What `tidy` would keep now, with a 30-day window.
 fn marked(repo: &Repository) -> HashSet<Id> {
     let now_ns = i128::from(now()) * 1_000_000;
     let listed = listed(repo.packs_folder(), repo.packs_dir(), now_ns).unwrap();
-    kept(repo, &listed, 30, now()).unwrap()
+    kept(repo, &listed, window_start(repo, 30, now())).unwrap()
 }
 
 /// Every object `keep` names, by kind, from the packs' indexes.

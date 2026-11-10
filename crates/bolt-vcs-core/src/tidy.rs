@@ -15,7 +15,8 @@ use crate::id::Id;
 use crate::listing::{EntryKind, Listing};
 use crate::merge;
 use crate::pack::{self, IndexEntry, ObjectKind, PackError, PackReader};
-use crate::repo::{RepoError, Repository, damaged};
+use crate::repo::{RepoError, Repository, cant_write, damaged};
+use crate::safe_fs;
 use crate::save::Save;
 use crate::store::{StoreError, is_damage, is_pack_name};
 use crate::text::{escape, thousands};
@@ -85,7 +86,9 @@ pub fn tidy(
     let packs_dir = repo.packs_dir().to_owned();
     let now_ns = i128::from(now_ms).saturating_mul(1_000_000);
     let listed = listed(&folder, &packs_dir, now_ns)?;
-    let keep = kept(repo, &listed, window_days, now_ms)?;
+    let since = window_start(repo, window_days, now_ms);
+    let keep = kept(repo, &listed, since)?;
+    record_window(repo, since)?;
     fault_point("tidy:marked")?;
 
     let mut report = TidyReport::default();
@@ -168,6 +171,43 @@ pub fn tidy(
         .filter_map(|(_, meta)| meta.ok())
         .fold(0u64, |sum, meta| sum.saturating_add(meta.size));
     Ok(report)
+}
+
+/// `state/tidied`, where the start of the window the last `tidy` used is kept.
+const TIDIED: &str = "tidied";
+
+/// The start of the undo window: now minus `window_days`, or the start the last `tidy` used if
+/// that is later, so a window made longer never asks for what that one freed.
+pub(crate) fn window_start(repo: &Repository, window_days: u32, now_ms: i64) -> i64 {
+    let since = now_ms.saturating_sub(i64::from(window_days).saturating_mul(DAY_MS));
+    tidied(repo, now_ms).map_or(since, |earlier| earlier.max(since))
+}
+
+/// What `state/tidied` names. A file that isn't digits and an LF, or names a time after `now_ms`,
+/// counts as absent: that only brings back the stop it was there to prevent.
+fn tidied(repo: &Repository, now_ms: i64) -> Option<i64> {
+    let shown = repo.state_dir().join(TIDIED);
+    let (name, max) = (OsStr::new(TIDIED), safe_fs::MAX_TIDIED_BYTES);
+    let bytes = safe_fs::read_capped_in(repo.state_folder(), name, &shown, max).ok()?;
+    let digits = bytes.strip_suffix(b"\n")?;
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let ms: i64 = std::str::from_utf8(digits).ok()?.parse().ok()?;
+    (ms <= now_ms).then_some(ms)
+}
+
+/// Writes `since` into `state/tidied`, before anything is removed.
+fn record_window(repo: &Repository, since: i64) -> Result<(), RepoError> {
+    // Digits only: a window reaching back before 1970 starts there for the next one.
+    let text = format!("{}\n", since.max(0));
+    fsio::write_atomic(
+        repo.tmp_folder(),
+        repo.state_folder(),
+        TIDIED,
+        text.as_bytes(),
+    )
+    .map_err(|e| cant_write(repo.state_dir().join(TIDIED), e))
 }
 
 /// Removes the old packs `names` from `folder`, one at a time. One that can't be removed is left,
@@ -344,20 +384,15 @@ fn survey(repo: &Repository, packs: &[Listed]) -> Result<Survey, RepoError> {
 }
 
 /// What must be kept: every object reached (fingerprints), and every chunk that a chunk list of a
-/// file reached, or one in a young pack, names. `packs` are the store's packs.
-fn kept(
-    repo: &Repository,
-    packs: &[Listed],
-    window_days: u32,
-    now_ms: i64,
-) -> Result<HashSet<Id>, RepoError> {
+/// file reached, or one in a young pack, names. `packs` are the store's packs; the undo window
+/// starts at `since`.
+fn kept(repo: &Repository, packs: &[Listed], since: i64) -> Result<HashSet<Id>, RepoError> {
     let Survey {
         entries,
         lists,
         reads,
     } = survey(repo, packs)?;
     let (head, _) = repo.current()?;
-    let since = now_ms.saturating_sub(i64::from(window_days).saturating_mul(DAY_MS));
     let mut marks = Marks {
         repo,
         kept: HashSet::new(),
@@ -366,13 +401,30 @@ fn kept(
         listings: Vec::new(),
         lists: &lists,
         reads,
+        stored: entries.clone(),
+        gap: None,
     };
     let mut walked = HashSet::new();
     marks.diary(head, since, &mut walked)?;
     // A diary cut off from `head` (a rolled-back `head`, a crash's leftover) lives out the window.
     for (end, entry) in undo::ends_among(repo, entries)? {
-        if entry.who.time_ms >= since {
-            marks.diary(end, since, &mut walked)?;
+        if entry.who.time_ms >= since
+            && let Err(e) = marks.diary(end, since, &mut walked)
+        {
+            // Only an entry the store lacks is passed over; what was reached stays kept.
+            let Some(missing) = marks.gap.take() else {
+                return Err(e);
+            };
+            repo.store().note(Warning::new(
+                warning::DIARY_END_UNREADABLE,
+                format!(
+                    "The diary that ends at entry {}, cut off from the current one, can't be read \
+                     back to its start: entry {} isn't in the store. Tidy kept what it could \
+                     reach from that end and went on.",
+                    end.short_hex(),
+                    missing.short_hex()
+                ),
+            ));
         }
     }
     marks.follow()?;
@@ -392,6 +444,10 @@ struct Marks<'a> {
     lists: &'a HashMap<Id, Vec<(usize, IndexEntry)>>,
     /// The chunk lists to read once all else is marked.
     reads: BTreeMap<(usize, u64), IndexEntry>,
+    /// The diary entries the store holds.
+    stored: HashSet<Id>,
+    /// An entry a diary named that the store doesn't hold, once one stopped marking.
+    gap: Option<Id>,
 }
 
 impl Marks<'_> {
@@ -442,6 +498,10 @@ impl Marks<'_> {
     /// Keeps the diary entry `id` and reads it.
     fn entry(&mut self, id: &Id) -> Result<DiaryEntry, RepoError> {
         self.kept.insert(*id);
+        if !self.stored.contains(id) {
+            self.gap = Some(*id);
+            return Err(damaged(format!("the diary has no entry {id}")));
+        }
         self.repo.entry(id)
     }
 
