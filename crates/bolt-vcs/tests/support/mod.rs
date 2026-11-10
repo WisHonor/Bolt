@@ -180,8 +180,10 @@ pub fn without_bolts_codes(said: &str) -> String {
         .fold(said.to_owned(), |s, code| s.replace(code, ""))
 }
 
-/// Fails unless `said` holds no control character but its line breaks (and the carriage returns
-/// progress redraws with), nothing that hides or reorders text, and no escape code but Bolt's own.
+/// Fails if `said`, once Bolt's own colour codes are taken out, holds a control character other
+/// than a newline or a carriage return (progress redraws with those, so a raw one from the project
+/// would pass too), or one of three characters that hide or reorder text: U+202E, U+2028 and
+/// U+200B. Other hidden characters pass, so a test's hostile text must use these three.
 pub fn assert_escaped(said: &str, what: &str) {
     for c in without_bolts_codes(said).chars() {
         let hides = matches!(c, '\u{202e}' | '\u{2028}' | '\u{200b}');

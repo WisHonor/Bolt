@@ -1642,25 +1642,14 @@ fn rot_in_store(env: &Env, id: &bolt_core::id::Id) {
     }
 }
 
-/// A file name that would drive a terminal, as far as this system lets a name hold it.
+/// A file name that reorders and breaks what a terminal shows, which a save takes on every system:
+/// Bolt's portable-name rule refuses only control characters and Windows' few, not U+202E or
+/// U+2028.
 #[cfg(feature = "fault-injection")]
-fn hostile_name() -> &'static str {
-    if cfg!(windows) {
-        "evil\u{202e}txt.exe\u{2028}x"
-    } else {
-        "evil\u{1b}[2J\u{202e}txt.exe"
-    }
-}
-
-/// [`hostile_name`] as Bolt shows it.
+const HOSTILE_NAME: &str = "evil\u{202e}txt.exe\u{2028}x";
+/// [`HOSTILE_NAME`] as Bolt shows it.
 #[cfg(feature = "fault-injection")]
-fn hostile_name_shown() -> &'static str {
-    if cfg!(windows) {
-        "evil\\u{202e}txt.exe\\u{2028}x"
-    } else {
-        "evil\\x1b[2J\\u{202e}txt.exe"
-    }
-}
+const HOSTILE_NAME_SHOWN: &str = "evil\\u{202e}txt.exe\\u{2028}x";
 
 /// `bolt <args>` on a terminal with colour, then with `NO_COLOR`: both end with `code`, nothing
 /// from the project reaches the screen raw, and they print the same once Bolt's own colour codes
@@ -1700,8 +1689,7 @@ fn project_text_is_escaped_with_colour_on() {
     put(&env, "a.txt", "a\n");
     run_at(&env, None, &["save", "First"]);
     let first = support::main_tip(&env).to_hex();
-    let name = hostile_name();
-    let shown_name = hostile_name_shown();
+    let (name, shown_name) = (HOSTILE_NAME, HOSTILE_NAME_SHOWN);
     let content = format!("{CLEAR}line\n");
     std::fs::write(env.root().join(name), &content).unwrap();
     put(
@@ -1765,6 +1753,38 @@ fn project_text_is_escaped_with_colour_on() {
     );
 }
 
+/// A name holding an escape character can only be made where the system allows it, and only as a
+/// new file: Bolt shows it escaped, and refuses to save it, since Windows can't hold it.
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn a_new_file_named_with_an_escape_code_is_shown_escaped_and_never_saved() {
+    let env = started();
+    std::fs::write(env.root().join("evil\u{1b}[2J.txt"), "x\n").unwrap();
+    let shown = "evil\\x1b[2J.txt";
+    for args in [&["status"][..], &["changes"]] {
+        let said = same_with_colour_on(&env, args, 0);
+        assert!(said.contains(shown), "{args:?}: {said}");
+    }
+    let before = support::head(&env).0;
+    let out = bolt_on_a_terminal(&env, env.root())
+        .args(["save", "Evil"])
+        .output()
+        .unwrap();
+    let (shown_out, said) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    support::assert_escaped(&shown_out, "save's stdout");
+    support::assert_escaped(&said, "save's stderr");
+    // The words, whatever the wrapping.
+    let said = support::without_bolts_codes(&said);
+    let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(said.contains("would not work on every system"), "{said}");
+    assert!(
+        said.contains(&format!("\"{shown}\" contains '\\u{{1b}}'")),
+        "{said}"
+    );
+    assert_eq!(support::head(&env).0, before);
+}
+
 /// The rows of `bolt line` and `bolt history` hold no escape code but Bolt's own: a name that
 /// would hold one is refused, read or written, and a name spelled like one shows as its letters.
 #[cfg(feature = "fault-injection")]
@@ -1774,7 +1794,10 @@ fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
     let env = started();
     put(&env, "a.txt", "a\n");
     run_at(&env, None, &["save", "First"]);
-    // Asked for: refused, with nothing saved.
+    // Asked for, at a save so that a new line may be made: refused for its name, nothing saved.
+    let first = support::main_tip(&env).to_hex();
+    let main = first.clone();
+    run_at(&env, None, &["goto", &first[..12]]);
     put(&env, "a.txt", "b\n");
     let before = support::head(&env).0;
     let hostile = format!("x{CLEAR}\u{1b}[31mred");
@@ -1782,9 +1805,20 @@ fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
         .args(["save", "--line", &hostile, "Red"])
         .output()
         .unwrap();
-    assert_ne!(out.status.code(), Some(0));
-    support::assert_escaped(&text(&out.stderr), "save --line");
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    support::assert_escaped(&said, "save --line");
+    support::assert_escaped(&text(&out.stdout), "save --line");
+    let said = support::without_bolts_codes(&said);
+    let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        said.contains("`x\\x1b[2J\\x1b[31mred` can't be a line's name"),
+        "{said}"
+    );
     assert_eq!(support::head(&env).0, before);
+    run_at(&env, None, &["discard"]);
+    run_at(&env, None, &["goto", "main"]);
+    assert_eq!(support::main_tip(&env).to_hex(), main);
     // Planted in the diary: refused when it is written, or read, never shown raw.
     let mut repo = bolt_core::repo::Repository::open(env.root()).unwrap();
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
@@ -1796,24 +1830,37 @@ fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
         state,
         ..entry
     };
-    let packs = repo.new_packs().unwrap();
-    let written = repo.commit(&lock, packs, &planted);
+    // Bolt's own commit refuses such a name, so it is stored as a hostile `.bolt` could hold it
+    // and made current through `state/head`.
+    assert!(
+        repo.commit(&lock, repo.new_packs().unwrap(), &planted)
+            .is_err()
+    );
     drop(lock);
     drop(repo);
-    if written.is_ok() {
-        for args in [
-            &["line"][..],
-            &["history"],
-            &["status"],
-            &["undo", "--list"],
-        ] {
-            let out = bolt_on_a_terminal(&env, env.root())
-                .args(args)
-                .output()
-                .unwrap();
-            let said = text(&out.stdout) + &text(&out.stderr);
-            support::assert_escaped(&said, &format!("{args:?}"));
-        }
+    let mut id = None;
+    support::add_pack(env.root(), |pack| {
+        let record = planted.encode();
+        id = Some(pack.add_record(bolt_core::pack::ObjectKind::DiaryEntry, &record));
+    });
+    let id = id.unwrap().unwrap();
+    std::fs::write(env.root().join(".bolt/state/head"), format!("{id}\n")).unwrap();
+    // The diary's reader refuses the entry, so each command stops, and `undo --list` lists the
+    // entries it could read instead.
+    for (args, code) in [
+        (&["line"][..], 1),
+        (&["history"], 1),
+        (&["status"], 1),
+        (&["undo", "--list"], 0),
+    ] {
+        let out = bolt_on_a_terminal(&env, env.root())
+            .args(args)
+            .output()
+            .unwrap();
+        let said = text(&out.stdout) + &text(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {said}");
+        support::assert_escaped(&said, &format!("{args:?}"));
+        assert!(!said.contains("x\\x1b[2J\\x1b[31m"), "{args:?}: {said}");
     }
     // Spelled with letters a name may hold: it is only its letters, in Bolt's colours.
     let env = started();
