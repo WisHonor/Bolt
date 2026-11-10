@@ -1451,6 +1451,8 @@ thread_local! {
     static LISTINGS_BUILT: std::cell::RefCell<Vec<String>> = const {
         std::cell::RefCell::new(Vec::new())
     };
+    /// How many entries `build_with` has made on this thread.
+    static ENTRIES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The listings of `folders`, in `build_order`, with each file, link and listing handed to
@@ -1470,7 +1472,7 @@ fn build_with<'a>(
     let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
     for (rel, children) in in_build_order(folders) {
         let before = last.listings.get(rel).and_then(Option::as_ref);
-        let mut entries = Vec::new();
+        let mut found = Vec::new();
         for c in children {
             let was = before.and_then(|l| l.get(&c.name));
             let (kind, id, size) = match c.kind {
@@ -1525,21 +1527,27 @@ fn build_with<'a>(
                     None => {}
                 }
             }
-            entries.push(Entry {
-                name: c.name.clone(),
-                kind,
-                id,
-                size,
-            });
+            found.push((c, kind, id, size));
         }
         // The store holds that listing: the walk just read it and checked it.
-        let unchanged = before.is_some_and(|l| l.entries() == entries.as_slice());
+        let unchanged = before.is_some_and(|l| is_listing(l, &found));
         if let Some(&id) = last.ids.get(rel).filter(|_| unchanged) {
             built.insert(rel, id);
             continue;
         }
         #[cfg(test)]
         LISTINGS_BUILT.with_borrow_mut(|b| b.push(rel.clone()));
+        #[cfg(test)]
+        ENTRIES_BUILT.set(ENTRIES_BUILT.get() + found.len());
+        let entries = found
+            .into_iter()
+            .map(|(c, kind, id, size)| Entry {
+                name: c.name.clone(),
+                kind,
+                id,
+                size,
+            })
+            .collect();
         let listing = Listing::new(entries).map_err(StoreError::from)?;
         built.insert(rel, contents.listing(listing)?);
     }
@@ -1551,6 +1559,19 @@ fn build_with<'a>(
         changed,
         taken_back,
     })
+}
+
+/// Whether `children`, each with the kind, ID and size it was found to have, are `listing`'s
+/// entries, in order.
+fn is_listing(listing: &Listing, children: &[(&Child, EntryKind, Id, u64)]) -> bool {
+    let entries = listing.entries();
+    entries.len() == children.len()
+        && entries
+            .iter()
+            .zip(children)
+            .all(|(e, &(c, kind, id, size))| {
+                e.name == c.name && e.kind == kind && e.id == id && e.size == size
+            })
 }
 
 /// Stores `listing` unless a good copy is held already, and returns its ID.
@@ -4204,6 +4225,23 @@ mod tests {
         let id = saved_root(save_now(&mut repo).unwrap());
         let want = with("left.txt", b"left, changed", &want);
         assert_eq!(saved_folder(repo.store(), id, "d"), want.id());
+    }
+
+    #[test]
+    fn an_unchanged_folder_copies_no_name() {
+        let (dir, repo) = three_folders();
+        let base = newest_root(&repo);
+        let status = |repo: &Repository| {
+            ENTRIES_BUILT.set(0);
+            let now = read_folder(repo, base, false, None, None).unwrap();
+            (ENTRIES_BUILT.get(), now.root)
+        };
+        assert_eq!(status(&repo), (0, base));
+        // `a/b` holds two, `a` two and the top folder three; `c` beside them none.
+        write(dir.path(), "a/b/two.txt", b"two, changed");
+        let (entries, root) = status(&repo);
+        assert_eq!(entries, 7);
+        assert_eq!(root, listing_on_disk(dir.path()));
     }
 
     #[test]

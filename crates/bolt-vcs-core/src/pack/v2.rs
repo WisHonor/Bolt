@@ -2,7 +2,9 @@
 //! so an object is found by reading a few IDs by position (docs/storage-format.md section 11).
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use super::{ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PACK_HEADER_LEN, PackError, Section};
+use super::{
+    ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PACK_HEADER_LEN, PackError, Section, Window,
+};
 use crate::encoding::{Reader, Writer};
 use crate::id::Id;
 use std::cmp::Ordering;
@@ -77,10 +79,15 @@ fn corrupt(path: &Path, reason: impl Into<String>) -> PackError {
 }
 
 /// `N` bytes at `pos`.
-fn read_at<const N: usize>(file: &File, pos: u64) -> Result<[u8; N], PackError> {
+fn read_at<const N: usize>(
+    file: &File,
+    window: Option<&Window>,
+    pos: u64,
+) -> Result<[u8; N], PackError> {
     let mut out = [0u8; N];
     Section {
         file,
+        window,
         pos,
         end: pos.saturating_add(N as u64),
     }
@@ -104,7 +111,7 @@ impl Index {
                 format!("its {len} bytes can't hold a fan-out"),
             ));
         }
-        let head: [u8; HEAD_LEN as usize] = read_at(file, start)?;
+        let head: [u8; HEAD_LEN as usize] = read_at(file, None, start)?;
         let mut r = Reader::new(&head);
         let count = r.u64().map_err(|e| corrupt(path, e.to_string()))?;
         if count > max_objects {
@@ -163,6 +170,7 @@ impl Index {
     pub(super) fn find(
         &self,
         file: &File,
+        window: Option<&Window>,
         path: &Path,
         id: &Id,
     ) -> Result<Option<IndexEntry>, PackError> {
@@ -174,7 +182,13 @@ impl Index {
                 let len = hi.saturating_sub(lo).saturating_mul(ID_LEN);
                 if let Some(ids) = short.get_mut(..len as usize) {
                     let (pos, end) = (self.id_pos(lo), self.id_pos(hi));
-                    Section { file, pos, end }.read_exact(ids)?;
+                    Section {
+                        file,
+                        window,
+                        pos,
+                        end,
+                    }
+                    .read_exact(ids)?;
                     short_from = Some(lo);
                 }
             }
@@ -188,13 +202,13 @@ impl Index {
             });
             let at = Id(match held {
                 Some(at) => at,
-                None => read_at(file, self.id_pos(mid))?,
+                None => read_at(file, window, self.id_pos(mid))?,
             });
             match at.cmp(id) {
                 Ordering::Less => lo = mid.saturating_add(1),
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => {
-                    let line = read_at(file, self.line_pos(mid))?;
+                    let line = read_at(file, window, self.line_pos(mid))?;
                     return self.entry(path, *id, &line).map(Some);
                 }
             }
@@ -247,7 +261,14 @@ impl Index {
     /// Every line in order, each checked as `find` checks it, and also that the IDs ascend and
     /// sit in their fan-out ranges.
     pub(super) fn lines<'a>(&'a self, file: &'a File, path: &'a Path) -> Lines<'a> {
-        let section = |pos, end| BufReader::new(Section { file, pos, end });
+        let section = |pos, end| {
+            BufReader::new(Section {
+                file,
+                window: None,
+                pos,
+                end,
+            })
+        };
         Lines {
             index: self,
             path,
@@ -264,6 +285,7 @@ impl Index {
         let mut hasher = blake3::Hasher::new();
         let mut index = Section {
             file,
+            window: None,
             pos: self.start,
             end: self.end,
         };

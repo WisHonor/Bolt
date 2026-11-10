@@ -13,9 +13,9 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(any(test, feature = "fault-injection"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod v2;
 
@@ -692,6 +692,7 @@ pub struct PackReader {
     file: File,
     path: PathBuf,
     index: Index,
+    window: Window,
     /// What counts this pack while it is open, for a store's tests.
     #[cfg(test)]
     counted: Option<Arc<open_files::Count>>,
@@ -765,7 +766,7 @@ impl PackReader {
             return Err(corrupt("the file is too short to be a pack".into()));
         }
 
-        let header = read_vec(&file, 0, PACK_HEADER_LEN)?;
+        let header = read_vec(&file, None, 0, PACK_HEADER_LEN)?;
         if sub::<8>(&header, 0) != PACK_MAGIC {
             return Err(corrupt("the file does not start with BOLTPACK".into()));
         }
@@ -774,7 +775,7 @@ impl PackReader {
             return Err(corrupt("unknown pack version or flags".into()));
         }
 
-        let trailer = read_vec(&file, len - TRAILER_LEN, TRAILER_LEN)?;
+        let trailer = read_vec(&file, None, len - TRAILER_LEN, TRAILER_LEN)?;
         let (index_offset, checksum, end_magic) = (
             u64::from_le_bytes(sub(&trailer, 0)),
             sub::<32>(&trailer, 8),
@@ -790,6 +791,7 @@ impl PackReader {
         let index = if version == 1 {
             let index = Section {
                 file: &file,
+                window: None,
                 pos: index_offset,
                 end: index_end,
             };
@@ -810,6 +812,7 @@ impl PackReader {
             file,
             path: path.to_path_buf(),
             index,
+            window: Window::new(len, index_offset),
             #[cfg(test)]
             counted: None,
         })
@@ -862,7 +865,7 @@ impl PackReader {
                 .binary_search_by(|e| e.id.cmp(id))
                 .ok()
                 .and_then(|i| entries.get(i).copied())),
-            Index::OnDisk(index) => index.find(&self.file, &self.path, id),
+            Index::OnDisk(index) => index.find(&self.file, Some(&self.window), &self.path, id),
         }
     }
 
@@ -1015,11 +1018,17 @@ impl PackReader {
 
     /// Checks the entry's header against `entry`, and returns its compression and stored bytes.
     fn stored(&self, entry: &IndexEntry) -> Result<(u8, Section<'_>), PackError> {
-        let header = read_vec(&self.file, entry.offset, ENTRY_HEADER_LEN)?;
+        let header = read_vec(
+            &self.file,
+            Some(&self.window),
+            entry.offset,
+            ENTRY_HEADER_LEN,
+        )?;
         let compression = self.check_header(entry, &header)?;
         let data_start = entry.offset + ENTRY_HEADER_LEN;
         let data = Section {
             file: &self.file,
+            window: Some(&self.window),
             pos: data_start,
             end: data_start
                 .checked_add(entry.stored_size)
@@ -1060,6 +1069,7 @@ impl PackReader {
         whole.resize(len as usize, 0);
         let mut section = Section {
             file: &self.file,
+            window: Some(&self.window),
             pos: entry.offset,
             end: entry.offset.saturating_add(len),
         };
@@ -1118,8 +1128,12 @@ impl PackReader {
         let produced = match compression {
             NO_COMPRESSION if stored == size => io::copy(&mut data, out)?,
             ZSTD => {
-                let frame_header =
-                    read_vec(&self.file, data_start, stored.min(ZSTD_MAX_FRAME_HEADER))?;
+                let frame_header = read_vec(
+                    &self.file,
+                    Some(&self.window),
+                    data_start,
+                    stored.min(ZSTD_MAX_FRAME_HEADER),
+                )?;
                 match zstd::zstd_safe::get_frame_content_size(&frame_header) {
                     Ok(None) => {}
                     Ok(Some(n)) if n == size => {}
@@ -1434,7 +1448,12 @@ fn sub<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
 }
 
 /// Reads `len` bytes at `offset`, refusing allocations the system can't give.
-fn read_vec(file: &File, offset: u64, len: u64) -> Result<Vec<u8>, PackError> {
+fn read_vec(
+    file: &File,
+    window: Option<&Window>,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, PackError> {
     let len = usize::try_from(len).map_err(|_| PackError::TooLarge)?;
     let mut out = Vec::new();
     out.try_reserve_exact(len)
@@ -1442,6 +1461,7 @@ fn read_vec(file: &File, offset: u64, len: u64) -> Result<Vec<u8>, PackError> {
     out.resize(len, 0);
     Section {
         file,
+        window,
         pos: offset,
         end: offset.saturating_add(len as u64),
     }
@@ -1449,9 +1469,12 @@ fn read_vec(file: &File, offset: u64, len: u64) -> Result<Vec<u8>, PackError> {
     Ok(out)
 }
 
-/// A byte range of a file, read with positional reads so readers never share a cursor.
+/// A byte range of a file, read with positional reads so readers never share a cursor. Every
+/// read of a pack goes through here.
 struct Section<'a> {
     file: &'a File,
+    /// Answers small reads, once the pack is open.
+    window: Option<&'a Window>,
     pos: u64,
     end: u64,
 }
@@ -1463,12 +1486,119 @@ impl Read for Section<'_> {
         if want == 0 {
             return Ok(0);
         }
+        let buf = &mut buf[..want];
+        if self
+            .window
+            .is_some_and(|w| w.read(self.file, self.pos, buf))
+        {
+            self.pos += want as u64;
+            return Ok(want);
+        }
         #[cfg(test)]
         open_files::read();
-        let n = safe_fs::read_at(self.file, &mut buf[..want], self.pos)?;
+        let n = safe_fs::read_at(self.file, buf, self.pos)?;
         self.pos += n as u64;
         Ok(n)
     }
+}
+
+/// What a read of the file that misses the window fills.
+const BLOCK: u64 = 65_536;
+/// The largest read answered from a block; bigger ones go to the file.
+const SMALL_READ: u64 = 4_096;
+
+/// The last block read of a pack's entries, and of its index, so the many small reads of records
+/// and index lines that sit side by side cost one read of the file. A pack never changes once it
+/// is named, so a block is only ever a copy of what the file holds.
+struct Window {
+    /// The file's length when it was opened.
+    len: u64,
+    index_start: u64,
+    /// The entries' block and the index's.
+    blocks: [Mutex<Block>; 2],
+}
+
+#[derive(Default)]
+struct Block {
+    start: u64,
+    bytes: Vec<u8>,
+}
+
+impl Window {
+    fn new(len: u64, index_start: u64) -> Window {
+        Window {
+            len,
+            index_start,
+            blocks: Default::default(),
+        }
+    }
+
+    /// Fills `buf` with the bytes at `pos` from a block, reading the block first if it isn't the
+    /// one held. False if the read is too big, crosses a block's end, or the block can't be read
+    /// whole: the caller then reads the file itself, and reports what goes wrong.
+    fn read(&self, file: &File, pos: u64, buf: &mut [u8]) -> bool {
+        let start = pos - pos % BLOCK;
+        let end = start.saturating_add(BLOCK).min(self.len);
+        let want = buf.len() as u64;
+        if want > SMALL_READ || pos.saturating_add(want) > end {
+            return false;
+        }
+        let Some(slot) = self.blocks.get(usize::from(pos >= self.index_start)) else {
+            return false;
+        };
+        let (at, len) = ((pos - start) as usize, buf.len());
+        // The lock is never held across a read of the file.
+        let mut bytes = {
+            let Ok(mut held) = slot.lock() else {
+                return false;
+            };
+            if held.start == start
+                && let Some(from) = held.bytes.get(at..at + len)
+            {
+                buf.copy_from_slice(from);
+                return true;
+            }
+            std::mem::take(&mut held.bytes)
+        };
+        bytes.clear();
+        bytes.resize((end - start) as usize, 0);
+        if !read_whole(file, start, &mut bytes) {
+            return false;
+        }
+        let Some(from) = bytes.get(at..at + len) else {
+            return false;
+        };
+        buf.copy_from_slice(from);
+        if let Ok(mut held) = slot.lock() {
+            *held = Block { start, bytes };
+        }
+        true
+    }
+
+    /// Where each held block starts, and its length.
+    #[cfg(test)]
+    fn held(&self) -> Vec<(u64, usize)> {
+        let held = |b: &Mutex<Block>| b.lock().map(|b| (b.start, b.bytes.len())).unwrap();
+        self.blocks.iter().map(held).collect()
+    }
+}
+
+/// Whether `buf` could be filled from `pos` on.
+fn read_whole(file: &File, mut pos: u64, mut buf: &mut [u8]) -> bool {
+    while !buf.is_empty() {
+        #[cfg(test)]
+        open_files::read();
+        match safe_fs::read_at(file, buf, pos) {
+            Ok(0) => return false,
+            Ok(n) => {
+                buf = &mut buf[n..];
+                pos += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Passes writes through while hashing them.
@@ -2184,8 +2314,10 @@ mod tests {
                 let (streamed, _) = read_damaged(kind, ONE_READ as usize + 4096, damage);
                 assert_eq!(small, streamed, "{kind:?} {damage:?}");
                 // Only a wrong fingerprint, checked after either path, is settled by the one read.
-                let settled = matches!(damage, Damage::Fingerprint { .. });
-                assert_eq!(reads == 1, settled, "{kind:?} {damage:?}: {reads} reads");
+                // A legacy frame is small enough that the streamed path rereads it from the
+                // block the one read filled.
+                let one_read = matches!(damage, Damage::Fingerprint { .. } | Damage::Legacy);
+                assert_eq!(reads == 1, one_read, "{kind:?} {damage:?}: {reads} reads");
                 if damage == Damage::CutShort {
                     assert!(small.starts_with(invalid), "{kind:?} {damage:?}: {small}");
                 }
@@ -2229,8 +2361,10 @@ mod tests {
         getrandom::fill(&mut random).unwrap();
         w.add_content(&random).unwrap();
         w.add_content(&b"squeezes well ".repeat(1000)).unwrap();
-        let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
-        for e in entries(&r) {
+        let path = w.finish(&packs).unwrap().unwrap();
+        for e in entries(&PackReader::open(&path).unwrap()) {
+            // A reader of its own each time, so no block read for one entry holds the next.
+            let r = PackReader::open(&path).unwrap();
             let before = open_files::reads();
             read_any(&r, &e).unwrap();
             assert_eq!(open_files::reads() - before, 1, "{e:?}");
@@ -2416,5 +2550,139 @@ mod tests {
             }
         }
         assert!(rolled_over, "no fault point sat between two packs");
+    }
+
+    fn random(len: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; len];
+        getrandom::fill(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// A pack of `sizes` random contents, in that order, and its reader.
+    fn random_pack(packs: &Path, tmp: &Path, sizes: &[usize]) -> (PathBuf, Vec<Vec<u8>>) {
+        let mut w = PackWriter::create(tmp).unwrap();
+        let contents: Vec<_> = sizes.iter().map(|&n| random(n)).collect();
+        for c in &contents {
+            w.add_content(c).unwrap();
+        }
+        (w.finish(packs).unwrap().unwrap(), contents)
+    }
+
+    #[test]
+    fn reads_inside_a_block_are_answered_from_memory() {
+        let (_root, tmp, packs) = dirs();
+        let (path, contents) = random_pack(&packs, &tmp, &[100; 100]);
+        let r = PackReader::open(&path).unwrap();
+        let before = open_files::reads();
+        for c in &contents {
+            let e = r.find(&hash_content(c)).unwrap().unwrap();
+            assert!(read_any(&r, &e).unwrap() == *c);
+        }
+        // One block of entries and one of the index, read once each.
+        let reads = open_files::reads() - before;
+        assert!(reads <= 2, "{reads} reads");
+    }
+
+    #[test]
+    fn a_read_across_two_blocks_is_made_from_the_file() {
+        let (_root, tmp, packs) = dirs();
+        // The second entry starts 50 bytes before the first block ends.
+        let filler = (BLOCK - 50 - PACK_HEADER_LEN - ENTRY_HEADER_LEN) as usize;
+        let (path, contents) = random_pack(&packs, &tmp, &[filler, 200, 200]);
+        let r = PackReader::open(&path).unwrap();
+        let find = |c: &[u8]| r.find(&hash_content(c)).unwrap().unwrap();
+        let (across, after) = (find(&contents[1]), find(&contents[2]));
+        assert_eq!(across.offset, BLOCK - 50);
+        assert!(read_any(&r, &after).unwrap() == contents[2]);
+        let held = r.window.held();
+        assert_eq!(held[0].0, BLOCK);
+        let before = open_files::reads();
+        assert!(read_any(&r, &across).unwrap() == contents[1]);
+        assert!(open_files::reads() > before);
+        assert_eq!(r.window.held(), held);
+    }
+
+    #[test]
+    fn a_big_read_is_made_from_the_file() {
+        let (_root, tmp, packs) = dirs();
+        let (path, contents) = random_pack(&packs, &tmp, &[100, 5000]);
+        let r = PackReader::open(&path).unwrap();
+        let find = |c: &[u8]| r.find(&hash_content(c)).unwrap().unwrap();
+        let (small, big) = (find(&contents[0]), find(&contents[1]));
+        assert!(read_any(&r, &small).unwrap() == contents[0]);
+        let held = r.window.held();
+        let before = open_files::reads();
+        assert!(read_any(&r, &big).unwrap() == contents[1]);
+        assert!(open_files::reads() > before);
+        assert_eq!(r.window.held(), held);
+    }
+
+    #[test]
+    fn a_window_never_changes_what_is_read() {
+        let (_root, tmp, packs) = dirs();
+        let sizes: Vec<usize> = (0..300).map(|i| 100 + i * 37 % 3000).collect();
+        let (path, _) = random_pack(&packs, &tmp, &sizes);
+        let file = std::fs::read(&path).unwrap();
+        let len = file.len() as u64;
+        assert!(len > 300_000, "{len}");
+        let r = PackReader::open(&path).unwrap();
+        let reads = proptest::collection::vec((0..len, 1..=2 * SMALL_READ), 1..64);
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(&reads, |reads| {
+                // Half the reads on each of two threads sharing the reader.
+                std::thread::scope(|s| {
+                    for half in [0, 1] {
+                        let (r, file, reads) = (&r, &file, &reads);
+                        s.spawn(move || {
+                            for &(pos, n) in reads.iter().skip(half).step_by(2) {
+                                let end = (pos + n).min(len);
+                                let mut got = vec![0u8; (end - pos) as usize];
+                                let mut section = Section {
+                                    file: &r.file,
+                                    window: Some(&r.window),
+                                    pos,
+                                    end,
+                                };
+                                section.read_exact(&mut got).unwrap();
+                                assert!(got == file[pos as usize..end as usize], "{pos} {n}");
+                            }
+                        });
+                    }
+                });
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_pack_shorter_than_its_index_says_fails_as_before() {
+        let (_root, tmp, packs) = dirs();
+        let (path, contents) = random_pack(&packs, &tmp, &[1000, 1000, 1000]);
+        let last = hash_content(&contents[2]);
+        let entry = PackReader::open(&path)
+            .unwrap()
+            .find(&last)
+            .unwrap()
+            .unwrap();
+        let whole = std::fs::read(&path).unwrap();
+        let read_cut = |cut: u64| {
+            std::fs::write(&path, &whole).unwrap();
+            let r = PackReader::open(&path).unwrap();
+            let file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(cut).unwrap();
+            read_any(&r, &entry).unwrap_err()
+        };
+        let in_data = entry.offset + ENTRY_HEADER_LEN + 500;
+        match read_cut(in_data) {
+            PackError::Corrupt { reason, .. } => {
+                assert_eq!(reason, format!("{last} does not have its recorded size"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match read_cut(entry.offset + 10) {
+            PackError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}"),
+            other => panic!("{other:?}"),
+        }
     }
 }
