@@ -484,7 +484,7 @@ pub fn save_folder(
     }
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
-    let trusted = now.map(|_| FileCache::load(repo)).unwrap_or_default();
+    let cache = now.map(|_| FileCache::load(repo)).unwrap_or_default();
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let base = Base::new(repo.store(), parent.root, SaveLimits::default());
     let Scan {
@@ -508,7 +508,7 @@ pub fn save_folder(
     // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
     // it is by the next save, which doesn't look. Told after the save's own checks.
     let pointers = if imported {
-        endings::pointers(repo.store(), drive, &trusted, &mut handles, &folders, &old)
+        endings::pointers(repo.store(), drive, &cache, &mut handles, &folders, &old)
     } else {
         Ok(())
     };
@@ -542,8 +542,7 @@ pub fn save_folder(
     let mut storing = Storing {
         store: repo.store(),
         packs: &mut packs,
-        trusted,
-        seen: FileCache::default(),
+        cache,
     };
     let built = build_reading(
         &mut storing,
@@ -554,7 +553,7 @@ pub fn save_folder(
         &ignored,
         &gitignored,
     )?;
-    let seen = storing.seen;
+    let seen = storing.cache;
     let root = built.root;
     let kept = built.kept.len() + built.kept_below_gone;
     if kept > 0 {
@@ -850,8 +849,8 @@ fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(Option<String>
     }
 }
 
-/// Writes `seen`, what this walk learned of the files, as the file-state cache, if the drive's
-/// "now" was found before the walk; failing to is only a warning.
+/// Writes `seen`, holding what this walk vouched for and learned of the files, as the file-state
+/// cache, if the drive's "now" was found before the walk; failing to is only a warning.
 fn keep_file_cache(
     repo: &Repository,
     seen: FileCache,
@@ -1041,14 +1040,13 @@ trait Contents {
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
 }
 
-/// A save's: everything goes into `packs` unless the store holds a good copy. A file `trusted`
+/// A save's: everything goes into `packs` unless the store holds a good copy. A file `cache`
 /// vouches for is taken from the base save unread, if the base save holds what the cache says it
-/// held. `seen` learns every file met.
+/// held. `cache` keeps or learns every file met.
 struct Storing<'a> {
     store: &'a Store,
     packs: &'a mut PackSet,
-    trusted: FileCache,
-    seen: FileCache,
+    cache: FileCache,
 }
 
 /// The ID and size `trusted` gives the file `c`, which the base save holds as `was`, if it vouches
@@ -1062,7 +1060,7 @@ fn vouched_by(trusted: &FileCache, c: &Child, was: Option<&Entry>) -> Option<(Id
 
 impl Contents for Storing<'_> {
     fn vouched(&self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
-        vouched_by(&self.trusted, c, was)
+        vouched_by(&self.cache, c, was)
     }
 
     fn file(
@@ -1071,13 +1069,16 @@ impl Contents for Storing<'_> {
         c: &Child,
         was: Option<&Entry>,
     ) -> Result<(Id, u64), SaveError> {
-        let (id, size) = match self.vouched(c, was) {
-            Some(known) => known,
-            None => self.store_read(read, &c.rel)?,
-        };
-        // The walk's details, which the cache vouched for or the read found the file still had.
+        if let Some(known) = self.vouched(c, was) {
+            if let Some(meta) = &c.meta {
+                self.cache.vouch(&c.rel, meta);
+            }
+            return Ok(known);
+        }
+        let (id, size) = self.store_read(read, &c.rel)?;
+        // The walk's details, which the read found the file still had.
         if let Some(meta) = &c.meta {
-            self.seen.record(&c.rel, meta, id);
+            self.cache.record(&c.rel, meta, id);
         }
         Ok((id, size))
     }
@@ -1389,8 +1390,7 @@ fn build(
     let mut storing = Storing {
         store,
         packs,
-        trusted: FileCache::default(),
-        seen: FileCache::default(),
+        cache: FileCache::default(),
     };
     let b = build_reading(
         &mut storing,
@@ -1714,7 +1714,7 @@ pub(crate) fn read_folder(
     // Taken before the walk, so a file changed during it is too new to trust next time. Without
     // it no time can be trusted, so every file is read and nothing cached.
     let now = filecache::drive_now(repo).ok();
-    let trusted = match now {
+    let cache = match now {
         Some(_) if !full => FileCache::load(repo),
         _ => FileCache::default(),
     };
@@ -1736,8 +1736,7 @@ pub(crate) fn read_folder(
         git_excludes,
     )?;
     let mut reading = Reading {
-        trusted,
-        seen: FileCache::default(),
+        cache,
         listings: HashMap::new(),
     };
     for listing in rebuilt {
@@ -1752,7 +1751,7 @@ pub(crate) fn read_folder(
         &ignored,
         &gitignored,
     )?;
-    keep_file_cache(repo, reading.seen, now, &mut warnings);
+    keep_file_cache(repo, reading.cache, now, &mut warnings);
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
     not_written_here.sort_unstable();
@@ -1764,18 +1763,17 @@ pub(crate) fn read_folder(
     })
 }
 
-/// Reads files and links to know their IDs, opening only those `trusted` doesn't vouch for, and
-/// keeps listings in memory. `seen` learns every file met.
+/// Reads files and links to know their IDs, opening only those `cache` doesn't vouch for, and
+/// keeps listings in memory. `cache` keeps or learns every file met.
 struct Reading {
-    trusted: FileCache,
-    seen: FileCache,
+    cache: FileCache,
     listings: HashMap<Id, Listing>,
 }
 
 impl Contents for Reading {
     fn vouched(&self, c: &Child, _was: Option<&Entry>) -> Option<(Id, u64)> {
         let meta = c.meta.as_ref()?;
-        let known = self.trusted.matches(&c.rel, meta)?;
+        let known = self.cache.matches(&c.rel, meta)?;
         Some((known.id, meta.size))
     }
 
@@ -1783,15 +1781,17 @@ impl Contents for Reading {
         &mut self,
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
-        was: Option<&Entry>,
+        _was: Option<&Entry>,
     ) -> Result<(Id, u64), SaveError> {
-        let (id, size) = match self.vouched(c, was) {
-            Some(known) => known,
-            None => hashed_read(read, &c.rel)?,
-        };
-        // The walk's details, which the cache vouched for or the read found the file still had.
+        if let Some(meta) = &c.meta
+            && let Some(known) = self.cache.vouch(&c.rel, meta)
+        {
+            return Ok((known.id, meta.size));
+        }
+        let (id, size) = hashed_read(read, &c.rel)?;
+        // The walk's details, which the read found the file still had.
         if let Some(meta) = &c.meta {
-            self.seen.record(&c.rel, meta, id);
+            self.cache.record(&c.rel, meta, id);
         }
         Ok((id, size))
     }

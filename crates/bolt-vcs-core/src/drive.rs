@@ -56,7 +56,7 @@ fn probe_once(tmp: &Dir) -> io::Result<Option<Drive>> {
         let ignores_case = there(tmp, &name.to_ascii_uppercase())?;
         // Renamed rather than made anew, so every write still goes through `fsio`. It finds the
         // file by its exact name, so it fails if the file was gone for the check above.
-        match fsio::rename_durable(tmp, &plain, tmp, OsStr::new(&accented)) {
+        match fsio::rename_plain(tmp, &plain, tmp, OsStr::new(&accented)) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             renamed => renamed?,
         }

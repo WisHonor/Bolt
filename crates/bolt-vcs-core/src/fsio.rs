@@ -31,19 +31,25 @@ pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
 /// Replaces `name` in the folder `to` with `bytes`, written in the folder `tmp` first, so that,
 /// even after a crash, it holds either the old or the new bytes, never a mix.
 pub fn write_atomic(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    replace(tmp, to, name, bytes, true, rename_durable)
+    replace(tmp, to, name, bytes, true, true, rename_durable)
 }
 
 /// `write_atomic` for the head, `name` in the folder `state`: once it is renamed into place the
 /// command has happened, so a flush that fails after that is told apart from an error.
 pub(crate) fn write_head(tmp: &Dir, state: &Dir, name: &str, bytes: &[u8]) -> io::Result<Done> {
-    replace(tmp, state, name, bytes, true, rename_reported)
+    replace(tmp, state, name, bytes, true, true, rename_reported)
 }
 
-/// `write_atomic` for a cache, which is no part of what a command did, so crash tests don't
-/// stop there.
+/// `write_atomic` without a flush, for a file a power cut may leave older or missing at no cost:
+/// still replaced whole, so no reader sees half of it.
+pub(crate) fn write_unflushed(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
+    replace(tmp, to, name, bytes, true, false, rename_plain)
+}
+
+/// `write_unflushed` for a cache, which is no part of what a command did, so crash tests don't
+/// stop there. A cache a crash leaves torn fails its seal and is rebuilt.
 pub(crate) fn write_cache(tmp: &Dir, to: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
-    replace(tmp, to, name, bytes, false, rename_durable)
+    replace(tmp, to, name, bytes, false, false, rename_plain)
 }
 
 fn replace<T>(
@@ -52,12 +58,15 @@ fn replace<T>(
     name: &str,
     bytes: &[u8],
     faults: bool,
+    flush: bool,
     rename: fn(&Dir, &OsStr, &Dir, &OsStr) -> io::Result<T>,
 ) -> io::Result<T> {
     let (mut file, temp) = create_temp(tmp)?;
     let result = (|| {
         file.write_all(bytes)?;
-        file.sync_all()?;
+        if flush {
+            flush_file(&file)?;
+        }
         drop(file);
         if faults {
             fault_point("write:before-rename")?;
@@ -75,7 +84,32 @@ fn replace<T>(
 /// then flushes `to_dir` so the move survives a crash.
 pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
     rename(from_dir, from, to_dir, to)?;
-    to_dir.sync()
+    flush_dir(to_dir)
+}
+
+/// Moves `from` in the folder `from_dir` to `to` in the folder `to_dir`, replacing a file there,
+/// with no flush: for a move a crash may undo at no cost.
+pub(crate) fn rename_plain(
+    from_dir: &Dir,
+    from: &OsStr,
+    to_dir: &Dir,
+    to: &OsStr,
+) -> io::Result<()> {
+    rename(from_dir, from, to_dir, to)
+}
+
+/// Flushes `file` to the disk.
+fn flush_file(file: &File) -> io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    fault::flushed();
+    file.sync_all()
+}
+
+/// Flushes `dir`, so the names changed in it survive a crash.
+fn flush_dir(dir: &Dir) -> io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    fault::flushed();
+    dir.sync()
 }
 
 /// A change made in a folder: flushed to the disk after it, or not.
@@ -100,7 +134,7 @@ pub(crate) fn rename_reported(
 
 /// Flushes `dir` after a change made in it, past the fault point `label`.
 pub(crate) fn flush_after(dir: &Dir, label: &'static str) -> Done {
-    match fault_point(label).and_then(|()| dir.sync()) {
+    match fault_point(label).and_then(|()| flush_dir(dir)) {
         Ok(()) => Done::Flushed,
         Err(e) => Done::NotFlushed(e),
     }
@@ -197,6 +231,16 @@ pub mod fault {
         static COUNT: Cell<u64> = const { Cell::new(0) };
         static ACTION: RefCell<Option<Action>> = const { RefCell::new(None) };
         static UNREADABLE: RefCell<Option<String>> = const { RefCell::new(None) };
+        static FLUSHES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// How many flushes this thread has made through `fsio`.
+    pub fn flushes() -> u64 {
+        FLUSHES.get()
+    }
+
+    pub(super) fn flushed() {
+        FLUSHES.set(FLUSHES.get().saturating_add(1));
     }
 
     /// Makes this thread's opens of the project file at `path` fail, until called with `None`.
@@ -419,5 +463,39 @@ mod tests {
         assert_eq!(err.to_string(), "injected fault at write:before-rename");
         assert_eq!(fs::read(root.path().join("head")).unwrap(), b"old");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    /// `write` run twice in a fresh folder, and how many flushes it made.
+    #[cfg(feature = "fault-injection")]
+    fn flushes_of(write: fn(&Dir, &Dir, &str, &[u8]) -> io::Result<()>) -> u64 {
+        let root = tempfile::tempdir().unwrap();
+        let dir = Dir::open_top(root.path()).unwrap();
+        let before = fault::flushes();
+        write(&dir, &dir, "file", b"old").unwrap();
+        write(&dir, &dir, "file", b"new").unwrap();
+        assert_eq!(fs::read(root.path().join("file")).unwrap(), b"new");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        fault::flushes() - before
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_cache_write_flushes_nothing() {
+        assert_eq!(flushes_of(write_atomic), 4);
+        assert_eq!(flushes_of(write_cache), 0);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn lock_info_is_written_without_a_flush() {
+        assert_eq!(flushes_of(write_unflushed), 0);
+        // It keeps its fault point.
+        let root = tempfile::tempdir().unwrap();
+        let dir = Dir::open_top(root.path()).unwrap();
+        fault::arm(1);
+        let err = write_unflushed(&dir, &dir, "lock-info", b"pid 1").unwrap_err();
+        fault::disarm();
+        assert_eq!(err.to_string(), "injected fault at write:before-rename");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }
