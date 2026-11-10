@@ -164,7 +164,7 @@ pub(super) mod ahead_seen {
 /// in a folder that isn't held: the base save holds it there as `saved`, a file or link, and
 /// it is one still. The rules only warn about such a file, and only if it changed, so they are
 /// asked then. A `.git` or `.bolt` spelling is always judged.
-pub(super) fn kept_unasked(name: &str, is_dir: bool, saved: Option<&Entry>) -> bool {
+fn kept_unasked(name: &str, is_dir: bool, saved: Option<&Entry>) -> bool {
     !is_dir
         && saved.is_some_and(|e| e.kind != EntryKind::Folder)
         && !is_git_alias(name)
@@ -203,7 +203,13 @@ impl Noted {
     /// What the walk noted of `c`, in the folder `folder`, or would have if it had asked the rules
     /// then: `was` is the base save's entry of that name there.
     pub(super) fn of(&self, folder: &str, c: &Child, was: Option<&Entry>) -> Option<Note> {
+        // A closed folder on Windows is built as a file, but the walk judged it as a folder.
+        let looked_plain = c
+            .meta
+            .as_ref()
+            .is_none_or(|m| matches!(m.kind, EntryType::File | EntryType::Symlink));
         if matches!(c.kind, Kind::File | Kind::Symlink)
+            && looked_plain
             && let Some(late) = self.late.get(folder)
             && kept_unasked(&c.name, false, was)
         {
@@ -326,6 +332,7 @@ impl Handles {
     /// Leaves room for `held` folders held open elsewhere, by jobs that read their files.
     pub(super) fn lend(&mut self, held: usize) {
         self.most = MOST_HELD.saturating_sub(held);
+        self.make_room();
     }
 
     fn deepest(&self) -> &Arc<Dir> {
@@ -530,7 +537,7 @@ impl Ahead {
             let mut found = None;
             for _ in 0..=at {
                 let (_, peeked) = ready.listings.pop_front()?;
-                ready.bytes = ready.bytes.saturating_sub(peeked.size);
+                ready.bytes = ready.bytes.saturating_sub(peeked.size());
                 found = Some(peeked);
             }
             found
@@ -557,7 +564,7 @@ impl Ahead {
         };
         while !ready.done
             && (ready.listings.len() >= AHEAD_MOST
-                || ready.bytes.saturating_add(peeked.size) > AHEAD_BYTES)
+                || ready.bytes.saturating_add(peeked.size()) > AHEAD_BYTES)
         {
             ready = match self.room.wait(ready) {
                 Ok(ready) => ready,
@@ -567,7 +574,7 @@ impl Ahead {
         if ready.done {
             return false;
         }
-        ready.bytes = ready.bytes.saturating_add(peeked.size);
+        ready.bytes = ready.bytes.saturating_add(peeked.size());
         ready.listings.push_back((id, peeked));
         true
     }
@@ -600,10 +607,10 @@ fn read_ahead(store: &Store, top: Id, ahead: &Ahead) {
         let Some(peeked) = store.peek_listing(&id) else {
             return;
         };
-        if peeked.size > AHEAD_LISTING {
+        if peeked.size() > AHEAD_LISTING {
             return;
         }
-        let below: Vec<Id> = (peeked.listing.entries().iter().rev())
+        let below: Vec<Id> = (peeked.listing().entries().iter().rev())
             .filter(|e| e.kind == EntryKind::Folder)
             .map(|e| e.id)
             .collect();
@@ -2090,6 +2097,43 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
+
+    #[test]
+    fn the_late_verdict_skips_what_the_walk_judged_as_neither_file_nor_link() {
+        let mut matcher = Matcher::new(this_drive());
+        matcher.enter("", vec![Rules::parse(b"*.log\n", "", false)]);
+        let mut noted = Noted::default();
+        let late = Late {
+            rules: matcher.in_force(),
+            git_held: false,
+            nested_held: false,
+        };
+        noted.late.insert(String::new(), late);
+        let was = Entry {
+            name: "a.log".into(),
+            kind: EntryKind::File,
+            id: Id([1; 32]),
+            size: 1,
+        };
+        let child = |kind| Child {
+            name: "a.log".into(),
+            kind: Kind::File,
+            rel: "a.log".into(),
+            meta: Some(EntryMeta {
+                kind,
+                size: 1,
+                modified_ns: 0,
+                changed_ns: 0,
+                executable: None,
+                file_id: (1, 2),
+            }),
+        };
+        let file = child(EntryType::File);
+        assert_eq!(noted.of("", &file, Some(&was)), Some(Note::Ignored));
+        // Such as a closed folder on Windows, which the walk matched as a folder.
+        let closed = child(EntryType::Other);
+        assert_eq!(noted.of("", &closed, Some(&was)), None);
+    }
 
     #[test]
     fn boltignore_git_and_bolt_folders_are_skipped() {
@@ -4623,9 +4667,9 @@ mod tests {
         assert!(packs.is_empty());
     }
 
-    /// Past the folders a save holds (126 below the top when it reads files), a folder is opened
-    /// again from the deepest one held. One swapped for another after the walk is found out there
-    /// too, and the other's file is never read as the walk's.
+    /// Past the folders a save holds, a folder is opened again from the nearest one kept open
+    /// above it (every 48th level stays open). One swapped for another after the walk is found
+    /// out there too, and the other's file is never read as the walk's.
     #[test]
     fn a_folder_swapped_past_the_held_ones_is_found_out() {
         let (dir, repo) = project();
@@ -4652,8 +4696,8 @@ mod tests {
         assert!(!packs.contains(&hash_content(b"else")));
     }
 
-    /// Past 127 levels the walk opens a folder again from the deepest one it holds, and so does
-    /// the save when it reads the files there.
+    /// Past the folders it can hold, the walk opens a folder again from the nearest one kept open
+    /// above it (every 48th level stays open), and so does the save when it reads the files there.
     #[test]
     fn a_deep_tree_holds_at_most_128_folders_open() {
         use bolt_platform::dir::{Dir, open_count};
@@ -4717,6 +4761,24 @@ mod tests {
         assert_eq!(tree[&format!("{}e07/x", down(299))].1, b"e");
     }
 
+    #[test]
+    fn folders_lent_to_jobs_are_counted_at_once() {
+        let (dir, _repo) = project();
+        let deep = "d/".repeat(200);
+        let deep = deep.trim_end_matches('/');
+        fs::create_dir_all(dir.path().join(deep)).unwrap();
+        let mut handles = Handles::open(dir.path()).unwrap();
+        handles.dir(Path::new(deep)).unwrap();
+        assert!(handles.down.len() > 100);
+        handles.lend(32);
+        // The top, those held, and those lent.
+        assert!(
+            1 + handles.down.len() + 32 <= MOST_HELD,
+            "{}",
+            handles.down.len()
+        );
+    }
+
     /// The build reads files deepest folder first. Past the folders held, each folder is still
     /// opened only a few times, not once again for every folder below it.
     #[test]
@@ -4755,6 +4817,8 @@ mod tests {
             most <= 2,
             "a folder opened {most} times, {total} opens in all"
         );
+        // So it can't pass with nothing counted.
+        assert!(total >= 199, "{total} opens in all");
     }
 
     /// Lets `gate`'s lookers go at the `sends`th job the walk sends, from this thread.

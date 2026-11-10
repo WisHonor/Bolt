@@ -1068,16 +1068,23 @@ struct Storing<'a> {
 /// for it: then a save doesn't read it.
 fn vouched_by(trusted: &FileCache, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
     // The cache never names content to a save: it only says the base save's entry still holds.
-    let known = trusted.matches(&c.rel, c.meta.as_ref()?)?;
-    was.filter(|e| (e.id, e.size) == (known.id, known.size))
-        .map(|_| (known.id, known.size))
+    let known = trusted
+        .matches(&c.rel, c.meta.as_ref()?)
+        .filter(|k| saved_as(was, k))?;
+    Some((known.id, known.size))
+}
+
+/// Whether the base save's entry `was` holds the content and size the cache knows.
+fn saved_as(was: Option<&Entry>, known: &FileState) -> bool {
+    was.is_some_and(|e| (e.id, e.size) == (known.id, known.size))
 }
 
 impl Contents for Storing<'_> {
     fn vouched(&mut self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
         // As `vouched_by`, with the entry kept in the same step.
-        let held = |k: &FileState| was.is_some_and(|e| (e.id, e.size) == (k.id, k.size));
-        let known = self.cache.vouch_if(&c.rel, c.meta.as_ref()?, held)?;
+        let known = self
+            .cache
+            .vouch_if(&c.rel, c.meta.as_ref()?, |k| saved_as(was, k))?;
         Some((known.id, known.size))
     }
 
@@ -4231,6 +4238,21 @@ mod tests {
         let id = saved_root(save_now(&mut repo).unwrap());
         let want = with("left.txt", b"left, changed", &want);
         assert_eq!(saved_folder(repo.store(), id, "d"), want.id());
+        // Gone from disk, `d` comes back holding only `sub`, still kept.
+        fs::remove_dir_all(root.join("d")).unwrap();
+        let id = saved_root(save_now(&mut repo).unwrap());
+        let sub: Vec<Entry> = d_saved
+            .entries()
+            .iter()
+            .filter(|e| e.name == "sub")
+            .cloned()
+            .collect();
+        let back = Listing::new(sub).unwrap().id();
+        assert_eq!(saved_folder(repo.store(), id, "d"), back);
+        // Asked again with nothing changed, neither it nor the top folder is built.
+        build_count_from_here();
+        let now = read_folder(&repo, newest_root(&repo), false, None, None).unwrap();
+        assert_eq!((built(), now.root), (Vec::<String>::new(), id));
     }
 
     #[test]

@@ -253,7 +253,8 @@ fn lengths_of(saves: &[(Id, ChangeId)]) -> Vec<usize> {
 
 /// Calls `each` with every save on the current line, newest first, and the shortest form of its
 /// change ID. The saves come from their own first parents, read one at a time, so that only the
-/// save being handed out is held; the short forms come from the cache's list of the line.
+/// save being handed out is held; the short forms come from the cache's list of the line, or from
+/// the line itself when that list is wrong.
 pub fn for_each_on_line<E: From<RepoError>>(
     repo: &Repository,
     mut each: impl FnMut(&Id, &Save, &str) -> Result<(), E>,
@@ -337,20 +338,23 @@ fn by_change_prefix(
     // The one save the list names is shown to be on the line, link by link from its newest save;
     // no save or several, from the store. That the list hides no second save of the line with
     // this start is trusted, as the short IDs Bolt prints trust it: showing it reads the line.
-    let sure = match listed.as_slice() {
-        [(id, _)] => saves
-            .iter()
-            .position(|(s, _)| s == id)
-            .is_some_and(|at| matches!(links_hold(repo, saves, at + 1, |_| {}), Ok(true))),
-        _ => false,
+    let checked = match listed.as_slice() {
+        [(id, _)] => Some(
+            saves
+                .iter()
+                .position(|(s, _)| s == id)
+                .is_some_and(|at| matches!(links_hold(repo, saves, at + 1, |_| {}), Ok(true))),
+        ),
+        _ => None,
     };
-    if sure {
+    if checked == Some(true) {
         cache.store(repo, &entry.state);
         return Ok(listed);
     }
     let mut read = ChangeIds::default();
     let found = starting_with(read.chain(repo, line, tip)?, text);
-    if found != listed {
+    // A list the check found wrong is dropped even where it gave the right answer.
+    if checked == Some(false) || found != listed {
         cache = read;
     }
     cache.store(repo, &entry.state);
@@ -1041,8 +1045,12 @@ mod tests {
 
     #[test]
     fn a_listing_cut_short_reads_no_more_of_the_line() {
-        let (_dir, repo, _) = project_with(&vec!["lmno"; 99]);
+        let (_dir, mut repo, ids) = project_with(&vec!["lmno"; 99]);
         cached_line(&repo);
+        // A save the cache doesn't hold yet, as after `bolt history | head`.
+        let newest = plant(&mut repo, &[ids[99]], "lmnp", Some("main"));
+        let cold = crate::changeids::ChangeIds::load(&repo);
+        assert_ne!(cold.get("main").unwrap()[0].0, newest);
         let before = repo.store().saves_read();
         let stopped = for_each_on_line::<RepoError>(&repo, |_, _, _| {
             Err(RepoError::Damaged {
@@ -1051,6 +1059,9 @@ mod tests {
         });
         assert!(stopped.is_err());
         assert!(repo.store().saves_read() - before <= 2);
+        // Written before the first save was handed out, the cache holds the line as it is.
+        let kept = crate::changeids::ChangeIds::load(&repo);
+        assert_eq!(kept.get("main").unwrap(), true_line(&repo).as_slice());
     }
 
     #[test]
@@ -1064,6 +1075,23 @@ mod tests {
             assert_eq!(cached, cold);
             assert!(cold.starts_with("Ok"), "{cold}");
         }
+    }
+
+    #[test]
+    fn a_list_wrong_above_the_save_found_is_dropped_though_the_answer_agrees() {
+        let mut starts = vec!["mmmm"; 20];
+        starts.extend(["klmnopl", "nnnn"]);
+        let (dir, repo, ids) = project_with(&starts);
+        let mut lie = true_line(&repo);
+        lie[0].1 = change("pppp");
+        let text = lie[1].1.to_letters();
+        let (cached, cold) = resolved(dir.path(), &repo, &lie, &text);
+        assert_eq!(cached, cold);
+        // The lie is gone: asked again, only the saves down to the one found are read.
+        let before = repo.store().saves_read();
+        assert_eq!(resolve(&repo, &text).unwrap(), ids[21]);
+        let read = repo.store().saves_read() - before;
+        assert!(read <= 4, "{read} saves read for a save 1 back");
     }
 
     #[test]
@@ -1098,14 +1126,14 @@ mod tests {
     }
 
     #[test]
-    fn a_list_with_another_line_s_save_names_no_save() {
+    fn a_list_with_another_line_s_save_changes_no_answer() {
         let (dir, mut repo, ids) = project_with(&["klmnopl", "klmnopk", "mmmm"]);
         let side = plant(&mut repo, &[ids[1]], "nopqrs", Some("side"));
         let mut lie = true_line(&repo);
         lie[1] = (side, change("nopqrs"));
         let (cached, cold) = resolved(dir.path(), &repo, &lie, "nopqr");
         assert_eq!(cached, cold);
-        // A line named like it is the line, as with no cache.
+        // A line name that a planted save's change ID starts with still names the line.
         let work = plant(&mut repo, &[ids[0]], "workkk", Some("elsewhere"));
         name_line(&mut repo, "work", ids[1]);
         let mut lie = true_line(&repo);

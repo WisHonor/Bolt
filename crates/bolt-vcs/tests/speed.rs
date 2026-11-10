@@ -94,7 +94,9 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
 
 /// The deepest chain of folders a save takes, 2,048 levels of `d`, with a file in each but the
 /// last, whose path would pass 4,096 bytes: a save, a status that reads every file again, and a
-/// `goto` that empties the folder and one that writes the chain out again, each timed.
+/// `goto` that empties the folder and one that writes the chain out again, each timed. Run by
+/// hand only, not nightly. The chain is made by absolute paths, so only Windows gets to 2,048
+/// levels; elsewhere it is skipped where the system's path limit stops it.
 #[test]
 #[ignore = "slow: saves the deepest chain of folders, a file in each"]
 fn the_deepest_chain_of_folders_with_a_file_in_each() {

@@ -359,11 +359,14 @@ fn pieces_take(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
         casefold,
         read: Vec::new(),
     };
-    text.iter().all(|&b| {
+    let taken = text.iter().all(|&b| {
         pieces
             .next_piece()
             .is_some_and(|token| takes(token, fold(b, casefold), casefold))
-    })
+    });
+    // `Ends` cut the text to as many bytes as there are pieces.
+    debug_assert!(!taken || pieces.next_piece().is_none());
+    taken
 }
 
 impl Pattern {

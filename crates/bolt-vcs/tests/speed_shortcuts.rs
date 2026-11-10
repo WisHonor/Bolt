@@ -341,6 +341,41 @@ fn status_after_goto_reads_what_goto_wrote() {
     assert_eq!(changed(&env), ["a.txt"]);
 }
 
+#[test]
+fn a_damaged_second_copy_of_a_listing_reads_the_same_every_time() {
+    use bolt_core::pack::{ENTRY_HEADER_LEN, ObjectKind, PackReader};
+    let env = project(&[("a/x", "x"), ("b/y/z", "z"), ("c/w", "w")]);
+    let top = support::top_folder(env.root());
+    let b = top.get("b").unwrap().id;
+    let repo = Repository::open(env.root()).unwrap();
+    let bytes = repo.store().listing(&b).unwrap().encode();
+    drop(repo);
+    // A valid pack holding a copy of `b`'s listing, a byte of its record then changed.
+    let made = support::add_pack(env.root(), |pack| {
+        pack.add_record(ObjectKind::FolderListing, &bytes).unwrap();
+    });
+    let [path] = &made[..] else {
+        panic!("{made:?}")
+    };
+    let entry = PackReader::open(path).unwrap().find(&b).unwrap().unwrap();
+    let mut pack = fs::read(path).unwrap();
+    pack[(entry.offset + ENTRY_HEADER_LEN) as usize] ^= 1;
+    fs::write(path, pack).unwrap();
+    assert_eq!(support::copies_of(env.root(), &b).len(), 2);
+
+    let status = || {
+        let out = env.bolt().arg("status").output().unwrap();
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    let first = status();
+    assert_eq!(first.0, Some(0), "{}", first.2);
+    for _ in 1..10 {
+        assert_eq!(status(), first);
+    }
+    support::write(&env, "c/w", "changed");
+    env.bolt().args(["save", "Changed"]).assert().success();
+}
+
 /// Tests that change the disk at a point the walk reaches on a thread of its own. That point is
 /// shared by the whole process, so these run the walk here, one at a time.
 #[cfg(feature = "fault-injection")]

@@ -208,8 +208,9 @@ fn a_long_history_of_a_big_file_imports_within_the_allowance() {
         env.git(&["commit", "-q", "-m", &format!("Version {v}")]);
     }
     env.git(&["repack", "-a", "-d", "-f", "--depth=50"]);
-    // With a cache of one version, as 96 MiB holds one of an 80 MiB file, rebuilding the
-    // versions one by one took 1.2 GB when measured; each once takes 420 MB.
+    // A cache that holds one version, as 96 MiB holds one of an 80 MiB file. Measured with a
+    // 200 MiB file and a 256 MiB cache, rebuilding the versions one by one took 1.2 GB, each
+    // once 420 MB.
     set_test_delta_limits(Some((640 * MIB, 9 * MIB)));
     let who = ada();
     let mut req = ImportRequest {

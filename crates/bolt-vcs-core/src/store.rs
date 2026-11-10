@@ -96,10 +96,20 @@ impl Copy {
 /// index line it was read from.
 #[derive(Debug)]
 pub(crate) struct Peeked {
-    pub(crate) listing: Listing,
-    pub(crate) size: usize,
+    listing: Listing,
+    size: usize,
     pack: PathBuf,
     entry: IndexEntry,
+}
+
+impl Peeked {
+    pub(crate) fn listing(&self) -> &Listing {
+        &self.listing
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
 }
 
 #[cfg(test)]
@@ -2818,6 +2828,18 @@ mod tests {
             s.checked().bad.insert((0, listing.id()), reason);
         };
         let (_, records, _) = alike(&packs, listing.id(), known_bad);
+        assert_eq!(records, 1);
+
+        // The same, with that copy's pack the last one read, so the shortcut meets the check.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "g.pack", &[(kind, &bytes), data]);
+        pack_as(&packs, "h.pack", &[(kind, &bytes)]);
+        let read_then_bad = |s: &Store| {
+            read_data(s);
+            let reason = (packs.join("g.pack"), "planted".to_owned());
+            s.checked().bad.insert((0, listing.id()), reason);
+        };
+        let (_, records, _) = alike(&packs, listing.id(), read_then_bad);
         assert_eq!(records, 1);
 
         // The store's first copy isn't a folder listing.

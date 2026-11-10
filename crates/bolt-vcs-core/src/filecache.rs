@@ -374,13 +374,14 @@ impl FileCache {
             return Ok(());
         };
         let trusted_before = now_ns.saturating_sub(RACY_NS);
-        // Every entry kept, none added and none turning racy: the same bytes, unencoded.
+        // Every entry kept, none added and none turning racy: the same bytes, unencoded. A kept
+        // entry was trusted, so it wasn't racy.
         let same = self.loaded
             && self.added.is_empty()
             && self
                 .slots
                 .iter()
-                .all(|s| s.kept && (s.entry.racy || s.entry.state.modified_ns <= trusted_before));
+                .all(|s| s.kept && s.entry.state.modified_ns <= trusted_before);
         if same {
             return Ok(());
         }
@@ -760,6 +761,20 @@ mod tests {
         assert!(cache.vouch("b", &file(2, THEN)).is_some());
         cache.store(&repo, THEN + 120 * SECOND).unwrap();
         assert_eq!(on_disk(&dir), before);
+    }
+
+    #[test]
+    fn an_entry_a_check_refuses_is_not_vouched_for_or_kept() {
+        let (dir, repo) = two_files();
+        let mut cache = FileCache::load(&repo);
+        assert!(cache.vouch_if("a", &file(1, THEN), |_| false).is_none());
+        assert!(!cache.slots[0].kept);
+        cache.vouch("b", &file(2, THEN)).unwrap();
+        cache.store(&repo, THEN + 120 * SECOND).unwrap();
+        // Unkept, it is dropped from the next write.
+        let back = FileCache::load(&reopen(&dir, KEY));
+        assert!(back.matches("a", &file(1, THEN)).is_none());
+        assert!(back.matches("b", &file(2, THEN)).is_some());
     }
 
     #[test]
