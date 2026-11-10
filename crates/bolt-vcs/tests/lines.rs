@@ -313,3 +313,16 @@ fn line_json_matches_its_snapshots() {
     env.bolt().args(["goto", "main"]).assert().success();
     insta::assert_json_snapshot!("line_on_a_line", line(&env));
 }
+
+#[test]
+fn history_json_at_a_save_gives_that_save_as_position() {
+    let (env, first) = at_first_save();
+    let out = env.bolt().args(["history", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        doc["position"],
+        serde_json::json!({"save": first.to_hex()}),
+        "{doc}"
+    );
+}
