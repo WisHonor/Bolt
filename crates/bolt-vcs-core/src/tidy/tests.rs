@@ -746,6 +746,81 @@ fn tidy_keeps_what_it_reached_from_such_an_end() {
     assert!(text_reads(&repo, "left by a crash"));
 }
 
+#[test]
+fn a_gap_at_an_undo_step_does_not_cut_off_the_entries_behind_it() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    let start = repo.head().unwrap();
+    // A, a discard inside the window, then B, a save.
+    let thrown = discard_text(dir.path(), &mut repo, "thrown away", 5);
+    save_text(dir.path(), &mut repo, "two", 4);
+    // C, after B: an undo whose step the store lacks, stored without moving `head`.
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (b, mut entry) = repo.current().unwrap();
+    entry.parent = Some(b);
+    entry.action = Action::Undo(Id([5; 32]));
+    entry.command = "undo".into();
+    entry.folder_change = None;
+    entry.who = days_ago(3);
+    let packs = repo.new_packs().unwrap();
+    let end = repo.store_entry(&lock, packs, &entry).unwrap();
+    drop(lock);
+    // `head` put back before A, so only C's diary reaches A and B.
+    fs::write(dir.path().join(".bolt/state/head"), format!("{start}\n")).unwrap();
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(reads(&repo, &thrown, ObjectKind::Save));
+    assert!(text_reads(&repo, "thrown away"));
+    let warned: Vec<Warning> = repo
+        .store()
+        .warnings()
+        .into_iter()
+        .filter(|w| w.kind == warning::DIARY_END_UNREADABLE)
+        .collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].message.contains(&end.short_hex()), "{warned:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tidied_file_that_is_a_link_counts_as_absent() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    discard_text(dir.path(), &mut repo, "thrown away", 10);
+    age_packs(&repo, 48);
+    let at = now();
+    // Honoured, either would free the discard's work.
+    let past = format!("{}\n", at - 5 * DAY);
+    let inside = dir.path().join("elsewhere.txt");
+    fs::write(&inside, &past).unwrap();
+    let away = tempfile::tempdir().unwrap();
+    let outside = away.path().join("tidied");
+    fs::write(&outside, &past).unwrap();
+    let file = tidied_file(dir.path());
+    for target in [&inside, &outside] {
+        let _ = fs::remove_file(&file);
+        std::os::unix::fs::symlink(target, &file).unwrap();
+        assert_eq!(window_start(&repo, 30, at), at - 30 * DAY);
+        let v = crate::verify::verify(&repo, 30, at, &mut |_, _| {});
+        assert_eq!(v.problems_total, 0, "{:?}", v.problems);
+        assert!(
+            fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    tidy(&mut repo, 30, at, &mut |_| {}, &mut |_| {}).unwrap();
+    assert!(text_reads(&repo, "thrown away"));
+    assert!(fs::symlink_metadata(&file).unwrap().file_type().is_file());
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        format!("{}\n", at - 30 * DAY)
+    );
+    assert_eq!(fs::read_to_string(&inside).unwrap(), past);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), past);
+}
+
 /// What `tidy` would keep now, with a 30-day window.
 fn marked(repo: &Repository) -> HashSet<Id> {
     let now_ns = i128::from(now()) * 1_000_000;

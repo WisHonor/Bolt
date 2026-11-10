@@ -377,7 +377,7 @@ pub fn diary_ends(repo: &Repository) -> Result<Vec<(Id, DiaryEntry)>, RepoError>
 /// [`diary_ends`] among the entries `ids`, read from `store`.
 pub(crate) fn ends_among(
     store: &Store,
-    ids: HashSet<Id>,
+    ids: impl IntoIterator<Item = Id>,
 ) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
     let (mut followed, mut found) = (HashSet::new(), Vec::new());
     for id in ids {

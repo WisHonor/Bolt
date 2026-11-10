@@ -522,15 +522,16 @@ fn mark(
         listings: Vec::new(),
         lists: &lists,
         reads,
-        stored: entries.clone(),
+        stored: &entries,
         gap: None,
+        passed: None,
         noted,
     };
     if let Some(noted) = &mut marks.noted {
         noted.known = all;
     }
     let mut walked = HashSet::new();
-    if let Err(e) = marks.diary(head, since, &mut walked) {
+    if let Err(e) = marks.diary(head, since, &mut walked, false) {
         match (marks.gap.take(), &mut marks.noted) {
             (Some(missing), Some(noted)) => noted.unread.push((missing, Unread::Missing)),
             _ => return Err(e),
@@ -541,25 +542,31 @@ fn mark(
         noted.entries = marks.followed.iter().filter(|(k, _)| *k == entry).count() as u64;
     }
     // A diary cut off from `head` (a rolled-back `head`, a crash's leftover) lives out the window.
-    for (end, entry) in undo::ends_among(src.store, entries)? {
-        if entry.who.time_ms >= since
-            && let Err(e) = marks.diary(end, since, &mut walked)
-        {
-            // Only an entry the store lacks is passed over; what was reached stays kept.
-            let Some(missing) = marks.gap.take() else {
-                return Err(e);
-            };
-            src.store.note(Warning::new(
-                warning::DIARY_END_UNREADABLE,
-                format!(
-                    "The diary that ends at entry {}, cut off from the current one, can't be read \
-                     back to its start: entry {} isn't in the store. Tidy kept what it could \
-                     reach from that end and went on.",
-                    end.short_hex(),
-                    missing.short_hex()
-                ),
-            ));
+    for (end, entry) in undo::ends_among(src.store, entries.iter().copied())? {
+        if entry.who.time_ms < since {
+            continue;
         }
+        let walked_out = marks.diary(end, since, &mut walked, true);
+        let passed = marks.passed.take();
+        // Only an entry the store lacks is passed over; what was reached stays kept.
+        let missing = match (walked_out, marks.gap.take()) {
+            (Err(e), None) => return Err(e),
+            (_, Some(missing)) => passed.unwrap_or(missing),
+            (Ok(()), None) => match passed {
+                Some(missing) => missing,
+                None => continue,
+            },
+        };
+        src.store.note(Warning::new(
+            warning::DIARY_END_UNREADABLE,
+            format!(
+                "The diary that ends at entry {}, cut off from the current one, can't be read \
+                 back to its start: entry {} isn't in the store. Tidy kept what it could reach \
+                 from that end and went on.",
+                end.short_hex(),
+                missing.short_hex()
+            ),
+        ));
     }
     marks.follow()?;
     marks.chunks(packs)?;
@@ -579,9 +586,11 @@ struct Marks<'a> {
     /// The chunk lists to read once all else is marked.
     reads: BTreeMap<(usize, u64), IndexEntry>,
     /// The diary entries the store holds.
-    stored: HashSet<Id>,
+    stored: &'a HashSet<Id>,
     /// An entry a diary named that the store doesn't hold, once one stopped marking.
     gap: Option<Id>,
+    /// The first undo or redo step a diary end's walk passed over, the store lacking it.
+    passed: Option<Id>,
     /// `verify`'s notes; without them, what can't be read stops marking.
     noted: Option<Noted>,
 }
@@ -589,11 +598,14 @@ struct Marks<'a> {
 impl Marks<'_> {
     /// Marks the diary back from `start`, as undo can reach it. `walked` holds the entries already
     /// marked, with whether their state was kept, so that diaries sharing a past are read once.
+    /// From a diary `end` other than `head`'s, an undo or redo whose step the store lacks is
+    /// noted in `passed` and the walk goes on along parents.
     fn diary(
         &mut self,
         start: Id,
         since: i64,
         walked: &mut HashSet<(Id, bool)>,
+        end: bool,
     ) -> Result<(), RepoError> {
         // The start's own state is always kept; an older entry's when the one after it is within
         // the window, since undoing that one puts it back.
@@ -612,12 +624,12 @@ impl Marks<'_> {
             if within {
                 self.change(&entry);
                 if let Action::Undo(step) | Action::Redo(step) = entry.action
-                    && let Some(step) = self.entry(&step)?
+                    && let Some(step) = self.step_entry(step, end)?
                 {
                     self.state(&step.state)?;
                     self.change(&step);
                     if let Some(before) = step.parent
-                        && let Some(before) = self.entry(&before)?
+                        && let Some(before) = self.step_entry(before, end)?
                     {
                         self.state(&before.state)?;
                     }
@@ -627,6 +639,16 @@ impl Marks<'_> {
             at = entry.parent;
         }
         Ok(())
+    }
+
+    /// [`Marks::entry`] for an undo or redo's step, or the entry before it. From a diary `end`, one
+    /// the store lacks is noted in `passed` and passed over.
+    fn step_entry(&mut self, id: Id, end: bool) -> Result<Option<DiaryEntry>, RepoError> {
+        if end && !self.stored.contains(&id) {
+            self.passed.get_or_insert(id);
+            return Ok(None);
+        }
+        self.entry(&id)
     }
 
     /// Keeps `id`, and gives whether a record of `kind` with it is still to be followed.

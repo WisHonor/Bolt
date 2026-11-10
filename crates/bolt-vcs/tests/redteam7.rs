@@ -152,7 +152,6 @@ fn now_ms() -> i64 {
 }
 
 #[test]
-#[ignore = "RT7-2: raising undo-window-days after a tidy stops tidy, calling the store damaged"]
 fn rt7_2_raising_the_undo_window_after_a_tidy_leaves_tidy_working() {
     let env = project();
     fs::write(env.root().join("a.txt"), "one\n").unwrap();
@@ -164,16 +163,15 @@ fn rt7_2_raising_the_undo_window_after_a_tidy_leaves_tidy_working() {
     let later = now_ms() + 3 * 24 * 3600 * 1000;
     let first = bolt_core::tidy::tidy(&mut repo, 1, later, &mut |_| {}, &mut |_| {});
     assert!(first.is_ok_and(|done| done.packs_removed > 0));
+    // The user then sets the window back to the default and tidies again, a minute later. Not
+    // through the binary: it would run before the first tidy's clock.
+    let tidy = bolt_core::tidy::tidy(&mut repo, 30, later + 60_000, &mut |_| {}, &mut |_| {});
     drop(repo);
-    // The user then sets the window back to the default and tidies again.
-    let tidy = env.bolt().arg("tidy").output().unwrap();
     let list = env.bolt().args(["undo", "--list"]).output().unwrap();
     assert!(
-        tidy.status.code() == Some(0),
-        "tidy: {:?}\n{}{}\nundo --list:\n{}",
-        tidy.status.code(),
-        text(&tidy.stdout),
-        text(&tidy.stderr),
+        tidy.is_ok(),
+        "tidy: {:?}\nundo --list:\n{}",
+        tidy.err(),
         text(&list.stdout)
     );
 }
