@@ -467,7 +467,7 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
         if let UserSetting::ExcludesFile(value) = setting {
             // Git expands the values in order once all are loaded, so with no home folder the
             // first `~/` one stops it, even where a later one overrides it.
-            if git.home.is_none() && stop.is_none() && from_home(&value) {
+            if git.home.is_none() && stop.is_none() && from_home(optional(&value).0) {
                 stop = Some((value.clone(), place.clone()));
             }
             named = Some((value, place.clone()));
@@ -477,21 +477,37 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
     // stops it first.
     git.read_files(&mut take)?;
     git.read_variables(&mut take)?;
+    let unset = || git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore"));
     let Some((value, place)) = stop.or(named) else {
-        return Ok(git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore")));
+        return Ok(unset());
     };
-    let value = utf8(value, "core.excludesFile", &place)?;
+    let (value, optional) = optional(&value);
+    let value = utf8(value.to_vec(), "core.excludesFile", &place)?;
     // Git reads no list from an empty setting, which is how one turns it off.
     if value.is_empty() {
-        return Ok(None);
+        return Ok(if optional { unset() } else { None });
     }
-    git_path(
+    let path = git_path(
         &value,
         "core.excludesFile",
         git.home.as_deref(),
         Some(git.top),
         &place,
-    )
+    )?;
+    // An optional file that isn't there counts as no setting at all, as in Git.
+    let missing = |p: &PathBuf| matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    if optional && path.as_ref().is_some_and(missing) {
+        return Ok(unset());
+    }
+    Ok(path)
+}
+
+/// `value` without Git's `:(optional)` in front, and whether it had one.
+fn optional(value: &[u8]) -> (&[u8], bool) {
+    match value.strip_prefix(b":(optional)".as_slice()) {
+        Some(rest) => (rest, true),
+        None => (value, false),
+    }
 }
 
 /// `git_lfs_storage` with the places given, so tests can choose them.
@@ -779,15 +795,17 @@ fn git_path(
     if names_no_file(value.as_bytes(), cfg!(windows)) {
         return Ok(None);
     }
+    // Git puts the folder it is installed in there.
+    if value.starts_with("%(prefix)/") {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}: %(prefix)/ stands for the folder Git is \
+             installed in, which Bolt can't tell; write the full path instead"
+        )));
+    }
     let Some(rest) = value.strip_prefix('~') else {
         return match folder {
             Some(folder) => Ok(Some(folder.join(value))),
             None if Path::new(value).has_root() => Ok(Some(PathBuf::from(value))),
-            // Git puts the folder it is installed in there.
-            None if value.starts_with("%(prefix)/") => Err(place.error(format!(
-                "Bolt can't expand its {setting}, {value}: %(prefix)/ stands for the folder Git is \
-                 installed in, which Bolt can't tell; write the full path instead"
-            ))),
             None => Err(place.error(format!(
                 "its {setting}, `{value}`, is a relative path, which Git takes only from a file \
                  and refuses here too"
@@ -2022,6 +2040,48 @@ mod tests {
         );
         assert!(!said.contains("refuses"), "{said}");
         assert_eq!(variable_named(e), "GIT_CONFIG_VALUE_0");
+    }
+
+    #[test]
+    fn a_prefix_path_stops_wherever_it_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let gitconfig = home.join(".gitconfig");
+        for list in ["%(prefix)/ignore", ":(optional)%(prefix)/ignore"] {
+            excludes_file_set(&gitconfig, list);
+            let said = excludes(home, &home.join("xdg"), home, &[])
+                .unwrap_err()
+                .to_string();
+            assert!(said.contains("%(prefix)/ stands for the folder"), "{said}");
+        }
+        std::fs::write(&gitconfig, "[include]\n\tpath = %(prefix)/etc/gitconfig\n").unwrap();
+        let said = excludes(home, &home.join("xdg"), home, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("%(prefix)/ stands for the folder"), "{said}");
+    }
+
+    #[test]
+    fn an_optional_excludes_file_that_is_not_there_counts_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let xdg = home.join("xdg");
+        let system = excludes_file_set(&home.join("etc/gitconfig"), "~/system");
+        excludes_file_set(&home.join(".gitconfig"), ":(optional)~/nope");
+        // It undoes the earlier setting too, so Git's own default list is read.
+        let vars = [("GIT_CONFIG_SYSTEM", system.as_str())];
+        let found = excludes(home, &xdg, home, &vars).unwrap();
+        assert_eq!(found, Some(xdg.join("git").join("ignore")));
+    }
+
+    #[test]
+    fn an_optional_excludes_file_that_is_there_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(home.join("list"), "*.log\n").unwrap();
+        excludes_file_set(&home.join(".gitconfig"), ":(optional)~/list");
+        let found = excludes(home, &home.join("xdg"), home, &[]).unwrap();
+        assert_eq!(found, Some(home.join("list")));
     }
 
     #[test]
