@@ -218,6 +218,12 @@ impl Screen {
         if self.symbols { symbol } else { plain }
     }
 
+    /// Columns a line drawn in place may take: one short of the width, so it never wraps; any
+    /// number off a terminal.
+    pub fn line_room(self) -> usize {
+        self.width.map_or(usize::MAX, |w| w.saturating_sub(1))
+    }
+
     /// The turning mark at its `step`th turn.
     pub fn turn(self, step: usize) -> char {
         const SYMBOLS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

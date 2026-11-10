@@ -249,21 +249,56 @@ fn a_failing_command_that_warns_first_starts_with_the_warning() {
     }
 }
 
-/// Progress is for people at a terminal: a script sees none, whatever its environment asks for.
+/// Progress is for people at a terminal: a script sees none, whatever its environment asks for,
+/// even with no quiet time; the same commands on a terminal do show it.
+#[cfg(feature = "fault-injection")]
 #[test]
 fn no_progress_reaches_stderr_without_a_terminal() {
-    let env = Env::new();
-    env.commit("a.txt", "a\n", "First");
-    env.commit("b.txt", "b\n", "Second");
-    // A sign of Git LFS, so the import looks for its files too.
-    std::fs::create_dir(env.root().join(".git/lfs")).unwrap();
-    for args in [&["import"][..], &["save", "Third"]] {
-        if args[0] == "save" {
-            std::fs::write(env.root().join("c.txt"), "c\n").unwrap();
+    for terminal in [true, false] {
+        let env = Env::new();
+        env.commit(
+            "a.txt", "a
+", "First",
+        );
+        env.commit(
+            "b.txt", "b
+", "Second",
+        );
+        // A sign of Git LFS, so the import looks for its files too.
+        std::fs::create_dir(env.root().join(".git/lfs")).unwrap();
+        for (args, label) in [
+            (&["import"][..], "Reading Git's history"),
+            (&["save", "Third"], "Saving"),
+        ] {
+            if args[0] == "save" {
+                std::fs::write(
+                    env.root().join("c.txt"),
+                    "c
+",
+                )
+                .unwrap();
+            }
+            let mut cmd = if terminal {
+                bolt_on_a_terminal(&env, env.root())
+            } else {
+                bolt_in_a_log(&env, env.root())
+            };
+            let out = cmd
+                .env("BOLT_PROGRESS_QUIET_MS", "0")
+                .args(args)
+                .output()
+                .unwrap();
+            let said = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(0), "{said}");
+            if terminal {
+                assert!(
+                    said.starts_with(&format!("\r{label}")),
+                    "{args:?}: {said:?}"
+                );
+            } else {
+                assert!(said.is_empty(), "{args:?}: {said:?}");
+            }
         }
-        let out = bolt_in_a_log(&env, env.root()).args(args).output().unwrap();
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
     }
 }
 
@@ -273,7 +308,9 @@ fn no_progress_reaches_stderr_without_a_terminal() {
 fn tidy_tells_its_estimate_only_to_a_person() {
     let env = project_with_a_change();
     let said = |args: &[&str]| {
+        // The turning mark never comes in first, however slow the machine.
         let out = bolt_on_a_terminal(&env, env.root())
+            .env("BOLT_PROGRESS_QUIET_MS", "600000")
             .args(args)
             .output()
             .unwrap();

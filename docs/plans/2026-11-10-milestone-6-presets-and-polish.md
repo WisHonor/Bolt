@@ -141,7 +141,7 @@ A test hook, compiled only with the `fault-injection` feature: `BOLT_FAKE_TERMIN
 #[test] fn a_path_loses_folders_from_its_middle_and_keeps_its_first_folder_and_name() { /* Assets/…/Rock_Albedo.psd */ }
 #[test] fn a_path_that_cannot_fit_is_left_whole() {}
 #[test] fn widths_count_escaped_text() {}
-#[test] fn sizes_are_1024_based_with_one_decimal_below_ten() { /* 0 B, 1023 B, 1.0 KiB, 9.9 MiB, 10 MiB, 1.2 GiB */ }
+#[test] fn sizes_are_1024_based_with_one_decimal_below_ten() { /* 0 B, 1,023 B, 1.0 KiB, 9.9 MiB, 10 MiB, 1.2 GiB */ }
 #[test] fn utf8_locales_are_recognised() { /* en_US.UTF-8, C.utf8, POSIX; LC_ALL before LC_CTYPE before LANG */ }
 #[test] fn bolt_ascii_wins_either_way() {}
 // tests/terminal.rs, with BOLT_FAKE_TERMINAL

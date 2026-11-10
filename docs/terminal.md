@@ -97,8 +97,8 @@ Only on a terminal, and only in lists and tables:
 Importing commits        ██████░░░░░░░░░░░░░░░░░░  26%  334 / 1,284
 ```
 
-  the label padded to 24 characters (cut with the cut mark when longer), a space, 24 cells, a space, the percentage right-aligned in 4 characters, two spaces, then done and total, as in the example. Under 70 columns the last part goes; under 50 the cells go too, leaving the label and the percentage. A line is kept short of the terminal's last column, so it never wraps.
-- **A turning mark,** when it isn't: the label, a space, the cut mark, a space and one of `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` in turn (`|/-\` without symbols).
+  the label padded to 24 characters (cut with the cut mark when longer), a space, 24 cells, a space, the percentage right-aligned in 4 characters, two spaces, then done and total, as in the example. A progress line takes at most one column less than the terminal's width, so it never wraps, and it never shows part of a number or part of the bar: when the whole line doesn't fit, the counts go whole; if it still doesn't fit, the cells go whole too. The label and the percentage always show, the label cut at its end with the cut mark only when even they don't fit.
+- **A turning mark,** when it isn't: the label, a space, the cut mark, a space and one of `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` in turn (`|/-\` without symbols). The label is cut at its end, the same way, when the line wouldn't fit.
 - **Who shows what:** `import` shows a bar for each of its passes (reading Git's history, checking Git LFS files, importing commits); `verify` shows a bar by bytes read; `save`, `goto`, `discard`, `shelf`, `unshelf`, `undo`, `redo`, `tidy` and `setup --preset` show the turning mark with what they are doing ("Saving", "Writing files", "Tidying").
 - A question, or the line that says Bolt is waiting for another command, takes the progress line off the screen first. So does any line told on stderr while the turning mark turns, such as `tidy`'s "Tidying: about … to free"; the mark comes back below it. The line is erased with `ESC[2K` where stderr shows colour, and with spaces over it otherwise.
 

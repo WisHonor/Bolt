@@ -12,38 +12,62 @@ use crate::style::{self, Screen, Sym, columns};
 
 /// How long work goes before progress shows: a quick command shows none.
 const QUIET: Duration = Duration::from_millis(400);
+
+/// The quiet time, which tests may set with `BOLT_PROGRESS_QUIET_MS`.
+#[cfg(feature = "fault-injection")]
+fn quiet() -> Duration {
+    static SET: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let set = SET.get_or_init(|| std::env::var("BOLT_PROGRESS_QUIET_MS").ok()?.parse().ok());
+    set.map_or(QUIET, Duration::from_millis)
+}
+
+#[cfg(not(feature = "fault-injection"))]
+fn quiet() -> Duration {
+    QUIET
+}
 /// The shortest time between two drawings.
 const EVERY: Duration = Duration::from_millis(100);
 const LABEL: usize = 24;
 const CELLS: usize = 24;
 
 /// A bar's line: the label padded to 24, the cells, the percentage in 4, then done and total.
-/// Under 70 columns the counts go; under 50 the cells go too.
+/// What doesn't fit the screen goes whole: first the counts, then the cells; the label and the
+/// percentage always show, the label cut at its end if even they don't fit.
 pub fn bar_line(label: &str, done: u64, total: u64, as_bytes: bool, screen: Screen) -> String {
-    let width = screen.width.unwrap_or(usize::MAX);
+    let room = screen.line_room();
     let done = done.min(total);
     let part = |of: u64| match total {
         0 => of,
         _ => u64::try_from(u128::from(done) * u128::from(of) / u128::from(total)).unwrap_or(of),
     };
-    let mut line = format!("{:<LABEL$}", screen.cut_end(label, LABEL));
-    if width >= 50 {
-        let full = usize::try_from(part(CELLS as u64)).unwrap_or(CELLS);
-        line.push(' ');
-        line += &screen.sym(Sym::Full).repeat(full);
-        line += &screen.sym(Sym::Empty).repeat(CELLS - full);
-    }
-    line += &format!(" {:>3}%", part(100));
-    if width >= 70 {
-        let count = |n| if as_bytes { bytes(n) } else { thousands(n) };
-        line += &format!("  {} / {}", count(done), count(total));
-    }
-    line
+    let full = usize::try_from(part(CELLS as u64)).unwrap_or(CELLS);
+    let cells = format!(
+        " {}{}",
+        screen.sym(Sym::Full).repeat(full),
+        screen.sym(Sym::Empty).repeat(CELLS - full)
+    );
+    let percent = format!(" {:>3}%", part(100));
+    let count = |n| if as_bytes { bytes(n) } else { thousands(n) };
+    let counts = format!("  {} / {}", count(done), count(total));
+    let padded = format!("{:<LABEL$}", screen.cut_end(label, LABEL));
+    [
+        format!("{padded}{cells}{percent}{counts}"),
+        format!("{padded}{cells}{percent}"),
+        format!("{padded}{percent}"),
+    ]
+    .into_iter()
+    .find(|line| columns(line) <= room)
+    .unwrap_or_else(|| {
+        let left = room.saturating_sub(columns(&percent));
+        format!("{}{percent}", screen.cut_end(label, left))
+    })
 }
 
-/// The turning mark's line at its `step`th turn.
+/// The turning mark's line at its `step`th turn, the label cut at its end to fit the screen.
 fn turning_line(label: &str, step: usize, screen: Screen) -> String {
-    format!("{label} {} {}", screen.sym(Sym::Cut), screen.turn(step))
+    let mark = format!(" {} {}", screen.sym(Sym::Cut), screen.turn(step));
+    let left = screen.line_room().saturating_sub(columns(&mark));
+    format!("{}{mark}", screen.cut_end(label, left))
 }
 
 /// One line drawn in place, and how many columns of it are on the screen.
@@ -53,15 +77,13 @@ struct Drawn {
 }
 
 impl Drawn {
-    /// Draws `text` over what was there, kept short of the last column so it never wraps. A
-    /// failed write only loses the progress line, so it is let go.
+    /// Draws `text`, already made to fit the screen, over what was there. A failed write only
+    /// loses the progress line, so it is let go.
     fn draw(&mut self, out: &mut dyn Write, text: &str) {
-        let room = self.screen.width.unwrap_or(usize::MAX).saturating_sub(1);
-        let text: String = text.chars().take(room).collect();
-        let left = self.shown.saturating_sub(columns(&text));
+        let left = self.shown.saturating_sub(columns(text));
         let _ = write!(out, "\r{text}{}", " ".repeat(left));
         let _ = out.flush();
-        self.shown = columns(&text);
+        self.shown = columns(text);
     }
 
     /// Takes the line off the screen, leaving the cursor at its start.
@@ -86,6 +108,7 @@ pub struct Bar<W: Write = io::Stderr> {
     on: bool,
     label: String,
     began: Instant,
+    quiet: Duration,
     last: Option<Instant>,
     turns: usize,
     drawn: Drawn,
@@ -99,18 +122,21 @@ impl Bar {
             style::for_people(),
             label,
             Instant::now(),
+            quiet(),
         )
     }
 }
 
 impl<W: Write> Bar<W> {
-    /// A bar written to `out`, showing only when `on`, for work that began at `began`.
-    fn to(out: W, screen: Screen, on: bool, label: &str, began: Instant) -> Self {
+    /// A bar written to `out`, showing only when `on`, for work that began at `began`, once it
+    /// has gone for `quiet`.
+    fn to(out: W, screen: Screen, on: bool, label: &str, began: Instant, quiet: Duration) -> Self {
         Bar {
             out,
             on,
             label: label.to_owned(),
             began,
+            quiet,
             last: None,
             turns: 0,
             drawn: Drawn { screen, shown: 0 },
@@ -131,7 +157,7 @@ impl<W: Write> Bar<W> {
 
     fn update_at(&mut self, now: Instant, done: u64, total: Option<u64>, as_bytes: bool) {
         let soon = |since: Instant, wait| now.saturating_duration_since(since) < wait;
-        if !self.on || soon(self.began, QUIET) || self.last.is_some_and(|t| soon(t, EVERY)) {
+        if !self.on || soon(self.began, self.quiet) || self.last.is_some_and(|t| soon(t, EVERY)) {
             return;
         }
         self.last = Some(now);
@@ -185,7 +211,8 @@ fn mark() -> MutexGuard<'static, Mark> {
 }
 
 /// A turning mark with what a command is doing, drawn on stderr by a thread of its own while the
-/// command works. Dropping it erases the line.
+/// command works. Dropping it erases the line. It isn't made to be nested: dropping an inner one
+/// stops the outer one too.
 pub struct Working {
     on: bool,
 }
@@ -202,10 +229,16 @@ impl Working {
         m.turning = number;
         m.paused = false;
         m.drawn.screen = style::err();
+        let quiet = quiet();
+        // With no quiet time, the first turn shows at once.
+        if quiet.is_zero() {
+            let line = turning_line(label, 0, m.drawn.screen);
+            m.drawn.draw(&mut io::stderr(), &line);
+        }
         drop(m);
         // A thread that couldn't start only loses the mark.
         let _ = thread::Builder::new().spawn(move || {
-            thread::sleep(QUIET);
+            thread::sleep(quiet);
             for step in 0.. {
                 {
                     let mut m = mark();
@@ -286,14 +319,42 @@ mod tests {
     }
 
     #[test]
-    fn under_70_columns_the_counts_go_and_under_50_the_cells() {
+    fn what_does_not_fit_goes_whole_first_the_counts_then_the_cells() {
+        let label = "Importing commits";
+        for (done, total) in [(334, 1284), (1_000_000, 1_000_000)] {
+            let counts = format!("  {} / {}", thousands(done), thousands(total));
+            let percent = format!(" {:>3}%", done * 100 / total);
+            for width in [40, 50, 53, 54, 60, 70, 77, 120] {
+                let line = bar_line(label, done, total, false, screen(true, width));
+                let at = format!("{width}, {done}: {line:?}");
+                assert!(columns(&line) < width, "{at}");
+                assert!(line.starts_with(label), "{at}");
+                let cells = line.chars().filter(|c| matches!(c, '█' | '░')).count();
+                assert!(cells == 0 || cells == CELLS, "{at}");
+                let shown = line.trim_end_matches(&counts);
+                // With the counts gone whole, the line ends at the percentage.
+                assert!(shown.ends_with(&percent), "{at}");
+            }
+            // There is room for everything.
+            let wide = bar_line(label, done, total, false, screen(true, 120));
+            assert!(wide.ends_with(&counts), "{wide:?}");
+        }
         assert_eq!(
-            bar_line("Importing commits", 334, 1284, false, screen(true, 69)),
+            bar_line(label, 334, 1284, false, screen(true, 69)),
+            "Importing commits        ██████░░░░░░░░░░░░░░░░░░  26%  334 / 1,284"
+        );
+        assert_eq!(
+            bar_line(label, 334, 1284, false, screen(true, 60)),
             "Importing commits        ██████░░░░░░░░░░░░░░░░░░  26%"
         );
         assert_eq!(
-            bar_line("Importing commits", 334, 1284, false, screen(true, 49)),
+            bar_line(label, 334, 1284, false, screen(true, 53)),
             "Importing commits         26%"
+        );
+        // Only when the label and the percentage don't fit is the label cut.
+        assert_eq!(
+            bar_line(label, 334, 1284, false, screen(true, 16)),
+            "Importing…  26%"
         );
     }
 
@@ -315,7 +376,14 @@ mod tests {
     }
 
     fn bar(out: &mut Vec<u8>, began: Instant) -> Bar<&mut Vec<u8>> {
-        Bar::to(out, screen(false, 80), true, "Importing commits", began)
+        Bar::to(
+            out,
+            screen(false, 80),
+            true,
+            "Importing commits",
+            began,
+            QUIET,
+        )
     }
 
     #[test]
@@ -368,9 +436,11 @@ mod tests {
             shown: 0,
         };
         let mut out = Vec::new();
-        drawn.draw(&mut out, "a long line");
+        drawn.draw(&mut out, "a longer");
         drawn.draw(&mut out, "short");
-        assert_eq!(String::from_utf8(out).unwrap(), "\ra long li\rshort    ");
+        assert_eq!(String::from_utf8(out).unwrap(), "\ra longer\rshort   ");
+        // The label is cut to leave room for the mark.
+        assert_eq!(turning_line("Tidying", 0, screen(true, 10)), "Tidy… … ⠋");
         // With colour, the line is cleared whole.
         let mut out = Vec::new();
         drawn.screen.color = true;
