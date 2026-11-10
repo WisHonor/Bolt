@@ -1560,8 +1560,12 @@ impl Window {
             }
             std::mem::take(&mut held.bytes)
         };
+        let size = (end - start) as usize;
         bytes.clear();
-        bytes.resize((end - start) as usize, 0);
+        if bytes.try_reserve_exact(size).is_err() {
+            return false;
+        }
+        bytes.resize(size, 0);
         if !read_whole(file, start, &mut bytes) {
             return false;
         }
@@ -2228,8 +2232,9 @@ mod tests {
             }
             Damage::Legacy => {
                 let mut frame = vec![0x27, 0xB5, 0x2F, 0xFD];
-                // Fixed bytes, so both sizes meet the same old-format header.
-                frame.extend_from_slice(&[0; 64]);
+                // Fixed bytes, so both sizes meet the same old-format header; more than a
+                // block's largest read, so the streamed path reads the file again.
+                frame.extend_from_slice(&[0; SMALL_READ as usize]);
                 (true, frame)
             }
             Damage::UnknownCompression | Damage::PackCutShort => (false, data.clone()),
@@ -2314,10 +2319,8 @@ mod tests {
                 let (streamed, _) = read_damaged(kind, ONE_READ as usize + 4096, damage);
                 assert_eq!(small, streamed, "{kind:?} {damage:?}");
                 // Only a wrong fingerprint, checked after either path, is settled by the one read.
-                // A legacy frame is small enough that the streamed path rereads it from the
-                // block the one read filled.
-                let one_read = matches!(damage, Damage::Fingerprint { .. } | Damage::Legacy);
-                assert_eq!(reads == 1, one_read, "{kind:?} {damage:?}: {reads} reads");
+                let settled = matches!(damage, Damage::Fingerprint { .. });
+                assert_eq!(reads == 1, settled, "{kind:?} {damage:?}: {reads} reads");
                 if damage == Damage::CutShort {
                     assert!(small.starts_with(invalid), "{kind:?} {damage:?}: {small}");
                 }
@@ -2351,24 +2354,69 @@ mod tests {
         assert!(!one_plain_frame(&[]));
     }
 
-    #[test]
-    fn a_small_entry_is_read_in_one_read() {
-        let (_root, tmp, packs) = dirs();
-        let mut w = PackWriter::create(&tmp).unwrap();
-        let listing = one_file_listing().encode();
-        w.add_record(ObjectKind::FolderListing, &listing).unwrap();
-        let mut random = vec![0u8; 1000];
-        getrandom::fill(&mut random).unwrap();
-        w.add_content(&random).unwrap();
-        w.add_content(&b"squeezes well ".repeat(1000)).unwrap();
-        let path = w.finish(&packs).unwrap().unwrap();
-        for e in entries(&PackReader::open(&path).unwrap()) {
-            // A reader of its own each time, so no block read for one entry holds the next.
-            let r = PackReader::open(&path).unwrap();
+    /// Reads each entry of the pack at `path` with a reader of its own, so no block read for one
+    /// holds the next, and checks it takes one read.
+    fn assert_each_read_once(path: &Path) {
+        for e in entries(&PackReader::open(path).unwrap()) {
+            let r = PackReader::open(path).unwrap();
             let before = open_files::reads();
             read_any(&r, &e).unwrap();
             assert_eq!(open_files::reads() - before, 1, "{e:?}");
         }
+    }
+
+    #[test]
+    fn a_small_entry_is_read_in_one_read() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        // A listing that compresses, though not below a block's largest read.
+        let mut names: Vec<String> = (0u32..200)
+            .map(|i| hash_content(&i.to_le_bytes()).to_string())
+            .collect();
+        names.sort();
+        let listing = Listing::new(
+            names
+                .into_iter()
+                .map(|name| Entry {
+                    id: hash_content(name.as_bytes()),
+                    name,
+                    kind: EntryKind::File,
+                    size: 1,
+                })
+                .collect(),
+        )
+        .unwrap();
+        w.add_record(ObjectKind::FolderListing, &listing.encode())
+            .unwrap();
+        w.add_content(&random(5000)).unwrap();
+        // Repeated, so it compresses to about half.
+        w.add_content(&random(10_000).repeat(2)).unwrap();
+        w.add_content(&random(ONE_READ as usize - 100)).unwrap();
+        let path = w.finish(&packs).unwrap().unwrap();
+        // Too big for a block, small enough for one read: the streamed path would take two.
+        let all = entries(&PackReader::open(&path).unwrap());
+        assert!(
+            all.iter()
+                .all(|e| (SMALL_READ..=ONE_READ).contains(&e.stored_size))
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|e| e.stored_size < e.uncompressed_size)
+                .count(),
+            2
+        );
+        assert_each_read_once(&path);
+    }
+
+    #[test]
+    fn a_tiny_entry_is_read_with_its_block() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        w.add_record(ObjectKind::FolderListing, &one_file_listing().encode())
+            .unwrap();
+        w.add_content(&random(1000)).unwrap();
+        w.add_content(&b"squeezes well ".repeat(1000)).unwrap();
+        assert_each_read_once(&w.finish(&packs).unwrap().unwrap());
     }
 
     #[test]
@@ -2626,7 +2674,15 @@ mod tests {
         let len = file.len() as u64;
         assert!(len > 300_000, "{len}");
         let r = PackReader::open(&path).unwrap();
-        let reads = proptest::collection::vec((0..len, 1..=2 * SMALL_READ), 1..64);
+        use proptest::prelude::*;
+        // A third near a block's edge, a sixth near the file's end, the rest anywhere.
+        let start = prop_oneof![
+            2 => (0..=len / BLOCK, 0..128u64)
+                .prop_map(move |(k, d)| (k * BLOCK + d).saturating_sub(64).min(len - 1)),
+            1 => (len - 8192)..len,
+            3 => 0..len,
+        ];
+        let reads = proptest::collection::vec((start, 1..=2 * SMALL_READ), 1..64);
         let mut runner = proptest::test_runner::TestRunner::default();
         runner
             .run(&reads, |reads| {
@@ -2636,16 +2692,29 @@ mod tests {
                         let (r, file, reads) = (&r, &file, &reads);
                         s.spawn(move || {
                             for &(pos, n) in reads.iter().skip(half).step_by(2) {
-                                let end = (pos + n).min(len);
-                                let mut got = vec![0u8; (end - pos) as usize];
-                                let mut section = Section {
-                                    file: &r.file,
-                                    window: Some(&r.window),
-                                    pos,
-                                    end,
+                                // A read may run past the file's end: both must fail alike.
+                                let read = |window| {
+                                    let mut got = vec![0u8; n as usize];
+                                    let mut section = Section {
+                                        file: &r.file,
+                                        window,
+                                        pos,
+                                        end: pos + n,
+                                    };
+                                    section.read_exact(&mut got).map(|()| got)
                                 };
-                                section.read_exact(&mut got).unwrap();
-                                assert!(got == file[pos as usize..end as usize], "{pos} {n}");
+                                match (read(Some(&r.window)), read(None)) {
+                                    (Ok(got), Ok(straight)) => {
+                                        let end = (pos + n) as usize;
+                                        assert!(got == straight, "{pos} {n}");
+                                        assert!(got == file[pos as usize..end], "{pos} {n}");
+                                    }
+                                    (Err(a), Err(b)) => {
+                                        assert_eq!(a.kind(), b.kind(), "{pos} {n}");
+                                        assert!(pos + n > len, "{pos} {n}: {a}");
+                                    }
+                                    (a, b) => panic!("{pos} {n}: {a:?} against {b:?}"),
+                                }
                             }
                         });
                     }
