@@ -474,6 +474,22 @@ fn setup_json_matches_json_md() {
     insta::assert_json_snapshot!("setup_applied", applied);
 }
 
+/// A preview heads each file as `bolt changes` does: kind, name, lines added and removed, size.
+#[test]
+fn a_preview_heads_each_file_as_bolt_changes_does() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let (code, out, _) = run(&env, &["setup", "--preset", "code"]);
+    assert_eq!(code, Some(1));
+    let (toml, _) = vector("code-nothing-found");
+    let lines = toml.lines().count();
+    let size = bolt_core::text::bytes(toml.len() as u64);
+    let header = format!("\nadded  bolt.toml  +{lines} -0  ({size})\n@@ -0,0 +1,{lines} @@\n");
+    assert!(out.contains(&header), "{out}");
+    let first = toml.lines().next().unwrap();
+    assert!(out.contains(&format!("@@\n+{first}\n")), "{out}");
+}
+
 #[test]
 fn a_preview_escapes_the_lines_it_shows() {
     let env = Env::empty();

@@ -83,7 +83,7 @@ Bolt draws no boxes, banners or rules beyond that separator.
 Only on a terminal, and only in lists and tables:
 
 - **A path** that would make its row pass the width loses whole folders from its middle, replaced by one cut mark, keeping its first folder and its file's name: `Assets/…/Rock_Albedo.psd`. If that still doesn't fit, the path is left as it is and the row runs long.
-- **A message** in a list is cut at its end, with the cut mark.
+- **A message** in a list is cut at its end, with the cut mark, never inside an escape (`\x1b`, `\u{202e}`): a cut that would fall there falls before its backslash.
 - **IDs, numbers, errors and hints** are never cut.
 - Widths count what is printed: the escaped form of a project's text, and the plain form of a symbol.
 
@@ -224,7 +224,7 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 | Nothing to amend | `Nothing to amend: your files match your last save, <id> "<message>", and so does the message.` (`what you named matches` with paths) | | |
 
 - The count is files, never lines: counting lines would slow every save. `on <line>` is left out for a save that names no line.
-- **Colour:** `Saved` and `Updated` green and bold, the ID magenta and bold, the line blue, the count dim.
+- **Colour:** `Saved` and `Updated` green and bold, the ID magenta and bold, the line blue, the count dim, the `bolt status` of the partial-save line cyan.
 - The questions and stops (a large save, a save away from a line, the first save's line endings and Git LFS pointers) keep their words and flags (§10); only their layout follows §6.
 
 ### `bolt status`
@@ -266,8 +266,8 @@ Saves on line main, newest first:
   kxqmr  5 days ago  Ben Okafor  Add rock textures
 ```
 
-- **The heading:** `Saves on line <line>, newest first:`; at a save, `At save <id>, not on a line. Saves back from it, newest first:`. Every save is listed, from where you are back.
-- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is. Columns are as wide as the first 1,000 rows need: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
+- **The heading:** `Saves on line <line>, newest first:`; at a save, `At save <id>, not on a line. Saves back from it, newest first:`. Every save is listed, from where you are back. When the first save can't be read, stdout gets nothing, not even the heading; when a later one can't, the rows before it are printed, then the error.
+- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
 - **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line names blue.
 
 ### `bolt show`
@@ -278,20 +278,20 @@ Save ptvz "Add double jump"
     Author       Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
     Saved by     Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
     Line         main
-    After        kxqmz "First playable"
+    After        3f9a0c2e7b04 "First playable"
     Fingerprint  d77a81f736da0b96a75602567a49fa760764e22213b6852cda7b6660f926f3ed
 
         Second jump while airborne, plus 0.1 s of coyote time off ledges.
 
 2 files changed:
 
-    added     Assets/Scripts/DoubleJump.cs  1.2 KiB
+    added     Assets/Scripts/DoubleJump.cs    1.2 KiB
     modified  Assets/Scripts/Player.cs      6 B → 7 B
 ```
 
 then, on a terminal, `Next: see its lines with: bolt changes --save <id>` when it changed files.
 
-- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `After` names the save before it (a merge brought in from Git adds the other parents' fingerprints); the fingerprint is whole.
+- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `After` names the save before it by the first 12 hex digits of its fingerprint, which `bolt show` takes back, and its message (a merge brought in from Git adds the other parents' fingerprints); no change ID is shortened for it, as that could read the whole line; the fingerprint is whole.
 - **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
 - **The changes** are rows as in `bolt status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
 - **Colour:** IDs magenta and bold, the line blue, the fingerprints blue, the rows as in `bolt status`, the times in brackets dim.

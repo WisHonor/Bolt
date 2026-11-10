@@ -473,15 +473,25 @@ pub struct SaveRow {
     pub lines: Vec<String>,
 }
 
-/// How many rows `bolt history` reads before it sets its columns: it never holds a whole line,
-/// so a wider row after them runs long.
-const HELD: usize = 1_000;
+impl SaveRow {
+    /// The bytes of text it holds.
+    fn size(&self) -> usize {
+        let lines: usize = self.lines.iter().map(String::len).sum();
+        self.short.len() + self.when.len() + self.author.len() + self.title.len() + lines
+    }
+}
+
+/// `bolt history` holds rows to set its columns, but never a whole line: it stops at this many
+/// rows, or at [`HELD_BYTES`] of their text, and a wider row after them runs long.
+const HELD_ROWS: usize = 1_000;
+const HELD_BYTES: usize = 1 << 20;
 
 /// `bolt history`'s list, written as its rows come.
 pub struct History {
     /// The line the project is on, escaped; `None` at a save.
     line: Option<String>,
     held: Vec<SaveRow>,
+    held_bytes: usize,
     widths: Option<[usize; 3]>,
     written: usize,
 }
@@ -491,6 +501,7 @@ impl History {
         History {
             line,
             held: Vec::new(),
+            held_bytes: 0,
             widths: None,
             written: 0,
         }
@@ -500,17 +511,19 @@ impl History {
         if let Some(widths) = self.widths {
             return self.write_row(out, &row, widths);
         }
+        self.held_bytes += row.size();
         self.held.push(row);
-        if self.held.len() >= HELD {
+        if self.held.len() >= HELD_ROWS || self.held_bytes >= HELD_BYTES {
             self.lay_out(out)?;
         }
         Ok(())
     }
 
+    /// Writes what is still held. With nothing read, nothing is written, not even the heading.
     pub fn finish(&mut self, out: &mut dyn Write) -> io::Result<()> {
         match self.widths {
-            Some(_) => Ok(()),
-            None => self.lay_out(out),
+            None if !self.held.is_empty() => self.lay_out(out),
+            _ => Ok(()),
         }
     }
 
@@ -525,17 +538,21 @@ impl History {
             ]
         });
         self.widths = Some(widths);
+        let held = std::mem::take(&mut self.held);
+        self.held_bytes = 0;
+        // Only called with a row held, the save you're at, which the heading names.
+        let Some(first) = held.first() else {
+            return Ok(());
+        };
         let heading = match &self.line {
             Some(line) => format!("Saves on line {}, newest first:", s.paint(Role::Line, line)),
             None => format!(
                 "At save {}, not on a line. Saves back from it, newest first:",
-                self.held
-                    .first()
-                    .map_or(String::new(), |r| s.paint(Role::ChangeId, &r.short))
+                s.paint(Role::ChangeId, &first.short)
             ),
         };
         writeln!(out, "{heading}\n")?;
-        for row in std::mem::take(&mut self.held) {
+        for row in held {
             self.write_row(out, &row, widths)?;
         }
         Ok(())

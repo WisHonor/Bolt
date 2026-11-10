@@ -273,17 +273,40 @@ impl Screen {
             .unwrap_or_else(|| path.to_owned())
     }
 
-    /// `text` cut at its end, with the cut mark, to fit `room` columns on a terminal.
+    /// `text` cut at its end, with the cut mark, to fit `room` columns on a terminal. A cut that
+    /// would fall inside an escape `text::escape` wrote falls before its backslash instead.
     pub fn cut_end(self, text: &str, room: usize) -> String {
         if self.width.is_none() || columns(text) <= room {
             return text.to_owned();
         }
         let cut = self.sym(Sym::Cut);
-        let kept: String = text
-            .chars()
-            .take(room.saturating_sub(columns(cut)))
-            .collect();
-        kept + cut
+        let chars: Vec<char> = text.chars().collect();
+        let mut keep = room.saturating_sub(columns(cut));
+        let mut at = 0;
+        while at < keep {
+            let step = escape_len(&chars[at..]);
+            if at + step > keep {
+                keep = at;
+            }
+            at += step.max(1);
+        }
+        chars[..keep].iter().collect::<String>() + cut
+    }
+}
+
+/// How many characters the escape at the start of `rest` takes: `\xNN` or `\u{N…}`, else 0.
+fn escape_len(rest: &[char]) -> usize {
+    match rest {
+        ['\\', 'x', a, b, ..] if a.is_ascii_hexdigit() && b.is_ascii_hexdigit() => 4,
+        ['\\', 'u', '{', tail @ ..] => {
+            let digits = tail.iter().take_while(|c| c.is_ascii_hexdigit()).count();
+            if digits > 0 && tail.get(digits) == Some(&'}') {
+                digits + 4
+            } else {
+                0
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -490,6 +513,35 @@ mod tests {
         let plain = screen(false, false, Some(80));
         assert_eq!(plain.fit_path(path, 26), "Assets/.../Rock_Albedo.psd");
         assert_eq!(s.cut_end("a long message", 8), "a long …");
+    }
+
+    #[test]
+    fn a_cut_never_falls_inside_an_escape() {
+        let s = screen(false, false, Some(80));
+        for raw in ["\u{1b}", "\u{202e}"] {
+            let escape = bolt_core::text::escape(raw, false);
+            let text = format!("ab{escape}cdefghijklmnop");
+            let len = escape.chars().count();
+            // Kept before the cut mark, `...`: every place from the start to past the escape.
+            for keep in 0..=len + 4 {
+                let shown = s.cut_end(&text, keep + 3);
+                let kept: String = if (3..2 + len).contains(&keep) {
+                    "ab".to_owned()
+                } else {
+                    text.chars().take(keep).collect()
+                };
+                assert_eq!(shown, format!("{kept}..."), "{escape} at {keep}");
+            }
+        }
+        // A title of nothing but escapes keeps only the escapes that fit whole.
+        let only = bolt_core::text::escape("\u{1b}\u{1b}\u{1b}", false);
+        assert_eq!(s.cut_end(&only, 6), "...");
+        assert_eq!(s.cut_end(&only, 9), "\\x1b...");
+        // A backslash typed by the user is printed as it is, and cut like any character.
+        let typed = bolt_core::text::escape("a\\b\\cdefgh", false);
+        assert_eq!(typed, "a\\b\\cdefgh");
+        assert_eq!(s.cut_end(&typed, 5), "a\\...");
+        assert_eq!(s.cut_end(&typed, 7), "a\\b\\...");
     }
 
     #[test]

@@ -1304,23 +1304,27 @@ fn history_to(
         Position::OnLine(line) => Some(escape(line, false)),
         Position::AtSave(_) => None,
     });
+    // Each save's lines, found once: an import can bring thousands.
+    let mut heads: HashMap<Id, Vec<String>> = HashMap::new();
+    for (name, tip) in &entry.state.lines {
+        heads.entry(*tip).or_default().push(escape(name, false));
+    }
     let walked = for_each_on_line(repo, |id, s, short| {
         let row = output::SaveRow {
             short: short.to_owned(),
             when: output::relative_time(s.author.time_ms, s.author.tz_offset_min, now),
             author: escape(&s.author.name, false),
             title: escape(s.message.lines().next().unwrap_or_default(), false),
-            lines: (entry.state.lines.iter())
-                .filter(|(_, tip)| *tip == id)
-                .map(|(name, _)| escape(name, false))
-                .collect(),
+            lines: heads.remove(id).unwrap_or_default(),
         };
         listed.add(out, row)?;
         Ok::<(), Failure>(())
     });
-    // What was read before a damaged save is still shown, before the error.
-    listed.finish(out)?;
+    // What was read before a damaged save is still shown, before the error, which is the one
+    // told even if that writing fails too.
+    let finished = listed.finish(out);
     walked?;
+    finished?;
     let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
     warnings.extend(repo.store().warnings());
     Ok(warnings)
@@ -1338,11 +1342,14 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let early = unfinished.clone();
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
-    let parent = match save.parents.first() {
-        Some(p) => Some((*p, store.save(p, repo.signatures_allowed())?)),
-        None => None,
+    // Of the parent, only what is shown and the root the walk compares with.
+    let (old_root, parent_title) = match save.parents.first() {
+        Some(p) => {
+            let parent = store.save(p, repo.signatures_allowed())?;
+            (Some(parent.root), output::quoted_title(&parent))
+        }
+        None => (None, String::new()),
     };
-    let old_root = parent.as_ref().map(|(_, p)| p.root);
     // Counting first holds the saves to the limits and reads them for damage before anything is
     // printed, so a save that can't be listed prints only the error. It also sets the table's
     // columns. The changes are then printed as the walk finds them, and none is kept.
@@ -1408,21 +1415,15 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
             s.paint(style::Role::Line, &escape(line, false))
         });
         writeln!(out, "    Line         {line}")?;
-        if let Some((parent_id, parent)) = &parent {
-            let named = short_or_whole(repo, parent_id, &parent.change_id, &mut warnings);
-            let mut after = format!(
-                "{} {}",
-                s.paint(style::Role::ChangeId, &named),
-                output::quoted_title(parent)
-            );
-            // Bolt's own saves have one; a merge brought in from Git has more.
-            for other in save.parents.iter().skip(1) {
-                after += &format!(
-                    ", {}",
-                    s.paint(style::Role::Fingerprint, &other.short_hex())
-                );
-            }
-            writeln!(out, "    After        {after}")?;
+        // By fingerprint: shortening a change ID for it could read the whole line.
+        // A merge brought in from Git has more than one; the first is the one compared with.
+        let mut named = save
+            .parents
+            .iter()
+            .map(|p| s.paint(style::Role::Fingerprint, &p.short_hex()));
+        if let Some(first) = named.next() {
+            let others: String = named.map(|p| format!(", {p}")).collect();
+            writeln!(out, "    After        {first} {parent_title}{others}")?;
         }
         writeln!(
             out,

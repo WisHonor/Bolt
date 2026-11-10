@@ -2222,6 +2222,25 @@ fn history_show_and_save_hold_one_save_at_a_time() {
     }
 }
 
+/// The same, where each message's first line is the whole mebibyte: `history` holds at most a
+/// mebibyte of rows to set its columns, then prints the rest as it reads them.
+#[cfg(unix)]
+#[test]
+fn history_holds_a_bounded_amount_of_long_first_lines() {
+    let env = Env::new();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let message = "A".repeat(1 << 20);
+    plant_history(env.root(), 150, |save| save.message.clone_from(&message));
+    let out = bolt_capped(&env, &["history"])
+        .stdout(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
 /// A key file Bolt can't use is the user's to deal with: commands still work, without caches,
 /// and say so, and the file is left as it is.
 #[test]
@@ -2282,6 +2301,129 @@ fn a_current_cache_reads_a_damaged_older_save_only_when_history_reaches_it() {
             .contains("damaged"),
         "{doc}"
     );
+}
+
+/// A project with saves `one`, `two` and `three`, whose first save, made by `start`, is damaged,
+/// and whose change-ID cache is current, so that only reaching that save reads it.
+fn project_whose_oldest_save_is_damaged() -> Env {
+    let env = project_with_two_saves();
+    let history = json_as_user(&env, &["--json", "history"]);
+    let oldest = Id::from_hex(history["saves"][2]["id"].as_str().unwrap()).unwrap();
+    rot(env.root(), &oldest);
+    std::fs::write(env.root().join("c.txt"), "c").unwrap();
+    let saved = json_as_user(&env, &["--json", "save", "three"]);
+    assert!(warning_kinds(&saved).is_empty(), "{saved}");
+    env
+}
+
+/// For people, as in `--json`: the rows read before the damaged save, then the error.
+#[test]
+fn history_in_words_shows_the_saves_before_a_damaged_one_then_the_error() {
+    let env = project_whose_oldest_save_is_damaged();
+    let out = env.bolt().arg("history").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let (shown, said) = (text(&out.stdout), text(&out.stderr));
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines[..2],
+        ["Saves on line main, newest first:", ""],
+        "{shown}"
+    );
+    assert_eq!(lines.len(), 5, "{shown}");
+    for (line, message) in lines[2..].iter().zip(["three  [main]", "two", "one"]) {
+        assert!(line.ends_with(&format!("  {message}")), "{shown}");
+    }
+    assert!(
+        said.starts_with("error: ") && said.contains("damaged"),
+        "{said}"
+    );
+}
+
+/// When the first save can't be read, on a line or at a save, stdout gets nothing: no heading.
+#[test]
+fn history_that_fails_before_its_first_save_prints_nothing() {
+    for at_a_save in [false, true] {
+        let env = project_with_two_saves();
+        let history = json_as_user(&env, &["--json", "history"]);
+        let id = |n: usize| history["saves"][n]["id"].as_str().unwrap().to_owned();
+        if at_a_save {
+            // At a save, the saves back from it are read whole before the first row.
+            let at = env.bolt().args(["goto", &id(1)]).output().unwrap();
+            assert_eq!(at.status.code(), Some(0), "{}", text(&at.stderr));
+        } else {
+            // Without the cache, the line is read whole before the first row.
+            std::fs::remove_file(env.root().join(".bolt/cache/change-ids")).unwrap();
+        }
+        rot(env.root(), &Id::from_hex(&id(2)).unwrap());
+        let out = env.bolt().arg("history").output().unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{at_a_save}: {said}");
+        assert_eq!(text(&out.stdout), "", "{at_a_save}");
+        assert!(said.contains("damaged"), "{at_a_save}: {said}");
+    }
+}
+
+/// `show` names the save before by the first 12 digits of its fingerprint, which `show` takes
+/// back.
+#[test]
+fn show_names_the_save_before_by_a_fingerprint_it_takes_back() {
+    let env = project_with_two_saves();
+    let out = stdout_of(&env, &["show"]);
+    let after = out
+        .lines()
+        .find_map(|l| l.strip_prefix("    After        "))
+        .unwrap_or_else(|| panic!("{out}"));
+    let (hex, title) = after.split_once(' ').unwrap();
+    assert_eq!((hex.len(), title), (12, "\"one\""), "{out}");
+    let parent = json_as_user(&env, &["--json", "show", hex]);
+    assert_eq!(parent["save"]["message"], "one", "{parent}");
+    assert!(parent["save"]["id"].as_str().unwrap().starts_with(hex));
+}
+
+/// Naming the save before reads no older save, so a damaged one doesn't reach `show`.
+#[test]
+fn show_reads_no_older_save_to_name_the_one_before() {
+    let env = project_whose_oldest_save_is_damaged();
+    let out = env.bolt().arg("show").output().unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert_eq!(said, "");
+    let doc = json_as_user(&env, &["--json", "show"]);
+    assert!(warning_kinds(&doc).is_empty(), "{doc}");
+}
+
+/// Rows past what `history` holds to set its columns still come, in order, in those columns: a
+/// longer author after them runs long.
+#[test]
+fn history_rows_past_what_it_holds_still_print_in_order() {
+    let env = Env::new();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    // The newest save's first line alone fills what `history` holds; the others come after it.
+    let mut n = 0;
+    plant_history(env.root(), 4, |save| {
+        n += 1;
+        if n == 4 {
+            save.message = "x".repeat(1 << 20);
+            save.author.name = "A".into();
+        } else {
+            save.message = format!("small {n}");
+            save.author.name = "Bea Long-Name".into();
+        }
+    });
+    let out = stdout_of(&env, &["history"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2 + 5, "{}", &out[..200]);
+    assert!(lines[2].contains("  A  xxx"), "{}", &lines[2][..80]);
+    for (line, n) in lines[3..6].iter().zip([3, 2, 1]) {
+        assert!(
+            line.ends_with(&format!("  Bea Long-Name  small {n}")),
+            "{line}"
+        );
+    }
+    assert!(lines[6].ends_with("  Test  Start project"), "{out}");
 }
 
 /// `json_of`, run as the test user, so that a save may be made.
