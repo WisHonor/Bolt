@@ -70,9 +70,9 @@ enum Command {
         #[arg(long, value_enum, value_name = "PRESET")]
         preset: Option<PresetArg>,
     },
-    /// Show the project's rules as Bolt reads them, or switch to a preset's.
+    /// Show the project's rules as Bolt reads them, or change them to a preset's.
     Setup {
-        /// Show the line changes switching to this preset makes, then make them.
+        /// Show the lines this preset would change, then change them.
         #[arg(long, value_enum, value_name = "PRESET")]
         preset: Option<PresetArg>,
         /// Make the changes without asking.
@@ -2206,4 +2206,25 @@ fn main() -> ExitCode {
         git_words::teach(word);
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn commit_knows_every_option_of_save_that_takes_a_value() {
+        let cli = Cli::command();
+        let save = cli.find_subcommand("save").unwrap();
+        let mut taking: Vec<String> = save
+            .get_opts()
+            .filter(|o| o.get_action().takes_values())
+            .map(|o| format!("--{}", o.get_long().unwrap()))
+            .collect();
+        taking.sort();
+        assert_eq!(taking, git_words::SAVE_VALUE_OPTIONS);
+    }
 }

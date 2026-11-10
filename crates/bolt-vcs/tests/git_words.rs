@@ -115,8 +115,33 @@ fn commit_takes_gits_message_forms() {
         assert_eq!(last_message(&env), format!("x{n}"));
     }
     write(&env, "a.txt", "plain\n");
-    ok(&env, &["commit", "plain"]);
-    assert_eq!(last_message(&env), "plain");
+    write(&env, "b.txt", "left\n");
+    ok(&env, &["commit", "-m", "only a", "a.txt"]);
+    assert_eq!(last_message(&env), "only a");
+    assert_eq!(changed(&env), ["b.txt"]);
+}
+
+#[test]
+fn commit_with_a_path_and_no_message_explains_and_saves_nothing() {
+    let env = project();
+    write(&env, "a.txt", "changed\n");
+    let said = explained(&env, &["commit", "a.txt"]);
+    assert!(said.contains("bolt save \"message\" <paths>"), "{said}");
+    assert_eq!(changed(&env), ["a.txt"]);
+    assert_eq!(last_message(&env), "Files");
+}
+
+#[test]
+fn a_message_that_starts_with_a_dash_is_a_message() {
+    let env = project();
+    write(&env, "a.txt", "changed\n");
+    ok(&env, &["commit", "-m", "--amend"]);
+    let history = doc(&run(&env, &["history", "--json"]).stdout);
+    let saves = history["saves"].as_array().unwrap();
+    // The start's save, "Files", and the new one: nothing was amended.
+    assert_eq!(saves.len(), 3, "{history}");
+    assert_eq!(saves[0]["message"], "--amend");
+    assert_eq!(saves[1]["message"], "Files");
 }
 
 #[test]
@@ -157,6 +182,26 @@ fn stash_list_lists() {
 }
 
 #[test]
+fn stash_with_anything_else_explains_and_shelves_nothing() {
+    let env = project();
+    write(&env, "a.txt", "changed\n");
+    for args in [
+        &["stash", "create"][..],
+        &["stash", "push", "-m", "x"],
+        &["stash", "-u"],
+        &["stash", "apply"],
+        &["stash", "drop"],
+        &["stash", "pop", "stash@{1}"],
+    ] {
+        let said = explained(&env, args);
+        assert!(said.contains("bolt shelf --list"), "{said}");
+        assert_eq!(changed(&env), ["a.txt"]);
+    }
+    let shelves = doc(&run(&env, &["shelf", "--list", "--json"]).stdout);
+    assert_eq!(shelves["shelves"], serde_json::json!([]));
+}
+
+#[test]
 fn restore_without_a_path_explains_and_discards_nothing() {
     let env = project();
     write(&env, "a.txt", "changed\n");
@@ -172,13 +217,29 @@ fn restore_without_a_path_explains_and_discards_nothing() {
 }
 
 #[test]
-fn restore_with_paths_discards_only_those() {
+fn restore_with_paths_explains_and_discards_nothing() {
     let env = project();
     write(&env, "a.txt", "changed\n");
-    write(&env, "b.txt", "changed\n");
-    ok(&env, &["restore", "a.txt"]);
-    assert_eq!(changed(&env), ["b.txt"]);
-    assert_eq!(fs::read_to_string(env.root().join("a.txt")).unwrap(), "a\n");
+    write(&env, "new.txt", "new\n");
+    for args in [&["restore", "a.txt"][..], &["restore", "."]] {
+        let said = explained(&env, args);
+        assert!(said.contains("bolt undo"), "{said}");
+    }
+    assert_eq!(changed(&env), ["a.txt", "new.txt"]);
+    assert_eq!(
+        fs::read_to_string(env.root().join("a.txt")).unwrap(),
+        "changed\n"
+    );
+}
+
+#[test]
+fn branch_with_an_option_gets_lines_own_answer() {
+    let env = project();
+    let out = run(&env, &["branch", "-d", "x"]);
+    assert_eq!(out.status.code(), Some(2));
+    let said = text(&out.stderr);
+    assert!(!said.contains("--line <name>"), "{said}");
+    assert!(said.contains("line"), "{said}");
 }
 
 #[test]
@@ -250,7 +311,8 @@ fn on_a_terminal(env: &Env, args: &[&str]) -> Output {
 }
 
 #[cfg(feature = "fault-injection")]
-const COMMIT_HINT: &str = "\nhint: in Bolt, commit is save: bolt save \"message\"\n";
+const COMMIT_HINT: &str =
+    "\nhint: in Bolt, commit is save, which takes new files too: bolt save \"message\"\n";
 
 #[cfg(feature = "fault-injection")]
 #[test]
@@ -341,7 +403,7 @@ fn the_diary_names_bolts_command() {
 
 #[test]
 fn help_never_names_a_git_word() {
-    // `tag` is left out: it is a word Bolt keeps for its own tags.
+    // `tag` is left out: it is Bolt's own word for the tags an import brings.
     const GIT: [&str; 26] = [
         "init",
         "commit",
@@ -349,12 +411,12 @@ fn help_never_names_a_git_word() {
         "log",
         "checkout",
         "switch",
-        "restore",
         "stash",
         "branch",
         "fsck",
         "gc",
         "add",
+        "restore",
         "rm",
         "mv",
         "reset",
@@ -389,14 +451,7 @@ fn help_never_names_a_git_word() {
             .map(str::to_ascii_lowercase)
             .collect();
         for git in GIT {
-            // `setup` switches presets: the verb, never a command.
-            let named = if git == "switch" {
-                help.contains("bolt switch")
-                    || help.lines().any(|l| l.trim_start().starts_with("switch "))
-            } else {
-                words.iter().any(|w| w == git)
-            };
-            assert!(!named, "{git} in:\n{help}");
+            assert!(!words.iter().any(|w| w == git), "{git} in:\n{help}");
         }
     }
 }
