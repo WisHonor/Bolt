@@ -1341,9 +1341,9 @@ fn build_reading(
     let mut todo = Vec::new();
     // What the cache said of each file, for `build_with`, which meets them in this same order.
     let mut known = Vec::new();
-    for rel in build_order(folders) {
+    for (rel, children) in in_build_order(folders) {
         let before = last.listings.get(rel).and_then(Option::as_ref);
-        for c in folders.get(rel).into_iter().flatten() {
+        for c in children {
             let read = match c.kind {
                 Kind::File => {
                     let vouched = contents.vouched(c, before.and_then(|l| l.get(&c.name)));
@@ -1443,10 +1443,20 @@ fn build_order(folders: &Folders) -> Vec<&String> {
     order
 }
 
+/// Each folder in `build_order`, with its children: both of `build_reading`'s passes go through
+/// this, so they meet the files in the same order.
+fn in_build_order(folders: &Folders) -> impl Iterator<Item = (&String, &[Child])> {
+    build_order(folders)
+        .into_iter()
+        .map(|rel| (rel, folders.get(rel).map_or(&[][..], Vec::as_slice)))
+}
+
 #[cfg(test)]
 thread_local! {
-    /// How many listings `build_with` has made on this thread.
-    static LISTINGS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The folders whose listings `build_with` has made on this thread.
+    static LISTINGS_BUILT: std::cell::RefCell<Vec<String>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
 /// The listings of `folders`, in `build_order`, with each file, link and listing handed to
@@ -1461,15 +1471,14 @@ fn build_with<'a>(
     ignored: &HashSet<String>,
     gitignored: &HashSet<String>,
 ) -> Result<Built, SaveError> {
-    let order = build_order(folders);
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
     let (mut kept, mut kept_below_gone) = (Vec::new(), 0);
     let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
-    for rel in order {
+    for (rel, children) in in_build_order(folders) {
         let before = last.listings.get(rel).and_then(Option::as_ref);
         let mut entries = Vec::new();
-        for c in folders.get(rel).into_iter().flatten() {
+        for c in children {
             let was = before.and_then(|l| l.get(&c.name));
             let (kind, id, size) = match c.kind {
                 Kind::Folder => {
@@ -1537,7 +1546,7 @@ fn build_with<'a>(
             continue;
         }
         #[cfg(test)]
-        LISTINGS_BUILT.set(LISTINGS_BUILT.get() + 1);
+        LISTINGS_BUILT.with_borrow_mut(|b| b.push(rel.clone()));
         let listing = Listing::new(entries).map_err(StoreError::from)?;
         built.insert(rel, contents.listing(listing)?);
     }
@@ -3841,24 +3850,46 @@ mod tests {
             if name == ".bolt" {
                 continue;
             }
-            entries.push(if e.file_type().unwrap().is_dir() {
-                Entry {
-                    name,
-                    kind: EntryKind::Folder,
-                    id: listing_on_disk(&e.path()),
-                    size: 0,
-                }
+            let is = e.file_type().unwrap();
+            let (kind, id, size) = if is.is_dir() {
+                (EntryKind::Folder, listing_on_disk(&e.path()), 0)
+            } else if is.is_symlink() {
+                let target = fs::read_link(e.path()).unwrap();
+                let target = target.to_str().unwrap().as_bytes().to_vec();
+                (
+                    EntryKind::Symlink,
+                    hash_content(&target),
+                    target.len() as u64,
+                )
             } else {
                 let bytes = fs::read(e.path()).unwrap();
-                Entry {
-                    name,
-                    kind: EntryKind::File,
-                    id: hash_content(&bytes),
-                    size: bytes.len() as u64,
-                }
+                (
+                    file_kind(&e.path()),
+                    hash_content(&bytes),
+                    bytes.len() as u64,
+                )
+            };
+            entries.push(Entry {
+                name,
+                kind,
+                id,
+                size,
             });
         }
         Listing::new(entries).unwrap().id()
+    }
+
+    /// A file's kind as a save takes it, for a file the last save didn't hold as executable.
+    fn file_kind(path: &Path) -> EntryKind {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if fs::metadata(path).unwrap().permissions().mode() & 0o111 != 0 {
+                return EntryKind::Executable;
+            }
+        }
+        let _ = path;
+        EntryKind::File
     }
 
     /// A project of three folders below the top one, saved.
@@ -3896,25 +3927,154 @@ mod tests {
         assert_eq!(id, listing_on_disk(root));
     }
 
+    /// Clears the record of the listings built on this thread.
+    fn build_count_from_here() {
+        LISTINGS_BUILT.with_borrow_mut(Vec::clear);
+    }
+
+    /// The folders whose listings were built on this thread since `build_count_from_here`.
+    fn built() -> Vec<String> {
+        LISTINGS_BUILT.with_borrow(Clone::clone)
+    }
+
     #[test]
     fn an_unchanged_folder_is_not_rebuilt() {
         let (dir, repo) = three_folders();
         let base = newest_root(&repo);
-        let built = |repo: &Repository| {
-            LISTINGS_BUILT.set(0);
+        let status = |repo: &Repository| {
+            build_count_from_here();
             let now = read_folder(repo, base, false, None, None).unwrap();
-            (LISTINGS_BUILT.get(), now.root)
+            (built(), now.root)
         };
-        assert_eq!(built(&repo), (0, base));
+        assert_eq!(status(&repo), (Vec::<String>::new(), base));
+        // Only the folders on the changed file's path; `c` beside them is not.
         write(dir.path(), "a/b/two.txt", b"two, changed");
-        let (count, root) = built(&repo);
-        // `a/b`, `a` and the top one.
-        assert_eq!(count, 3);
+        let (rebuilt, root) = status(&repo);
+        assert_eq!(rebuilt, ["a/b", "a", ""]);
+        assert_eq!(root, listing_on_disk(dir.path()));
+        // `a/b`, unchanged inside its changed folder, is not either.
+        write(dir.path(), "a/b/two.txt", b"two");
+        write(dir.path(), "a/one.txt", b"one, changed");
+        let (rebuilt, root) = status(&repo);
+        assert_eq!(rebuilt, ["a", ""]);
         assert_eq!(root, listing_on_disk(dir.path()));
     }
 
+    /// Saves a project of a folder `d` and one beside it, `e`; makes `change` in `d`, if it can;
+    /// and saves again. `d`'s new ID must be the one a build of what it now holds gives, and not
+    /// the one it had; only `d` and the top folder are built.
+    fn assert_one_change_is_seen(change: impl FnOnce(&Path) -> bool) {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "d/a.txt", b"aaa");
+        write(root, "d/b.txt", b"bbb");
+        write(root, "e/c.txt", b"ccc");
+        let first = saved_root(save_now(&mut repo).unwrap());
+        let before = saved_folder(repo.store(), first, "d");
+        if !change(&root.join("d")) {
+            return;
+        }
+        build_count_from_here();
+        let second = saved_root(save_now(&mut repo).unwrap());
+        assert_eq!(built(), ["d", ""]);
+        let after = saved_folder(repo.store(), second, "d");
+        assert_eq!(after, listing_on_disk(&root.join("d")));
+        assert_ne!(after, before);
+        assert_eq!(second, listing_on_disk(root));
+    }
+
     #[test]
-    fn status_reads_no_listing_twice() {
+    fn a_change_of_one_field_alone_is_seen() {
+        // The bytes, but not the size.
+        assert_one_change_is_seen(|d| {
+            fs::write(d.join("a.txt"), b"xyz").unwrap();
+            true
+        });
+        // The size.
+        assert_one_change_is_seen(|d| {
+            fs::write(d.join("a.txt"), b"aaaa").unwrap();
+            true
+        });
+        // The name's letter case, the bytes kept, whether the drive folds case or not.
+        assert_one_change_is_seen(|d| {
+            fs::rename(d.join("a.txt"), d.join("A.txt")).unwrap();
+            true
+        });
+        // One file gone and another come, so the count stays.
+        assert_one_change_is_seen(|d| {
+            fs::remove_file(d.join("b.txt")).unwrap();
+            fs::write(d.join("c.txt"), b"bbb").unwrap();
+            true
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_change_of_kind_alone_is_seen() {
+        use std::os::unix::fs::PermissionsExt;
+        // The executable bit: the kind changes, the ID and size don't.
+        assert_one_change_is_seen(|d| {
+            let to = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(d.join("a.txt"), to).unwrap();
+            true
+        });
+        // A file replaced by a link.
+        assert_one_change_is_seen(|d| {
+            fs::remove_file(d.join("a.txt")).unwrap();
+            crate::test_support::symlink(Path::new("b.txt"), &d.join("a.txt"))
+        });
+    }
+
+    #[test]
+    fn a_folder_with_entries_carried_over_gets_the_id_a_build_would_give() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        let top = plant_save(
+            &mut repo,
+            &[
+                ("top.txt", EntryKind::File, b"top"),
+                ("d/in.txt", EntryKind::File, b"in"),
+                ("d/left.txt", EntryKind::File, b"left"),
+                ("d/sub", EntryKind::ProjectLink, &[0x5a; 20]),
+            ],
+        );
+        write(root, "top.txt", b"top");
+        write(root, "d/in.txt", b"in");
+        write(root, "d/left.txt", b"left");
+        let d_before = top.get("d").unwrap().id;
+        let d_saved = repo.store().listing(&d_before).unwrap();
+        assert_eq!(
+            Listing::new(d_saved.entries().to_vec()).unwrap().id(),
+            d_before
+        );
+        // `d` holds `sub`, kept as it was, and, as this save leaves it, `left.txt`.
+        write(root, "top.txt", b"top, changed");
+        build_count_from_here();
+        let only = [path("top.txt"), path("d/in.txt")];
+        let id = saved_root(save_only(&mut repo, &only).unwrap());
+        assert_eq!(built(), [""]);
+        assert_eq!(saved_folder(repo.store(), id, "d"), d_before);
+        // Both of its files changed; this save takes only `in.txt`.
+        write(root, "d/in.txt", b"in, changed");
+        write(root, "d/left.txt", b"left, changed");
+        let id = saved_root(save_only(&mut repo, &[path("d/in.txt")]).unwrap());
+        let with = |name: &str, bytes: &[u8], from: &Listing| {
+            let mut entries = from.entries().to_vec();
+            let e = entries.iter_mut().find(|e| e.name == name).unwrap();
+            (e.id, e.size) = (hash_content(bytes), bytes.len() as u64);
+            Listing::new(entries).unwrap()
+        };
+        let want = with("in.txt", b"in, changed", &d_saved);
+        assert_eq!(saved_folder(repo.store(), id, "d"), want.id());
+        assert_ne!(want.id(), d_before);
+        // A whole save then takes `left.txt` too, `sub` still kept.
+        let id = saved_root(save_now(&mut repo).unwrap());
+        let want = with("left.txt", b"left, changed", &want);
+        assert_eq!(saved_folder(repo.store(), id, "d"), want.id());
+    }
+
+    #[test]
+    fn the_comparison_after_a_read_finds_the_base_listings_in_memory() {
         let (dir, repo) = three_folders();
         let base = newest_root(&repo);
         write(dir.path(), "a/b/two.txt", b"two, changed");

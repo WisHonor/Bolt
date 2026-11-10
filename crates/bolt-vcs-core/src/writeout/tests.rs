@@ -1683,3 +1683,34 @@ fn an_earlier_entrys_problem_comes_before_a_later_ones() {
         "{said}"
     );
 }
+
+#[test]
+fn a_plan_reads_no_listing_of_the_save_it_is_on_again() {
+    let (dir, mut repo) = project();
+    let on = files(&[
+        ("a/b/two.txt", b"two"),
+        ("a/one.txt", b"one"),
+        ("c/four.txt", b"four"),
+    ]);
+    let from = planted(&mut repo, &on).0;
+    let mut more = on.clone();
+    more.push(("new.txt", EntryKind::File, b"new"));
+    let to = planted(&mut repo, &more).0;
+    // The folder holds the target, so every listing a comparison opens is one read already.
+    for (path, _, bytes) in &more {
+        let at = dir.path().join(path);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(at, bytes).unwrap();
+    }
+    let _lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let reads = crate::pack::open_files::reads;
+    let start = reads();
+    repo.store().save(&from, true).unwrap();
+    repo.store().save(&to, true).unwrap();
+    let saves = reads() - start;
+    let start = reads();
+    plan(&repo, from, to, None, false, drive, None).unwrap();
+    // The walk reads the listings on a thread of its own; this one reads only the two saves.
+    assert_eq!(reads() - start, saves);
+}

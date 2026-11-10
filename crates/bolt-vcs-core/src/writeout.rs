@@ -149,10 +149,11 @@ fn planned(
         unsaved.retain(|p| unlike_target.contains(p));
     }
     let carried = unsaved.len();
-    let stored = HashMap::new();
+    // Looked up only by ID, and each was read or built under the ID it is kept by.
+    let stored = &now.listings;
     // Where the target differs from `from`, and, of those, where it holds an entry to write.
     let (mut switched, mut written) = (BTreeSet::new(), BTreeSet::new());
-    for_each_entry_change_in(store, &stored, Some(from_root), to_root, |path, _, t| {
+    for_each_entry_change_in(store, stored, Some(from_root), to_root, |path, _, t| {
         switched.insert(path.to_owned());
         if t.is_some() {
             written.insert(path.to_owned());
@@ -162,7 +163,7 @@ fn planned(
 
     // Compared as the drive compares names, so a path given in another case still matches.
     let only = only.map(|o| Scope::paths(o, drive));
-    let mut target = Tree::new(store, &stored, to_root, drive);
+    let mut target = Tree::new(store, stored, to_root, drive);
     let mut folder = Tree::new(store, &now.listings, now.root, drive);
     let mut refused = BTreeSet::new();
     let mut plan = Plan {
