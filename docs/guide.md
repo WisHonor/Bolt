@@ -1,8 +1,8 @@
 # The Bolt user guide
 
-This guide is for Bolt v0.1. It assumes you have never used version control before. If you have used Git, read it anyway, then see [Coming from Git](#9-coming-from-git).
+This guide is for Bolt v0.1. It assumes you have never used version control before. If you have used Git, the most widely used version control system, read it anyway, then see [Coming from Git](#9-coming-from-git).
 
-The commands in this guide are run by a test, in order, in one practice project, so they are commands Bolt really takes. What Bolt prints is shown as a terminal shows it, without the colours; the change IDs (the short words like `kxqm`), times and names will be your own. Where a terminal can't show symbols, Bolt prints plain ones instead: `->` for `→`, `>` for `▸`, `*` for `•`, and `+` and `x` for `✓` and `✗`. The lines that start with `Next:` or `Changed your mind?` appear only in a terminal, not when a script runs Bolt. In a terminal, Bolt also wraps its longer sentences onto more lines, at 100 columns or at the window's edge if that comes first; here they are shown unwrapped.
+The commands you can type along with in the practice project (from [section 3](#3-the-first-five-minutes) on) are run by a test, in order, in one practice project, so they are commands Bolt really takes; the other examples, which need something the practice project doesn't have, are not. What Bolt prints is shown as a terminal shows it, without the colours; the change IDs (the short words like `kxqm`), times, names, sizes and counts will be your own. Where a terminal can't show symbols, Bolt prints plain ones instead: `->` for `→`, `<-` for `←`, `>` for `▸`, `*` for `•`, `...` for `…`, and `+` and `x` for `✓` and `✗`. The lines that start with `Next:` or `Changed your mind?` appear only in a terminal, not when a script runs Bolt. In a terminal, Bolt also wraps its longer sentences onto more lines, at 100 columns or at the window's edge if that comes first; here they are shown unwrapped.
 
 ## Contents
 
@@ -53,24 +53,24 @@ The release also has a file named `SHA256SUMS`. It lists a fingerprint for each 
 On Windows, in PowerShell:
 
 ```text
-Get-FileHash .\bolt-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+(Get-FileHash .\bolt-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
 ```
 
-It prints a long string of letters and digits. Compare it by eye with the line for the same file in `SHA256SUMS` (upper or lower case doesn't matter). `certutil -hashfile bolt-0.1.0-x86_64-pc-windows-msvc.zip SHA256` prints the same fingerprint, if you prefer the older Command Prompt.
+It prints a long string of letters and digits. Open `SHA256SUMS` in Notepad and compare it with the line that ends with the same file name (upper or lower case doesn't matter). `certutil -hashfile bolt-0.1.0-x86_64-pc-windows-msvc.zip SHA256` prints the same fingerprint, if you prefer the older Command Prompt.
 
-On macOS, in Terminal:
+On macOS, in Terminal (this is the Apple silicon archive; for an Intel Mac, use `bolt-0.1.0-x86_64-apple-darwin.tar.gz` in its place):
 
 ```text
-shasum -a 256 -c SHA256SUMS
+grep bolt-0.1.0-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c
 ```
 
 On Linux:
 
 ```text
-sha256sum -c SHA256SUMS
+grep bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c
 ```
 
-On macOS and Linux the line for the archive you downloaded must end with `OK`. The lines for the other three archives say they can't be found, which is fine: you didn't download them. If the fingerprints differ, don't run the program: download it again.
+`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was uploaded: don't run the program, delete it and download it again.
 
 The fingerprints prove that the download wasn't damaged and matches what was uploaded. They don't prove who made it, because v0.1 isn't signed (below).
 
@@ -79,9 +79,23 @@ The fingerprints prove that the download wasn't damaged and matches what was upl
 Your PATH is the list of folders your terminal looks in when you type a command's name. Unpack the archive and put the program in one of those folders.
 
 - **Windows:** unpack the `.zip` (right-click it, then "Extract All"). Move `bolt.exe` to a folder of your own, such as `C:\Users\<you>\bin`. Open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", "New", and add that folder. Open a new terminal.
-- **macOS and Linux:** unpack it with `tar -xzf` and the archive's name, then move `bolt` to a folder on your PATH, such as `~/.local/bin` or `/usr/local/bin`.
+- **macOS and Linux:** in a terminal, in the folder that holds the archive, unpack it, make a folder for your own programs, `~/.local/bin` (`~` is your home folder), and move `bolt` there. On Linux, for example:
 
-Check that it works:
+  ```text
+  tar -xzf bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+  mkdir -p ~/.local/bin
+  mv bolt ~/.local/bin/
+  ```
+
+  (Use your archive's name in the first line.) Then add that folder to your PATH, by adding a line to the file your terminal reads when it opens: `~/.zshrc` on macOS, whose terminal uses the zsh shell, and `~/.bashrc` on Linux, whose terminals mostly use bash. If you use another shell, it has its own file.
+
+  ```text
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+  ```
+
+  That is macOS; on Linux, write `~/.bashrc` in its place. Then close the terminal and open a new one. The other way, if you have administrator rights, is `sudo mv bolt /usr/local/bin/`, a folder that is already on the PATH.
+
+Check that it works, in a new terminal:
 
 ```text
 bolt --version
@@ -100,7 +114,7 @@ v0.1 is not signed. Signing means a company or a developer buys a certificate an
 The warning means only "nobody we know vouched for this program". It doesn't mean something bad was found. Check the download against `SHA256SUMS` first, as above; that is the check you can make yourself.
 
 - **Windows** (SmartScreen) may show "Windows protected your PC". Choose "More info", then "Run anyway". Or, in PowerShell, in the folder that holds it, mark the file as one you trust: `Unblock-File .\bolt.exe`.
-- **macOS** (Gatekeeper) refuses to open a program from an unknown developer the first time you run it. Open System Settings, then Privacy & Security; near the bottom it names `bolt` and offers "Open Anyway". Choose it, then run `bolt --version` again and confirm. Or, in Terminal, in the folder that holds it, remove the download mark: `xattr -d com.apple.quarantine bolt`.
+- **macOS** (Gatekeeper) refuses to open a program from an unknown developer the first time you run it. Open System Settings (System Preferences before macOS 13), then Privacy & Security (Security & Privacy in System Preferences); near the bottom it names `bolt` and offers "Open Anyway". Choose it, then run `bolt --version` again and confirm. Or, in Terminal, in the folder that holds it, remove the download mark: `xattr -d com.apple.quarantine bolt`.
 
 ### Folders that sync (OneDrive and the like)
 
@@ -120,12 +134,42 @@ Every save records who made it, so before your first project Bolt needs your nam
 | macOS | `~/Library/Application Support/bolt/config.toml` |
 | Linux | `~/.config/bolt/config.toml` |
 
-Make the folder and the file if they aren't there (any plain text editor will do; in Notepad, choose "All files" when you save, so the name stays `config.toml` and doesn't become `config.toml.txt`), and put these three lines in it, with your own name and email:
+Make the folder and the file if they aren't there, then open the file in a plain text editor. These lines do that, in a terminal:
+
+- **Windows,** in PowerShell. Notepad asks whether to make the file: say yes.
+
+  ```text
+  mkdir -Force $env:APPDATA\bolt\config
+  notepad $env:APPDATA\bolt\config\config.toml
+  ```
+
+- **macOS,** in Terminal. The `Library` folder is hidden in Finder, so these lines go there for you. If TextEdit shows a ruler above the text, choose Format, then Make Plain Text, so it saves plain text.
+
+  ```text
+  mkdir -p ~/Library/Application\ Support/bolt
+  touch ~/Library/Application\ Support/bolt/config.toml
+  open -e ~/Library/Application\ Support/bolt/config.toml
+  ```
+
+- **Linux:**
+
+  ```text
+  mkdir -p ~/.config/bolt
+  nano ~/.config/bolt/config.toml
+  ```
+
+Put these three lines in the file, with your own name and email, and save it:
 
 ```toml
 [user]
 name = "Ana Lima"
 email = "ana@example.com"
+```
+
+The file is written in TOML, a plain text format of `key = value` lines, with a name in square brackets, such as `[user]`, starting a section. Text goes in quotes. If you ever write a Windows path in this file, put it in single quotes (`'C:\Users\Ana\work'`) or double every backslash (`"C:\\Users\\Ana\\work"`): inside double quotes a single backslash starts a special character, and Bolt can't read the file. Every command that needs your name then stops with a message such as:
+
+```text
+error: C:\Users\Ana\AppData\Roaming\bolt\config\config.toml is not a valid Bolt settings file: too few unicode value digits, expected unicode hexadecimal value
 ```
 
 If you skip this step, `bolt start` stops and tells you, naming the exact file on your computer:
@@ -483,7 +527,7 @@ Here you are already there, so nothing changes, and there is nothing to undo:
 Already on line main, at save tqwl "Eggs too".
 ```
 
-Going to an older save by its change ID writes that save's files into your folder. For example:
+Going to an older save by its change ID writes that save's files into your folder. In the practice project, going back to the first notes would write `notes.txt` as it was then and remove `todo.txt` and `idea.txt`, which that save doesn't have:
 
 ```text
 bolt goto kxqm
@@ -492,7 +536,7 @@ bolt goto kxqm
 ```text
 Switched to save kxqm "First notes". You are not on a line.
 
-    2 files written, 1 removed.
+    1 file written, 2 removed.
     Saving here asks for a new line's name.
 
 Changed your mind? bolt undo
@@ -745,6 +789,8 @@ Nothing to free: storage holds 29 KiB.
     Left 18 packs changed in the last 24 hours as they are: a later bolt tidy frees what they hold that nothing needs.
 ```
 
+A **pack** is one of the files in `.bolt` where Bolt stores your saves; each command that stores something writes one. `tidy` leaves every pack from the last 24 hours alone, which is why a new project has nothing to free.
+
 In a project with something to free, it says how much it freed, such as `Freed 1.2 GiB  (3 packs removed, 1 written)`. See [Looking after a project](#10-looking-after-a-project).
 
 ### `bolt verify`
@@ -774,7 +820,7 @@ A project's rules live in two text files at the top of the project:
 - **`bolt.toml`** holds the settings: from what size files are cut into chunks, when a save asks first, and rules for some kinds of file.
 - **`.boltignore`** lists the files and folders Bolt leaves out of saves, such as caches that a game engine makes again by itself.
 
-They are ordinary files: they go into your saves like any other file, so a copy of the project carries its rules. Bolt also reads `.gitignore` files, as Git does, so a project that has them needs nothing more.
+They are ordinary files: they go into your saves like any other file, so a copy of the project carries its rules. Bolt also reads files named `.gitignore`, which projects that once used Git often hold: they list files to leave out in the same way, so such a project needs nothing more.
 
 ### What each preset writes
 
@@ -789,9 +835,9 @@ They are ordinary files: they go into your saves like any other file, so a copy 
 
 **Code** recognises Node, Python, Rust, Go, Dart, .NET, Maven and Gradle by their project files, and adds each one's lines. It always leaves out `.env` and `.env.*` files, which often hold passwords, but keeps `.env.example`.
 
-**Game** recognises Unity, Unreal and Godot. It marks as lockable the art and audio that can't be merged (`*.psd *.png *.tga *.tif *.tiff *.exr *.jpg *.jpeg *.fbx *.blend *.max *.mb *.wav *.ogg *.mp3 *.mp4 *.mov`), then, for Unity, `*.unity` and `*.prefab` (lockable, and no conflict markers) and `*.meta` (no conflict markers); for Unreal, `*.uasset` and `*.umap`; for Godot, `*.scn` and `*.res`. Its lists follow one rule: when in doubt, the file is saved. They leave out what the engine makes again (Unity's `Library/`, `Temp/` and `Logs/`, Unreal's `Binaries/`, `Intermediate/` and `Saved/`, Godot's `.godot/` and `.import/`, and the like), never a file only because of its extension. If you start with Game before the engine has made its project, no engine is found: run `bolt setup --preset game` once it has.
+**Game** recognises Unity, Unreal and Godot. It marks as lockable the art and audio that can't be merged (`*.psd *.png *.tga *.tif *.tiff *.exr *.jpg *.jpeg *.fbx *.blend *.max *.mb *.wav *.ogg *.mp3 *.mp4 *.mov`), then, for Unity, `*.unity` and `*.prefab` (lockable, and no conflict markers) and `*.meta` (no conflict markers); for Unreal, `*.uasset` and `*.umap`; for Godot, `*.scn` and `*.res`. Its lists follow one rule: when in doubt, the file is saved. They leave out what the engine makes again (Unity's `Library/`, `Temp/` and `Logs/`, Unreal's `Binaries/`, `Intermediate/` and `Saved/`, Godot's `.godot/` and `.import/`, and the like). They leave nothing out only for an extension that an asset can have: a `*.obj` model, a `*.exe` tool or a `*.log` file is saved. (They do leave out files that only a tool makes, by extension, such as the project files `*.sln` and `*.csproj` that Unity writes at the top of the project.) If you start with Game before the engine has made its project, no engine is found: run `bolt setup --preset game` once it has.
 
-**Custom** writes no file. A project with no `bolt.toml`, which includes every imported project, uses Bolt's own values.
+**Custom** writes no file. A project with no `bolt.toml` uses Bolt's own values. That includes an imported project, unless its Git history held a `bolt.toml` of its own.
 
 "Lockable" and "conflict markers" are only recorded in v0.1: locking a file arrives with syncing, and conflict markers with combining lines. The presets write them now so a project has them from its first save.
 
@@ -845,9 +891,9 @@ Rules are read from top to bottom, and for each setting the last rule that match
 
 ### `.boltignore`
 
-A `.boltignore` works exactly like a `.gitignore`:
+A `.boltignore` is a list of patterns: names, with wildcards, of files and folders a save leaves out. (If you know Git's `.gitignore`, it works exactly the same way.)
 
-- One pattern per line. A line starting with `#` is a comment.
+- One pattern per line, such as `*.tmp` for every file whose name ends in `.tmp`. A line starting with `#` is a comment.
 - `*` matches anything within one folder name; `**` matches across folders: `**/build/` is a folder named `build` at any depth.
 - A `/` at the end matches folders only (`Library/`). A `/` at the start ties the pattern to the folder the file is in (`/Builds/`).
 - A `!` at the start takes back a file an earlier line left out (`!.env.example`).
@@ -1017,7 +1063,7 @@ Next: look around with: bolt status
 - Kinds of repository Bolt refuses, before writing anything: shallow or partial clones, sparse checkouts, the reftable format, and a `.git` that another account owns.
 - A folder that isn't a Git repository, or one that is already a Bolt project.
 
-If an import stops partway, nothing is committed. The `.bolt` folder it began stays, so running `bolt import` again can finish from what it stored, or you can delete that folder.
+If an import stops partway, the `.bolt` folder it began stays, and its message says how far it got. When nothing was committed yet, running `bolt import` again can finish from what it stored, or you can delete that folder. When the history was already committed, running `bolt import` again finishes the project.
 
 **The first save after an import** may stop once:
 
@@ -1058,7 +1104,7 @@ hint: in Bolt, commit is save, which takes new files too: bolt save "message"
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Bolt never deletes files it doesn't keep | explained |
 
-"Runs" means `bolt commit -m "message"` really saves. "Explained" means Bolt prints two or three lines saying what to type instead, does nothing else, and ends with exit code 2. For example, `bolt add` prints:
+"Runs" means `bolt commit -m "message"` really saves. "Explained" means Bolt prints two or three lines saying what to type instead, does nothing else, and ends with exit code 2 (a number every command hands back when it ends, which scripts read: 0 means it worked; see [Scripts](#12-scripts)). For example, `bolt add` prints:
 
 ```text
 Bolt has no staging step: `bolt save` saves every change, new files too.
@@ -1180,7 +1226,7 @@ The environment variables `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, when both are 
 
 ### `safe-folders`
 
-**What it is for.** Bolt works in a project only when both the project's folder and its `.bolt` folder belong to you, the account you're logged in as. This protects you from a project someone else planted where you'd run Bolt: in a shared folder, or a folder above your own. Git has the same rule.
+**What it is for.** Bolt works in a project only when both the project's folder and its `.bolt` folder belong to you, the account you're logged in as. This protects you from a project someone else planted where you'd run Bolt: in a shared folder, or a folder above your own. (Git has the same rule.)
 
 **When Bolt asks for it.** When a project's folder or its `.bolt` belongs to another account, or when the drive doesn't record who owns folders (USB sticks and SD cards often don't), Bolt refuses to use it:
 
@@ -1195,15 +1241,15 @@ hint: If you trust it, add its folder to safe-folders at the top of /home/ana/.c
       safe-folders = ["/srv/work"]
 ```
 
-Add the line only if you know the project is yours or someone's you trust. Each entry must be a full path, and names one exact folder: the project's own, not a folder above it.
+Add the line only if you know the project is yours or someone's you trust. Each entry must be a full path, and names one exact folder: the project's own, not a folder above it. Copy the line Bolt's hint prints, rather than typing it: it is already written the right way, which matters on Windows, where a path in double quotes needs every backslash doubled (`"D:\\Shared\\game"`), or the whole path in single quotes (`'D:\Shared\game'`); otherwise Bolt can't read the settings file at all.
 
 On Windows, a few more cases need it: a project directly in your home folder (`C:\Users\<you>`, which Windows gives to the SYSTEM account), and, outside a terminal run as administrator, a folder the Administrators group owns.
 
-**Never list a folder that other people can write to.** Such as `/tmp` on macOS and Linux, or the top of a drive or of a network share on Windows. Anyone who can write there can put a project there, and Bolt would then trust it as yours. That is how a real Git attack worked (CVE-2022-24765). For such a folder Bolt doesn't offer the line at all: it says that other accounts can write there, and asks you to move the project into a folder of your own. Do that, rather than adding the line by hand.
+**Never list a folder that other people can write to.** Such as `/tmp` on macOS and Linux, or the top of a drive or of a network share on Windows. Anyone who can write there can put a project there, and Bolt would then trust it as yours. (A real attack on Git worked that way: CVE-2022-24765.) For such a folder Bolt doesn't offer the line at all: it says that other accounts can write there, and asks you to move the project into a folder of your own. Do that, rather than adding the line by hand.
 
 **Some entries never count.** Bolt passes over these, and when it then refuses the project, its message names the entry and why:
 
-- **An entry that is itself a link:** a symbolic link, or on Windows also a junction or a mounted drive folder. Otherwise whoever could replace a trusted folder with a link could move your trust wherever the link leads. List the real folder. (A link in a folder *above* the entry is still followed: the rule is about the entry itself.)
+- **An entry that is itself a link:** a symbolic link, or on Windows also a junction, a mounted drive or anything else Windows treats as a link to another place. Otherwise whoever could replace a trusted folder with a link could move your trust wherever the link leads. List the real folder. (A link in a folder *above* the entry is still followed: the rule is about the entry itself.)
 - **An entry with `..` in it,** such as `/home/ana/shared/x/..`, whatever it leads to. Write the folder's path out in full.
 - **Any entry, on a drive that doesn't tell its folders apart.** Some network shares give every folder the same identity, so Bolt can't be sure the entry is the project's folder, and `safe-folders` can't vouch for a folder there. Work on a copy on a drive of your own, or as the account that owns the folder.
 
@@ -1226,7 +1272,7 @@ Every command ends with one of three exit codes:
 | 1 | It failed, or `bolt verify` found a problem. |
 | 2 | Bolt couldn't use the command line: an unknown command or option, `bolt` with no command, or a Git word Bolt explains instead of running. |
 
-[json.md](json.md) describes every document, field and warning. From v0.1 on, a field is never removed, renamed or given another meaning, though new ones may be added; the words of messages and hints, which are for people, may change.
+[json.md](https://github.com/WisHonor/Bolt/blob/main/docs/json.md) describes every document, field and warning. Every document says its format's version in `bolt_json`, `1` in v0.1. Within one version, a field is never removed, renamed or given another meaning, though new ones may be added; a change that would break that gets the next version number. The words of messages and hints, which are for people, may change at any time.
 
 ## 13. What v0.1 doesn't do yet
 
@@ -1236,9 +1282,11 @@ Every command ends with one of three exit codes:
 - **No repair.** `bolt verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
 - **Not yet:** shelving only some files, dropping a shelf, a warning about files that look like secrets, and installers or package managers.
+- **Not signed.** The programs aren't signed yet, so Windows and macOS warn about them ([section 2](#windows-and-macos-warn-about-bolt)).
+- **No license yet.** Bolt has no license yet.
 
 ### Reporting a problem
 
 To report a bug or ask a question, open an issue at <https://github.com/WisHonor/Bolt/issues>. Say which version `bolt --version` prints, your system, and what you typed and saw.
 
-A security problem (anything that lets a project or repository harm the person using Bolt) must not go in a public issue: see [SECURITY.md](../SECURITY.md).
+A security problem (anything that lets a project or repository harm the person using Bolt) must not go in a public issue: see [SECURITY.md](https://github.com/WisHonor/Bolt/blob/main/SECURITY.md).

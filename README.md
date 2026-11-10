@@ -1,6 +1,6 @@
 # Bolt
 
-Bolt is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and undo any command with `bolt undo`. Big files are cut into chunks, so a change to part of a file stores only the part that changed.
+Bolt is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `bolt undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; `bolt tidy`, which frees space, is the one it doesn't take back). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
 
 ## State
 
@@ -37,6 +37,8 @@ bolt undo                    Take back your last step
 
 ## Documents
 
+These documents are in Bolt's repository, <https://github.com/WisHonor/Bolt>; a release archive holds only this README and the user guide.
+
 - [docs/guide.md](docs/guide.md): the user guide, for people new to version control and people coming from Git.
 - [docs/design.md](docs/design.md): how Bolt works and why.
 - [docs/storage-format.md](docs/storage-format.md): everything Bolt writes on disk, byte by byte.
@@ -56,7 +58,7 @@ The program is `target/release/bolt` (`bolt.exe` on Windows).
 
 ## Problems and questions
 
-Open an issue at <https://github.com/WisHonor/Bolt/issues>. Don't open a public issue for a security problem: [SECURITY.md](SECURITY.md) says how to report one in private.
+Open an issue at <https://github.com/WisHonor/Bolt/issues>. Don't open a public issue for a security problem: [SECURITY.md](https://github.com/WisHonor/Bolt/blob/main/SECURITY.md) says how to report one in private.
 
 ## License
 
