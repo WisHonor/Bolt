@@ -1,7 +1,7 @@
 //! `bolt save`: walks the project folder, stores its files, and commits the save.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fmt::{self, Write as _};
 use std::fs::File;
@@ -39,7 +39,7 @@ mod endings;
 mod only;
 mod walk;
 
-use walk::{Base, Handles, Scan, walk};
+use walk::{Base, Handles, Note, Noted, Scan, walk};
 
 pub struct SaveRequest<'a> {
     /// `None` keeps the message of the save an amend replaces; any other save needs one.
@@ -505,8 +505,7 @@ pub fn save_folder(
         mut old,
         old_ids,
         mut rebuilt,
-        ignored,
-        gitignored,
+        noted,
         mut warnings,
         ..
     } = scan?;
@@ -561,8 +560,7 @@ pub fn save_folder(
         &mut handles,
         &folders,
         last,
-        &ignored,
-        &gitignored,
+        &noted,
     )?;
     let seen = storing.cache;
     let root = built.root;
@@ -1340,8 +1338,7 @@ fn build_reading(
     handles: &mut Handles,
     folders: &Folders,
     last: Last,
-    ignored: &HashSet<String>,
-    gitignored: &HashSet<String>,
+    noted: &Noted,
 ) -> Result<Built, SaveError> {
     let mut todo = Vec::new();
     // What the cache said of each file, for `build_with`, which meets them in this same order.
@@ -1379,7 +1376,7 @@ fn build_reading(
             |job| job.run(store),
             |read| {
                 let known = &mut known.into_iter();
-                build_with(contents, read, known, folders, last, ignored, gitignored)
+                build_with(contents, read, known, folders, last, noted)
             },
         );
         handles.lend(0);
@@ -1394,15 +1391,16 @@ struct Built {
     kept: Vec<String>,
     /// How many entries were kept as they were in folders gone from disk.
     kept_below_gone: usize,
-    /// The files and links in `ignored` that changed.
+    /// The files and links noted as ignored that changed.
     changed: Vec<String>,
-    /// The files and links in `gitignored` that are new or changed.
+    /// The files and links noted as kept that Git would leave out that are new or changed.
     taken_back: Vec<String>,
 }
 
 /// Stores every file and listing, deepest folders first, reading every file and link through
 /// `handles`. Returns the top listing's ID, how many entries were kept as they were, which of the
-/// files and links in `ignored` changed, and which of those in `gitignored` are new or changed.
+/// files and links `noted` as ignored changed, and which of those noted as kept that Git would
+/// leave out are new or changed.
 #[cfg(test)]
 fn build(
     store: &Store,
@@ -1410,8 +1408,7 @@ fn build(
     handles: &mut Handles,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
-    ignored: &HashSet<String>,
-    gitignored: &HashSet<String>,
+    noted: &Noted,
 ) -> Result<(Id, usize, Vec<String>, Vec<String>), SaveError> {
     let mut storing = Storing {
         store,
@@ -1422,15 +1419,7 @@ fn build(
         listings: old,
         ids: &HashMap::new(),
     };
-    let b = build_reading(
-        &mut storing,
-        Some(store),
-        handles,
-        folders,
-        last,
-        ignored,
-        gitignored,
-    )?;
+    let b = build_reading(&mut storing, Some(store), handles, folders, last, noted)?;
     let kept = b.kept.len() + b.kept_below_gone;
     Ok((b.root, kept, b.changed, b.taken_back))
 }
@@ -1473,8 +1462,7 @@ fn build_with<'a>(
     known: &mut dyn Iterator<Item = (&'a str, Option<(Id, u64)>)>,
     folders: &'a Folders,
     last: Last,
-    ignored: &HashSet<String>,
-    gitignored: &HashSet<String>,
+    noted: &Noted,
 ) -> Result<Built, SaveError> {
     let mut built: HashMap<&str, Id> = HashMap::new();
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
@@ -1531,10 +1519,10 @@ fn build_with<'a>(
                 }
             };
             if was.is_none_or(|e| (e.kind, e.id) != (kind, id)) {
-                if ignored.contains(&c.rel) {
-                    changed.push(c.rel.clone());
-                } else if gitignored.contains(&c.rel) {
-                    taken_back.push(c.rel.clone());
+                match noted.of(rel, c, was) {
+                    Some(Note::Ignored) => changed.push(c.rel.clone()),
+                    Some(Note::GitIgnored) => taken_back.push(c.rel.clone()),
+                    None => {}
                 }
             }
             entries.push(Entry {
@@ -1799,8 +1787,7 @@ pub(crate) fn read_folder(
         old_ids,
         rebuilt,
         gone_kept,
-        ignored,
-        gitignored,
+        noted,
         mut warnings,
     } = scan?;
     let mut reading = Reading {
@@ -1814,15 +1801,7 @@ pub(crate) fn read_folder(
         listings: &old,
         ids: &old_ids,
     };
-    let built = build_reading(
-        &mut reading,
-        None,
-        &mut handles,
-        &folders,
-        last,
-        &ignored,
-        &gitignored,
-    )?;
+    let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted)?;
     keep_file_cache(repo, reading.cache, now, &mut warnings);
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
@@ -2099,6 +2078,132 @@ mod tests {
                 }
                 SaveOutcome::NothingChanged { .. } => prop_assert!(expected.is_empty()),
             }
+        }
+    }
+
+    /// The files the two warnings would name, from a walk and a build that read the project as
+    /// `bolt status` does, or the first problem.
+    fn warned(repo: &Repository) -> Result<(Vec<String>, Vec<String>), String> {
+        let shown = |e: SaveError| format!("{e:?}");
+        let Scan {
+            mut handles,
+            folders,
+            old,
+            noted,
+            ..
+        } = walk_project(repo, SaveLimits::default()).map_err(shown)?;
+        let mut reading = Reading {
+            cache: FileCache::default(),
+            listings: HashMap::new(),
+        };
+        let last = Last {
+            listings: &old,
+            ids: &HashMap::new(),
+        };
+        let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted);
+        let built = built.map_err(shown)?;
+        Ok((built.changed, built.taken_back))
+    }
+
+    /// A path up to three levels down, from a few names.
+    fn late_path() -> impl Strategy<Value = String> {
+        let folders = prop::collection::vec(prop::sample::select(vec!["a", "b"]), 0..3);
+        let name = prop::sample::select(vec!["a", "b", "c.x", "d.y"]);
+        (folders, name).prop_map(|(folders, name)| {
+            folders.iter().map(|f| format!("{f}/")).collect::<String>() + name
+        })
+    }
+
+    /// A few lines of an ignore file.
+    fn rule_lines() -> impl Strategy<Value = Vec<&'static str>> {
+        let lines = [
+            "*.x", "!*.x", "c.x", "!c.x", "*.y", "d.y", "!d.y", "a/", "!a/", "b", "!b", "/a",
+            "a/c.x", "!a/c.x", "*",
+        ];
+        prop::collection::vec(prop::sample::select(lines.to_vec()), 1..5)
+    }
+
+    /// An ignore file: its folder, whether it is a `.gitignore`, and its lines.
+    fn rule_file() -> impl Strategy<Value = (String, bool, Vec<&'static str>)> {
+        // Mostly where the files are.
+        let folder = prop::sample::select(vec!["", "", "", "a/", "b/", "a/a/", "b/a/"]);
+        (folder.prop_map(str::to_owned), any::<bool>(), rule_lines())
+    }
+
+    /// Writes `bytes` at `rel`, unless a file or folder of the other kind is in the way.
+    fn put(root: &Path, rel: &str, bytes: &[u8]) {
+        let path = root.join(rel);
+        let _ = fs::create_dir_all(path.parent().unwrap());
+        let _ = fs::write(path, bytes);
+    }
+
+    fn put_rules(root: &Path, (folder, gitignore, lines): &(String, bool, Vec<&str>)) {
+        let name = if *gitignore {
+            ".gitignore"
+        } else {
+            ".boltignore"
+        };
+        put(
+            root,
+            &format!("{folder}{name}"),
+            lines.join("\n").as_bytes(),
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn the_late_verdict_names_the_files_the_walk_would(
+            files in prop::collection::vec(late_path(), 0..16),
+            rules in prop::collection::vec(rule_file(), 0..3),
+            git_after in rule_lines(),
+            bolt_after in rule_lines(),
+            rules_after in prop::collection::vec(rule_file(), 0..3),
+            changes in prop::collection::vec((0..6u8, any::<prop::sample::Index>()), 1..12),
+        ) {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            for rel in &files {
+                put(root, rel, b"first");
+            }
+            for file in &rules {
+                put_rules(root, file);
+            }
+            let _ = save_now(&mut repo);
+            // Mostly the saved files, changed under new rules.
+            put_rules(root, &(String::new(), true, git_after));
+            put_rules(root, &(String::new(), false, bolt_after));
+            for file in &rules_after {
+                put_rules(root, file);
+            }
+            for (what, at) in &changes {
+                let Some(file) = files.get(at.index(files.len().max(1))) else {
+                    continue;
+                };
+                // A saved file, or the folder that holds it.
+                let rel = match file.rsplit_once('/') {
+                    Some((up, _)) if *what == 5 => up,
+                    _ => file.as_str(),
+                };
+                let path = root.join(rel);
+                match what {
+                    3 => drop(fs::remove_file(&path)),
+                    4 => {
+                        let _ = fs::remove_file(&path);
+                        put(root, &format!("{rel}/c.x"), b"was a file");
+                    }
+                    5 => {
+                        let _ = fs::remove_dir_all(&path);
+                        put(root, rel, b"was a folder");
+                    }
+                    _ => put(root, rel, b"changed"),
+                }
+            }
+            let late = warned(&repo);
+            walk::verdicts::match_every_name(repo.root(), true);
+            let every_name = warned(&repo);
+            walk::verdicts::match_every_name(repo.root(), false);
+            prop_assert_eq!(late, every_name);
         }
     }
 
@@ -2969,8 +3074,7 @@ mod tests {
             &mut handles,
             &folders,
             &HashMap::new(),
-            &HashSet::new(),
-            &HashSet::new(),
+            &Noted::default(),
         ) {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "victim.txt"),
             other => panic!("{other:?}"),
@@ -3004,8 +3108,7 @@ mod tests {
             &mut handles,
             &folders,
             &HashMap::new(),
-            &HashSet::new(),
-            &HashSet::new(),
+            &Noted::default(),
         ) {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "link"),
             other => panic!("{other:?}"),
@@ -3748,8 +3851,7 @@ mod tests {
             mut handles,
             folders,
             old,
-            ignored,
-            gitignored,
+            noted,
             ..
         } = walk_project(&repo, SaveLimits::default()).unwrap();
         after_walk(dir.path());
@@ -3762,8 +3864,7 @@ mod tests {
             &mut handles,
             &folders,
             &old,
-            &ignored,
-            &gitignored,
+            &noted,
         );
         crate::workers::set_test_workers(None);
         let built = built.map(|(root, ..)| root).map_err(|e| format!("{e:?}"));

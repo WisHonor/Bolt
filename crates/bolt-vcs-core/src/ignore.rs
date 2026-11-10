@@ -3,6 +3,7 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::mem;
+use std::sync::Arc;
 
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
@@ -646,7 +647,23 @@ pub struct Verdict {
 /// The rules of the folders a walk is in, the nearest last.
 pub struct Matcher {
     drive: Drive,
-    levels: Vec<(String, Vec<Rules>)>,
+    levels: Vec<(String, Arc<[Rules]>)>,
+}
+
+/// The rules a `Matcher` had in force at one moment, kept to be asked later: the same rules,
+/// shared, so they give the verdicts it gave then.
+#[derive(Clone)]
+pub struct InForce {
+    drive: Drive,
+    levels: Vec<Arc<[Rules]>>,
+}
+
+impl InForce {
+    /// What these rules say about `path`, as `Matcher::verdict` said it then.
+    pub fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
+        let levels = self.levels.iter().map(|rules| &**rules);
+        verdict_in(self.drive, levels, path.as_ref(), is_dir)
+    }
 }
 
 impl Matcher {
@@ -669,7 +686,15 @@ impl Matcher {
                 }
             }
         }
-        self.levels.push((folder.to_owned(), rules));
+        self.levels.push((folder.to_owned(), rules.into()));
+    }
+
+    /// The rules in force now, to be asked later.
+    pub fn in_force(&self) -> InForce {
+        InForce {
+            drive: self.drive,
+            levels: self.levels.iter().map(|(_, r)| Arc::clone(r)).collect(),
+        }
     }
 
     /// Ends the rules of the folders that don't hold `folder`.
@@ -689,7 +714,7 @@ impl Matcher {
     pub fn in_force_bytes(&self) -> u64 {
         self.levels
             .iter()
-            .flat_map(|(_, rules)| rules)
+            .flat_map(|(_, rules)| rules.iter())
             .fold(0, |sum, r| sum.saturating_add(r.bytes))
     }
 
@@ -704,50 +729,61 @@ impl Matcher {
     /// when a `.boltignore` line decides Bolt's. Call `leave_to` with the folder that holds `path`
     /// first.
     pub fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
-        let path = path.as_ref();
-        // Where the drive composes Unicode, Git reads names composed (`core.precomposeunicode`).
-        let composed: Option<String> = match std::str::from_utf8(path) {
-            Ok(s) if self.drive.composes_unicode && !is_nfc(s) => Some(s.nfc().collect()),
-            _ => None,
-        };
-        let path = composed.as_ref().map_or(path, String::as_bytes);
-        let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
-        let bolt = self.last_match(path, name, is_dir, false);
-        let git = match bolt {
-            Some((_, false)) => self.last_match(path, name, is_dir, true),
-            decided => decided,
-        };
-        let decision = |found: Option<(&Pattern, bool)>| match found {
-            Some((p, _)) if p.negative => Decision::Kept,
-            Some(_) => Decision::Ignored,
-            None => Decision::NoRule,
-        };
-        Verdict {
-            bolt: decision(bolt),
-            git: decision(git),
-        }
+        let levels = self.levels.iter().map(|(_, rules)| &**rules);
+        verdict_in(self.drive, levels, path.as_ref(), is_dir)
     }
+}
 
-    /// The line that decides `path`, and whether a `.gitignore` holds it: among the lines of
-    /// every ignore file in force, or of the `.gitignore` files alone.
-    fn last_match(
-        &self,
-        path: &[u8],
-        name: &[u8],
-        is_dir: bool,
-        gitignore_only: bool,
-    ) -> Option<(&Pattern, bool)> {
-        let casefold = self.drive.ignores_case;
-        self.levels
-            .iter()
-            .rev()
-            .flat_map(|(_, rules)| rules.iter().rev())
-            .filter(|rules| rules.gitignore || !gitignore_only)
-            .find_map(|rules| {
-                let line = rules.last_match(path, name, is_dir, casefold)?;
-                Some((line, rules.gitignore))
-            })
+/// `Matcher::verdict` on `path` with the rules of `levels`, the nearest last, on `drive`.
+fn verdict_in<'a, L>(drive: Drive, levels: L, path: &[u8], is_dir: bool) -> Verdict
+where
+    L: DoubleEndedIterator<Item = &'a [Rules]> + Clone,
+{
+    // Where the drive composes Unicode, Git reads names composed (`core.precomposeunicode`).
+    let composed: Option<String> = match std::str::from_utf8(path) {
+        Ok(s) if drive.composes_unicode && !is_nfc(s) => Some(s.nfc().collect()),
+        _ => None,
+    };
+    let path = composed.as_ref().map_or(path, String::as_bytes);
+    let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    let casefold = drive.ignores_case;
+    let bolt = last_match(levels.clone(), path, name, is_dir, casefold, false);
+    let git = match bolt {
+        Some((_, false)) => last_match(levels, path, name, is_dir, casefold, true),
+        decided => decided,
+    };
+    let decision = |found: Option<(&Pattern, bool)>| match found {
+        Some((p, _)) if p.negative => Decision::Kept,
+        Some(_) => Decision::Ignored,
+        None => Decision::NoRule,
+    };
+    Verdict {
+        bolt: decision(bolt),
+        git: decision(git),
     }
+}
+
+/// The line of `levels` that decides `path`, and whether a `.gitignore` holds it: among the lines
+/// of every ignore file in force, or of the `.gitignore` files alone.
+fn last_match<'a, L>(
+    levels: L,
+    path: &[u8],
+    name: &[u8],
+    is_dir: bool,
+    casefold: bool,
+    gitignore_only: bool,
+) -> Option<(&'a Pattern, bool)>
+where
+    L: DoubleEndedIterator<Item = &'a [Rules]>,
+{
+    levels
+        .rev()
+        .flat_map(|rules| rules.iter().rev())
+        .filter(|rules| rules.gitignore || !gitignore_only)
+        .find_map(|rules| {
+            let line = rules.last_match(path, name, is_dir, casefold)?;
+            Some((line, rules.gitignore))
+        })
 }
 
 #[cfg(test)]
@@ -1424,6 +1460,19 @@ mod tests {
             m.enter(folder, vec![Rules::parse(text.as_bytes(), folder, true)]);
         }
         m
+    }
+
+    #[test]
+    fn rules_kept_in_force_give_the_verdicts_they_gave_then() {
+        let mut m = matcher(PLAIN, &[("", "*.x\n!keep.x\n"), ("sub", "!*.x\n*.y\n")]);
+        let paths = ["a.x", "keep.x", "sub/a.x", "sub/a.y", "sub/b.z"];
+        let then: Vec<Verdict> = paths.iter().map(|p| m.verdict(p, false)).collect();
+        let kept = m.in_force();
+        m.leave_to("");
+        m.enter("other", vec![Rules::parse(b"*\n", "other", false)]);
+        let later: Vec<Verdict> = paths.iter().map(|p| kept.verdict(p, false)).collect();
+        assert_eq!(later, then);
+        assert_eq!(then[2].bolt, Decision::Kept);
     }
 
     #[test]

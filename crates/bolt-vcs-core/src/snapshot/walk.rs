@@ -17,7 +17,7 @@ use bolt_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::drive::Drive;
 use crate::id::Id;
-use crate::ignore::{Decision, Matcher, Rules};
+use crate::ignore::{Decision, InForce, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{
     Listed, holdable_here, is_bolt_alias, is_git_alias, listed_hints, own_folder, validate_name,
@@ -75,6 +75,109 @@ mod asked {
     pub(super) fn at(folder: &Path) -> (usize, usize) {
         let asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
         asked.get(folder).copied().unwrap_or_default()
+    }
+}
+
+/// How many verdicts a walk of a project asked the ignore rules for, by the project's folder, and
+/// the projects whose walks match every name, as they did before saved files were kept unasked.
+#[cfg(test)]
+pub(super) mod verdicts {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static ASKED: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+    static EVERY_NAME: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+    pub(in crate::snapshot) fn note(root: &Path) {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        *asked.entry(root.to_owned()).or_default() += 1;
+    }
+
+    pub(in crate::snapshot) fn at(root: &Path) -> usize {
+        let asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        asked.get(root).copied().unwrap_or_default()
+    }
+
+    pub(in crate::snapshot) fn match_every_name(root: &Path, every: bool) {
+        let mut set = EVERY_NAME.lock().unwrap_or_else(|e| e.into_inner());
+        if every {
+            set.insert(root.to_owned());
+        } else {
+            set.remove(root);
+        }
+    }
+
+    pub(in crate::snapshot) fn every_name(root: &Path) -> bool {
+        let set = EVERY_NAME.lock().unwrap_or_else(|e| e.into_inner());
+        set.contains(root)
+    }
+}
+
+/// Whether the walk keeps `name`, met as a folder when `is_dir`, without asking the ignore rules,
+/// in a folder that isn't held: the base save holds it there as `saved`, a file or link, and
+/// it is one still. The rules only warn about such a file, and only if it changed, so they are
+/// asked then. A `.git` or `.bolt` spelling is always judged.
+pub(super) fn kept_unasked(name: &str, is_dir: bool, saved: Option<&Entry>) -> bool {
+    !is_dir
+        && saved.is_some_and(|e| e.kind != EntryKind::Folder)
+        && !is_git_alias(name)
+        && !is_bolt_alias(name)
+}
+
+/// The rules in force in a folder the walk went into, kept for the files it kept unasked there,
+/// and whether the folder is `git_held` or `nested_held`.
+pub(super) struct Late {
+    rules: InForce,
+    git_held: bool,
+    nested_held: bool,
+}
+
+/// What the walk noted for the warnings about files the ignore rules match.
+#[derive(Default)]
+pub(super) struct Noted {
+    /// Files and links an ignore rule matches, kept because the base save holds them.
+    ignored: HashSet<String>,
+    /// Files and links kept that Git's rules alone would leave out: a `.boltignore` line takes
+    /// them back, or a folder they are in.
+    gitignored: HashSet<String>,
+    /// For each folder that isn't held, by project path, the rules to ask about what it kept
+    /// unasked.
+    late: HashMap<String, Late>,
+}
+
+/// What `Noted` says of a file or link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Note {
+    Ignored,
+    GitIgnored,
+}
+
+impl Noted {
+    /// What the walk noted of `c`, in the folder `folder`, or would have if it had asked the rules
+    /// then: `was` is the base save's entry of that name there.
+    pub(super) fn of(&self, folder: &str, c: &Child, was: Option<&Entry>) -> Option<Note> {
+        if matches!(c.kind, Kind::File | Kind::Symlink)
+            && let Some(late) = self.late.get(folder)
+            && kept_unasked(&c.name, false, was)
+        {
+            let verdict = late.rules.verdict(c.rel.as_bytes(), false);
+            // As `judged` and `saved_before` note it.
+            return if verdict.bolt == Decision::Ignored {
+                (!late.nested_held).then_some(Note::Ignored)
+            } else if late.git_held || verdict.git == Decision::Ignored {
+                Some(Note::GitIgnored)
+            } else {
+                None
+            };
+        }
+        if self.ignored.contains(&c.rel) {
+            Some(Note::Ignored)
+        } else if self.gitignored.contains(&c.rel) {
+            Some(Note::GitIgnored)
+        } else {
+            None
+        }
     }
 }
 
@@ -370,6 +473,8 @@ struct WalkState {
     git_held: HashSet<String>,
     /// Files and links the walk keeps that Git would leave out, in the same way.
     gitignored: HashSet<String>,
+    /// The rules of each folder that isn't held, for the files kept there unasked.
+    late: HashMap<String, Late>,
     drive: Drive,
     /// The base save's entries the walk leaves untouched, by project path: the new save keeps
     /// them as they were, whatever the folder holds there.
@@ -382,12 +487,14 @@ struct WalkState {
 }
 
 /// What a walk knows of the folder it is in: whether it is held, whether Git would leave it out
-/// (`git_held`), and whether it holds an entry left untouched.
+/// (`git_held`), whether it holds an entry left untouched, and whether its rules are kept to be
+/// asked later (`late`).
 #[derive(Clone, Copy)]
 struct Within {
     held: bool,
     git_held: bool,
     untouched: bool,
+    late: bool,
 }
 
 /// An entry the walk judges: its project path as shown (lossily, for a name that isn't UTF-8),
@@ -433,6 +540,7 @@ impl WalkState {
             ignored: HashSet::new(),
             git_held: HashSet::new(),
             gitignored: HashSet::new(),
+            late: HashMap::new(),
             drive,
             untouched: HashMap::new(),
             untouched_in: HashSet::new(),
@@ -507,7 +615,27 @@ impl WalkState {
             held: self.held.contains(rel),
             git_held: self.git_held.contains(rel),
             untouched: self.untouched_in.contains(rel),
+            late: self.late.contains_key(rel),
         }
+    }
+
+    /// Keeps the rules in force now for the folder `rel`, which the walk has just gone into, so
+    /// that a file kept there unasked can be judged later. A held folder keeps none: everything
+    /// in it is judged without the rules.
+    fn keep_rules(&mut self, rel: &str) {
+        #[cfg(test)]
+        if verdicts::every_name(&self.root) {
+            return;
+        }
+        if self.held.contains(rel) {
+            return;
+        }
+        let late = Late {
+            rules: self.matcher.in_force(),
+            git_held: self.git_held.contains(rel),
+            nested_held: self.nested_held.contains(rel),
+        };
+        self.late.insert(rel.to_owned(), late);
     }
 
     /// After the walk, which found `found`: the base save's folders, in the folders it found,
@@ -830,6 +958,16 @@ impl WalkState {
         if within.held {
             return self.saved_before(folder, met, is_dir);
         }
+        // Kept whatever the rules say; they are asked only if it changed (`Noted::of`).
+        if within.late
+            && let Some(name) = met.name
+            && let Some(Some(listing)) = self.old.get(folder)
+            && kept_unasked(name, is_dir, listing.get(name))
+        {
+            return true;
+        }
+        #[cfg(test)]
+        verdicts::note(&self.root);
         // Before `path`'s own ignore files are read, if it is a folder: they are for what it holds.
         let verdict = self.matcher.verdict(met.bytes, is_dir);
         if verdict.bolt == Decision::Ignored {
@@ -953,12 +1091,8 @@ pub(super) struct Scan {
     pub(super) rebuilt: Vec<Listing>,
     /// The paths of the entries kept as they were in those folders.
     pub(super) gone_kept: Vec<String>,
-    /// The project paths of the files and links an ignore rule matches, kept because the base
-    /// save holds them.
-    pub(super) ignored: HashSet<String>,
-    /// The project paths of the files and links kept that Git's rules alone would leave out,
-    /// because a `.boltignore` line takes them back, or a folder they are in.
-    pub(super) gitignored: HashSet<String>,
+    /// What the walk noted for the warnings about files the ignore rules match.
+    pub(super) noted: Noted,
     /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` or Bolt as
     /// `.bolt` left out.
     pub(super) warnings: Vec<Warning>,
@@ -987,6 +1121,7 @@ impl InFolder {
         rel: String,
         depth: usize,
     ) -> Result<InFolder, SaveError> {
+        rules.keep_rules(&rel);
         let within = rules.within(&rel);
         let handles = &mut rules.handles;
         let (dir, mut left) = match ready {
@@ -1134,8 +1269,11 @@ fn scan_folder(
         old_ids: rules.old_ids,
         rebuilt,
         gone_kept,
-        ignored: rules.ignored,
-        gitignored: rules.gitignored,
+        noted: Noted {
+            ignored: rules.ignored,
+            gitignored: rules.gitignored,
+            late: rules.late,
+        },
         warnings: rules.warnings,
     })
 }
@@ -3256,6 +3394,58 @@ mod tests {
         assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
     }
 
+    /// How many verdicts a walk of the project asks the ignore rules for.
+    fn verdicts_asked(repo: &Repository) -> usize {
+        let before = verdicts::at(repo.root());
+        walk_project(repo, SaveLimits::default()).unwrap();
+        verdicts::at(repo.root()) - before
+    }
+
+    #[test]
+    fn an_unchanged_scan_matches_no_saved_file() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".gitignore", b"*.log\n");
+        for i in 0..50 {
+            write(root, &format!("d{}/f{i}.txt", i % 5), b"x");
+        }
+        save_now(&mut repo).unwrap();
+        // The five folders.
+        assert_eq!(verdicts_asked(&repo), 5);
+        write(root, "new.txt", b"n");
+        write(root, "d0/new.log", b"n");
+        write(root, "d1/f1.txt", b"changed");
+        assert_eq!(verdicts_asked(&repo), 7);
+    }
+
+    #[test]
+    fn a_saved_file_that_became_a_folder_is_matched() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "a.dll", b"x");
+        save_now(&mut repo).unwrap();
+        fs::remove_file(root.join("a.dll")).unwrap();
+        write(root, "a.dll/x", b"x");
+        write(root, ".gitignore", b"*.dll\n");
+        assert_eq!(verdicts_asked(&repo), 2);
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
+    }
+
+    #[test]
+    fn a_folder_that_became_a_file_is_matched() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "b.dll/x", b"x");
+        save_now(&mut repo).unwrap();
+        fs::remove_dir_all(root.join("b.dll")).unwrap();
+        write(root, "b.dll", b"x");
+        write(root, ".gitignore", b"*.dll\n");
+        assert_eq!(verdicts_asked(&repo), 2);
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
+    }
+
     /// Saves the project, which must make a save, and returns that save's top listing.
     fn saved_top(repo: &mut Repository) -> Listing {
         let root = saved_root(save_now(repo).unwrap());
@@ -4157,8 +4347,7 @@ mod tests {
             &mut scan.handles,
             &scan.folders,
             &scan.old,
-            &HashSet::new(),
-            &HashSet::new(),
+            &Noted::default(),
         );
         match built {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "a"),
@@ -4188,8 +4377,7 @@ mod tests {
             &mut scan.handles,
             &scan.folders,
             &scan.old,
-            &HashSet::new(),
-            &HashSet::new(),
+            &Noted::default(),
         );
         match built {
             Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, bottom),
@@ -4247,8 +4435,7 @@ mod tests {
             &mut scan.handles,
             &scan.folders,
             &scan.old,
-            &scan.ignored,
-            &scan.gitignored,
+            &scan.noted,
         )
         .unwrap();
         crate::workers::set_test_workers(None);
