@@ -269,43 +269,43 @@ Two sessions build it at once, each with its own steps, decisions and red-team s
 
 Planned on 2026-11-10, after decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md).
 
-**0. What a terminal can show** (Tasks 1–2)
+**0. What a terminal can show** ✅ (Tasks 1–2)
 - Bolt finds out, for stdout and stderr each, whether it has colour, symbols and a width; errors, hints and warnings are laid out by it; progress is a bar or a turning mark (decision 120). Colour works on Windows.
 - *Done when:* with a terminal faked, each role has its colour and each symbol its plain form; without one, Bolt's own words are as plain as before.
 
-**1. Change IDs in Jujutsu's letters** (Task 3)
+**1. Change IDs in Jujutsu's letters** ✅ (Task 3)
 - *Done when:* an imported save shows the letters its commit's `change-id` header has (decision 122).
 
-**2. `bolt.toml`** (Task 4)
+**2. `bolt.toml`** ✅ (Task 4)
 - The chunk threshold and the large-save question's numbers are read from the folder's `bolt.toml`; what Bolt can't use is passed over with a warning (decision 114).
 - *Done when:* the vectors of storage-format.md §12 pass, a hostile file never stops a save, and a project without the file saves byte for byte as before.
 
-**3. Presets** (Tasks 5–7)
+**3. Presets** ✅ (Tasks 5–7)
 - The presets' rules as data, a look at the folder to suggest one, the `setup` step that writes the two rule files, `bolt start`'s question and `--preset`, and `bolt setup` (decisions 113 and 115).
 - *Done when:* each preset writes its vector byte for byte, `bolt undo` after a start gives the folder back, and a preset switch can be undone and redone.
 
-**4. Git's words** (Task 8)
+**4. Git's words** ✅ (Task 8)
 - *Done when:* each shortcut runs its Bolt command, each explained word changes nothing, and the hint shows once (decision 116).
 
-**5. `bolt verify`** (Task 9)
+**5. `bolt verify`** ✅ (Task 9)
 - Every pack and object, then everything the project needs; `tidy` records the window it used (decisions 118 and 123).
 - *Done when:* every kind of damage the pack tests make is found, a deleted pack shows as what the project lacks, and a command running beside it never makes it report damage.
 
-**6. Every command in the new design** (Tasks 10–12)
+**6. Every command in the new design** ✅ (Tasks 10–12)
 - *Done when:* each command's output follows terminal.md at 60, 80 and 120 columns, and every place the canvas and Bolt's facts disagree is written down.
 
-**7. Follow-ups** (Task 13)
+**7. Follow-ups** ✅ (Task 13)
 - The rows decision 123 marks "done in milestone 6".
 - *Done when:* each has a test, and the tests of RT6-3 and RT7-2 run again.
 
-**8. The JSON formats, before they freeze** (Task 14)
+**8. The JSON formats, before they freeze** ✅ (Task 14)
 - *Done when:* every document has been read against json.md once, and a test fails on a field json.md doesn't list (decision 117).
 
-**9. Proof** (Task 15)
+**9. Proof** ✅ (Task 15)
 - Hostile rule files, and project text with colour on.
 - *Done when:* both pass on all three systems.
 
-**10. The guide and packaging** (Tasks 16–17)
+**10. The guide and packaging** ✅ (Tasks 16–17)
 - The user guide, the README, `SECURITY.md`, version 0.1.0 and the release workflow (decision 119).
 - *Done when:* every command in the guide runs in a test, and the workflow builds four archives that each pass their smoke test.
 
