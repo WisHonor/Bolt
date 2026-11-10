@@ -1468,7 +1468,7 @@ fn after(env: &Env, what: &[&str]) -> Vec<String> {
 }
 
 /// `bolt show` takes back the fingerprints it names after `After` where a line's history reaches
-/// that save: always a first parent's, and a merge's other parent only while a line reaches it.
+/// that save, and only then: a merge's other parent, or the parent of a save past every line.
 #[test]
 fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them() {
     for keep_the_branch in [true, false] {
@@ -1490,6 +1490,18 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
         let taken_back = out.status.code() == Some(0);
         assert_eq!(taken_back, keep_the_branch, "{}", text(&out.stderr));
     }
+    // A detached Git HEAD two commits past main: Bolt is at its save, whose parent no line's
+    // history reaches, so the digits `show` names for it aren't taken back.
+    let env = Env(support::Env::new());
+    env.commit("a.txt", "a\n", "A");
+    env.git(&["checkout", "-q", "--detach"]);
+    env.commit("b.txt", "b\n", "B");
+    env.commit("c.txt", "c\n", "C");
+    env.import();
+    let b = &after(&env, &[])[0];
+    assert!(stdout_of(&env, &["show"]).contains("\"B\""));
+    let out = env.bolt().args(["show", b]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     // A save made on a new line from an older one: its parent is on main's history.
     let env = project_with_two_saves();
     let history: serde_json::Value =
