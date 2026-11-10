@@ -14,7 +14,10 @@ use std::time::Instant;
 use bolt_core::pack::ObjectKind;
 use bolt_core::presets::{self, Engine, Found, LOOK_AT_MOST, Language, Preset};
 use serde_json::Value;
-use support::{Env, copies_of, head, link_file, link_folder, run_limited, text, write_noise};
+use support::{
+    CLEAR, Env, TITLE, assert_escaped, copies_of, head, link_file, link_folder, run_limited, text,
+    write_noise,
+};
 
 /// `bolt <args>` in the project's folder: its exit code, stdout and stderr.
 fn run(env: &Env, args: &[&str]) -> (Option<i32>, String, String) {
@@ -318,45 +321,6 @@ fn a_rules_file_with_numbers_at_every_limit() {
     let shown = saved_and_shown(&env, &file);
     assert_eq!(rules_warnings(&shown), ["rules_file_skipped"]);
     assert!(own_values(&shown));
-}
-
-/// Escape codes Bolt itself never prints, so any found raw came from the project.
-const CLEAR: &str = "\u{1b}[2J";
-const TITLE: &str = "\u{1b}]0;pwned\u{7}";
-
-/// Bolt's own colour codes and the line erase, which the checks below look past.
-const BOLTS_OWN: [&str; 14] = [
-    "\x1b[0m",
-    "\x1b[1;32m",
-    "\x1b[1;31m",
-    "\x1b[1;33m",
-    "\x1b[1;36m",
-    "\x1b[36m",
-    "\x1b[1;35m",
-    "\x1b[34m",
-    "\x1b[32m",
-    "\x1b[31m",
-    "\x1b[33m",
-    "\x1b[2m",
-    "\x1b[1m",
-    "\x1b[2K",
-];
-
-/// Fails unless `said` holds no control character but its line breaks (and the carriage returns
-/// progress redraws with), no character that hides or reorders text, and no escape code but
-/// Bolt's own colours.
-fn assert_escaped(said: &str, what: &str) {
-    let mut plain = said.to_owned();
-    for code in BOLTS_OWN {
-        plain = plain.replace(code, "");
-    }
-    for c in plain.chars() {
-        let hides = matches!(c, '\u{202e}' | '\u{2028}' | '\u{200b}');
-        assert!(
-            !hides && (!c.is_control() || c == '\n' || c == '\r'),
-            "{what}: {c:?} in {said:?}"
-        );
-    }
 }
 
 /// `bolt <args>` in `dir` on a terminal 80 columns wide that shows colour and symbols.

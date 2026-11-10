@@ -1534,10 +1534,12 @@ fn nothing_printed_ever_holds_a_wrapping_mark() {
         ways.push((Some(60), false));
     }
     for (width, json) in ways {
-        let run = |env: &Env, args: &[&str]| {
+        // Each step must end as it should, so that none quietly does less than it seems to.
+        let run = |env: &Env, args: &[&str], code: i32| {
             let mut all = if json { vec!["--json"] } else { vec![] };
             all.extend(args);
-            let (_, shown, said) = output_at(env, width, &all);
+            let (ended, shown, said) = output_at(env, width, &all);
+            assert_eq!(ended, Some(code), "{all:?} at {width:?}: {shown}{said}");
             let marks = ['\u{1}', '\u{2}', '\u{3}'];
             assert!(
                 !shown.contains(marks) && !said.contains(marks),
@@ -1546,45 +1548,362 @@ fn nothing_printed_ever_holds_a_wrapping_mark() {
         };
         let git = Env::new();
         git.commit("a.txt", "a\n", "First");
-        run(&git, &["import"]);
+        run(&git, &["import"], 0);
+        run(&with_an_entry_left_out(), &["import"], 0);
         let env = Env::empty();
-        run(&env, &["start", "--preset", "game"]);
+        run(&env, &["start", "--preset", "game"], 0);
+        run(&env, &["setup"], 0);
         put(&env, "a.txt", "a\n");
         put(&env, "b.txt", "b\n");
-        run(&env, &["save", "First"]);
+        run(&env, &["status"], 0);
+        run(&env, &["save", "First"], 0);
         put(&env, "a.txt", "A\n");
-        run(&env, &["save", "Part", "a.txt"]);
+        run(&env, &["save", "Part", "a.txt"], 0);
         let first = support::main_tip(&env).to_hex();
-        run(&env, &["goto", &first[..12]]);
+        run(&env, &["goto", &first[..12]], 0);
         put(&env, "c.txt", "c\n");
-        run(&env, &["save", "--line", LONG_LINE, "Away"]);
-        run(&env, &["goto", &tip_of(&env, LONG_LINE)]);
-        run(&env, &["goto", LONG_LINE]);
+        run(&env, &["save", "--line", LONG_LINE, "Away"], 0);
+        run(&env, &["goto", &tip_of(&env, LONG_LINE)], 0);
+        run(&env, &["goto", LONG_LINE], 0);
         put(&env, "a.txt", "shelved\n");
-        run(&env, &["shelf"]);
+        run(&env, &["shelf"], 0);
         put(&env, "b.txt", "other\n");
-        run(&env, &["unshelf"]);
-        run(&env, &["discard"]);
-        for args in [
-            &["status"][..],
-            &["show"],
-            &["history"],
-            &["line"],
-            &["undo"],
-            &["redo"],
-            &["undo", "--list"],
-            &["tidy"],
-            &["verify"],
-            &["help"],
-            &["help", "save"],
-            &["add", "x"],
-            &["goto", "nowhere"],
+        run(&env, &["unshelf"], 0);
+        run(&env, &["discard"], 0);
+        for (args, code) in [
+            (&["status"][..], 0),
+            (&["show"], 0),
+            (&["history"], 0),
+            (&["line"], 0),
+            (&["undo"], 0),
+            (&["redo"], 0),
+            (&["undo", "--list"], 0),
+            (&["tidy"], 0),
+            (&["verify"], 0),
+            (&["help"], 0),
+            (&["help", "save"], 0),
+            (&["add", "x"], 2),
+            (&["goto", "nowhere"], 1),
         ] {
-            run(&env, args);
+            run(&env, args, code);
         }
         put(&env, "a.txt", "stashed\n");
-        run(&env, &["stash"]);
+        run(&env, &["stash"], 0);
+        damage_a_pack(&env);
+        run(&env, &["verify"], 1);
     }
+}
+
+/// A Git repository whose one commit holds an entry an import leaves out: a spelling of `.git`.
+fn with_an_entry_left_out() -> Env {
+    let env = Env::new();
+    let stream = "blob\nmark :1\ndata 2\na\n\ncommit refs/heads/main\nmark :2\nauthor Ada \
+                  Lovelace <ada@example.com> 1700000000 +0000\ncommitter Ada Lovelace \
+                  <ada@example.com> 1700000000 +0000\ndata 6\nFirst\n\nM 100644 :1 a.txt\nM \
+                  100644 :1 .g\u{200c}it/x\n\n";
+    let args = ["-c", "core.protectHFS=false", "fast-import", "--quiet"];
+    let made = support::git_with_input(env.root(), &args, stream.as_bytes());
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    env
+}
+
+/// Writes a pack into the project's store whose only object no longer matches its fingerprint.
+fn damage_a_pack(env: &Env) {
+    let made = tempfile::tempdir().unwrap();
+    let mut w = PackWriter::create(made.path()).unwrap();
+    w.add_content(b"damaged on disk\n").unwrap();
+    let path = w.finish(made.path()).unwrap().unwrap();
+    rot(&path, &bolt_core::id::hash_content(b"damaged on disk\n"));
+    let to = env
+        .root()
+        .join(".bolt/store/packs")
+        .join(path.file_name().unwrap());
+    std::fs::copy(&path, to).unwrap();
+}
+
+/// Flips the first stored byte of the object `id` in the pack at `path`.
+fn rot(path: &Path, id: &bolt_core::id::Id) {
+    use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader};
+    let entry = PackReader::open(path).unwrap().find(id).unwrap().unwrap();
+    let mut bytes = std::fs::read(path).unwrap();
+    bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// Flips a byte of the object `id` in every pack of the project that holds it.
+#[cfg(feature = "fault-injection")]
+fn rot_in_store(env: &Env, id: &bolt_core::id::Id) {
+    use bolt_core::pack::PackReader;
+    for e in std::fs::read_dir(env.root().join(".bolt/store/packs")).unwrap() {
+        let path = e.unwrap().path();
+        if PackReader::open(&path).unwrap().find(id).unwrap().is_some() {
+            rot(&path, id);
+        }
+    }
+}
+
+/// A file name that would drive a terminal, as far as this system lets a name hold it.
+#[cfg(feature = "fault-injection")]
+fn hostile_name() -> &'static str {
+    if cfg!(windows) {
+        "evil\u{202e}txt.exe\u{2028}x"
+    } else {
+        "evil\u{1b}[2J\u{202e}txt.exe"
+    }
+}
+
+/// [`hostile_name`] as Bolt shows it.
+#[cfg(feature = "fault-injection")]
+fn hostile_name_shown() -> &'static str {
+    if cfg!(windows) {
+        "evil\\u{202e}txt.exe\\u{2028}x"
+    } else {
+        "evil\\x1b[2J\\u{202e}txt.exe"
+    }
+}
+
+/// `bolt <args>` on a terminal with colour, then with `NO_COLOR`: both end with `code`, nothing
+/// from the project reaches the screen raw, and they print the same once Bolt's own colour codes
+/// are taken out. What the coloured one printed, on stdout and stderr together.
+#[cfg(feature = "fault-injection")]
+fn same_with_colour_on(env: &Env, args: &[&str], code: i32) -> String {
+    let coloured = bolt_on_a_terminal(env, env.root())
+        .args(args)
+        .output()
+        .unwrap();
+    let plain = bolt_on_a_terminal(env, env.root())
+        .env("NO_COLOR", "1")
+        .args(args)
+        .output()
+        .unwrap();
+    let mut all = String::new();
+    for (on, off) in [
+        (&coloured.stdout, &plain.stdout),
+        (&coloured.stderr, &plain.stderr),
+    ] {
+        let (on, off) = (text(on), text(off));
+        support::assert_escaped(&on, &format!("{args:?}"));
+        assert_eq!(support::without_bolts_codes(&on), off, "{args:?}");
+        all += &on;
+    }
+    assert_eq!(coloured.status.code(), Some(code), "{args:?}: {all}");
+    assert_eq!(plain.status.code(), Some(code), "{args:?}");
+    assert!(all.contains("\x1b[0m"), "{args:?}: no colour in {all:?}");
+    all
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn project_text_is_escaped_with_colour_on() {
+    use support::{CLEAR, TITLE};
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "First"]);
+    let first = support::main_tip(&env).to_hex();
+    let name = hostile_name();
+    let shown_name = hostile_name_shown();
+    let content = format!("{CLEAR}line\n");
+    std::fs::write(env.root().join(name), &content).unwrap();
+    put(
+        &env,
+        "bolt.toml",
+        "preset = \"\\u001b[2Jteam\\u202e\"\n[[rule]]\nfiles = [\"\\u001b[2J*.psd\"]\nlockable = \
+         true\n",
+    );
+    let message = format!("{CLEAR}{TITLE}Add it\u{202e}");
+    let shown_message = "\\x1b[2J\\x1b]0;pwned\\x07Add it\\u{202e}";
+    let saved = bolt_in_a_log(&env, env.root())
+        .env("BOLT_USER_NAME", format!("Ada{CLEAR}\u{202e}"))
+        .args(["save", &message])
+        .output()
+        .unwrap();
+    assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
+    let author = "Ada\\x1b[2J\\u{202e}";
+    std::fs::write(env.root().join(name), format!("{TITLE}changed\n")).unwrap();
+
+    let said = same_with_colour_on(&env, &["status"], 0);
+    assert!(said.contains(shown_name), "{said}");
+    assert!(said.contains(shown_message), "{said}");
+    let said = same_with_colour_on(&env, &["changes"], 0);
+    assert!(said.contains(shown_name), "{said}");
+    let said = same_with_colour_on(&env, &["history"], 0);
+    assert!(said.contains(author) && said.contains("\\x1b[2J"), "{said}");
+    let said = same_with_colour_on(&env, &["show"], 0);
+    for part in [shown_name, shown_message, author] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    let said = same_with_colour_on(&env, &["undo", "--list"], 0);
+    assert!(said.contains("\"\\x1b[2J"), "{said}");
+    let said = same_with_colour_on(&env, &["setup"], 0);
+    assert!(said.contains("\\x1b[2Jteam\\u{202e}"), "{said}");
+    assert!(said.contains("\\x1b[2J*.psd"), "{said}");
+
+    run_at(&env, None, &["shelf", &message]);
+    let said = same_with_colour_on(&env, &["shelf", "--list"], 0);
+    assert!(said.contains("\"\\x1b[2J"), "{said}");
+    run_at(&env, None, &["unshelf"]);
+    run_at(&env, None, &["discard"]);
+
+    // A switch prints once; colour on, its words are escaped all the same.
+    for (to, words) in [(&first[..12], "\"First\""), ("main", shown_message)] {
+        let out = bolt_on_a_terminal(&env, env.root())
+            .args(["goto", to])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let said = text(&out.stdout) + &text(&out.stderr);
+        support::assert_escaped(&said, "goto");
+        assert!(said.contains(words), "{said}");
+    }
+
+    // A damaged copy of the file: verify names where the save needs it.
+    rot_in_store(&env, &bolt_core::id::hash_content(content.as_bytes()));
+    let said = same_with_colour_on(&env, &["verify"], 1);
+    assert!(
+        support::without_bolts_codes(&said).contains(&format!("needs it at {shown_name}.")),
+        "{said}"
+    );
+}
+
+/// The rows of `bolt line` and `bolt history` hold no escape code but Bolt's own: a name that
+/// would hold one is refused, read or written, and a name spelled like one shows as its letters.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
+    use support::CLEAR;
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "First"]);
+    // Asked for: refused, with nothing saved.
+    put(&env, "a.txt", "b\n");
+    let before = support::head(&env).0;
+    let hostile = format!("x{CLEAR}\u{1b}[31mred");
+    let out = bolt_on_a_terminal(&env, env.root())
+        .args(["save", "--line", &hostile, "Red"])
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    support::assert_escaped(&text(&out.stderr), "save --line");
+    assert_eq!(support::head(&env).0, before);
+    // Planted in the diary: refused when it is written, or read, never shown raw.
+    let mut repo = bolt_core::repo::Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert(hostile.clone(), state.lines["main"]);
+    let planted = bolt_core::diary::DiaryEntry {
+        parent: Some(head),
+        state,
+        ..entry
+    };
+    let packs = repo.new_packs().unwrap();
+    let written = repo.commit(&lock, packs, &planted);
+    drop(lock);
+    drop(repo);
+    if written.is_ok() {
+        for args in [
+            &["line"][..],
+            &["history"],
+            &["status"],
+            &["undo", "--list"],
+        ] {
+            let out = bolt_on_a_terminal(&env, env.root())
+                .args(args)
+                .output()
+                .unwrap();
+            let said = text(&out.stdout) + &text(&out.stderr);
+            support::assert_escaped(&said, &format!("{args:?}"));
+        }
+    }
+    // Spelled with letters a name may hold: it is only its letters, in Bolt's colours.
+    let env = started();
+    let first = support::main_tip(&env).to_hex();
+    run_at(&env, None, &["goto", &first[..12]]);
+    put(&env, "a.txt", "a\n");
+    let name = "x1b/31m/red";
+    run_at(&env, None, &["save", "--line", name, "Spelled"]);
+    for args in [&["line"][..], &["history"]] {
+        let out = bolt_on_a_terminal(&env, env.root())
+            .args(args)
+            .output()
+            .unwrap();
+        let shown = text(&out.stdout);
+        let row = shown.lines().find(|l| l.contains(name)).unwrap();
+        assert!(
+            row.contains(&format!("\x1b[34m{name}")),
+            "{args:?}: {row:?}"
+        );
+        // Every code in the row is one Bolt paints, each closed.
+        assert_eq!(
+            row.matches('\x1b').count(),
+            2 * row.matches("\x1b[0m").count()
+        );
+        support::assert_escaped(row, &format!("{args:?}"));
+    }
+}
+
+/// Cut on a terminal, a path loses whole folders and a message ends before an escape, never in
+/// the middle of one: `\u{202e}` and `\x1b` are shown whole or not at all.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn cutting_a_path_never_cuts_through_an_escaped_character() {
+    let env = started();
+    let folders = [
+        "Ab\u{202e}cd",
+        "Ef\u{202e}gh",
+        "Ij\u{202e}kl",
+        "Mn\u{202e}op",
+        "Qr\u{202e}st",
+    ];
+    let path = format!("{}/name\u{202e}.psd", folders.join("/"));
+    std::fs::create_dir_all(env.root().join(folders.join("/"))).unwrap();
+    std::fs::write(env.root().join(&path), "p\n").unwrap();
+    let escaped = |s: &str| {
+        s.replace('\u{202e}', "\\u{202e}")
+            .replace('\u{1b}', "\\x1b")
+    };
+    let parts: Vec<String> = path.split('/').map(escaped).collect();
+    let message = "ab\u{1b}cd\u{202e}".repeat(12);
+    run_at(&env, None, &["save", &message]);
+    put(&env, &path, "changed\n");
+    let mut cut_somewhere = (false, false);
+    for width in 40..=100 {
+        // The path in status's row, as whole folders or the cut mark.
+        let (shown, _) = run_at(&env, Some(width), &["status"]);
+        let row = shown.lines().last().unwrap();
+        let shown_path = row.trim_start().strip_prefix("modified  ").unwrap();
+        let shown_path = shown_path.split("  ").next().unwrap();
+        for part in shown_path.split('/') {
+            assert!(
+                part == "..." || parts.contains(&part.to_owned()),
+                "{width}: {row}"
+            );
+        }
+        cut_somewhere.0 |= shown_path.contains("...");
+        // The message in history's row: what is kept starts the escaped message and ends
+        // before a backslash or after a whole escape.
+        let (shown, _) = run_at(&env, Some(width), &["history"]);
+        let row = shown.lines().nth(2).unwrap();
+        let whole = escaped(&message);
+        let Some(at) = row.find("ab\\x1b") else {
+            continue;
+        };
+        let kept = &row[at..];
+        let kept = kept.split("  [main]").next().unwrap();
+        if let Some(kept) = kept.strip_suffix("...") {
+            cut_somewhere.1 = true;
+            assert!(whole.starts_with(kept), "{width}: {row}");
+            let tail = &kept[kept.rfind('\\').unwrap_or(kept.len())..];
+            assert!(
+                tail.is_empty() || tail.starts_with("\\x1b") || tail.starts_with("\\u{202e}"),
+                "{width}: {row}"
+            );
+        }
+    }
+    assert_eq!(cut_somewhere, (true, true));
+    // With colour on, the cut forms are escaped the same.
+    let said = same_with_colour_on(&env, &["history"], 0);
+    assert!(said.contains('…'), "{said}");
 }
 
 /// Runs `setup` in a project just started, then `args`, in a log and on a terminal 60 columns

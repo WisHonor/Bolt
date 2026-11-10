@@ -153,6 +153,45 @@ pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Escape codes Bolt itself never prints, so any found raw came from the project: one clears the
+/// screen, the other sets the window's title.
+pub const CLEAR: &str = "\u{1b}[2J";
+pub const TITLE: &str = "\u{1b}]0;pwned\u{7}";
+
+/// `said` without Bolt's own colour codes and line erase.
+pub fn without_bolts_codes(said: &str) -> String {
+    const OWN: [&str; 14] = [
+        "\x1b[0m",
+        "\x1b[1;32m",
+        "\x1b[1;31m",
+        "\x1b[1;33m",
+        "\x1b[1;36m",
+        "\x1b[36m",
+        "\x1b[1;35m",
+        "\x1b[34m",
+        "\x1b[32m",
+        "\x1b[31m",
+        "\x1b[33m",
+        "\x1b[2m",
+        "\x1b[1m",
+        "\x1b[2K",
+    ];
+    OWN.iter()
+        .fold(said.to_owned(), |s, code| s.replace(code, ""))
+}
+
+/// Fails unless `said` holds no control character but its line breaks (and the carriage returns
+/// progress redraws with), nothing that hides or reorders text, and no escape code but Bolt's own.
+pub fn assert_escaped(said: &str, what: &str) {
+    for c in without_bolts_codes(said).chars() {
+        let hides = matches!(c, '\u{202e}' | '\u{2028}' | '\u{200b}');
+        assert!(
+            !hides && (!c.is_control() || c == '\n' || c == '\r'),
+            "{what}: {c:?} in {said:?}"
+        );
+    }
+}
+
 /// A `--json` document with what changes from run to run redacted, for a snapshot: every
 /// fingerprint (64 hex digits), and the change IDs, times and time zones of saves and entries.
 pub fn masked(mut doc: serde_json::Value) -> serde_json::Value {
