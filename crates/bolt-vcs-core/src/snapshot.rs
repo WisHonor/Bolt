@@ -25,6 +25,7 @@ use crate::ingest::{self, IngestError, Ready};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
+use crate::otherlines::OtherLines;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, Person, Save};
@@ -732,7 +733,8 @@ pub(crate) fn shown_elsewhere(
 /// The lines of `state` other than `line`, in order of name, that hold `id`, the newest save of
 /// `line`, or reach a save with `change_id` along first parents. Only `line` gets a list in
 /// `cache`: each other line is walked until it meets that list or a save an earlier walk passed,
-/// so lines that share a history cost it once.
+/// so lines that share a history cost it once. What the walks read is kept in `cache/other-lines`,
+/// and the next amend goes on from where they stopped.
 fn lines_reaching<'s>(
     repo: &Repository,
     cache: &mut ChangeIds,
@@ -763,6 +765,7 @@ fn lines_reaching<'s>(
         Err(_) => (HashMap::new(), None),
     };
     let mut known: HashMap<Id, bool> = HashMap::new();
+    let mut runs: Option<OtherLines> = None;
     let mut found = Vec::new();
     for (name, &tip) in others {
         let listed = cache
@@ -773,8 +776,18 @@ fn lines_reaching<'s>(
         } else if let Some(saves) = listed {
             saves.iter().any(|(_, c)| c == change_id)
         } else {
+            let runs = runs.get_or_insert_with(|| OtherLines::load(repo));
+            // What an earlier amend read of this line: if it doesn't hold the change ID, the
+            // walk goes on from where it stopped.
+            let mut next = match runs.run(&tip) {
+                Some(run) if run.saves.iter().any(|(_, c)| c == change_id) => {
+                    found.push(name.as_str());
+                    continue;
+                }
+                Some(run) => run.next,
+                None => Some(tip),
+            };
             let mut passed = Vec::new();
-            let mut next = Some(tip);
             let reaches = loop {
                 let Some(at) = next else { break false };
                 // From here on this line is `line`'s list, so it reaches the change ID if the
@@ -786,18 +799,22 @@ fn lines_reaching<'s>(
                     break answer;
                 }
                 let save = repo.store().save(&at, repo.signatures_allowed())?;
-                passed.push(at);
+                passed.push((at, save.change_id));
+                next = save.parents.first().copied();
                 if save.change_id == *change_id {
                     break true;
                 }
-                next = save.parents.first().copied();
             };
-            known.extend(passed.into_iter().map(|at| (at, reaches)));
+            runs.add(tip, &passed, next);
+            known.extend(passed.into_iter().map(|(at, _)| (at, reaches)));
             reaches
         };
         if reaches {
             found.push(name.as_str());
         }
+    }
+    if let Some(runs) = &mut runs {
+        runs.store(repo, state);
     }
     Ok(found)
 }

@@ -1394,6 +1394,128 @@ mod tests {
         by
     }
 
+    /// What `shown_elsewhere` names for an amend of `line`'s newest save, and the saves it read.
+    fn shown_for(repo: &Repository, line: &str) -> (Vec<String>, usize) {
+        let state = repo.current().unwrap().1.state;
+        let tip = state.lines[line];
+        let save = repo.store().save(&tip, false).unwrap();
+        let mut cache = ChangeIds::load(repo);
+        let before = repo.store().saves_read();
+        let by =
+            crate::snapshot::shown_elsewhere(repo, &mut cache, &state, line, tip, &save).unwrap();
+        cache.store(repo, &state);
+        (by, repo.store().saves_read() - before)
+    }
+
+    /// Plants `n` saves of their own on `on`, the last as the line `name`, and returns them,
+    /// oldest first.
+    fn side_line(repo: &mut Repository, name: &str, on: Id, start: &str, n: usize) -> Vec<Id> {
+        let mut saves = vec![];
+        let mut top = on;
+        for k in 0..n {
+            top = plant(repo, &[top], start, (k + 1 == n).then_some(name));
+            saves.push(top);
+        }
+        saves
+    }
+
+    #[test]
+    fn a_second_amend_reads_no_save_of_a_line_that_has_not_moved() {
+        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "kmkk"]);
+        side_line(&mut repo, "old", ids[1], "pppp", 20);
+        cached_line(&repo);
+        let (by, first) = shown_for(&repo, "main");
+        assert!(by.is_empty(), "{by:?}");
+        assert!(first >= 20, "{first}");
+        assert_eq!(shown_for(&repo, "main"), (vec![], 0));
+        // An amend moves main; the side line's run still meets main's list.
+        assert!(save_through(&mut repo, "again", true).is_some());
+        cached_line(&repo);
+        assert_eq!(shown_for(&repo, "main"), (vec![], 0));
+        // With the file gone, the line is read again.
+        std::fs::remove_file(dir.path().join(".bolt/cache/other-lines")).unwrap();
+        assert!(shown_for(&repo, "main").1 >= 20);
+    }
+
+    /// What `shown_elsewhere` names for an amend of `line`, with `cache/other-lines` as it is and
+    /// with it deleted, both checked against walking each line whole.
+    fn named_both_ways(dir: &std::path::Path, repo: &Repository, line: &str) -> Vec<String> {
+        let state = repo.current().unwrap().1.state;
+        let tip = state.lines[line];
+        let change_id = repo.store().save(&tip, false).unwrap().change_id;
+        let walked: Vec<String> = state
+            .lines
+            .iter()
+            .filter(|(name, _)| *name != line)
+            .filter(|&(_, &other)| {
+                other == tip || chain(repo, other).any(|s| s.unwrap().1.change_id == change_id)
+            })
+            .map(|(name, _)| format!("line {name}"))
+            .collect();
+        let file = dir.join(".bolt/cache/other-lines");
+        let kept = std::fs::read(&file).ok();
+        let _ = std::fs::remove_file(&file);
+        let cold = shown_for(repo, line).0;
+        match kept {
+            Some(bytes) => std::fs::write(&file, bytes).unwrap(),
+            None => std::fs::remove_file(&file).unwrap(),
+        }
+        let warm = shown_for(repo, line).0;
+        assert_eq!(cold, walked);
+        assert_eq!(warm, walked);
+        warm
+    }
+
+    #[test]
+    fn the_amend_check_names_the_same_lines_with_kept_runs_and_without() {
+        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "kmkk", "knkk", "kokk"]);
+        let check = |repo: &Repository, line: &str| named_both_ways(dir.path(), repo, line);
+        // A line off main below the amended save, and one off the middle of that line's run.
+        let below = side_line(&mut repo, "below", ids[2], "qqqq", 3);
+        side_line(&mut repo, "off-run", below[1], "rrrr", 2);
+        assert!(check(&repo, "main").is_empty());
+        assert!(check(&repo, "main").is_empty());
+        assert!(save_through(&mut repo, "amended", true).is_some());
+        // A line whose own saves hold the amended save's change ID, as an undone amend leaves.
+        let twin = plant(&mut repo, &[ids[1]], "kokk", None);
+        side_line(&mut repo, "twin", twin, "pppp", 2);
+        assert_eq!(check(&repo, "main"), ["line twin"]);
+        assert_eq!(check(&repo, "main"), ["line twin"]);
+        // A line that moved after its run was kept.
+        plant(&mut repo, &[below[2]], "kokk", Some("below"));
+        assert_eq!(check(&repo, "main"), ["line below", "line twin"]);
+        // Amending another line, where main is one of the others.
+        set_position(&mut repo, Position::OnLine("off-run".into()));
+        let off_run = repo.current().unwrap().1.state.lines["off-run"];
+        side_line(&mut repo, "copy", off_run, "rrrr", 1);
+        assert_eq!(check(&repo, "off-run"), ["line copy"]);
+        assert_eq!(check(&repo, "off-run"), ["line copy"]);
+        assert_eq!(check(&repo, "below"), ["line main", "line twin"]);
+    }
+
+    #[test]
+    fn a_run_that_starts_at_no_line_s_newest_save_is_not_used() {
+        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk"]);
+        let below = side_line(&mut repo, "below", ids[0], "qqqq", 3);
+        let off = side_line(&mut repo, "off", below[1], "rrrr", 1);
+        let tip = repo.current().unwrap().1.state.lines["main"];
+        let change_id = repo.store().save(&tip, false).unwrap().change_id;
+        // Under a good seal, runs that say main's change ID is on `below` and `off` past their
+        // newest save.
+        let mut lie = crate::otherlines::OtherLines::default();
+        lie.add(below[1], &[(below[1], change_id)], None);
+        lie.add(below[0], &[(below[0], change_id)], None);
+        assert!(lie.run(&off[0]).is_none());
+        let file = dir.path().join(".bolt/cache/other-lines");
+        std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
+        assert!(shown_for(&repo, "main").0.is_empty());
+        // A lie at a line's newest save is believed: the seal is what it is trusted for.
+        let mut lie = crate::otherlines::OtherLines::default();
+        lie.add(off[0], &[(off[0], change_id)], None);
+        std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
+        assert_eq!(shown_for(&repo, "main").0, ["line off"]);
+    }
+
     /// Puts the project at `position`, as `goto` would, without touching the folder.
     fn set_position(repo: &mut Repository, position: Position) {
         let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();

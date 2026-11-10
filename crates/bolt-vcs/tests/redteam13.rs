@@ -118,7 +118,6 @@ fn rt13_1_small_reads_in_pairs_cost_small_reads() {
 /// this build 19 to 21 s an amend, every time, and main 34 s once, then 0.3 s.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT13-2: every amend walks every line that branched off long ago, where main read them once"]
 fn rt13_2_a_second_amend_does_not_walk_the_other_lines_again() {
     const BRANCHES: usize = 40;
     const DEPTH: usize = 500;

@@ -717,6 +717,57 @@ fn change_ids_match_their_vector() {
     assert_eq!(ids.get("side").unwrap(), [save(0x55, 0x22)]);
 }
 
+/// A run from 11…11 (change ID 22…22) to 33…33 (44…44) that stops at 55…55, and a run of 66…66
+/// (77…77), which has no first parent, as storage-format.md §10 lays them out.
+fn other_lines_body() -> String {
+    let id = |byte: &str, n: usize| byte.repeat(n);
+    format!(
+        "{}010202{}{}{}{}01{}01{}{}00",
+        hex(b"BOLTLINE"),
+        id("11", 32),
+        id("22", 16),
+        id("33", 32),
+        id("44", 16),
+        id("55", 32),
+        id("66", 32),
+        id("77", 16)
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/other_lines.json"]
+fn print_other_lines_vector() {
+    let key = [0x42; 32];
+    let body = other_lines_body();
+    println!(
+        "[\n  {{\"name\": \"two-runs\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        hex(&key),
+        hex(&bolt_core::keyed::seal(&key, &unhex(&body)))
+    );
+}
+
+#[test]
+fn other_lines_match_their_vector() {
+    use bolt_core::keyed::{open_sealed, seal};
+    use bolt_core::otherlines::OtherLines;
+    let path = format!(
+        "{}/tests/vectors/other_lines.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<SealedVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors.len(), 1);
+    let v = &vectors[0];
+    assert_eq!(v.body, other_lines_body());
+    let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
+    assert_eq!(key, [0x42; 32]);
+    let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
+    assert_eq!(OtherLines::decode(&body).unwrap().encode(), body);
+    assert_eq!(seal(&key, &body), sealed, "{}", v.name);
+    assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
+    assert_eq!(open_sealed(&[0; 32], &sealed), None);
+}
+
 /// `a.txt`, 3 bytes, modified at 1,700,000,000.123456789 s, changed at 1,700,000,001.5 s, file 9
 /// on drive 0x0102030405060708, racy, with content 11…11; and `b`, an executable of 300 bytes,
 /// modified at -1.5 s (whole seconds round down, to -2), changed at -0.999999999 s, file 2^64 + 5
