@@ -1,0 +1,5 @@
+
+# Godot's binary scenes and resources.
+[[rule]]
+files = ["*.scn", "*.res"]
+lockable = true

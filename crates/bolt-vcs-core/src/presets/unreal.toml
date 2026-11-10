@@ -1,0 +1,5 @@
+
+# Unreal assets and maps.
+[[rule]]
+files = ["*.uasset", "*.umap"]
+lockable = true

@@ -1,0 +1,17 @@
+# Unreal: caches, generated project files and build output.
+.vs/
+/Binaries/
+/Saved/
+/Intermediate/
+Plugins/**/Intermediate/
+/DerivedDataCache/
+*_BuiltData.uasset
+/*.sln
+/*.slnx
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.xcodeproj
+*.xcworkspace
