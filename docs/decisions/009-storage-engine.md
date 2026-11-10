@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 9
-- **Refined by:** [decision 041](041-several-packs-per-command.md) (a command writes several packs when it needs more objects than one may hold); [decision 057](057-pack-index-on-disk-and-merging.md) (pack indexes searched on disk; packs opened when needed and merged); [decision 076](076-renames-reach-the-disk-on-windows.md) (renames written through on Windows); [decision 077](077-tidy-and-the-undo-window.md) (`tidy`: what is kept, the grace period, what waits); [decision 082](082-how-big-files-are-cut-into-chunks.md) (how files are cut into chunks); [decision 088](088-benchmarks-and-the-speed-gates.md) (compressing again at a stronger level waits for its numbers)
+- **Refined by:** [decision 041](041-several-packs-per-command.md) (a command writes several packs when it needs more objects than one may hold); [decision 057](057-pack-index-on-disk-and-merging.md) (pack indexes searched on disk; packs opened when needed and merged); [decision 076](076-renames-reach-the-disk-on-windows.md) (renames written through on Windows); [decision 077](077-tidy-and-the-undo-window.md) (`tidy`: what is kept, the grace period, what waits); [decision 082](082-how-big-files-are-cut-into-chunks.md) (how files are cut into chunks); [decision 088](088-benchmarks-and-the-speed-gates.md) (compressing again at a stronger level waits for its numbers); [decision 102](102-big-files-are-flushed-while-they-are-written.md) (a pack is flushed while it is written); [decision 103](103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) (zstd level 3 stays)
 
 ## Context
 

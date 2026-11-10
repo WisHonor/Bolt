@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6's red-team gate, [decision 024](024-red-team-gate.md))
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 105](105-the-change-id-cache-keeps-each-lines-saves-in-order.md) (which lines get a list, and what happens when the lists outgrow the file) and [decision 109](109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md) (what a list may be trusted for: a whole ID too); it also writes down the pack reader's block window, which no record had
+- **Refined by:** [decision 112](112-rulings-after-the-second-red-team-session-on-the-speed-work.md) (the block window reads a block only while blocks pay for themselves; the check before an amend keeps what it read of the other lines; RT12-1's proof runs on Linux only)
 
 ## Context
 

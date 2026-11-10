@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5 planning; the question decision 044's review left for when chunks arrive)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 044](044-red-team-m2-final-rulings.md) (RT4-1: no write limit for imports until chunked storage arrives)
+- **Refined by:** [decision 109](109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md) (what an import costs in memory: measured, and left for after v0.1)
 
 ## Context
 

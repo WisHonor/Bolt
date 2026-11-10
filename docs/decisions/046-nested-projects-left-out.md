@@ -6,6 +6,7 @@
 - **Decided by:** Claude, at the owner's request ("do what you think is best", 2026-11-04). The owner can reverse any part.
 - **Supersedes:** the last sentence of [decision 043](043-red-team-m2-rulings.md)'s RT3-5 ruling ("The rest of a nested Git repository is saved as before").
 - **Refines:** [decision 004](004-project-contents.md) (a folder with its own `.bolt/` is left alone) and [decision 038](038-gitignore-and-saved-files.md) (an ignored folder keeps what the last save holds)
+- **Refined by:** [decision 101](101-the-walk-lists-a-folder-before-it-looks-inside.md) (the walk lists a folder before it asks it for a repository or project by name)
 
 ## Context
 
