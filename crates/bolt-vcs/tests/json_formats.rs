@@ -1,4 +1,7 @@
-//! Every command's `--json` document, checked against docs/json.md.
+//! Every command's `--json` document, checked against docs/json.md. Only the top-level fields are
+//! checked: a field a document has that the spec doesn't list fails, but a field the spec lists
+//! that a document lacks doesn't (some are there only in some states). The tables are found by
+//! the heading of their section and their place under it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,8 +35,19 @@ fn fields_in_json_md() -> BTreeMap<(String, usize), BTreeSet<String>> {
             }
         } else if let Some(key) = &filling {
             let first = line.split('|').nth(1).unwrap_or_default();
-            // `bolt_json`, `result` names two fields; `error.message` is a field of `error`.
-            for name in first.split('`').skip(1).step_by(2) {
+            // `bolt_json`, `result` names two fields; `error.message` is a field of `error`; in
+            // `undone` (`undo`) the brackets name a command, not a field.
+            let mut outside = String::new();
+            let mut depth = 0;
+            for c in first.chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ if depth == 0 => outside.push(c),
+                    _ => {}
+                }
+            }
+            for name in outside.split('`').skip(1).step_by(2) {
                 let name = name.split('.').next().unwrap_or_default().to_owned();
                 tables.entry(key.clone()).or_default().insert(name);
             }
@@ -148,4 +162,21 @@ fn every_document_parses_and_holds_bolt_json_and_warnings() {
         assert_eq!(doc["bolt_json"], 1, "{section}: {doc}");
         assert!(doc["warnings"].is_array(), "{section}: {doc}");
     }
+}
+
+#[test]
+fn the_fields_of_a_table_are_read_from_its_first_column() {
+    let spec = fields_in_json_md();
+    let undo = &spec[&("`bolt undo --json` and `bolt redo --json`".to_owned(), 0)];
+    let names: Vec<&str> = undo.iter().map(String::as_str).collect();
+    let want = [
+        "bolt_json",
+        "finished",
+        "position",
+        "redone",
+        "shelved",
+        "undone",
+        "warnings",
+    ];
+    assert_eq!(names, want);
 }
