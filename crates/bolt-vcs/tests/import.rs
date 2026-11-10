@@ -50,6 +50,37 @@ fn a_simple_repository_imports() {
     assert!(state.server_lines.is_none());
 }
 
+/// The outcome line first, with the counts; what was renamed or left out indented under it; then
+/// where you are. A log gets nothing on stderr.
+#[test]
+fn the_import_summary_leads_with_imported_and_its_counts() {
+    let env = Env::new();
+    let first = env.commit("a.txt", "a\n", "First");
+    env.commit("b.txt", "b\n", "Second");
+    env.git(&["tag", "v1", &first]);
+    let (out, err) = env.import();
+    assert_eq!(
+        out,
+        "Imported 2 commits from Git: 1 line, 1 tag.\n\nYou're on line main.\n"
+    );
+    assert_eq!(err, "");
+
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    env.git(&["branch", "feature+x"]);
+    env.git(&["branch", "two+x"]);
+    env.git(&["update-ref", "refs/notes/commits", "HEAD"]);
+    let (out, err) = env.import();
+    assert_eq!(
+        out,
+        "Imported 1 commit from Git: 3 lines, 0 tags.\n\n    Renamed 2 names that Bolt's \
+         names don't allow:\n        feature+x -> feature-x\n        two+x -> two-x\n    \
+         Didn't import 1 ref (only branches, server branches and tags come in): \
+         refs/notes/commits\n\nYou're on line main.\n"
+    );
+    assert_eq!(err, "");
+}
+
 #[test]
 fn server_branches_become_server_lines() {
     let env = Env::new();
@@ -95,8 +126,8 @@ fn names_bolt_refuses_are_renamed_and_listed() {
         out.contains("Renamed 2 names that Bolt's names don't allow:\n"),
         "{out}"
     );
-    assert!(out.contains("\n  feature -> feature-2\n"), "{out}");
-    assert!(out.contains("\n  feature+x -> feature-x\n"), "{out}");
+    assert!(out.contains("\n        feature -> feature-2\n"), "{out}");
+    assert!(out.contains("\n        feature+x -> feature-x\n"), "{out}");
     let (_, state) = env.state();
     let lines: Vec<&str> = state.lines.keys().map(String::as_str).collect();
     assert_eq!(lines, ["Feature", "feature-2", "feature-x", "main"]);
@@ -130,9 +161,12 @@ fn refs_left_out_are_listed_up_to_100_and_counted() {
         out.contains("Didn't import 150 refs (only branches, server branches and tags come in):"),
         "{out}"
     );
-    assert!(out.contains(&format!("\n  {}\n", pulls[99])), "{out}");
-    assert!(!out.contains(&format!("\n  {}\n", pulls[100])), "{out}");
-    assert!(out.contains("\n  and 50 more\n"), "{out}");
+    assert!(out.contains(&format!("\n        {}\n", pulls[99])), "{out}");
+    assert!(
+        !out.contains(&format!("\n        {}\n", pulls[100])),
+        "{out}"
+    );
+    assert!(out.contains("\n        and 50 more\n"), "{out}");
 
     let copy = Env::new();
     copy.commit("a.txt", "a\n", "First");
@@ -169,13 +203,16 @@ fn renamed_names_and_skipped_tags_are_listed_up_to_100_and_counted() {
         "Didn't import 150 tags:\n",
     ] {
         let list = &out[out.find(heading).unwrap() + heading.len()..];
-        let items: Vec<&str> = list.lines().take_while(|l| l.starts_with("  ")).collect();
+        let items: Vec<&str> = list
+            .lines()
+            .take_while(|l| l.starts_with("        "))
+            .collect();
         assert_eq!(items.len(), 101, "{out}");
-        assert_eq!(items[100], "  and 50 more", "{out}");
+        assert_eq!(items[100], "        and 50 more", "{out}");
     }
-    assert!(out.contains("\n  b+000 -> b-000\n"), "{out}");
+    assert!(out.contains("\n        b+000 -> b-000\n"), "{out}");
     assert!(
-        out.contains("\n  t000, as it tags a folder (a Git tree), not a commit\n"),
+        out.contains("\n        t000, as it tags a folder (a Git tree), not a commit\n"),
         "{out}"
     );
 

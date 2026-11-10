@@ -1,6 +1,7 @@
 //! The `bolt` command-line tool.
 
 mod git_words;
+mod help;
 mod history_output;
 mod import_output;
 mod output;
@@ -48,7 +49,7 @@ use bolt_core::undo::{self, StepInfo, StepRequest};
 use bolt_core::verify;
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use git_words::Typed;
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
@@ -101,20 +102,28 @@ enum Command {
         /// The save to show, by line name, change ID or fingerprint, against its first parent.
         #[arg(long, value_name = "SAVE")]
         save: Option<String>,
+        /// Only these files and folders.
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
     /// List the saves on this line.
     History,
     /// Show one save.
-    Show { save: Option<String> },
+    Show {
+        /// The save, by line name, change ID or fingerprint; the one you're at if left out.
+        save: Option<String>,
+    },
     /// List the lines, marking the one you're on, then the server lines.
     Line,
     /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
-    Goto { target: String },
+    Goto {
+        /// The line or save to go to.
+        target: String,
+    },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
     /// of each changed or new file is kept.
     Discard {
+        /// Only in these files and folders.
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
@@ -181,7 +190,9 @@ impl From<PresetArg> for Preset {
 
 #[derive(clap::Args)]
 struct SaveArgs {
+    /// What the save holds, in a few words.
     message: Option<String>,
+    /// Save only these files, folders and patterns.
     #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
     /// After an import, save files Git wrote with CRLF line endings as they are.
@@ -707,15 +718,24 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let text = if json {
         format!("{}\n", import_output::import_json(&report, &warnings))
     } else {
+        let s = style::out();
         let standing = match &report.position {
-            Position::OnLine(line) => format!("You're on line {}.", escape(line, false)),
+            Position::OnLine(line) => {
+                format!(
+                    "You're on line {}.",
+                    s.paint(style::Role::Line, &escape(line, false))
+                )
+            }
             Position::AtSave(id) => {
                 // By change ID, as everywhere else; by fingerprint if the save can't be read now.
                 let short = opened.as_ref().and_then(|repo| {
                     let save = repo.store().save(id, repo.signatures_allowed()).ok()?;
                     Some(short_or_whole(repo, id, &save.change_id, &mut warnings))
                 });
-                let short = short.unwrap_or_else(|| id.to_hex());
+                let short = match short {
+                    Some(short) => s.paint(style::Role::ChangeId, &short),
+                    None => s.paint(style::Role::Fingerprint, &id.to_hex()),
+                };
                 format!(
                     "You're at save {short}, where Git's HEAD was detached: not on a line. Saving \
                      here asks for a new line's name."
@@ -724,7 +744,12 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         };
         import_output::import_text(&report, &standing)
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    style::next(&format!(
+        "look around with: {}",
+        style::err().paint(style::Role::Command, "bolt status")
+    ));
+    Ok(())
 }
 
 /// Asks in the terminal for the new line's name, with `working` off the screen meanwhile; `None`
@@ -2338,6 +2363,31 @@ fn finished_switch(repo: &Repository) -> Option<String> {
     Some(format!("{what} of {}", escape(&step.command, false)))
 }
 
+/// What a command line clap stopped at prints: Bolt's own help when help was asked for, or when
+/// no command was given, which still ends with 2; clap's own message for anything else.
+fn help_or_usage_error(e: &clap::Error, args: &[OsString]) -> ExitCode {
+    use clap::error::ErrorKind;
+    let code = match e.kind() {
+        ErrorKind::DisplayHelp => 0,
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 2,
+        _ => e.exit(),
+    };
+    style::find_out(false);
+    // The command asked about: the first word that isn't an option, or the one after `help`.
+    let mut words = args
+        .iter()
+        .filter(|a| !a.to_string_lossy().starts_with('-'));
+    let first = words.next();
+    let named = if first.is_some_and(|w| w == "help") {
+        words.next()
+    } else {
+        first
+    };
+    let page = named.and_then(|name| help::page(&mut Cli::command(), &name.to_string_lossy()));
+    output::print_out(&page.unwrap_or_else(help::overview));
+    ExitCode::from(code)
+}
+
 fn main() -> ExitCode {
     let mut typed = std::env::args_os();
     let program = typed.next().unwrap_or_else(|| "bolt".into());
@@ -2352,7 +2402,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let cli = Cli::parse_from(std::iter::once(program).chain(args));
+    let cli = match Cli::try_parse_from(std::iter::once(program).chain(args.iter().cloned())) {
+        Ok(cli) => cli,
+        Err(e) => return help_or_usage_error(&e, &args),
+    };
     style::find_out(cli.json);
     // The project a command opens is kept here, so that if the command fails, the error can list
     // what the project's store had noticed by then.
@@ -2403,8 +2456,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use clap::CommandFactory;
-
     use super::*;
 
     #[test]
@@ -2418,5 +2469,37 @@ mod tests {
             .collect();
         taking.sort();
         assert_eq!(taking, git_words::SAVE_VALUE_OPTIONS);
+    }
+
+    /// `line` split as a shell would: at spaces, except inside double quotes.
+    fn words(line: &str) -> Vec<String> {
+        let mut words = vec![String::new()];
+        let mut quoted = false;
+        for c in line.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => words.push(String::new()),
+                c => words.last_mut().unwrap().push(c),
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn each_commands_help_leads_with_examples_that_parse() {
+        let cli = Cli::command();
+        for command in cli.get_subcommands() {
+            let name = command.get_name();
+            let examples = help::examples(name);
+            assert!(!examples.is_empty(), "{name}");
+            for (line, does) in examples {
+                assert!(!does.is_empty(), "{line}");
+                let words = words(line);
+                assert_eq!(words[..2], ["bolt", name], "{line}");
+                let parsed = Cli::try_parse_from(&words);
+                assert!(parsed.is_ok(), "{line}: {:?}", parsed.err());
+            }
+        }
+        assert!(help::examples("commit").is_empty());
     }
 }

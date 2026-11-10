@@ -2788,3 +2788,205 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
     let history = env.bolt().arg("history").output().unwrap();
     assert!(text(&history.stdout).contains("Add a"));
 }
+
+/// Every command, and the options each takes besides `--json` and `--help`.
+const COMMANDS: [(&str, &[&str]); 17] = [
+    ("status", &["--full"]),
+    ("save", &["--accept-crlf", "--line", "--yes", "--amend"]),
+    ("changes", &["--save"]),
+    ("history", &[]),
+    ("goto", &[]),
+    ("undo", &["--shelve", "--list", "--all", "--to"]),
+    ("redo", &["--shelve"]),
+    ("line", &[]),
+    ("shelf", &["--list"]),
+    ("unshelf", &[]),
+    ("discard", &[]),
+    ("show", &[]),
+    ("start", &["--preset"]),
+    ("setup", &["--preset", "--yes"]),
+    ("import", &[]),
+    ("tidy", &[]),
+    ("verify", &[]),
+];
+
+/// `bolt <args>` in an empty folder: its exit code, stdout and stderr.
+fn bolt_says(args: &[&str]) -> (Option<i32>, String, String) {
+    let env = Env::new();
+    let out = env.bolt().args(args).output().unwrap();
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+/// What `bolt help <command>` prints, which must work.
+fn help_of(command: &str) -> String {
+    let (code, shown, said) = bolt_says(&["help", command]);
+    assert_eq!(code, Some(0), "{command}: {said}");
+    assert_eq!(said, "", "{command}");
+    shown
+}
+
+/// The lines of the section `title` in a command's help: those after it, up to an empty line.
+fn section<'a>(help: &'a str, title: &str) -> Vec<&'a str> {
+    help.lines()
+        .skip_while(|l| *l != title)
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .collect()
+}
+
+#[test]
+fn bolt_alone_help_and_dash_dash_help_print_the_overview() {
+    let (code, overview, said) = bolt_says(&["help"]);
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(said, "");
+    assert!(
+        overview.starts_with(
+            "Bolt keeps every version of your project: code and big files together.\n\nUsage: \
+             bolt <command> [options]\n\nEvery day\n"
+        ),
+        "{overview}"
+    );
+    assert!(
+        overview
+            .ends_with("\n\nHelp on one command: bolt help <command>    Version: bolt --version\n"),
+        "{overview}"
+    );
+    for args in [&["--help"][..], &["-h"], &["--json", "help"]] {
+        assert_eq!(
+            bolt_says(args),
+            (Some(0), overview.clone(), String::new()),
+            "{args:?}"
+        );
+    }
+    // Alone, it is a command line Bolt couldn't use, so it ends with 2.
+    assert_eq!(bolt_says(&[]), (Some(2), overview, String::new()));
+}
+
+#[test]
+fn the_overview_lists_every_command_once_and_no_git_word() {
+    let (_, overview, _) = bolt_says(&["help"]);
+    let groups = ["Every day", "Lines, shelves and details", "The project"];
+    let mut rows = Vec::new();
+    for group in groups {
+        let lines = section(&overview, group);
+        assert!(!lines.is_empty(), "{group}: {overview}");
+        rows.extend(lines.iter().map(|l| l.split(' ').next().unwrap()));
+    }
+    let named: Vec<&str> = COMMANDS
+        .iter()
+        .map(|(c, _)| *c)
+        .filter(|c| !["redo", "unshelf"].contains(c))
+        .collect();
+    assert_eq!(rows, named, "{overview}");
+    // The two that undo and shelf go with are named beside them, once.
+    for (row, beside) in [("undo", "redo"), ("shelf", "unshelf")] {
+        let line = overview
+            .lines()
+            .find(|l| l.starts_with(&format!("{row} ")))
+            .unwrap();
+        assert!(line.ends_with(&format!("(and: {beside})")), "{line}");
+        assert_eq!(overview.matches(&format!("(and: {beside})")).count(), 1);
+    }
+    let words: Vec<String> = overview
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .map(str::to_ascii_lowercase)
+        .collect();
+    for git in [
+        "init",
+        "commit",
+        "diff",
+        "log",
+        "checkout",
+        "switch",
+        "stash",
+        "branch",
+        "fsck",
+        "gc",
+        "add",
+        "restore",
+        "rm",
+        "mv",
+        "reset",
+        "merge",
+        "rebase",
+        "cherry-pick",
+        "blame",
+        "clone",
+        "fetch",
+        "pull",
+        "push",
+        "remote",
+        "revert",
+        "clean",
+    ] {
+        assert!(!words.iter().any(|w| w == git), "{git} in:\n{overview}");
+    }
+}
+
+#[test]
+fn each_commands_help_leads_with_examples_then_usage_then_options() {
+    for (command, _) in COMMANDS {
+        let help = help_of(command);
+        let (code, dashed, said) = bolt_says(&[command, "--help"]);
+        assert_eq!(
+            (code, &dashed, &said[..]),
+            (Some(0), &help, ""),
+            "{command}"
+        );
+        let lines: Vec<&str> = help.lines().collect();
+        assert!(lines[0].starts_with(&format!("bolt {command}: ")), "{help}");
+        assert_eq!(&lines[1..3], ["", "Examples"], "{help}");
+        let titles: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| ["Examples", "Usage", "Arguments", "Options"].contains(l))
+            .collect();
+        assert!(
+            titles == ["Examples", "Usage", "Options"]
+                || titles == ["Examples", "Usage", "Arguments", "Options"],
+            "{help}"
+        );
+        for example in section(&help, "Examples") {
+            assert!(example.starts_with(&format!("bolt {command}")), "{help}");
+        }
+        assert_eq!(section(&help, "Usage").len(), 1, "{help}");
+        assert!(
+            section(&help, "Usage")[0].starts_with(&format!("bolt {command} ")),
+            "{help}"
+        );
+        assert!(!help.ends_with("\n\n"), "{help}");
+    }
+}
+
+#[test]
+fn help_lists_only_options_the_command_takes() {
+    for (command, takes) in COMMANDS {
+        let help = help_of(command);
+        let listed: Vec<&str> = section(&help, "Options")
+            .iter()
+            .map(|l| {
+                l.trim_start()
+                    .trim_start_matches("-h, ")
+                    .split([' ', '='])
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        let mut wanted: Vec<&str> = takes.to_vec();
+        wanted.extend(["--json", "--help"]);
+        let (mut listed_sorted, mut wanted_sorted) = (listed.clone(), wanted.clone());
+        listed_sorted.sort_unstable();
+        wanted_sorted.sort_unstable();
+        assert_eq!(listed_sorted, wanted_sorted, "{command}:\n{help}");
+        for invented in [
+            "-m,",
+            "--wait",
+            "--repair",
+            "--allow-lfs-pointers",
+            "--color",
+            "--ascii",
+        ] {
+            assert!(!help.contains(invented), "{invented} in {command}:\n{help}");
+        }
+    }
+}

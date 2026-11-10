@@ -143,7 +143,7 @@ fn content(env: &Env, name: &str) -> Vec<u8> {
 /// The line `bolt import` lists an entry it left out with, every hidden character shown.
 fn left_out(path: &str, commit: &GitId) -> String {
     let path = escape_all(path);
-    format!("\n  `{path}` in commit {}\n", &commit.to_hex()[..12])
+    format!("\n        `{path}` in commit {}\n", &commit.to_hex()[..12])
 }
 
 /// The heading of the list of entries an import left out.
@@ -252,7 +252,7 @@ fn path_parts_are_skipped() {
     for path in ["..", ".", "a/b", ".git\\hooks\\x"] {
         assert!(out.contains(&left_out(path, &id)), "{path}: {out}");
     }
-    let empty = format!("\n  an empty name in commit {}\n", &id.to_hex()[..12]);
+    let empty = format!("\n        an empty name in commit {}\n", &id.to_hex()[..12]);
     assert!(out.contains(&empty), "{out}");
     assert_eq!(saved(&env), ["file README"]);
 }
@@ -671,7 +671,7 @@ fn line_names_bolt_refuses_are_renamed_and_too_many_servers_stop() {
         "{id} refs/heads/Feature\n{id} refs/heads/feature\n{id} refs/heads/feature+x\n"
     ));
     let (out, _) = env.import();
-    let renamed = "Renamed 2 names that Bolt's names don't allow:\n  feature -> feature-2\n  \
+    let renamed = "Renamed 2 names that Bolt's names don't allow:\n        feature -> feature-2\n        \
                    feature+x -> feature-x\n";
     assert!(out.contains(renamed), "{out}");
     let (_, state) = env.state();

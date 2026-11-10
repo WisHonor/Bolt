@@ -1,7 +1,5 @@
 //! What the terminal can show: colour, symbols and width, found out once; and the lines laid out
 //! by them.
-// Some roles and symbols are here for the whole design before any command shows them.
-#![allow(dead_code)]
 
 use std::io::{self, IsTerminal};
 use std::sync::OnceLock;
@@ -235,19 +233,27 @@ impl Screen {
     /// `prefix` then `message`, wrapped under the message's text when this is a terminal.
     pub fn prefixed(self, prefix_role: Role, prefix: &str, message: &str) -> String {
         let head = self.paint(prefix_role, prefix);
-        let Some(width) = self.width else {
+        if self.width.is_none() {
             return format!("{head} {message}");
-        };
-        let indent = columns(prefix) + 1;
-        let room = width.min(100).saturating_sub(indent);
-        let mut lines = Vec::new();
-        for line in message.split('\n') {
-            wrap(line, room, &mut lines);
         }
-        format!(
-            "{head} {}",
-            lines.join(&format!("\n{}", " ".repeat(indent)))
-        )
+        let indent = columns(prefix) + 1;
+        let body = self.indented(indent, message);
+        format!("{head} {}", &body[indent..])
+    }
+
+    /// `text` with each of its lines `indent` columns in. On a terminal each line is wrapped at
+    /// the smaller of the width and 100, the lines it breaks into starting as far in.
+    pub fn indented(self, indent: usize, text: &str) -> String {
+        let mut lines = Vec::new();
+        for line in text.split('\n') {
+            match self.width {
+                Some(width) => wrap(line, width.min(100).saturating_sub(indent), &mut lines),
+                None => lines.push(line.to_owned()),
+            }
+        }
+        let pad = " ".repeat(indent);
+        let lines: Vec<String> = lines.into_iter().map(|l| format!("{pad}{l}")).collect();
+        lines.join("\n")
     }
 
     /// `path` cut from its middle to fit `room` columns, or whole when it can't be or this is no

@@ -126,10 +126,11 @@ Every stop is an `error:` whose `hint:` names the flag.
 
 ## 11. Help
 
-- `bolt` alone, `bolt help` and `bolt --help` print one screen: a sentence about Bolt, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`.
-- `bolt help <command>` and `bolt <command> --help` print the command's one-line description, then examples, then usage, then its options, each on one line. Only options the command really takes are listed.
-- Git's words appear nowhere in help.
-- Help is plain text on stdout, with section titles in bold on a terminal.
+- `bolt` alone, `bolt help` and `bolt --help` print one screen: a sentence about Bolt, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: bolt help <command>    Version: bolt --version`. Each command's name is padded to 10.
+- `bolt help` and `bolt --help` end with exit code 0. `bolt` alone prints the same screen, also on stdout, and ends with 2, as before milestone 6: a command line with no command is one Bolt couldn't use.
+- `bolt help <command>` and `bolt <command> --help` print the same page: `bolt <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. The usage, the arguments and the options are read from the command line's own definitions, so only options the command really takes are listed. Every example is a command line Bolt takes.
+- Git's words appear nowhere in help. A command line Bolt can't use (an unknown command or option) gets the command-line reader's own message on stderr and exit code 2, as before.
+- Help is plain text on stdout, with section titles in bold on a terminal, and nothing else styled. It is never wrapped or cut: it reads the same at any width and in a pipe.
 
 ## 12. Each command
 
@@ -164,6 +165,37 @@ A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.
 | No terminal or `--json`, no `--yes` | the preview, then `error: Nothing was changed: Bolt can't ask whether to apply these changes without a terminal.` With `--json`, there is no preview, and the document's `error` says it instead, ending `… these changes with --json.` | `hint: If they are what you want, run: bolt setup --preset <name> --yes` | |
 
 Problems in `bolt.toml` come as `warning:` lines after the list. The engine's refusals (a rule file that is a link or a folder, one over 1 MiB, one changed since the preview) are errors with their own hints.
+
+### `bolt import`
+
+It takes no argument: run inside a Git repository's folder, it makes `.bolt/` there, next to `.git/`, and never changes the Git repository. Uncommitted Git work isn't refused: it shows as unsaved changes and goes into the next save. While it works, a terminal's stderr shows each pass in turn (§8): `Reading Git's history` with the turning mark, as how many commits there are isn't known yet; then the bars `Checking Git LFS files`, when the repository shows a sign of Git LFS, and `Importing commits`, both by commits.
+
+```text
+Imported 1,284 commits from Git: 3 lines, 2 server lines from 1 server, 12 tags.
+
+    Renamed 2 names that Bolt's names don't allow:
+        feature+x -> feature-x
+        tag v1:0 -> v1-0
+    Didn't import 1 ref (only branches, server branches and tags come in): refs/notes/commits
+    Brought in 41 Git LFS files (11 GiB) from .git/lfs/objects.
+
+You're on line main.
+```
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| Imported, on a line | `Imported <N> commits from Git: <N> lines, <N> tags.` (`, <N> server lines from <N> servers` after the lines when Git had any) | what was renamed or left out, and what a later export can't recreate, a detail each; then, after an empty line, `You're on line <line>.` | `Next: look around with: bolt status` |
+| Imported, Git's `HEAD` detached | the same | the same, ending `You're at save <id>, where Git's HEAD was detached: not on a line. Saving here asks for a new line's name.` | the same |
+| Refused (not a Git repository's folder, a second import, a project already here, a repository Bolt can't read) | stdout gets nothing; `error:` says why, `hint:` what to do | | |
+| A Git LFS stop: objects missing (the first 20, with the commit and size, then `and N more`), kept elsewhere (`lfs.storage`, or a link at `.git/lfs`), a pointer with `ext-` lines, an object whose SHA-256 differs | stdout gets nothing; `error:` in the import's own words, `hint:` as decisions 085, 089 and 091 word it, naming Git's commands and none of Bolt's flags | | |
+| The work stop | stdout gets nothing; `error: Bolt can't import this Git repository: rebuilding objects from Git's deltas would take more than the <N> GiB of work Bolt allows: the repository holds a long history of small edits to a big file, or it was built to make importing slow.` | ``hint: Nothing was changed. If you trust this repository, have Git store its files over 1 MiB whole and make its other deltas anew, with `git -c core.bigFileThreshold=1m repack -a -d -f`, then run bolt import again. Git's packs stay bigger until its next `git gc`.`` (when it stopped after `.bolt` was begun, the hint of the last row, with this advice) | |
+| Stopped after `.bolt` was begun | stdout gets nothing; `error:` as the stop says it | `hint:` the stop's own advice without its `Nothing was changed.`, then on a line of its own that the `.bolt` folder it began is kept and a later `bolt import` finishes from what it stored (or that nothing was committed, and the folder may be deleted) | |
+
+- **The details,** in this order, each indented 4 and only when there is something to say: the names renamed because Bolt's rules refuse them (bad characters become `-`, clashes get `-2`); the refs not imported (only branches, server branches and tags come in); the tags not imported, with why; the entries left out, which are only `.git` and `.bolt` spellings, every hidden character shown; how many commits a later export can't recreate exactly; the Git LFS files brought in (count and size), the commits holding them, and the pointers not in Git LFS's exact form.
+- **A list** of one is on its detail's line, after a colon; of more, its rows are indented 8 under it: the first 100, then `and N more`. Rows are names, never cut, so a long one runs long.
+- On a terminal each detail sentence is wrapped at a space, at the smaller of the width and 100, its lines after the first indented 4 like it; without a terminal each is one line.
+- The import's warnings (such as `lfs_lookalikes` and `elevated_only`) come on stderr after the summary, one `warning:` each, before the `Next:` line.
+- **Colour:** `Imported` green and bold, the line blue, the save's ID magenta and bold.
 
 ### `bolt verify`
 

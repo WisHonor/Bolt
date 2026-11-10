@@ -953,13 +953,20 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
 /// escaping still can't drive the terminal; only the newlines Bolt writes survive, the pieces
 /// having had theirs escaped.
 fn tell_failure(failure: &Failure) {
-    let screen = style::err();
-    let message = escape(&failure.message, true);
-    tell(&screen.prefixed(Role::Error, "error:", &message));
-    if let Some(hint) = &failure.hint {
-        tell("");
-        tell(&screen.prefixed(Role::Hint, "hint:", &escape(hint, true)));
+    for line in failure_lines(style::err(), failure) {
+        tell(&line);
     }
+}
+
+/// The lines `failure` is told in on `screen`: `error:` and its message, then `hint:` after an
+/// empty line.
+pub fn failure_lines(screen: style::Screen, failure: &Failure) -> Vec<String> {
+    let mut told = screen.prefixed(Role::Error, "error:", &escape(&failure.message, true));
+    if let Some(hint) = &failure.hint {
+        told += "\n\n";
+        told += &screen.prefixed(Role::Hint, "hint:", &escape(hint, true));
+    }
+    told.split('\n').map(str::to_owned).collect()
 }
 
 /// How long ago `time_ms` was, in words; after 30 days, the date in the save's own zone.

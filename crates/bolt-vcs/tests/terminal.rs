@@ -168,6 +168,22 @@ fn without_a_terminal_bolts_own_words_are_plain() {
     run(&["discard"]);
     run(&["tidy"]);
     assert!(run(&["verify"]).contains("    + "));
+    run(&["help"]);
+    run(&["help", "import"]);
+    // An import, in a Git repository of its own.
+    let git = Env::new();
+    git.commit("a.txt", "a\n", "First");
+    let out = bolt_in_a_log(&git, git.root())
+        .arg("import")
+        .output()
+        .unwrap();
+    let (shown, said) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert_eq!(said, "");
+    assert_eq!(
+        shown,
+        "Imported 1 commit from Git: 1 line, 0 tags.\n\nYou're on line main.\n"
+    );
 }
 
 /// A project whose store holds a damaged copy of the licence it is about to save.
@@ -1144,5 +1160,104 @@ fn each_of_these_commands_fits_60_80_and_120_columns() {
         run(&["unshelf"]);
         run_at(&env, None, &["discard"]);
         run(&["tidy"]);
+    }
+}
+
+/// A Git repository whose import renames a line, leaves a ref out, and warns of a file that only
+/// looks like a Git LFS pointer.
+#[cfg(feature = "fault-injection")]
+fn a_repository_with_much_to_say() -> Env {
+    let env = Env::new();
+    let tracked = "*.psd filter=lfs diff=lfs merge=lfs -text\n";
+    env.commit(".gitattributes", tracked, "Track art with Git LFS");
+    let looks = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 1\nand more\n",
+        "a".repeat(64)
+    );
+    env.commit("art/a.psd", &looks, "Add a look-alike");
+    env.git(&["branch", "feature+x"]);
+    env.git(&["update-ref", "refs/notes/commits", "HEAD"]);
+    env
+}
+
+/// What `text` says, without the spaces and line breaks that lay it out.
+#[cfg(feature = "fault-injection")]
+fn words(text: &str) -> Vec<&str> {
+    text.split_whitespace().collect()
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn the_import_summary_fits_60_80_and_120_columns() {
+    let (logged, warned) = run_at(&a_repository_with_much_to_say(), None, &["import"]);
+    assert!(
+        logged.starts_with("Imported 2 commits from Git: 2 lines, 0 tags.\n\n    Renamed "),
+        "{logged}"
+    );
+    assert!(logged.ends_with("\n\nYou're on line main.\n"), "{logged}");
+    assert!(warned.starts_with("warning: A file looks like"), "{warned}");
+    assert!(!warned.contains("Next:"), "{warned}");
+    for width in [60, 80, 120] {
+        let env = a_repository_with_much_to_say();
+        let (shown, said) = run_at(&env, Some(width), &["import"]);
+        for line in shown.lines().chain(said.lines()) {
+            assert!(line.chars().count() <= width, "{width}: {line:?}");
+        }
+        // Only laid out anew: every word is there, in its place.
+        assert_eq!(words(&shown), words(&logged), "{width}: {shown}");
+        assert_eq!(shown.lines().next(), logged.lines().next(), "{width}");
+        for line in shown.lines().skip(2).take_while(|l| !l.is_empty()) {
+            assert!(line.starts_with("    "), "{width}: {shown}");
+        }
+        assert!(said.starts_with("\nwarning: "), "{width}: {said}");
+        assert!(
+            said.ends_with("\n\nNext: look around with: bolt status\n"),
+            "{width}: {said}"
+        );
+    }
+}
+
+/// Help is the same text on a terminal of any width as in a log; on a terminal that shows colour
+/// its titles are bold, and nothing else is styled.
+#[test]
+fn help_reads_the_same_at_every_width_with_only_its_titles_bold() {
+    let env = Env::empty();
+    for (args, titles) in [
+        (
+            &["help"][..],
+            &["Every day", "Lines, shelves and details", "The project"][..],
+        ),
+        (
+            &["help", "save"],
+            &["Examples", "Usage", "Arguments", "Options"],
+        ),
+    ] {
+        let (logged, said) = run_at(&env, None, args);
+        assert_eq!(said, "", "{args:?}");
+        assert!(!logged.contains('\x1b'), "{args:?}");
+        for width in widths() {
+            assert_eq!(
+                run_at(&env, width, args),
+                (logged.clone(), String::new()),
+                "{args:?} at {width:?}"
+            );
+        }
+        #[cfg(feature = "fault-injection")]
+        {
+            let out = bolt_on_a_terminal(&env, env.root())
+                .args(args)
+                .output()
+                .unwrap();
+            let shown = text(&out.stdout);
+            for title in titles {
+                assert!(
+                    shown.contains(&format!("\n\x1b[1m{title}\x1b[0m\n")),
+                    "{title}: {shown:?}"
+                );
+            }
+            assert_eq!(shown.matches('\x1b').count(), titles.len() * 2, "{shown:?}");
+            assert_eq!(shown.replace("\x1b[1m", "").replace("\x1b[0m", ""), logged);
+        }
+        let _ = titles;
     }
 }

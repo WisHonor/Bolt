@@ -6,6 +6,7 @@ use bolt_core::warning::Warning;
 use serde_json::json;
 
 use crate::output::{self, BOLT_JSON};
+use crate::style::{self, Role};
 
 /// "1 tag" or "2 tags", with the count as `thousands` writes it.
 fn counted(count: u64, one: &str, many: &str) -> String {
@@ -22,23 +23,31 @@ fn and_the_rest(mut listed: Vec<String>, count: u64) -> Vec<String> {
     listed
 }
 
-/// `heading` and `items` after it, added to `text`: one on the same line, more on a line each.
+/// One detail, added to `text`: indented 4, and on a terminal wrapped there.
+fn detail(text: &mut String, line: &str) {
+    *text += &style::out().indented(4, line);
+    text.push('\n');
+}
+
+/// `heading` and `items` after it, added to `text` as a detail: one on the same line, more on a
+/// line each under it. Names are never cut, so a long one runs long.
 fn list(text: &mut String, heading: &str, items: &[String]) {
     match items {
         [] => {}
-        [one] => *text += &format!("{heading}: {one}\n"),
+        [one] => detail(text, &format!("{heading}: {one}")),
         _ => {
-            *text += &format!("{heading}:\n");
+            detail(text, &format!("{heading}:"));
             for item in items {
-                *text += &format!("  {item}\n");
+                *text += &format!("        {item}\n");
             }
         }
     }
 }
 
-/// What `bolt import` tells people it did: what came in, where they stand, and what was renamed
-/// or left out.
+/// What `bolt import` tells people it did: the outcome line with what came in, then what was
+/// renamed or left out, then where they stand.
 pub fn import_text(report: &ImportReport, standing: &str) -> String {
+    let outcome = style::out().paint(Role::Ok, "Imported");
     let mut parts = vec![counted(report.lines, "line", "lines")];
     if report.servers > 0 {
         let lines = counted(report.server_lines, "server line", "server lines");
@@ -49,10 +58,7 @@ pub fn import_text(report: &ImportReport, standing: &str) -> String {
     }
     parts.push(counted(report.tags, "tag", "tags"));
     let commits = counted(report.commits, "commit", "commits");
-    let mut text = format!(
-        "Imported {commits} from Git: {}.\n{standing}\n",
-        parts.join(", ")
-    );
+    let mut text = String::new();
     let renamed: Vec<String> = report
         .renamed
         .iter()
@@ -129,61 +135,75 @@ pub fn import_text(report: &ImportReport, standing: &str) -> String {
     list(&mut text, &heading, &entries);
     match report.inexact_commits {
         0 => {}
-        1 => {
-            text += "1 commit can't be recreated exactly by a later export: it holds a folder in a \
-                     form Git no longer writes, or an entry Bolt left out.\n";
-        }
-        n => {
-            text += &format!(
+        1 => detail(
+            &mut text,
+            "1 commit can't be recreated exactly by a later export: it holds a folder in a form \
+             Git no longer writes, or an entry Bolt left out.",
+        ),
+        n => detail(
+            &mut text,
+            &format!(
                 "{} commits can't be recreated exactly by a later export: they hold folders in a \
-                 form Git no longer writes, or entries Bolt left out.\n",
+                 form Git no longer writes, or entries Bolt left out.",
                 thousands(n)
-            );
-        }
+            ),
+        ),
     }
-    text + &lfs_text(report)
+    lfs_text(&mut text, report);
+    let details = if text.is_empty() {
+        text
+    } else {
+        format!("\n{text}")
+    };
+    format!(
+        "{outcome} {commits} from Git: {}.\n{details}\n{standing}\n",
+        parts.join(", ")
+    )
 }
 
-/// What the summary says of Git LFS files: how many came in, the commits that hold them, and
-/// the pointers a later export can't give back as they were.
-fn lfs_text(report: &ImportReport) -> String {
-    let mut text = String::new();
+/// What the summary says of Git LFS files, added to `text`: how many came in, the commits that
+/// hold them, and the pointers a later export can't give back as they were.
+fn lfs_text(text: &mut String, report: &ImportReport) {
     if report.lfs_files > 0 {
-        text += &format!(
-            "Brought in {} ({}) from .git/lfs/objects.\n",
-            counted(report.lfs_files, "Git LFS file", "Git LFS files"),
-            bytes(report.lfs_bytes)
+        let files = counted(report.lfs_files, "Git LFS file", "Git LFS files");
+        let size = bytes(report.lfs_bytes);
+        detail(
+            text,
+            &format!("Brought in {files} ({size}) from .git/lfs/objects."),
         );
     }
     match report.lfs_commits {
         0 => {}
-        1 => {
-            text += "1 commit holds Git LFS files, so a later export can recreate its Git ID only \
-                     by turning them back into pointers.\n";
-        }
-        n => {
-            text += &format!(
+        1 => detail(
+            text,
+            "1 commit holds Git LFS files, so a later export can recreate its Git ID only by \
+             turning them back into pointers.",
+        ),
+        n => detail(
+            text,
+            &format!(
                 "{} commits hold Git LFS files, so a later export can recreate their Git IDs only \
-                 by turning those files back into pointers.\n",
+                 by turning those files back into pointers.",
                 thousands(n)
-            );
-        }
+            ),
+        ),
     }
     match report.inexact_lfs_pointers {
         0 => {}
-        1 => {
-            text += "1 Git LFS pointer isn't in the exact form Git LFS writes, so a later export \
-                     can't recreate it as it was.\n";
-        }
-        n => {
-            text += &format!(
+        1 => detail(
+            text,
+            "1 Git LFS pointer isn't in the exact form Git LFS writes, so a later export can't \
+             recreate it as it was.",
+        ),
+        n => detail(
+            text,
+            &format!(
                 "{} Git LFS pointers aren't in the exact form Git LFS writes, so a later export \
-                 can't recreate them as they were.\n",
+                 can't recreate them as they were.",
                 thousands(n)
-            );
-        }
+            ),
+        ),
     }
-    text
 }
 
 /// The `--json` document of `bolt import` (docs/json.md).
@@ -222,4 +242,80 @@ pub fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::V
         "inexact_lfs_pointers": report.inexact_lfs_pointers,
         "warnings": output::warnings_json(warnings),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use bolt_core::git::GitError;
+    use bolt_core::import::ImportError;
+
+    use crate::output::{Failure, failure_lines};
+    use crate::style::Screen;
+
+    /// The import's stop past its work allowance can't be reached from a test's repository in
+    /// reasonable time, so its error is made here and laid out as `bolt import` lays it out.
+    #[test]
+    fn the_work_stop_is_laid_out_like_every_other_error() {
+        let what = "rebuilding objects from Git's deltas would take more than the 4 GiB of work \
+                    Bolt allows: the repository holds a long history of small edits to a big \
+                    file, or it was built to make importing slow";
+        let way_out = "If you trust this repository, have Git store its files over 1 MiB whole \
+                       and make its other deltas anew, with `git -c core.bigFileThreshold=1m \
+                       repack -a -d -f`, then run bolt import again. Git's packs stay bigger \
+                       until its next `git gc`.";
+        let stop = || ImportError::Git(GitError::TooMuchWork { what: what.into() });
+        // Before the import began its .bolt folder, and after.
+        let after = ImportError::Unfinished {
+            stop: Box::new(stop()),
+            committed: false,
+        };
+        for (stop, hint) in [
+            (stop(), format!("Nothing was changed. {way_out}")),
+            (
+                after,
+                format!(
+                    "{way_out}\nNothing was committed. Bolt kept the .bolt folder it began here: \
+                     bolt import stops the same way until the cause is fixed, then finishes from \
+                     what it stored. Or delete that folder."
+                ),
+            ),
+        ] {
+            let failure = Failure::from(stop);
+            assert_eq!(failure.hint.as_deref(), Some(&hint[..]));
+            let error = format!("Bolt can't import this Git repository: {what}.");
+            let plain = Screen {
+                color: false,
+                symbols: false,
+                width: None,
+            };
+            assert_eq!(
+                failure_lines(plain, &failure).join("\n"),
+                format!("error: {error}\n\nhint: {hint}")
+            );
+            for width in [60, 80, 120] {
+                let screen = Screen {
+                    width: Some(width),
+                    ..plain
+                };
+                let lines = failure_lines(screen, &failure);
+                let blank = lines.iter().position(String::is_empty).unwrap();
+                let (said, hinted) = (&lines[..blank], &lines[blank + 1..]);
+                assert!(said[0].starts_with("error: Bolt can't"), "{lines:?}");
+                assert!(hinted[0].starts_with("hint: "), "{lines:?}");
+                for line in &lines {
+                    assert!(line.chars().count() <= width.min(100), "{width}: {line:?}");
+                }
+                for line in &said[1..] {
+                    assert!(line.starts_with("       ") && !line.starts_with("        "));
+                }
+                for line in &hinted[1..] {
+                    assert!(line.starts_with("      ") && !line.starts_with("       "));
+                }
+                let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert_eq!(words(&said.join(" ")), words(&format!("error: {error}")));
+                assert_eq!(words(&hinted.join(" ")), words(&format!("hint: {hint}")));
+            }
+        }
+    }
 }

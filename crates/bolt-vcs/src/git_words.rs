@@ -51,7 +51,7 @@ const NEW_LINE: &str = "In Bolt, a new line starts with a save made away from a 
                         `bolt goto <save>`, then `bolt save --line <name> \"message\"`";
 const STASH: &str = "`bolt shelf` sets your unsaved changes aside, new files too.\n\
                      `bolt unshelf` brings the newest back, `bolt unshelf <number>` another.\n\
-                     `bolt shelf --list` lists them.";
+                     `bolt shelf --list` lists them by that number, which stays with its shelf.";
 const LATER: &str = "Combining lines, tags and seeing who changed each line arrive in v0.2.\n\
                      Until then, `bolt history` lists the saves on your line.";
 const SYNC: &str = "Syncing with a server arrives in Bolt v0.3.\n\
@@ -193,7 +193,10 @@ pub fn hint(word: &str) -> Option<&'static str> {
         "log" => "in Bolt, log is history: bolt history",
         "checkout" => "in Bolt, checkout is goto: bolt goto <line or save>",
         "switch" => "in Bolt, switch is goto: bolt goto <line>",
-        "stash" => "in Bolt, stash is shelf, which takes new files too: bolt shelf",
+        "stash" => {
+            "in Bolt, stash is shelf, which takes new files too: bolt shelf\n\
+             A shelf keeps the number bolt shelf --list shows, counted from 1."
+        }
         "branch" => "in Bolt, branch is line: bolt line",
         "fsck" => "in Bolt, fsck is verify: bolt verify",
         "gc" => "in Bolt, gc is tidy: bolt tidy",
@@ -201,24 +204,29 @@ pub fn hint(word: &str) -> Option<&'static str> {
     })
 }
 
-/// Prints an explanation on stderr, its commands in the command colour.
+/// Prints an explanation on stderr, wrapped at words on a narrow terminal, its commands in the
+/// command colour.
 pub fn explain(text: &str) {
     let e = style::err();
-    for line in text.lines() {
-        // Commands are between backquotes: every second piece.
-        let painted: Vec<String> = line
-            .split('`')
-            .enumerate()
-            .map(|(n, piece)| {
-                if n % 2 == 1 {
-                    format!("`{}`", e.paint(Role::Command, piece))
-                } else {
-                    piece.to_owned()
-                }
-            })
-            .collect();
-        tell(&painted.concat());
-    }
+    // Commands are between backquotes: every second piece. One a line break cut is painted on
+    // each line.
+    let painted: Vec<String> = e
+        .indented(0, text)
+        .split('`')
+        .enumerate()
+        .map(|(n, piece)| {
+            if n % 2 == 1 {
+                let lines: Vec<String> = piece
+                    .split('\n')
+                    .map(|p| e.paint(Role::Command, p))
+                    .collect();
+                format!("`{}`", lines.join("\n"))
+            } else {
+                piece.to_owned()
+            }
+        })
+        .collect();
+    tell(&painted.concat());
 }
 
 /// After a shortcut ran: its hint, once per person, only when lines for people are printed.
@@ -234,13 +242,15 @@ pub fn teach(word: &str) {
         return;
     }
     let e = style::err();
-    let (said, command) = hint.split_once(": ").unwrap_or((hint, ""));
+    // The command ends the first line; a line after it says more.
+    let (first, more) = hint.split_once('\n').unwrap_or((hint, ""));
+    let (said, command) = first.split_once(": ").unwrap_or((first, ""));
+    let mut message = format!("{said}: {}", e.paint(Role::Command, command));
+    if !more.is_empty() {
+        message = format!("{message}\n{more}");
+    }
     tell("");
-    tell(&e.prefixed(
-        Role::Hint,
-        "hint:",
-        &format!("{said}: {}", e.paint(Role::Command, command)),
-    ));
+    tell(&e.prefixed(Role::Hint, "hint:", &message));
 }
 
 /// True the first time `word` is met for this user; then remembers it in `git-words`. With no
@@ -480,13 +490,16 @@ mod tests {
 
     #[test]
     fn no_explanation_or_hint_line_passes_78_columns() {
-        let hints = SHORTCUTS.iter().map(|w| hint(w).unwrap());
-        // As printed: a hint after `hint: `.
+        // As printed: a hint after `hint: `, and its lines after the first under its text.
+        let hints = SHORTCUTS
+            .iter()
+            .flat_map(|w| hint(w).unwrap().lines().enumerate())
+            .map(|(n, line)| format!("{}{line}", if n == 0 { "hint: " } else { "      " }));
         for line in EXPLANATIONS
             .iter()
             .flat_map(|t| t.lines())
             .map(str::to_owned)
-            .chain(hints.map(|h| format!("hint: {h}")))
+            .chain(hints)
         {
             assert!(line.chars().count() <= 78, "{line}");
         }

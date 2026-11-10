@@ -391,6 +391,52 @@ fn a_git_words_file_bolt_cannot_use_is_never_an_error() {
     assert!(!said.contains("warning:"), "{said}");
 }
 
+/// An explanation wraps at words on a terminal narrower than its lines, and stays whole in a log.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_explanation_wraps_on_a_narrow_terminal() {
+    let env = project();
+    let logged = explained(&env, &["stash", "apply"]);
+    let out = env
+        .bolt()
+        .env("BOLT_FAKE_TERMINAL", "40")
+        .env("NO_COLOR", "1")
+        .args(["stash", "apply"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let said = text(&out.stderr);
+    assert!(said.lines().count() > logged.lines().count(), "{said}");
+    for line in said.lines() {
+        assert!(line.chars().count() <= 40, "{line:?}");
+    }
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(words(&said), words(&logged));
+}
+
+/// Bolt numbers shelves from 1 and a number stays with its shelf, so both say where to find it.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn stash_says_a_shelfs_number_is_the_one_shelf_list_shows() {
+    let env = project();
+    let said = explained(&env, &["stash", "drop"]);
+    assert!(
+        said.contains("`bolt shelf --list` lists them by that number, which stays with its shelf."),
+        "{said}"
+    );
+    write(&env, "a.txt", "changed\n");
+    let out = on_a_terminal(&env, &["stash"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).ends_with(
+            "\nhint: in Bolt, stash is shelf, which takes new files too: bolt shelf\n      A \
+             shelf keeps the number bolt shelf --list shows, counted from 1.\n"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 #[test]
 fn the_diary_names_bolts_command() {
     let env = project();
@@ -436,7 +482,7 @@ fn help_never_names_a_git_word() {
     let mut helps = vec![
         ok(&env, &["--help"]),
         ok(&env, &["help"]),
-        text(&run(&env, &[]).stderr),
+        text(&run(&env, &[]).stdout),
     ];
     for command in [
         "start", "setup", "import", "save", "status", "changes", "history", "show", "line", "goto",

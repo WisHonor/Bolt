@@ -861,6 +861,8 @@ impl Env {
     pub fn refused_import(&self) -> String {
         let out = self.bolt().arg("import").output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        // It had nothing to show, so stdout gets nothing, not even a heading.
+        assert_eq!(text(&out.stdout), "", "{}", text(&out.stderr));
         text(&out.stderr)
     }
 
