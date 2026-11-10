@@ -1709,9 +1709,10 @@ fn a_plan_reads_no_listing_of_the_save_it_is_on_again() {
     repo.store().save(&from, true).unwrap();
     repo.store().save(&to, true).unwrap();
     let saves = reads() - start;
-    let start = reads();
+    let (start, listings) = (reads(), crate::store::counted::listings());
     plan(&repo, from, to, None, false, drive, None).unwrap();
-    // The walk reads the listings on a thread of its own; this one reads only the two saves, or
-    // less when the walk's reads left their block held.
+    // The walk reads the listings on a thread of its own; this one reads none, and of the pack
+    // files no more than the two saves took (less when the walk left their block held).
+    assert_eq!(crate::store::counted::listings(), listings);
     assert!(reads() - start <= saves, "{} reads", reads() - start);
 }

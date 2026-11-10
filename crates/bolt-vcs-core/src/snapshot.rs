@@ -3023,6 +3023,9 @@ mod tests {
         let cached = |repo: &Repository, line: &str| ChangeIds::load(repo).get(line).is_some();
         // A line from the first save, which doesn't hold this one: nothing to amend.
         plant_line(&mut repo, "b", first);
+        // Gone before each amend, so a list found after it is one the amend kept.
+        let file = dir.path().join(".bolt/cache/change-ids");
+        fs::remove_file(&file).unwrap();
         let same = save_as(&mut repo, None, true);
         assert!(
             matches!(same, Ok(SaveOutcome::NothingChanged { .. })),
@@ -3032,6 +3035,7 @@ mod tests {
         assert!(!cached(&repo, "b"));
         // A line from this save: refused.
         plant_line(&mut repo, "c", save_id);
+        fs::remove_file(&file).unwrap();
         let refused = save_as(&mut repo, None, true);
         let by_c = matches!(&refused, Err(SaveError::AmendShared { by }) if by == &["line c"]);
         assert!(by_c, "{refused:?}");

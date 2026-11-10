@@ -147,6 +147,16 @@ pub(crate) mod counted {
     thread_local! {
         static FINDS: Cell<usize> = const { Cell::new(0) };
         static RECORDS: Cell<usize> = const { Cell::new(0) };
+        static LISTINGS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn listing() {
+        LISTINGS.set(LISTINGS.get() + 1);
+    }
+
+    /// The listings this thread's stores were asked for, read ahead or not.
+    pub(crate) fn listings() -> usize {
+        LISTINGS.get()
     }
 
     pub(super) fn find() {
@@ -753,6 +763,8 @@ impl Store {
     }
 
     pub fn listing(&self, id: &Id) -> Result<Listing, StoreError> {
+        #[cfg(test)]
+        counted::listing();
         Ok(Listing::decode(
             &self.read_record(id, ObjectKind::FolderListing)?,
         )?)
@@ -762,6 +774,8 @@ impl Store {
     /// so this store notes what `listing` would. It is spared only the lookup in the pack asked
     /// first when that is the pack `peeked` came from, and the read of `peeked`'s own copy.
     pub(crate) fn listing_after(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
+        #[cfg(test)]
+        counted::listing();
         let Peeked {
             listing,
             pack: at,

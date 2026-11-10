@@ -404,9 +404,12 @@ fn by_fingerprint_prefix(
             )
         });
         if checked == Some(false) {
-            // The lists are dropped; the current line's, read from the store, is kept.
-            cache = ChangeIds::default();
-            cache.chain(repo, line_of(entry), tip_of(entry)?)?;
+            // The lists are dropped; on a line, its own, read from the store as a handle with
+            // no cache reads it, is kept. At a save nothing more is read.
+            cache = ChangeIds::dropped();
+            if let Some(line) = line_of(entry) {
+                cache.chain(repo, Some(line), tip_of(entry)?)?;
+            }
         }
         cache.store(repo, &entry.state);
         if checked == Some(true) {
@@ -1151,6 +1154,21 @@ mod tests {
             let fixed = crate::changeids::ChangeIds::load(&repo);
             assert_eq!(fixed.get("main").unwrap(), truth.as_slice());
         }
+        // At a save, the lie is dropped and nothing is read but the lines' walk and the one
+        // link the check reads, the newest save, which the walk reads too.
+        set_position(&mut repo, Position::AtSave(ids[1]));
+        let mut lie = truth.clone();
+        lie.insert(1, (stray, change("nnnn")));
+        plant_list(dir.path(), lie);
+        let before = repo.store().saves_read();
+        let cached = format!("{:?}", resolve(&repo, &stray.to_hex()));
+        let cached_reads = repo.store().saves_read() - before;
+        let cold = Repository::open(dir.path()).unwrap();
+        let shown = format!("{:?}", resolve(&cold, &stray.to_hex()));
+        assert_eq!(cached, shown);
+        assert_eq!(cached_reads, cold.store().saves_read() + 1);
+        let dropped = crate::changeids::ChangeIds::load(&repo);
+        assert!(dropped.get("main").is_none());
     }
 
     #[test]
@@ -1318,37 +1336,62 @@ mod tests {
         // Another save with the amended save's change ID, as an undone amend leaves.
         plant(&mut repo, &[ids[6]], starts[28], Some("twin"));
         side_saves += 1;
+        // A line of two saves of its own on the amended save.
+        let above = plant(&mut repo, &[tip], "uuuu", None);
+        plant(&mut repo, &[above], "uuuu", Some("above"));
+        side_saves += 2;
+        assert_eq!(repo.current().unwrap().1.state.lines.len(), 42);
+        let by = asked_as_walked(&repo, side_saves);
+        for shown in ["twin", "amended0", "above"] {
+            assert!(by.contains(&format!("line {shown}")), "{shown}: {by:?}");
+        }
+        assert!(!by.contains(&"line side00".to_owned()), "{by:?}");
+    }
+
+    #[test]
+    fn an_amend_finds_a_line_between_two_saves_of_its_change_id() {
+        // `main` holds the amended save's change ID twice, at its newest save and two back.
+        let (_dir, mut repo, ids) = project_with(&["kkkk", "klkk", "zzzz", "kmkk", "zzzz"]);
+        name_line(&mut repo, "between", ids[4]);
+        plant(&mut repo, &[ids[4]], "uuuu", Some("between2"));
+        name_line(&mut repo, "older", ids[2]);
+        plant(&mut repo, &[ids[2]], "uuuu", Some("older2"));
+        let by = asked_as_walked(&repo, 2);
+        assert_eq!(by, ["line between", "line between2"]);
+    }
+
+    /// The lines `shown_elsewhere` names for an amend of `main`'s newest save, checked against
+    /// walking each line whole; that only `main` gains a list; and that no more saves are read
+    /// than the `on_no_list` saves no line's list holds.
+    fn asked_as_walked(repo: &Repository, on_no_list: usize) -> Vec<String> {
         let state = repo.current().unwrap().1.state;
-        assert_eq!(state.lines.len(), 41);
+        let tip = state.lines["main"];
         let save = repo.store().save(&tip, false).unwrap();
         let expected: Vec<String> = state
             .lines
             .iter()
             .filter(|(name, _)| *name != "main")
             .filter(|&(_, &other)| {
-                other == tip
-                    || chain(&repo, other).any(|s| s.unwrap().1.change_id == save.change_id)
+                other == tip || chain(repo, other).any(|s| s.unwrap().1.change_id == save.change_id)
             })
             .map(|(name, _)| format!("line {name}"))
             .collect();
-        assert!(expected.contains(&"line twin".to_owned()));
-        assert!(expected.contains(&"line amended0".to_owned()));
-        cached_line(&repo);
-        let mut cache = ChangeIds::load(&repo);
+        cached_line(repo);
+        let mut cache = ChangeIds::load(repo);
         let before = repo.store().saves_read();
-        let by = crate::snapshot::shown_elsewhere(&repo, &mut cache, &state, "main", tip, &save)
-            .unwrap();
+        let by =
+            crate::snapshot::shown_elsewhere(repo, &mut cache, &state, "main", tip, &save).unwrap();
         let read = repo.store().saves_read() - before;
         assert_eq!(by, expected);
-        // Only the saves on no line's list are read, each at most once.
         assert!(
-            read <= side_saves,
-            "{read} saves read, {side_saves} on no list"
+            read <= on_no_list,
+            "{read} saves read, {on_no_list} on no list"
         );
         assert!(cache.get("main").is_some());
         for name in state.lines.keys().filter(|name| *name != "main") {
             assert!(cache.get(name).is_none(), "{name}");
         }
+        by
     }
 
     /// Puts the project at `position`, as `goto` would, without touching the folder.

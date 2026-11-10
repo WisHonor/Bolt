@@ -36,7 +36,7 @@ pub fn seal(key: &[u8; KEY_LEN], body: &[u8]) -> Vec<u8> {
 }
 
 /// Adds to `buf` the seal of what it holds, as `seal` does without a copy.
-pub fn seal_in_place(key: &[u8; KEY_LEN], buf: &mut Vec<u8>) {
+pub(crate) fn seal_in_place(key: &[u8; KEY_LEN], buf: &mut Vec<u8>) {
     let tag = blake3::keyed_hash(key, buf);
     buf.extend_from_slice(tag.as_bytes());
 }
@@ -260,5 +260,14 @@ mod tests {
         }
         assert_eq!(open_sealed(&key, &sealed[..KEY_LEN - 1]), None);
         assert_eq!(open_sealed(&key, &seal(&key, b"")), Some(&b""[..]));
+    }
+
+    #[test]
+    fn a_body_sealed_in_place_is_what_seal_gives() {
+        let key = [1; KEY_LEN];
+        let mut buf = b"body".to_vec();
+        seal_in_place(&key, &mut buf);
+        assert_eq!(buf, seal(&key, b"body"));
+        assert_eq!(open_sealed(&key, &buf), Some(&b"body"[..]));
     }
 }

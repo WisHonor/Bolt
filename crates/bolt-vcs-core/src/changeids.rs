@@ -50,9 +50,9 @@ impl ChangeIds {
             w.u8(*b);
         }
         w.u8(VERSION);
-        let kept: Vec<_> = self.lines.iter().filter(|(name, _)| keep(name)).collect();
-        w.varint(kept.len() as u64);
-        for (name, saves) in kept {
+        let kept = || self.lines.iter().filter(|(name, _)| keep(name));
+        w.varint(kept().count() as u64);
+        for (name, saves) in kept() {
             w.string(name);
             w.varint(saves.len() as u64);
             for (id, change_id) in saves {
@@ -102,6 +102,14 @@ impl ChangeIds {
             changed: false,
             written: None,
         })
+    }
+
+    /// A cache with no lists, which `store` writes over the file it replaces.
+    pub(crate) fn dropped() -> ChangeIds {
+        ChangeIds {
+            changed: true,
+            ..ChangeIds::default()
+        }
     }
 
     /// The saves the cache holds for `line`, newest first.
