@@ -12,9 +12,10 @@ use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::shelf::ShelfInfo;
 use bolt_core::switch::DiscardOutcome;
-use bolt_core::text::{bytes, escape};
+use bolt_core::text::{bytes, escape, thousands};
 use bolt_core::tidy::TidyReport;
 use bolt_core::undo::{Effect, Taken};
+use bolt_core::verify::{PROBLEMS_KEPT, Problem, ProblemKind, Verified};
 use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
 
@@ -960,6 +961,241 @@ pub fn tidied(report: &TidyReport) -> String {
         }
     }
     text
+}
+
+/// How many problems of a kind `bolt verify` lists on screen.
+const PROBLEMS_SHOWN: usize = 20;
+
+/// `n`, then `one` or `many`.
+fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", thousands(n), if n == 1 { one } else { many })
+}
+
+/// `bolt verify`'s outcome line, for `--json`'s `error` too.
+pub fn verify_outcome(v: &Verified, project: &str) -> String {
+    let problems = counted(v.problems_total, "problem", "problems");
+    format!("Checked {project}: {problems} found.")
+}
+
+/// What to do about what `bolt verify` found: v0.1 can't repair.
+pub fn verify_hint(v: &Verified) -> String {
+    let general = "Bolt can't repair a project in this version. Saves that don't use the damaged \
+                   or missing data still work; keep any other copy of this project safe.";
+    if v.problems.iter().any(|p| p.kind == ProblemKind::HeadLost) {
+        let lost = bolt_core::repo::RepoError::HeadLost {
+            detail: String::new(),
+        };
+        if let Some(hint) = lost.hint() {
+            return format!("{hint} {general}");
+        }
+    }
+    general.to_owned()
+}
+
+/// What `bolt verify` found, for people: the outcome line, then a line for each check, or the
+/// problems it found, grouped by kind.
+pub fn verified(v: &Verified, project: &str) -> String {
+    let s = style::out();
+    let mut text = if v.problems_total == 0 {
+        format!(
+            "{} {project}: no problems found.\n\n",
+            s.paint(Role::Ok, "Verified")
+        )
+    } else {
+        format!("{}\n\n", verify_outcome(v, project))
+    };
+    let check = s.paint(Role::Ok, s.sym(Sym::Check));
+    let of = |kind: ProblemKind| -> Vec<&Problem> {
+        v.problems.iter().filter(|p| p.kind == kind).collect()
+    };
+    let (packs, unread, damaged) = (
+        of(ProblemKind::PackDamaged),
+        of(ProblemKind::PackUnreadable),
+        of(ProblemKind::ObjectDamaged),
+    );
+    let (missing, lost) = (of(ProblemKind::ObjectMissing), of(ProblemKind::HeadLost));
+
+    // The stored objects.
+    let failed = damaged
+        .iter()
+        .chain(&unread)
+        .filter(|p| p.object.is_some() && p.pack.is_some())
+        .count() as u64;
+    let matched = v.objects.saturating_sub(failed);
+    let stored = format!(
+        "{} ({}) {}",
+        counted(v.packs, "pack", "packs"),
+        bytes(v.bytes),
+        if matched == 1 {
+            "matches its fingerprint"
+        } else {
+            "match their fingerprints"
+        }
+    );
+    let objects = counted(v.objects, "stored object", "stored objects");
+    if packs.is_empty() && unread.is_empty() && damaged.is_empty() {
+        let _ = writeln!(text, "    {check} {objects} in {stored}");
+    } else {
+        if failed == 0 && v.objects > 0 {
+            let _ = writeln!(text, "    {check} {objects} in {stored}");
+        } else if matched > 0 {
+            let _ = writeln!(
+                text,
+                "    {check} {} of {objects} in {stored}",
+                thousands(matched)
+            );
+        }
+        group(&mut text, s, &packs, ("pack is", "packs are"), "damaged:");
+        let things = if unread.iter().any(|p| p.object.is_some()) {
+            ("object", "objects")
+        } else {
+            ("pack", "packs")
+        };
+        group(&mut text, s, &unread, things, "couldn't be read:");
+        group(
+            &mut text,
+            s,
+            &damaged,
+            ("object is", "objects are"),
+            "damaged:",
+        );
+    }
+    // What the saves, lines and shelves need; the diary.
+    if let Some(lost) = lost.first() {
+        let cross = s.paint(Role::Error, s.sym(Sym::Cross));
+        let _ = writeln!(text, "    {cross} {}", lost.message);
+    } else {
+        if missing.is_empty() {
+            let _ = writeln!(
+                text,
+                "    {check} {}, {} and {} point to objects that exist",
+                counted(v.saves, "save", "saves"),
+                counted(v.lines, "line", "lines"),
+                counted(v.shelves, "shelf", "shelves")
+            );
+        }
+        let needed = (
+            "object the project needs is",
+            "objects the project needs are",
+        );
+        group(&mut text, s, &missing, needed, "missing:");
+        let entries = counted(v.entries, "entry", "entries");
+        let _ = writeln!(text, "    {check} the undo diary ({entries}) is intact");
+    }
+    let unkept = v.problems_total.saturating_sub(v.problems.len() as u64);
+    if unkept > 0 {
+        let _ = writeln!(
+            text,
+            "    {} more {} counted past the first {}, which are all bolt verify --json lists.",
+            thousands(unkept),
+            if unkept == 1 {
+                "problem was"
+            } else {
+                "problems were"
+            },
+            thousands(PROBLEMS_KEPT as u64)
+        );
+    }
+    text
+}
+
+/// A `✗` line counting `problems`, `things` (one, many) then `what`, and a row for each of the
+/// first 20.
+fn group(
+    text: &mut String,
+    s: style::Screen,
+    problems: &[&Problem],
+    things: (&str, &str),
+    what: &str,
+) {
+    if problems.is_empty() {
+        return;
+    }
+    let n = problems.len() as u64;
+    let cross = s.paint(Role::Error, s.sym(Sym::Cross));
+    let _ = writeln!(
+        text,
+        "    {cross} {} {what}",
+        counted(n, things.0, things.1)
+    );
+    for p in problems.iter().take(PROBLEMS_SHOWN) {
+        let _ = writeln!(text, "        {}", problem_row(s, p));
+    }
+    if problems.len() > PROBLEMS_SHOWN {
+        let more = thousands(n.saturating_sub(PROBLEMS_SHOWN as u64));
+        let _ = writeln!(
+            text,
+            "        {} and {more} more (bolt verify --json lists up to {})",
+            s.sym(Sym::Cut),
+            thousands(PROBLEMS_KEPT as u64)
+        );
+    }
+}
+
+/// A problem's row: what it is about, its message, and what needs it.
+fn problem_row(s: style::Screen, p: &Problem) -> String {
+    let (label, plain) = match (p.object, &p.pack) {
+        (Some(id), _) => (s.paint(Role::Fingerprint, &id.short_hex()), id.short_hex()),
+        (None, Some(pack)) => {
+            let pack = escape(pack, false);
+            (s.paint(Role::Path, &pack), pack)
+        }
+        (None, None) => return p.message.clone(),
+    };
+    let mut row = format!("{label}  {}", p.message);
+    if let Some((save, path)) = &p.needed_by {
+        let save = save.short_hex();
+        let at = if path.is_empty() {
+            "its top folder".to_owned()
+        } else {
+            let said = format!("{plain}  {} Save {save} needs it at .", p.message);
+            let room = s.line_room().saturating_sub(8 + style::columns(&said));
+            s.paint(Role::Path, &s.fit_path(&escape(path, false), room))
+        };
+        let save = s.paint(Role::Fingerprint, &save);
+        let _ = write!(row, " Save {save} needs it at {at}.");
+    }
+    row
+}
+
+/// `bolt verify --json`'s document, without `error`.
+pub fn verified_json(v: &Verified) -> Value {
+    let problems: Vec<Value> = v
+        .problems
+        .iter()
+        .map(|p| {
+            let needed_by = p.needed_by.as_ref().map_or(
+                Value::Null,
+                |(save, path)| json!({"save": save.to_hex(), "path": path}),
+            );
+            json!({
+                "kind": p.kind.name(),
+                "pack": p.pack,
+                "object": p.object.map(|id| id.to_hex()),
+                "needed_by": needed_by,
+                "message": p.message,
+            })
+        })
+        .collect();
+    json!({
+        "bolt_json": BOLT_JSON,
+        "packs": v.packs,
+        "objects": v.objects,
+        "bytes": v.bytes,
+        "saves": v.saves,
+        "entries": v.entries,
+        "problems_total": v.problems_total,
+        "problems": problems,
+        "warnings": warnings_json(&v.warnings),
+    })
+}
+
+/// `hint` on stderr, after an empty line when something came before it.
+pub fn tell_hint(hint: &str) {
+    if seen_any() {
+        tell("");
+    }
+    tell(&style::err().prefixed(Role::Hint, "hint:", &escape(hint, true)));
 }
 
 #[cfg(test)]

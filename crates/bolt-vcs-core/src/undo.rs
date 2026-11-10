@@ -13,10 +13,10 @@ use crate::history::tip_of;
 use crate::id::{Id, is_hex_start};
 use crate::kept;
 use crate::pack::ObjectKind;
-use crate::repo::{ChangeLock, RepoError, Repository};
+use crate::repo::{ChangeLock, RepoError, Repository, entry_in};
 use crate::save::Person;
 use crate::shelf::{free_label, within_limit};
-use crate::store::{StoreError, is_damage};
+use crate::store::{Store, StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
 use crate::warning::Warning;
@@ -371,17 +371,17 @@ fn stored_entries(repo: &Repository) -> Result<HashSet<Id>, RepoError> {
 /// time: where the diary may have stopped, for a lost `head`. One that can't be read is left
 /// out, since it couldn't be made current either.
 pub fn diary_ends(repo: &Repository) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
-    ends_among(repo, stored_entries(repo)?)
+    ends_among(repo.store(), stored_entries(repo)?)
 }
 
-/// [`diary_ends`] among the entries `ids`.
+/// [`diary_ends`] among the entries `ids`, read from `store`.
 pub(crate) fn ends_among(
-    repo: &Repository,
+    store: &Store,
     ids: HashSet<Id>,
 ) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
     let (mut followed, mut found) = (HashSet::new(), Vec::new());
     for id in ids {
-        match repo.entry(&id) {
+        match entry_in(store, &id) {
             Ok(entry) => {
                 followed.extend(entry.parent);
                 found.push((Reverse(entry.who.time_ms), id));
@@ -395,7 +395,7 @@ pub(crate) fn ends_among(
     // Read again rather than held: a store can hold any number of entries.
     found
         .into_iter()
-        .map(|(_, id)| Ok((id, repo.entry(&id)?)))
+        .map(|(_, id)| Ok((id, entry_in(store, &id)?)))
         .collect()
 }
 

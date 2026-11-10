@@ -41,6 +41,7 @@ use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
 use bolt_core::tidy;
 use bolt_core::undo::{self, StepInfo, StepRequest};
+use bolt_core::verify;
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
 use clap::{Parser, Subcommand};
@@ -152,6 +153,9 @@ enum Command {
     /// Free the space nothing needs any more: saves no line, shelf or tag reaches, and what only
     /// steps older than the undo window (undo-window-days in your settings, 30 by default) needed.
     Tidy,
+    /// Check everything Bolt has stored, and that the project has everything it needs. Changes
+    /// nothing.
+    Verify,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1874,6 +1878,48 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     output::print_done(&text, &warnings)
 }
 
+/// `bolt verify`. Problems found end it with exit code 1, the outcome line being the error.
+fn verify_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(Repository::discover(&std::env::current_dir()?)?);
+    let window = undo_window_days()?;
+    let mut bar = progress::Bar::new("Checking stored objects");
+    let done = verify::verify(repo, window, now_ms(), &mut |read, total| {
+        bar.update(read, Some(total), true);
+    });
+    bar.finish();
+    let warnings = done.warnings.clone();
+    // The folder's name came from outside Bolt, like any name in a project.
+    let root = repo.root();
+    let name = root.file_name().map_or_else(
+        || root.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let project = escape(&name, false);
+    let failure = (done.problems_total > 0).then(|| Failure {
+        message: output::verify_outcome(&done, &project),
+        hint: Some(output::verify_hint(&done)),
+        printed: true,
+    });
+    if json {
+        let document = output::verified_json(&done);
+        let Some(failure) = failure else {
+            return output::print_quietly(&format!("{document}\n"), &warnings);
+        };
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        return output::ended(Some(failure), String::new, &warnings, None);
+    }
+    output::print_out(&output::verified(&done, &project));
+    output::ended(None, String::new, &warnings, None)?;
+    let Some(failure) = failure else {
+        return Ok(());
+    };
+    if let Some(hint) = &failure.hint {
+        output::tell_hint(hint);
+    }
+    Err(failure)
+}
+
 /// How many of the steps undo can take `bolt undo --list` shows.
 const UNDO_LIST: usize = 20;
 
@@ -2193,6 +2239,7 @@ fn main() -> ExitCode {
         Command::Shelf { message, .. } => shelf_command(cli.json, message.as_deref(), &mut opened),
         Command::Unshelf { number } => unshelf_command(cli.json, number.as_deref(), &mut opened),
         Command::Tidy => tidy_command(cli.json, &mut opened),
+        Command::Verify => verify_command(cli.json, &mut opened),
     };
     let code = match result {
         Ok(()) => ExitCode::SUCCESS,

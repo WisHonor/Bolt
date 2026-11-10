@@ -721,6 +721,38 @@ fn head_lost(detail: impl Into<String>) -> RepoError {
     }
 }
 
+/// The diary entry `id`, which `state/head` names, from `store`. One that can't be had is a lost
+/// head, unless it couldn't be read for a reason that isn't damage.
+fn head_entry(store: &Store, id: Id) -> Result<(Id, DiaryEntry), RepoError> {
+    let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
+    let bytes = match store.read_record(&id, ObjectKind::DiaryEntry) {
+        Ok(bytes) => bytes,
+        Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+            return Err(lost("which the store doesn't hold".to_owned()));
+        }
+        Err(StoreError::Pack(e)) if is_damage(&e) => {
+            return Err(lost(format!("which can't be read ({e})")));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let entry =
+        DiaryEntry::decode(&bytes).map_err(|e| lost(format!("which can't be read ({e})")))?;
+    Ok((id, entry))
+}
+
+/// The diary entry `id` in `store`. One the store lacks, holds as another kind of record, or
+/// can't decode, is damage to the diary, named.
+pub(crate) fn entry_in(store: &Store, id: &Id) -> Result<DiaryEntry, RepoError> {
+    let bytes = match store.read_record(id, ObjectKind::DiaryEntry) {
+        Ok(bytes) => bytes,
+        Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+            return Err(damaged(format!("the diary has no entry {id}")));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    DiaryEntry::decode(&bytes).map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
+}
+
 /// Proof that this process holds the change lock; dropping it releases the lock.
 pub struct ChangeLock {
     _file: File,
@@ -1393,34 +1425,18 @@ impl Repository {
             Some(id) => id,
             None => self.head()?,
         };
-        let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
-        let bytes = match self.store.read_record(&id, ObjectKind::DiaryEntry) {
-            Ok(bytes) => bytes,
-            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
-                return Err(lost("which the store doesn't hold".to_owned()));
-            }
-            Err(StoreError::Pack(e)) if is_damage(&e) => {
-                return Err(lost(format!("which can't be read ({e})")));
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let entry =
-            DiaryEntry::decode(&bytes).map_err(|e| lost(format!("which can't be read ({e})")))?;
-        Ok((id, entry))
+        head_entry(&self.store, id)
+    }
+
+    /// [`Repository::current`], with `state/head` read again and its entry looked for in `store`.
+    pub(crate) fn current_from(&self, store: &Store) -> Result<(Id, DiaryEntry), RepoError> {
+        head_entry(store, self.head()?)
     }
 
     /// The diary entry `id`. One the store lacks, holds as another kind of record, or can't
     /// decode, is damage to the diary, named.
     pub fn entry(&self, id: &Id) -> Result<DiaryEntry, RepoError> {
-        let bytes = match self.store.read_record(id, ObjectKind::DiaryEntry) {
-            Ok(bytes) => bytes,
-            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
-                return Err(damaged(format!("the diary has no entry {id}")));
-            }
-            Err(e) => return Err(e.into()),
-        };
-        DiaryEntry::decode(&bytes)
-            .map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
+        entry_in(&self.store, id)
     }
 
     /// The tags of `state`; empty if it has none.

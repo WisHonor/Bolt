@@ -440,7 +440,7 @@ fn help_never_names_a_git_word() {
     ];
     for command in [
         "start", "setup", "import", "save", "status", "changes", "history", "show", "line", "goto",
-        "discard", "undo", "redo", "shelf", "unshelf", "tidy",
+        "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
     ] {
         helps.push(ok(&env, &[command, "--help"]));
         helps.push(ok(&env, &["help", command]));

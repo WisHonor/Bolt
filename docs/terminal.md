@@ -164,3 +164,45 @@ A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.
 | No terminal or `--json`, no `--yes` | the preview, then `error: Nothing was changed: Bolt can't ask whether to apply these changes without a terminal.` With `--json`, there is no preview, and the document's `error` says it instead, ending `… these changes with --json.` | `hint: If they are what you want, run: bolt setup --preset <name> --yes` | |
 
 Problems in `bolt.toml` come as `warning:` lines after the list. The engine's refusals (a rule file that is a link or a folder, one over 1 MiB, one changed since the preview) are errors with their own hints.
+
+### `bolt verify`
+
+`<project>` is the name of the project's folder. While it reads the packs, a terminal's stderr shows the bar `Checking stored objects`, by bytes of pack read out of bytes in all (§8); the total grows when a pack arrives during the check.
+
+Nothing wrong (exit code 0), on stdout:
+
+```text
+Verified Skyrunner: no problems found.
+
+    ✓ 12,480 stored objects in 3 packs (4.8 GiB) match their fingerprints
+    ✓ 1,290 saves, 3 lines and 2 shelves point to objects that exist
+    ✓ the undo diary (24 entries) is intact
+```
+
+Problems (exit code 1), on stdout:
+
+```text
+Checked Skyrunner: 3 problems found.
+
+    ✓ 12,479 of 12,480 stored objects in 3 packs (4.8 GiB) match their fingerprints
+    ✗ 1 object is damaged:
+        4c2e9a01f7b3  It doesn't match its fingerprint. Save 1a2b3c4d5e6f needs it at Assets/Rock.psd.
+    ✗ 2 objects the project needs are missing:
+        b17f0d9e2a64  It isn't in any pack. Save 1a2b3c4d5e6f needs it at Assets/Scripts/OldInput.cs.
+        9d0e44a1c3b2  It isn't in any pack.
+    ✓ the undo diary (24 entries) is intact
+```
+
+then, after the warnings, on stderr:
+
+```text
+
+hint: Bolt can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+```
+
+- **The three checks,** in this order, each a `✓` line when it found nothing, else its `✗` lines: the stored objects (`pack_damaged`, `pack_unreadable` and `object_damaged` problems; its `✓` line says `N of M` when some objects failed, and shows only while some matched), what the saves, lines and shelves need (`object_missing`), and the diary (`head_lost`, whose `✗` line is the problem's message, and then there is no line for the second check, which couldn't run).
+- **A kind's `✗` line** counts its problems (`1 pack is damaged:`, `2 packs couldn't be read:`, `1 object is damaged:`, `3 objects the project needs are missing:`), and its rows follow, indented 8: the object's fingerprint (12 hex digits) or the pack's file name, two spaces, then the problem's message, then, for something the project needs, `Save <12 hex digits> needs it at <path>.` (`… at its top folder.` for the top folder). At most 20 rows a kind, then `… and N more (bolt verify --json lists up to 1,000)`. When more than 1,000 problems were found, a last line says how many more were counted but not kept.
+- **Colour:** `Verified` green and bold; `✓` green; `✗` red; fingerprints and pack names blue, paths blue. Nothing else.
+- **Without symbols** (§4) the marks are `+` and `x`, and the cut mark is `...`. Without a terminal it is the same text, plain, and stderr holds only the warnings and the hint, with no bar.
+- **The hint** says the same however the problems were found. When `head` is lost it first gives that error's own hint (`bolt undo --list`, then `bolt undo --to`). There is no `error:` line: the outcome line on stdout is the error, and `--json`'s `error` holds it, with the hint.
+- A switch left unfinished is a `warning:` (`switch_unfinished`), as for `bolt status`, and doesn't change the exit code.

@@ -10,15 +10,16 @@ use std::sync::Arc;
 use bolt_platform::dir::{Dir, EntryMeta};
 
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
+use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point};
 use crate::id::Id;
 use crate::listing::{EntryKind, Listing};
 use crate::merge;
 use crate::pack::{self, IndexEntry, ObjectKind, PackError, PackReader};
-use crate::repo::{RepoError, Repository, cant_write, damaged};
+use crate::repo::{RepoError, Repository, cant_write, damaged, entry_in};
 use crate::safe_fs;
 use crate::save::Save;
-use crate::store::{StoreError, is_damage, is_pack_name};
+use crate::store::{Store, StoreError, is_damage, is_pack_name};
 use crate::text::{escape, thousands};
 use crate::undo;
 use crate::warning::{self, Warning};
@@ -43,11 +44,11 @@ pub struct TidyReport {
 }
 
 /// A pack in the store when `tidy` started.
-struct Listed {
-    name: OsString,
-    size: u64,
+pub(crate) struct Listed {
+    pub(crate) name: OsString,
+    pub(crate) size: u64,
     /// Changed in the 24 hours before: left as it is.
-    young: bool,
+    pub(crate) young: bool,
 }
 
 /// What a pack's index says it holds.
@@ -236,8 +237,22 @@ fn remove(
     }
 }
 
+/// [`listed`] for `verify`, which checks each pack on its own: one whose details can't be read is
+/// left out.
+pub(crate) fn listed_leniently(folder: &Dir, now_ns: i128) -> io::Result<Vec<Listed>> {
+    let listed = packs(folder)?.into_iter().filter_map(|(name, meta)| {
+        let meta = meta.ok()?;
+        Some(Listed {
+            name,
+            size: meta.size,
+            young: now_ns.saturating_sub(meta.modified_ns) < GRACE_NS,
+        })
+    });
+    Ok(listed.collect())
+}
+
 /// Every entry in `folder` named like a pack, by name, with its details or why they can't be read.
-fn packs(folder: &Dir) -> io::Result<Vec<(OsString, io::Result<EntryMeta>)>> {
+pub(crate) fn packs(folder: &Dir) -> io::Result<Vec<(OsString, io::Result<EntryMeta>)>> {
     let mut found = Vec::new();
     for entry in folder.entries()? {
         if is_pack_name(&entry.name) {
@@ -346,19 +361,39 @@ struct Survey {
     /// The chunk lists whose chunks are kept, by their pack's place and offset: so far those in
     /// young packs.
     reads: BTreeMap<(usize, u64), IndexEntry>,
+    /// Every ID an index names, for `verify`.
+    all: HashSet<Id>,
 }
 
-/// Reads the index of each of `packs`, young ones too, and checks it against its checksum. A pack
-/// that can't be opened, read or checked stops `tidy`, since it could hold the only chunk list
-/// naming chunks in the others; so does a conflict record, which this version doesn't follow.
-fn survey(repo: &Repository, packs: &[Listed]) -> Result<Survey, RepoError> {
+/// Reads the index of each of `packs`, in `folder` at `packs_dir`, young ones too, and checks it
+/// against its checksum. A pack that can't be opened, read or checked stops `tidy`, since it could
+/// hold the only chunk list naming chunks in the others; so does a conflict record, which this
+/// version doesn't follow. For `verify` (`lenient`), which checks each pack on its own, they are
+/// passed over, and every ID read is kept in `all`.
+fn survey(
+    folder: &Dir,
+    packs_dir: &Path,
+    packs: &[Listed],
+    lenient: bool,
+) -> Result<Survey, RepoError> {
     let mut survey = Survey::default();
     for (at, listed) in packs.iter().enumerate() {
-        let path = repo.packs_dir().join(&listed.name);
+        let path = packs_dir.join(&listed.name);
         let cant = |e: PackError| cant_tidy(&path, &e);
-        let pack = PackReader::open_in(repo.packs_folder(), &listed.name, &path).map_err(cant)?;
+        let pack = match PackReader::open_in(folder, &listed.name, &path) {
+            Ok(pack) => pack,
+            Err(_) if lenient => continue,
+            Err(e) => return Err(cant(e)),
+        };
         for line in pack.entries() {
-            let line = line.map_err(cant)?;
+            let line = match line {
+                Ok(line) => line,
+                Err(_) if lenient => break,
+                Err(e) => return Err(cant(e)),
+            };
+            if lenient {
+                survey.all.insert(line.id);
+            }
             match line.kind {
                 ObjectKind::DiaryEntry => {
                     survey.entries.insert(line.id);
@@ -369,7 +404,7 @@ fn survey(repo: &Repository, packs: &[Listed]) -> Result<Survey, RepoError> {
                         survey.reads.insert((at, line.offset), line);
                     }
                 }
-                ObjectKind::Conflict => {
+                ObjectKind::Conflict if !lenient => {
                     return Err(RepoError::CantTidy {
                         path: path.clone(),
                         why: None,
@@ -378,7 +413,9 @@ fn survey(repo: &Repository, packs: &[Listed]) -> Result<Survey, RepoError> {
                 _ => {}
             }
         }
-        pack.check_index().map_err(cant)?;
+        if !lenient {
+            pack.check_index().map_err(cant)?;
+        }
     }
     Ok(survey)
 }
@@ -387,14 +424,98 @@ fn survey(repo: &Repository, packs: &[Listed]) -> Result<Survey, RepoError> {
 /// file reached, or one in a young pack, names. `packs` are the store's packs; the undo window
 /// starts at `since`.
 fn kept(repo: &Repository, packs: &[Listed], since: i64) -> Result<HashSet<Id>, RepoError> {
+    let survey = survey(repo.packs_folder(), repo.packs_dir(), packs, false)?;
+    let (head, _) = repo.current()?;
+    let (kept, _) = mark(&Source::of(repo), packs, survey, head, since, None)?;
+    Ok(kept)
+}
+
+/// Where marking reads: a store, whether its saves may be signed, and the packs' folder.
+pub(crate) struct Source<'a> {
+    pub(crate) store: &'a Store,
+    pub(crate) signed: bool,
+    pub(crate) folder: &'a Dir,
+    pub(crate) packs_dir: &'a Path,
+}
+
+impl<'a> Source<'a> {
+    pub(crate) fn of(repo: &'a Repository) -> Source<'a> {
+        Source {
+            store: repo.store(),
+            signed: repo.signatures_allowed(),
+            folder: repo.packs_folder(),
+            packs_dir: repo.packs_dir(),
+        }
+    }
+}
+
+/// What `verify` learns while marking, which goes on past what it can't read.
+#[derive(Default)]
+pub(crate) struct Noted {
+    /// What couldn't be read, and why.
+    pub(crate) unread: Vec<(Id, Unread)>,
+    /// Every ID the packs' indexes name.
+    pub(crate) known: HashSet<Id>,
+    /// Chunks to find the files of, as well as those no index names.
+    pub(crate) watch: HashSet<Id>,
+    /// Each chunk no index names, or watched, with the file whose list names it.
+    pub(crate) via: HashMap<Id, Id>,
+    /// The saves read.
+    pub(crate) saves: Vec<Id>,
+    /// The diary entries read from the current one back.
+    pub(crate) entries: u64,
+}
+
+/// Why `verify`'s marking couldn't read a record.
+pub(crate) enum Unread {
+    Missing,
+    Damaged(String),
+    Unreadable(String),
+}
+
+impl Unread {
+    fn of(e: &StoreError) -> Unread {
+        match e {
+            StoreError::Missing(_) | StoreError::WrongKind { .. } => Unread::Missing,
+            StoreError::Pack(p) if !is_damage(p) => Unread::Unreadable(p.to_string()),
+            e => Unread::Damaged(e.to_string()),
+        }
+    }
+}
+
+/// What `tidy` keeps, as `verify` asks for it: from the entry `head` in `src`'s store, with the
+/// undo window starting at `since`, noting in `noted` what can't be read instead of stopping
+/// there.
+pub(crate) fn needs(
+    src: &Source,
+    packs: &[Listed],
+    head: Id,
+    since: i64,
+    noted: Noted,
+) -> Result<(HashSet<Id>, Noted), RepoError> {
+    let survey = survey(src.folder, src.packs_dir, packs, true)?;
+    let (kept, noted) = mark(src, packs, survey, head, since, Some(noted))?;
+    Ok((kept, noted.unwrap_or_default()))
+}
+
+/// Marks what must be kept from the entry `head`, as [`kept`] says, reading from `src`. With
+/// `noted`, what can't be read is noted there and passed over.
+fn mark(
+    src: &Source,
+    packs: &[Listed],
+    survey: Survey,
+    head: Id,
+    since: i64,
+    noted: Option<Noted>,
+) -> Result<(HashSet<Id>, Option<Noted>), RepoError> {
     let Survey {
         entries,
         lists,
         reads,
-    } = survey(repo, packs)?;
-    let (head, _) = repo.current()?;
+        all,
+    } = survey;
     let mut marks = Marks {
-        repo,
+        src,
         kept: HashSet::new(),
         followed: HashSet::new(),
         saves: Vec::new(),
@@ -403,11 +524,24 @@ fn kept(repo: &Repository, packs: &[Listed], since: i64) -> Result<HashSet<Id>, 
         reads,
         stored: entries.clone(),
         gap: None,
+        noted,
     };
+    if let Some(noted) = &mut marks.noted {
+        noted.known = all;
+    }
     let mut walked = HashSet::new();
-    marks.diary(head, since, &mut walked)?;
+    if let Err(e) = marks.diary(head, since, &mut walked) {
+        match (marks.gap.take(), &mut marks.noted) {
+            (Some(missing), Some(noted)) => noted.unread.push((missing, Unread::Missing)),
+            _ => return Err(e),
+        }
+    }
+    if let Some(noted) = &mut marks.noted {
+        let entry = ObjectKind::DiaryEntry as u8;
+        noted.entries = marks.followed.iter().filter(|(k, _)| *k == entry).count() as u64;
+    }
     // A diary cut off from `head` (a rolled-back `head`, a crash's leftover) lives out the window.
-    for (end, entry) in undo::ends_among(repo, entries)? {
+    for (end, entry) in undo::ends_among(src.store, entries)? {
         if entry.who.time_ms >= since
             && let Err(e) = marks.diary(end, since, &mut walked)
         {
@@ -415,7 +549,7 @@ fn kept(repo: &Repository, packs: &[Listed], since: i64) -> Result<HashSet<Id>, 
             let Some(missing) = marks.gap.take() else {
                 return Err(e);
             };
-            repo.store().note(Warning::new(
+            src.store.note(Warning::new(
                 warning::DIARY_END_UNREADABLE,
                 format!(
                     "The diary that ends at entry {}, cut off from the current one, can't be read \
@@ -429,12 +563,12 @@ fn kept(repo: &Repository, packs: &[Listed], since: i64) -> Result<HashSet<Id>, 
     }
     marks.follow()?;
     marks.chunks(packs)?;
-    Ok(marks.kept)
+    Ok((marks.kept, marks.noted))
 }
 
-/// What `kept` has found so far, and what it has still to read.
+/// What `mark` has found so far, and what it has still to read.
 struct Marks<'a> {
-    repo: &'a Repository,
+    src: &'a Source<'a>,
     kept: HashSet<Id>,
     /// The records already followed, by kind: an ID kept as one kind can't stop another being read.
     followed: HashSet<(u8, Id)>,
@@ -448,6 +582,8 @@ struct Marks<'a> {
     stored: HashSet<Id>,
     /// An entry a diary named that the store doesn't hold, once one stopped marking.
     gap: Option<Id>,
+    /// `verify`'s notes; without them, what can't be read stops marking.
+    noted: Option<Noted>,
 }
 
 impl Marks<'_> {
@@ -466,19 +602,23 @@ impl Marks<'_> {
             if walked.contains(&(id, true)) || !walked.insert((id, after_within)) {
                 return Ok(());
             }
-            let entry = self.entry(&id)?;
+            let Some(entry) = self.entry(&id)? else {
+                return Ok(());
+            };
             let within = entry.who.time_ms >= since;
             if within || after_within {
                 self.state(&entry.state)?;
             }
             if within {
                 self.change(&entry);
-                if let Action::Undo(step) | Action::Redo(step) = entry.action {
-                    let step = self.entry(&step)?;
+                if let Action::Undo(step) | Action::Redo(step) = entry.action
+                    && let Some(step) = self.entry(&step)?
+                {
                     self.state(&step.state)?;
                     self.change(&step);
-                    if let Some(before) = step.parent {
-                        let before = self.entry(&before)?;
+                    if let Some(before) = step.parent
+                        && let Some(before) = self.entry(&before)?
+                    {
                         self.state(&before.state)?;
                     }
                 }
@@ -495,44 +635,106 @@ impl Marks<'_> {
         self.followed.insert((kind as u8, id))
     }
 
-    /// Keeps the diary entry `id` and reads it.
-    fn entry(&mut self, id: &Id) -> Result<DiaryEntry, RepoError> {
-        self.kept.insert(*id);
+    /// Keeps the diary entry `id` and reads it. One the store doesn't hold stops marking, noted in
+    /// `gap`; `None` is one `verify` noted it couldn't read.
+    fn entry(&mut self, id: &Id) -> Result<Option<DiaryEntry>, RepoError> {
         if !self.stored.contains(id) {
             self.gap = Some(*id);
             return Err(damaged(format!("the diary has no entry {id}")));
         }
-        self.repo.entry(id)
+        self.kept.insert(*id);
+        let read = entry_in(self.src.store, id);
+        let Some(noted) = &mut self.noted else {
+            return read.map(Some);
+        };
+        match read {
+            Ok(entry) => {
+                self.followed.insert((ObjectKind::DiaryEntry as u8, *id));
+                Ok(Some(entry))
+            }
+            Err(e) => {
+                let why = match e {
+                    RepoError::Damaged { .. } => Unread::Damaged(e.to_string()),
+                    e => Unread::Unreadable(e.to_string()),
+                };
+                noted.unread.push((*id, why));
+                Ok(None)
+            }
+        }
     }
 
-    /// Reads the record `id` of `kind`, which must be kept.
-    fn read(&self, id: &Id, kind: ObjectKind, what: &str) -> Result<Vec<u8>, RepoError> {
-        self.repo
-            .store()
-            .read_record(id, kind)
-            .map_err(|e| match e {
-                // Memory or I/O: the copy may be fine, so this isn't damage.
-                StoreError::Pack(e) if !is_damage(&e) => RepoError::Io(io::Error::other(format!(
-                    "Bolt couldn't read {what} {id}, which must be kept: {e}"
-                ))),
-                e => damaged(format!("{what} {id} can't be read ({e})")),
-            })
+    /// Reads the record `id` of `kind`, which must be kept; `None` when `verify` noted it couldn't.
+    fn read(
+        &mut self,
+        id: &Id,
+        kind: ObjectKind,
+        what: &str,
+    ) -> Result<Option<Vec<u8>>, RepoError> {
+        let e = match self.src.store.read_record(id, kind) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) => e,
+        };
+        if let Some(noted) = &mut self.noted {
+            noted.unread.push((*id, Unread::of(&e)));
+            return Ok(None);
+        }
+        Err(match e {
+            // Memory or I/O: the copy may be fine, so this isn't damage.
+            StoreError::Pack(e) if !is_damage(&e) => RepoError::Io(io::Error::other(format!(
+                "Bolt couldn't read {what} {id}, which must be kept: {e}"
+            ))),
+            e => damaged(format!("{what} {id} can't be read ({e})")),
+        })
+    }
+
+    /// `decoded` as the record `id`, `what`; `None` when `verify` noted it couldn't be.
+    fn decoded<T>(
+        &mut self,
+        id: &Id,
+        what: &str,
+        decoded: Result<T, DecodeError>,
+    ) -> Result<Option<T>, RepoError> {
+        match decoded {
+            Ok(value) => Ok(Some(value)),
+            Err(e) => {
+                let said = format!("{what} {id} can't be read ({e})");
+                let Some(noted) = &mut self.noted else {
+                    return Err(damaged(said));
+                };
+                noted.unread.push((*id, Unread::Damaged(said)));
+                Ok(None)
+            }
+        }
     }
 
     /// Keeps every chunk the lists to read name, opening each pack once. A list names only
-    /// chunks, so nothing more is followed. One that can't be read stops `tidy`, naming its pack.
+    /// chunks, so nothing more is followed. One that can't be read stops `tidy`, naming its pack;
+    /// `verify` checks each pack on its own, so passes over it here.
     fn chunks(&mut self, packs: &[Listed]) -> Result<(), RepoError> {
         for (at, listed) in packs.iter().enumerate() {
             let mut lines = self.reads.range((at, 0)..=(at, u64::MAX)).peekable();
             if lines.peek().is_none() {
                 continue;
             }
-            let path = self.repo.packs_dir().join(&listed.name);
+            let path = self.src.packs_dir.join(&listed.name);
             let cant = |e: PackError| cant_tidy(&path, &e);
-            let pack =
-                PackReader::open_in(self.repo.packs_folder(), &listed.name, &path).map_err(cant)?;
+            let pack = match PackReader::open_in(self.src.folder, &listed.name, &path) {
+                Ok(pack) => pack,
+                Err(_) if self.noted.is_some() => continue,
+                Err(e) => return Err(cant(e)),
+            };
             for (_, line) in lines {
-                let list = pack.read_chunk_list(line).map_err(cant)?;
+                let list = match pack.read_chunk_list(line) {
+                    Ok(list) => list,
+                    Err(_) if self.noted.is_some() => continue,
+                    Err(e) => return Err(cant(e)),
+                };
+                if let Some(noted) = &mut self.noted {
+                    let told = |id: &Id| !noted.known.contains(id) || noted.watch.contains(id);
+                    for chunk in list.chunks.iter().filter(|c| told(&c.id)) {
+                        noted.via.entry(chunk.id).or_insert(list.file);
+                    }
+                }
                 self.kept.extend(list.chunks.iter().map(|c| c.id));
             }
         }
@@ -553,20 +755,18 @@ impl Marks<'_> {
         }
         if let Some(id) = state.tags
             && self.first(ObjectKind::TagList, id)
+            && let Some(bytes) = self.read(&id, ObjectKind::TagList, "tag list")?
+            && let Some(tags) = self.decoded(&id, "tag list", TagList::decode(&bytes))?
         {
-            let bytes = self.read(&id, ObjectKind::TagList, "tag list")?;
-            let tags = TagList::decode(&bytes)
-                .map_err(|e| damaged(format!("tag list {id} can't be read ({e})")))?;
             for tag in tags.tags.values() {
                 self.save(tag.save);
             }
         }
         if let Some(id) = state.server_lines
             && self.first(ObjectKind::ServerLines, id)
+            && let Some(bytes) = self.read(&id, ObjectKind::ServerLines, "server lines")?
+            && let Some(servers) = self.decoded(&id, "server lines", ServerLines::decode(&bytes))?
         {
-            let bytes = self.read(&id, ObjectKind::ServerLines, "server lines")?;
-            let servers = ServerLines::decode(&bytes)
-                .map_err(|e| damaged(format!("server lines {id} can't be read ({e})")))?;
             for save in servers.servers.values().flat_map(|lines| lines.values()) {
                 self.save(*save);
             }
@@ -596,20 +796,31 @@ impl Marks<'_> {
 
     /// Reads every save and listing marked, and marks what each names, until none is left.
     fn follow(&mut self) -> Result<(), RepoError> {
-        let signed = self.repo.signatures_allowed();
         loop {
             if let Some(id) = self.saves.pop() {
-                let bytes = self.read(&id, ObjectKind::Save, "save")?;
-                let save = Save::decode(&bytes, signed)
-                    .map_err(|e| damaged(format!("save {id} can't be read ({e})")))?;
+                let Some(bytes) = self.read(&id, ObjectKind::Save, "save")? else {
+                    continue;
+                };
+                let decoded = Save::decode(&bytes, self.src.signed);
+                let Some(save) = self.decoded(&id, "save", decoded)? else {
+                    continue;
+                };
+                if let Some(noted) = &mut self.noted {
+                    noted.saves.push(id);
+                }
                 for parent in save.parents {
                     self.save(parent);
                 }
                 self.listing(save.root);
             } else if let Some(id) = self.listings.pop() {
-                let bytes = self.read(&id, ObjectKind::FolderListing, "folder listing")?;
-                let listing = Listing::decode(&bytes)
-                    .map_err(|e| damaged(format!("folder listing {id} can't be read ({e})")))?;
+                let Some(bytes) = self.read(&id, ObjectKind::FolderListing, "folder listing")?
+                else {
+                    continue;
+                };
+                let decoded = Listing::decode(&bytes);
+                let Some(listing) = self.decoded(&id, "folder listing", decoded)? else {
+                    continue;
+                };
                 for entry in listing.entries() {
                     match entry.kind {
                         // Content is kept by its fingerprint, unread; a big file's chunk lists
@@ -627,10 +838,14 @@ impl Marks<'_> {
                             }
                         }
                         EntryKind::Conflict => {
-                            return Err(damaged(format!(
+                            let said = format!(
                                 "folder listing {id} holds a conflict, which this version of \
                                  Bolt can't follow"
-                            )));
+                            );
+                            let Some(noted) = &mut self.noted else {
+                                return Err(damaged(said));
+                            };
+                            noted.unread.push((id, Unread::Damaged(said)));
                         }
                     }
                 }

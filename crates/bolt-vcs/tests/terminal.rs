@@ -164,6 +164,7 @@ fn without_a_terminal_bolts_own_words_are_plain() {
     run(&["unshelf"]);
     run(&["discard"]);
     run(&["tidy"]);
+    assert!(run(&["verify"]).contains("    + "));
 }
 
 /// A project whose store holds a damaged copy of the licence it is about to save.
