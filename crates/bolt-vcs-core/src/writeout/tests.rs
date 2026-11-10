@@ -1513,6 +1513,39 @@ fn unsaved_work_changed_to_as_many_bytes_after_the_plan_is_left_alone() {
     }
 }
 
+/// Unsaved work too long to cut is kept whole, compared with the plan's ID as it is read, so one
+/// changed to as many bytes is left out.
+#[test]
+fn unsaved_work_too_long_to_cut_is_kept_whole_unless_it_changed() {
+    // Files of 1 to 2 MiB are cut; a longer one is too long to cut.
+    crate::chunks::set_test_cut_sizes(Some((1 << 20, 2 << 20)));
+    let mine = noise(11, 3 << 20);
+    let mut changed = mine.clone();
+    changed[1 << 20..(1 << 20) + 4].copy_from_slice(b"MINE");
+    let id = hash_content(&mine);
+    for (now, kept) in [(&mine, true), (&changed, false)] {
+        let (dir, mut repo) = project();
+        let from = current_save(&repo).unwrap();
+        let actions = vec![Action {
+            path: "big".into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::File,
+                id,
+                size: mine.len() as u64,
+            }),
+        }];
+        fs::write(dir.path().join("big"), now).unwrap();
+        let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let copies = keep_safety_copies(&repo, &actions, from, drive, &mut packs).unwrap();
+        assert_eq!(copies.len(), usize::from(kept), "{kept}");
+        assert_eq!(packs.kind_of(&id), kept.then_some(ObjectKind::Content));
+    }
+    crate::chunks::set_test_cut_sizes(None);
+}
+
 /// A new project holding unsaved work a discard would remove, and the actions that remove it:
 /// 120 small files in five folders, some of them alike, a big file and, where links can be made,
 /// a link.

@@ -1620,15 +1620,15 @@ pub(crate) fn store_file(
     if seen.is_some_and(|seen| is_too_long_to_cut(seen.size)) {
         // Hashed first, then stored whole unless the store holds it already.
         let (mut file, id, size) = hash_scanned(dir, name, rel, seen, after_read)?;
-        if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
-            return Ok((id, size));
-        }
-        file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
-        return match packs.add_content_from(&mut file, id) {
-            Ok(_) => Ok((id, size)),
-            Err(PackError::ContentChanged) => Err(changed()),
-            Err(e) => Err(e.into()),
+        let again = || {
+            file.seek(SeekFrom::Start(0))
+                .map(|_| file)
+                .map_err(unreadable)
         };
+        if !ingest::store_long(packs, store, id, size, again)? {
+            return Err(changed());
+        }
+        return Ok((id, size));
     }
     let (mut file, opened) = open_scanned(dir, name, rel, seen)?;
     let before = stamp_of(&opened);

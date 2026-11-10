@@ -25,7 +25,7 @@ use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, writable_here};
-use crate::pack::{ObjectKind, PackError, PackSet};
+use crate::pack::{ObjectKind, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
 use crate::snapshot::{NAMED, SaveError, ingest_failed, listed, read_folder, same_file};
@@ -545,11 +545,7 @@ fn copy_in(
     };
     if is_too_long_to_cut(e.size) {
         // Stored whole, and compared with the plan's ID as it is read.
-        return match packs.add_content_from(&mut file, e.id) {
-            Ok(_) => Ok(true),
-            Err(PackError::ContentChanged) => Ok(false),
-            Err(err) => Err(err.into()),
-        };
+        return ingest::store_long(packs, store, e.id, e.size, || Ok(file));
     }
     // A file that isn't what the plan found any more is left as it is, like a changed one.
     match ingest::store_bytes(packs, store, &mut file, e.size) {

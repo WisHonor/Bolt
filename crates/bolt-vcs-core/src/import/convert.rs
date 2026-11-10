@@ -1159,17 +1159,9 @@ impl<'r> Converter<'r> {
                 oid: p.oid_hex(),
             });
         }
-        if long
-            && !self.packs.contains(&content)
-            && !self
-                .store
-                .has_good_copy(&content, ObjectKind::Content, p.size)?
-        {
-            let mut again = self.git.lfs_object(p)?.ok_or_else(|| lfs_changed(&at))?;
-            match self.packs.add_content_from(&mut again, content) {
-                Err(PackError::ContentChanged) => return Err(lfs_changed(&at)),
-                other => other?,
-            };
+        let again = || self.git.lfs_object(p)?.ok_or_else(|| lfs_changed(&at));
+        if long && !ingest::store_long(self.packs, self.store, content, p.size, again)? {
+            return Err(lfs_changed(&at));
         }
         Ok(content)
     }
@@ -1205,18 +1197,13 @@ impl<'r> Converter<'r> {
             (size, blob.start)
         };
         let content = hasher.finish();
-        if !self.packs.contains(&content)
-            && !self
-                .store
-                .has_good_copy(&content, ObjectKind::Content, size)?
-        {
-            let mut blob = self.git.blob_reader(id).map_err(|e| at(e, place))?;
-            match self.packs.add_content_from(&mut blob, content) {
-                Err(PackError::Io(e)) => return Err(failed(e)),
-                other => other?,
-            };
+        let again = || self.git.blob_reader(id).map_err(|e| at(e, place));
+        match ingest::store_long(self.packs, self.store, content, size, again) {
+            Ok(true) => Ok((content, size, start)),
+            Ok(false) => Err(PackError::ContentChanged.into()),
+            Err(ImportError::Pack(PackError::Io(e))) => Err(failed(e)),
+            Err(e) => Err(e),
         }
-        Ok((content, size, start))
     }
 
     /// Stores a record unless this converter stored it already, this pack holds it or the store
@@ -1636,6 +1623,15 @@ mod tests {
         // A store that holds them already gets neither again.
         convert(dir.path(), "a", |c| c.commit(&first).unwrap());
         assert_eq!(held(), [chunks_and_small, lists]);
+        // Too long to cut, the big one is read to learn its ID, then again to be stored whole.
+        set_test_cut_sizes(Some((1 << 20, 2 << 20)));
+        let (save, store) = convert(dir.path(), "b", |c| c.commit(&first).unwrap());
+        set_test_cut_sizes(None);
+        let root = store
+            .listing(&store.save(&save, false).unwrap().root)
+            .unwrap();
+        assert!(content(&store, &root.get("big").unwrap().id) == big);
+        assert_eq!(stored(dir.path(), "b", ObjectKind::ChunkList), 0);
     }
 
     #[test]

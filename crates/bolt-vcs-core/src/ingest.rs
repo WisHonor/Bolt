@@ -1,5 +1,6 @@
 //! How a file's bytes enter the store: read once, a small file whole and a big one cut into
-//! chunks as it is read, each chunk hashed, checked and compressed on the workers.
+//! chunks as it is read, each chunk hashed, checked and compressed on the workers. One too long
+//! to cut is stored whole, once its ID is known.
 
 use std::io::{self, Read};
 
@@ -32,7 +33,8 @@ impl From<StoreError> for IngestError {
 }
 
 /// Stores the `size` bytes `reader` gives, reading them once, and gives their ID. Fewer or more
-/// bytes than `size` is `Changed`. A file too long to cut is its caller's to store whole.
+/// bytes than `size` is `Changed`. A file too long to cut is stored whole by `store_long`, which
+/// needs its ID first.
 pub(crate) fn store_bytes(
     packs: &mut PackSet,
     store: &Store,
@@ -60,6 +62,26 @@ pub(crate) fn store_held(
         return cut(packs, store, &mut &*bytes, size);
     }
     store_whole(packs, store, bytes)
+}
+
+/// Stores whole a file too long to cut, of `size` bytes and the ID `id` (from a first read, or a
+/// plan), unless the pack being built or the store holds it. `open` gives its bytes, which are
+/// compared with `id` as they are stored; `false` if they aren't `id`'s any more.
+pub(crate) fn store_long<R: Read, E: From<PackError> + From<StoreError>>(
+    packs: &mut PackSet,
+    store: &Store,
+    id: Id,
+    size: u64,
+    open: impl FnOnce() -> Result<R, E>,
+) -> Result<bool, E> {
+    if packs.contains(&id) || store.has_good_copy(&id, ObjectKind::Content, size)? {
+        return Ok(true);
+    }
+    match packs.add_content_from(&mut open()?, id) {
+        Ok(_) => Ok(true),
+        Err(PackError::ContentChanged) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Stores `bytes`, a small file, unless the pack being built or the store holds them, and gives
@@ -409,6 +431,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A file too long to cut is stored whole only if its bytes are its ID's, and not read again
+    /// once held.
+    #[test]
+    fn a_file_too_long_to_cut_is_stored_whole_once() {
+        let f = Folders::new();
+        let (data, other) = (noise(5, 100_000), noise(6, 100_000));
+        let id = hash_content(&data);
+        let (store, mut packs) = (f.store(), f.packs());
+        let long = |packs: &mut PackSet, bytes: &[u8]| {
+            store_long(packs, &store, id, 100_000, || Ok::<_, IngestError>(bytes)).unwrap()
+        };
+        assert!(!long(&mut packs, &other));
+        assert!(!packs.contains(&id));
+        assert!(long(&mut packs, &data));
+        assert_eq!(packs.kind_of(&id), Some(ObjectKind::Content));
+        let never = || -> Result<&[u8], IngestError> { panic!("read again") };
+        assert!(store_long(&mut packs, &store, id, 100_000, never).unwrap());
+        // Held by the store, in a command of its own.
+        packs.finish().unwrap();
+        let mut next = f.packs();
+        assert!(store_long(&mut next, &f.store(), id, 100_000, never).unwrap());
+        assert!(added(next).is_empty());
     }
 
     #[test]
