@@ -1673,6 +1673,15 @@ mod tests {
             tidied(&rewritten),
             "Nothing to free: storage holds 2.0 KiB.\n"
         );
+        // A small pack rewritten under its own name, so none removed, is nothing to free too.
+        let renamed_alike = TidyReport {
+            packs_written: 1,
+            ..nothing
+        };
+        assert_eq!(
+            tidied(&renamed_alike),
+            "Nothing to free: storage holds 2.0 KiB.\n"
+        );
         // Merged packs that do free something say so.
         let merged = TidyReport {
             to_free: 100,
