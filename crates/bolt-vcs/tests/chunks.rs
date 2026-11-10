@@ -104,6 +104,23 @@ fn chunking_changes_no_ids() {
     }
 }
 
+/// With no `bolt.toml`, files are cut from exactly 1 MiB, as before projects had rules.
+#[test]
+fn a_project_without_a_rules_file_cuts_files_from_exactly_1_mib() {
+    let env = Env::empty();
+    ok(&env, &["start"]);
+    let cut = write_noise(&env.root().join("cut.bin"), 21, MIB);
+    let whole = write_noise(&env.root().join("whole.bin"), 22, MIB - 1);
+    let out = env.bolt().args(["save", "--json", "Two"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = doc["warnings"].as_array().unwrap();
+    assert!(warnings.is_empty(), "{doc}");
+    assert_eq!(copies_of(env.root(), &cut), [ObjectKind::ChunkList]);
+    assert_eq!(ObjectKind::ChunkList as u8, 18);
+    assert_eq!(copies_of(env.root(), &whole), [ObjectKind::Content]);
+}
+
 #[test]
 fn big_files_go_to_and_come_back_byte_for_byte() {
     let (env, first) = with_a_big_file(1, 3 * MIB);

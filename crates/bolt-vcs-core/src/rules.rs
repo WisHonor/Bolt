@@ -437,6 +437,24 @@ mod tests {
     }
 
     #[test]
+    fn bolts_own_values_are_the_ones_before_rules_existed() {
+        let own = Rules {
+            preset: None,
+            chunk_files_over: 1_048_576,
+            ask_over_bytes: 100_000_000,
+            ask_over_files: 10_000,
+            rules: vec![],
+        };
+        assert_eq!(Rules::default(), own);
+        let dir = tempfile::tempdir().unwrap();
+        let read = read_in(dir.path());
+        assert_eq!(read.rules, own);
+        assert!(!read.file);
+        assert_eq!(read.skipped, None);
+        assert!(read.ignored.is_empty());
+    }
+
+    #[test]
     fn no_file_means_bolts_own_values_without_a_word() {
         let dir = tempfile::tempdir().unwrap();
         let read = read_in(dir.path());
