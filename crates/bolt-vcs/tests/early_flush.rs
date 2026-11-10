@@ -102,15 +102,16 @@ fn packs_as_stored(root: &Path) -> Vec<PackAsStored> {
         .unwrap()
         .map(|pack| {
             let entries = entries_with_bytes(&pack.unwrap().path());
-            // In order of offset: a save's random ID sorts it anywhere in the index.
-            let mut offsets: Vec<u64> = entries.iter().map(|(e, _)| e.offset).collect();
-            offsets.sort_unstable();
-            // A save record and a diary entry hold a random change ID and the time: not compared.
-            let kept = entries
+            // A save record and a diary entry hold a random change ID and the time, so their
+            // stored sizes differ from run to run and what follows them moves: not compared.
+            let kept: Vec<_> = entries
                 .into_iter()
                 .filter(|(e, _)| !matches!(e.kind, ObjectKind::Save | ObjectKind::DiaryEntry))
                 .map(|(e, bytes)| (e.id, e.kind, e.offset, e.stored_size, bytes))
                 .collect();
+            // In order of offset too: the index is in order of ID.
+            let mut offsets: Vec<u64> = kept.iter().map(|entry| entry.2).collect();
+            offsets.sort_unstable();
             (kept, offsets)
         })
         .collect();
