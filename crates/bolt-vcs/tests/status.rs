@@ -109,7 +109,7 @@ fn status_lists_added_modified_removed_and_kind_changes() {
     ];
     if kind_changed {
         let kind = if cfg!(unix) { "executable" } else { "symlink" };
-        expected.push(change("c", "kind-changed", kind));
+        expected.push(change("c", "kind_changed", kind));
     }
     expected.push(change("new\u{202e}.txt", "added", "file"));
     expected.push(change("sub/s.txt", "removed", "file"));

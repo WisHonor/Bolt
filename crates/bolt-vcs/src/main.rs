@@ -942,7 +942,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 warnings.extend(repo.store().warnings());
                 let document = json!({
                     "bolt_json": BOLT_JSON,
-                    "result": "nothing-changed",
+                    "result": "nothing_changed",
                     "paths": paths,
                     "warnings": output::warnings_json(&warnings),
                 });

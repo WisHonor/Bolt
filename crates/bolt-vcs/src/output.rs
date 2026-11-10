@@ -9,6 +9,7 @@ use bolt_core::changes::{Endings, Lines, Tag, eol_only, only_line_endings};
 use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
+use bolt_core::listing::EntryKind;
 use bolt_core::save::{Person, Save};
 use bolt_core::shelf::{ShelfInfo, Shelved};
 use bolt_core::switch::DiscardOutcome;
@@ -63,9 +64,13 @@ pub fn change_json(c: &FileChange) -> Value {
             ChangeKind::Added => "added",
             ChangeKind::Removed => "removed",
             ChangeKind::Modified => "modified",
-            ChangeKind::KindChanged => "kind-changed",
+            ChangeKind::KindChanged => "kind_changed",
         },
-        "kind": c.kind.as_str(),
+        // People see `project-link`; every value in JSON is written with underscores.
+        "kind": match c.kind {
+            EntryKind::ProjectLink => "project_link",
+            kind => kind.as_str(),
+        },
         "old_size": c.old_size,
         "new_size": c.new_size,
     })
@@ -495,8 +500,8 @@ impl fmt::Display for LinesJson<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (shown, hunks, timed_out) = match self.lines {
             Lines::Binary => ("binary", &[][..], false),
-            Lines::TooBig => ("too-big", &[][..], false),
-            Lines::TooManyLines => ("too-many-lines", &[][..], false),
+            Lines::TooBig => ("too_big", &[][..], false),
+            Lines::TooManyLines => ("too_many_lines", &[][..], false),
             Lines::Hunks { hunks, timed_out } => ("text", &hunks[..], *timed_out),
         };
         f.write_str("{\"hunks\":[")?;
@@ -1368,6 +1373,37 @@ mod tests {
             object: None,
             needed_by: None,
             message: message.into(),
+        }
+    }
+
+    #[test]
+    fn values_bolt_chooses_are_written_with_underscores() {
+        let change = FileChange {
+            path: "sub",
+            change: ChangeKind::KindChanged,
+            kind: EntryKind::ProjectLink,
+            old_kind: Some(EntryKind::File),
+            old_size: Some(1),
+            new_size: Some(0),
+            old_id: None,
+            new_id: None,
+        };
+        let doc = change_json(&change);
+        assert_eq!(
+            (&doc["change"], &doc["kind"]),
+            (&json!("kind_changed"), &json!("project_link"))
+        );
+        for (lines, content) in [
+            (Lines::TooBig, "too_big"),
+            (Lines::TooManyLines, "too_many_lines"),
+        ] {
+            let shown = LinesJson {
+                change: &change,
+                lines: &lines,
+            }
+            .to_string();
+            let doc: Value = serde_json::from_str(&shown).unwrap();
+            assert_eq!(doc["content"], content, "{doc}");
         }
     }
 

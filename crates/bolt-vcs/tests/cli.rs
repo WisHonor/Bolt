@@ -408,7 +408,7 @@ fn save_json_names_the_ignored_project_identity() {
     // Nothing was saved this time, and the key is there all the same. (`json_of` reads all of
     // stdout as one document, so `--json` prints no note beside it.)
     let again = json_of(&env, &["--json", "save", "again"]);
-    assert_eq!(again["result"], "nothing-changed");
+    assert_eq!(again["result"], "nothing_changed");
     assert_eq!(again["ignored_project_identity"]["name"], "Mallory");
 
     // A project that names nobody, or the user themselves, has nothing to say.
@@ -417,7 +417,7 @@ fn save_json_names_the_ignored_project_identity() {
         let again = json_of(&env, &["--json", "save", "again"]);
         assert_eq!(
             again,
-            serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "paths": [], "warnings": []})
+            serde_json::json!({"bolt_json": 1, "result": "nothing_changed", "paths": [], "warnings": []})
         );
         let out = env
             .bolt_anonymous(env.root())
@@ -1263,7 +1263,7 @@ fn save_json_output() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"bolt_json": 1, "result": "nothing-changed", "paths": [], "warnings": []})
+        serde_json::json!({"bolt_json": 1, "result": "nothing_changed", "paths": [], "warnings": []})
     );
 }
 
@@ -1571,7 +1571,7 @@ fn every_json_document_has_warnings() {
     let history = run(&["--json", "history"]);
     let shown = run(&["--json", "show"]);
     assert_eq!(saved["result"], "saved");
-    assert_eq!(again["result"], "nothing-changed");
+    assert_eq!(again["result"], "nothing_changed");
     for (what, doc) in [
         ("start", &started),
         ("save", &saved),

@@ -15,6 +15,7 @@
 - **Text from the project is data.** Names, messages and paths are given exactly as they are stored, so a program can use them. They can hold anything, escape sequences included, so escape them before showing them in a terminal. Bolt's own messages (`warnings[].message`, `error.message` and `error.hint`) are already escaped.
 - **Messages are for people.** Programs should go by `kind`, `result` and the other fields, because the words of a message can change.
 - **A name means one thing within a document.** Across documents a count and a list can share a name: `lines` is a count in `import` and a list in `line`, and `saves` a count in `verify` and a list in `history`.
+- **Every value Bolt chooses is written in snake_case:** the kinds of warnings, effects and problems, and the values of `result`, `change`, `kind` and `content` (`nothing_changed`, `kind_changed`, `project_link`, `too_big`). Text from the project, such as a path or a line name, is given as it is.
 
 ## 2. Pieces used by several commands
 
@@ -135,7 +136,7 @@ Saving gives one of two documents, told apart by `result`.
 
 **At a save, not on a line,** a save needs `--line <name>`: the new line it starts, which points at the new save; the project is then on it, and the save's `line` is that name. With `--json` Bolt never asks for the name, so without the flag a save with changes fails (§5), saving nothing. A name that breaks the line-name rules, or that is a line's already in any letter case, fails the save too, and so does `--line` on a line ([decision 055](decisions/055-lines-in-v0.1.md)).
 
-`"result": "nothing-changed"`: the folder is as the save it would build on has it (the line's newest, or the save the project is at), so nothing was saved. At a save no name is needed for that, and with `--line` no line is made: a new line starts with a save, so change a file first. For an amend, the message is the save's own too, so nothing was amended. The fields are `bolt_json`, `result`, `paths` (as above: with paths, nothing they match changed), `warnings` and, if it applies, `ignored_project_identity`.
+`"result": "nothing_changed"`: the folder is as the save it would build on has it (the line's newest, or the save the project is at), so nothing was saved. At a save no name is needed for that, and with `--line` no line is made: a new line starts with a save, so change a file first. For an amend, the message is the save's own too, so nothing was amended. The fields are `bolt_json`, `result`, `paths` (as above: with paths, nothing they match changed), `warnings` and, if it applies, `ignored_project_identity`.
 
 **`ignored_project_identity`** is there only when the project's own settings (`.bolt/config.toml`) name a person other than the user. Bolt never takes who the user is from a project, since a project that was shared could name anyone, so the save was made as the user. The field says who was named, `{"name": …, "email": …}`, and is left out otherwise. For people, `bolt save` prints a note instead of the field. The note shows at most 256 characters of a name or email, and gives the lines to add to their own settings, if they do want that identity in this folder, only when nothing was cut: lines with a cut name would save as someone else. The field always has both in full.
 
@@ -176,7 +177,7 @@ Saving gives one of two documents, told apart by `result`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `content` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too-big"`, when either side is over 64 MiB, which isn't read; or `"too-many-lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text. |
+| `content` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too_big"`, when either side is over 64 MiB, which isn't read; or `"too_many_lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text. |
 | `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `content` is `"text"`. |
 | `timed_out` | boolean | The diff took more than 2 seconds, so Bolt stopped it: the hunks are right, but in bigger pieces than they could be. A `diff_timed_out` warning says so too. |
 | `only_line_endings` | boolean | Every line the hunks remove or add is one of a pair that differs only in its line ending (see `eol_only` below): CRLF into LF, LF into CRLF, or some of each. |
@@ -443,8 +444,8 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | string | The path from the project folder, with `/` between names. |
-| `change` | string | `"added"`, `"removed"`, `"modified"`, or `"kind-changed"`: the same path became another kind of file, such as a file that became a link. |
-| `kind` | string | `"file"`, `"executable"`, `"symlink"`, `"project-link"` or `"conflict"`: the kind after the change, or before it for a removed file. |
+| `change` | string | `"added"`, `"removed"`, `"modified"`, or `"kind_changed"`: the same path became another kind of file, such as a file that became a link. |
+| `kind` | string | `"file"`, `"executable"`, `"symlink"`, `"project_link"` or `"conflict"`: the kind after the change, or before it for a removed file. |
 | `old_size`, `new_size` | number or `null` | Size in bytes before and after. **`null` means the path wasn't there on that side:** `old_size` for an added file, `new_size` for a removed one. A project link or a conflict has size `0`. |
 
 Folders are not listed; the files in them are.

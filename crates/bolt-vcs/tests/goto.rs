@@ -96,7 +96,7 @@ fn read_only_commands_say_a_switch_is_unfinished() {
 
     // The next command that changes the project finishes it, and says so.
     let (kinds, doc) = warning_kinds(&env, &["save", "B"]);
-    assert_eq!(doc["result"], "nothing-changed", "{doc}");
+    assert_eq!(doc["result"], "nothing_changed", "{doc}");
     assert_eq!(kinds, ["switch_finished"]);
     let (kinds, doc) = warning_kinds(&env, &["status"]);
     assert!(kinds.is_empty(), "{doc}");

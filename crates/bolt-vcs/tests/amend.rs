@@ -163,7 +163,7 @@ fn amend_with_nothing_new_says_so() {
     let said = ok(&env, &["save", "--amend", "Files"]);
     assert!(said.starts_with("Nothing to amend: "), "{said}");
     let doc = json(&env, &["save", "--amend"]);
-    let nothing = json!({"bolt_json": 1, "result": "nothing-changed", "paths": [], "warnings": []});
+    let nothing = json!({"bolt_json": 1, "result": "nothing_changed", "paths": [], "warnings": []});
     assert_eq!(doc, nothing);
     // With paths, only what they name counts.
     write(&env, "b.txt", "b\n");
