@@ -242,6 +242,8 @@ pub struct Rule { pub files: Vec<String>, pub lockable: Option<bool>, pub confli
 pub struct Rules { pub preset: Option<String>, pub chunk_files_over: u64, pub ask_over_bytes: u64, pub ask_over_files: u64, pub rules: Vec<Rule> }
 impl Default for Rules { /* 1 MiB, 100,000,000, 10,000, no rules */ }
 pub fn parse_size(text: &str) -> Option<u64>;
+/// A setting's size as `bolt.toml` would write it: the largest unit that gives it exactly, the 1,024 family first.
+pub fn size_text(bytes: u64) -> String;       // 1048576 -> "1 MiB", 100000000 -> "100 MB", 1500 -> "1500 B"
 /// What a `bolt.toml`'s text means, and each name passed over with why. `Err` says why the text isn't TOML.
 pub fn parse(text: &[u8]) -> Result<(Rules, Vec<(String, String)>), String>;
 #[derive(Clone, Debug, Default)]
@@ -269,6 +271,7 @@ impl Store {
 #[test] fn every_vector_reads_as_it_says() { /* rules.json: values, kept rules, ignored names in order, skipped */ }
 #[test] fn sizes_read_in_both_families() {}
 #[test] fn a_size_that_does_not_fit_64_bits_is_no_size() {}
+#[test] fn a_settings_size_is_written_in_the_largest_exact_unit_and_reads_back() { /* 1 MiB, 100 MB, 1 GiB, 5 GB, 1500 B, 0 B; parse_size(size_text(n)) == n */ }
 #[test] fn a_file_of_nested_brackets_is_passed_over_without_overflowing_the_stack() { /* 100,000 `[` */ }
 #[test] fn a_link_a_folder_and_a_file_over_1_mib_are_each_passed_over() { /* read(), through a real folder */ }
 #[test] fn the_file_is_never_read_through_a_link() { /* a link to a file outside: skipped, and the target's text appears in no warning */ }
@@ -469,7 +472,7 @@ pub fn first_time(word: &str, settings_folder: Option<&Path>) -> bool;
 - [ ] **Step 4:** Run `--test git_words`, `--test cli`. Expected: PASS.
 - [ ] **Step 5:** Commit: `Accept Git's words as shortcuts, and explain the ones Bolt doesn't run`.
 
-### Task 9: `bolt verify`, and two things `tidy` passes over
+### Task 9: `bolt verify`, and two things that no longer stop `tidy`
 
 Decisions 118 and 123 (items 6 and 7); storage-format.md §11; json.md (`verify`).
 
@@ -536,20 +539,106 @@ pub fn verify(repo: &Repository, window_days: u32, now_ms: i64, progress: &mut d
 - [ ] **Step 4:** Run `-p bolt-vcs-core verify`, `-p bolt-vcs-core tidy`, `--test verify`, `--test tidy`, `--test redteam7`, then the workspace. Expected: PASS.
 - [ ] **Step 5:** Commit: `Add bolt verify, and let tidy pass over what an earlier tidy freed`.
 
-### Tasks 10 to 12: every command in the new layout
+### Task 10: `save`, `status`, `changes`, `history` and `show` in the new design
 
-Decision 120; terminal.md; the review's fact list. Each of the three tasks restyles a group of commands that exist today, the same way:
+Decision 120; terminal.md; the canvas's screens for these commands; the review's fact list.
 
-1. Read the canvas's screens for the group and the review. For every line of every screen, either build it or write down why not: the fact it gets wrong, and Bolt's fact. That list goes into the task's report, for the rulings file.
+**Files:** `crates/bolt-vcs/src/main.rs`, `output.rs`; `docs/terminal.md` (§12); the tests of these commands (`cli.rs`, `status.rs`, `changes.rs`, `amend.rs`, `lines.rs`, `terminal.rs`).
+
+**How a restyle task works** (the same for Tasks 10, 11 and 12):
+1. Read the canvas's screens for the group, and the review. For every line of every screen, either build it or write down why not: the fact it gets wrong, and Bolt's fact. That list goes into the task's report, for the rulings file.
 2. The outcome line first, details indented four, lists as terminal.md §5 and §7, a `Next:` or "Changed your mind?" line where terminal.md §6 gives one. Colours by role. Errors, warnings and hints keep their words.
 3. Update the tests that match the old text. Add one test per command that runs it with a terminal faked at 60, 80 and 120 columns, and one that it prints nothing new without a terminal.
 4. Fill in terminal.md §12 for the group: each state's outcome line.
 
-**Task 10: `save`, `status`, `changes`, `history`, `show`.** Files: `main.rs`, `output.rs`, their tests. Facts to keep: no line counts per file; `Updated` for an amend; added, removed, modified and kind changed are the only kinds; `status --full`; the first-save stops and their hints as they are. Commit: `Lay out save, status, changes, history and show in the new design`.
+**Facts to keep:** no line counts per file in `save` or `status`; `Updated` for an amend; added, removed, modified and kind changed are the only kinds; `status --full`; `changes --save`; the first-save stops (line endings, Git LFS pointers) and their hints as they are; `show` gives author and saver, and the full fingerprint is 64 hex digits.
 
-**Task 11: `goto`, `discard`, `line`, `undo`, `redo`, `undo --list`, `undo --to`, `shelf`, `shelf --list`, `unshelf`, `tidy`.** Facts to keep: no `--continue`; files in use fail with exit code 1 after the rest is written; undo stopped by unsaved work names only `--shelve`; shelf numbers never shift; `undo --list` shows up to 20 steps then "and more"; entry IDs are 12 hex digits; `tidy`'s "about X to free" line stays on stderr on a terminal. Commit: `Lay out goto, discard, lines, undo, shelves and tidy in the new design`.
+- [ ] **Step 1: Write the failing tests:**
 
-**Task 12: `import` and its stops; help.** Files also: `import_output.rs`, `crates/bolt-vcs/src/help.rs` (new). Facts to keep: `bolt import` takes no argument and works in place; every Git LFS stop and its hint as decisions 085, 089 and 091 word them; the canvas doesn't cover `tidy` stopping at a pack it can't read or the import's work stop: lay those out by the same rules. Help: `bolt`, `bolt help` and `bolt --help` print the overview of terminal.md §11; `bolt help <command>` and `--help` lead with examples; only real options are listed. Tests: `the_overview_lists_every_command_once_and_no_git_word`, `each_commands_help_leads_with_examples_that_parse` (every example line is run through clap and must parse). Commit: `Lay out import and help in the new design`.
+```rust
+#[test] fn save_says_saved_then_the_id_the_message_and_the_line() {}
+#[test] fn an_amend_says_updated_and_that_the_id_stays() {}
+#[test] fn nothing_to_save_names_the_last_save_and_exits_0() {}
+#[test] fn a_partial_save_says_what_it_left_out() {}
+#[test] fn status_opens_with_where_you_are_then_lists_changes_in_columns() {}
+#[test] fn status_cuts_a_long_path_from_its_middle_only_on_a_terminal() { /* 60, 80, 120 columns, and none */ }
+#[test] fn history_marks_the_current_save_and_cuts_long_messages_at_the_end() {}
+#[test] fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {}
+#[test] fn changes_colours_only_added_removed_and_hunk_lines() {}
+#[test] fn each_of_these_commands_prints_no_new_line_without_a_terminal() {}
+```
+- [ ] **Step 2:** Run them. Expected: FAIL.
+- [ ] **Step 3:** Implement, following the method above.
+- [ ] **Step 4:** Run each touched test file, then the workspace. Expected: PASS.
+- [ ] **Step 5:** Commit: `Lay out save, status, changes, history and show in the new design`.
+
+### Task 11: `goto`, `discard`, lines, undo, shelves and `tidy` in the new design
+
+Decision 120; terminal.md; the canvas's screens for these commands; the review's fact list.
+
+**Files:** `crates/bolt-vcs/src/main.rs`, `output.rs`; `docs/terminal.md` (§12); the tests of these commands (`goto.rs`, `discard.rs`, `lines.rs`, `undo.rs`, `shelf.rs`, `tidy.rs`, `recovery.rs`, `terminal.rs`).
+
+**How a restyle task works:** as in Task 10 (its four numbered points apply here word for word: read the screens and write down every fact the canvas gets wrong; outcome first; update and add tests at 60, 80 and 120 columns and without a terminal; fill in terminal.md §12).
+
+**Facts to keep:** there is no `goto --continue`: the next changing command finishes a stopped switch and says so; files in use fail with exit code 1 after the rest is written; an undo or redo stopped by unsaved work names only `--shelve`; a bare `bolt discard` throws away every unsaved change, undoably, with no `--all`; a new shelf takes the smallest free number and numbers never shift; `bolt unshelf` brings back the newest; default shelf messages are `Shelved`, `Set aside by undo` and `Set aside by redo`; `undo --list` shows the steps redo can bring back, then up to 20 undo steps, then "and more"; entry IDs are 12 hex digits and `undo --to` needs at least 8; `tidy` keeps the undo window and leaves packs changed in the last 24 hours; its "about X to free" line stays on stderr on a terminal; a lost `head` stops every command and says the saves are safe.
+
+- [ ] **Step 1: Write the failing tests:**
+
+```rust
+#[test] fn goto_says_switched_to_and_how_many_files_it_wrote() {}
+#[test] fn goto_stopped_by_unsaved_work_lists_the_files_and_changes_nothing() {}
+#[test] fn discard_says_threw_away_and_that_undo_brings_it_back() {}
+#[test] fn line_marks_the_current_line_with_the_marker() {}
+#[test] fn undo_and_redo_say_what_they_took_back_or_brought_back() {}
+#[test] fn undo_list_numbers_the_steps_and_marks_where_you_are() {}
+#[test] fn shelf_and_unshelf_say_the_shelfs_number() {}
+#[test] fn shelf_list_aligns_its_columns() {}
+#[test] fn tidy_says_freed_and_how_many_packs() {}
+#[test] fn changed_your_mind_shows_only_on_a_terminal() {}
+#[test] fn each_of_these_commands_fits_60_80_and_120_columns() {}
+#[test] fn each_of_these_commands_prints_no_new_line_without_a_terminal() {}
+```
+- [ ] **Step 2:** Run them. Expected: FAIL.
+- [ ] **Step 3:** Implement, following the method above.
+- [ ] **Step 4:** Run each touched test file, then the workspace. Expected: PASS.
+- [ ] **Step 5:** Commit: `Lay out goto, discard, lines, undo, shelves and tidy in the new design`.
+
+### Task 12: `import` and help in the new design
+
+Decision 120; terminal.md §11; the canvas's screens for `import` and help; the review's fact list; decisions 085, 089 and 091 for the stops.
+
+**Files:**
+- Create: `crates/bolt-vcs/src/help.rs`.
+- Modify: `crates/bolt-vcs/src/main.rs`, `import_output.rs`; `docs/terminal.md` (§12); `crates/bolt-vcs/tests/import.rs`, `import_lfs.rs`, `cli.rs`, `terminal.rs`.
+
+**How a restyle task works:** as in Task 10 (its four numbered points apply here word for word).
+
+**Facts to keep:** `bolt import` takes no argument and works in place, next to `.git/`; a second import is refused; uncommitted Git work comes along; an import that stops keeps the started `.bolt`; the summary's counts are those `import_output.rs` prints today; every Git LFS stop and its hint are worded as decisions 085, 089 and 091 word them, and none takes a flag. The canvas doesn't cover `tidy` stopping at a pack it can't read, or the import's work stop with decision 091's hint: lay those two out by the same rules as the others. Help lists only what each command really takes, and no Git word.
+
+**Interfaces:**
+```rust
+// help.rs
+pub fn overview() -> String;                          // terminal.md §11: the three groups
+pub fn examples(command: &str) -> &'static [(&'static str, &'static str)];   // (command line, what it does)
+```
+
+- [ ] **Step 1: Write the failing tests:**
+
+```rust
+#[test] fn the_import_summary_leads_with_imported_and_its_counts() {}
+#[test] fn each_git_lfs_stop_keeps_its_words_and_names_no_flag() {}
+#[test] fn the_work_stop_is_laid_out_like_every_other_error() { /* decision 091's hint, whole */ }
+#[test] fn bolt_alone_help_and_dash_dash_help_print_the_overview() {}
+#[test] fn the_overview_lists_every_command_once_and_no_git_word() {}
+#[test] fn each_commands_help_leads_with_examples_then_usage_then_options() {}
+#[test] fn each_commands_help_leads_with_examples_that_parse() { /* every example line is run through clap and must parse */ }
+#[test] fn help_lists_only_options_the_command_takes() { /* no -m, --wait, --repair, --allow-lfs-pointers */ }
+#[test] fn the_import_summary_fits_60_80_and_120_columns() {}
+```
+- [ ] **Step 2:** Run them. Expected: FAIL.
+- [ ] **Step 3:** Implement, following the method above.
+- [ ] **Step 4:** Run each touched test file, then the workspace. Expected: PASS.
+- [ ] **Step 5:** Commit: `Lay out import and help in the new design`.
 
 ### Task 13: The follow-ups
 
