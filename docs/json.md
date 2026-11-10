@@ -18,7 +18,7 @@
 - **A warning names its paths only in its `message` in v0.1.** That is a known gap: fields may be added to a warning later, as to any object.
 - **Numbers are whole numbers.** Every number in a document is an integer. Sizes, counts and times stay far below 2^53; only `setup`'s `ask_before_saving_over` and `ask_before_saving_files_over` can go past it, since they are whatever the user wrote in `bolt.toml`, and a reader that keeps numbers as doubles (JavaScript's) then rounds them.
 - **Paths are project paths,** with `/` between names, from the project folder. The one exception is `start`'s `root`.
-- **A name means one thing within a document.** Across documents a count and a list can share a name: `lines` is a count in `import` and a list in `line`, and `saves` a count in `verify` and a list in `history`.
+- **What a name means.** A field name means one thing at a document's top level. Inside the objects a name can mean something else: `kind`, wherever it is, says which variant an object is (an entry's kind in a change, a warning's kind in `warnings`), and in `goto` the top-level `save` is a save while `position`'s `save` is a fingerprint. Across documents a count and a list can share a name: `lines` is a count in `import` and a list in `line`, and `saves` a count in `verify` and a list in `history`.
 - **Every value Bolt chooses is written in snake_case:** the kinds of warnings, effects and problems, and the values of `result`, `change`, `kind` and `content` (`nothing_changed`, `kind_changed`, `project_link`, `too_big`). Text from the project, such as a path or a line name, is given as it is.
 
 ## 2. Pieces used by several commands
@@ -55,6 +55,7 @@
 | `found` | object | What Bolt saw in the folder: `engines`, a list of `"unity"`, `"unreal"` and `"godot"`, and `languages`, a list of `"node"`, `"python"`, `"rust"`, `"go"`, `"dart"`, `"dotnet"`, `"maven"` and `"gradle"`. The preset's rule files are written for these. |
 | `rules_written` | list of string | The rule files the start wrote, as one undoable `setup` step after the start: `"bolt.toml"`, `".boltignore"`, or `[]` (Custom writes none; a `bolt.toml` that was there is kept). |
 | `warnings` | list | See §4. |
+| `error` | object | Only when the project was made but its rule files couldn't be written (below): the exit code is then 1. |
 
 A folder that already has a `bolt.toml` is judged first: there `bolt start` needs no `--preset` and never asks, the file stays as it is, and `preset` is `null`; giving `--preset` there fails before anything is made. In any other folder, with `--json` or without a terminal, `bolt start` needs `--preset code`, `--preset game` or `--preset custom`: without it nothing is started, and the error's hint names the flag and the preset Bolt would have suggested. A start whose project was made but whose rule files couldn't be written (one of the two names is a link or a folder, say) exits with code 1: the document has every field above, `rules_written` is `[]`, and `error` says what stopped the files, with a hint naming `bolt setup --preset <name>`, which writes them. The project is there, with no rule files yet, and `preset` stays the preset that was asked for.
 
