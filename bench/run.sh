@@ -91,16 +91,27 @@ steps() {
 	cd "$work" && rm -rf "$dir" "$n"
 }
 
-# gate_check <results>: Bolt's mean against Git's for the gate's three steps; fails over 2 times.
+# run_times <file>: one step's median, mean, best and worst run, in seconds; fails if one is missing.
+run_times() {
+	jq -er '.results[0] | [.median, .mean, .min, .max]
+		| if all(type == "number") then @tsv else error("a time is missing") end' "$1"
+}
+
+# gate_check <results>: Bolt's median against Git's for the gate's three steps; fails over 2 times.
+# A flush that stalls on the runner's disk shows as a mean far above the median.
 gate_check() {
 	local failed=0 step bolt git
-	echo "== The gate: Bolt's time, Git's time, times Git's (at most 2)"
+	echo "== The gate: Bolt's median, Git's median, times Git's (at most 2); then each mean, best and worst run"
 	for step in status small-change back-to-first; do
-		bolt=$(jq -er '.results[0].mean' "$1"/*-code-bolt-"$step".json)
-		git=$(jq -er '.results[0].mean' "$1"/*-code-git-"$step".json)
-		awk -v s="$step" -v b="$bolt" -v g="$git" 'BEGIN {
-			r = b / g
-			printf "%-14s %8.1f ms %8.1f ms %5.2f %s\n", s, b * 1000, g * 1000, r, (r > 2 ? "OVER" : "ok")
+		bolt=$(run_times "$1"/*-code-bolt-"$step".json)
+		git=$(run_times "$1"/*-code-git-"$step".json)
+		printf '%s	%s	%s
+' "$step" "$bolt" "$git" | awk -F'	' '{
+			r = $2 / $6
+			printf "%-14s %8.1f ms %8.1f ms %5.2f %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f
+",
+				$1, $2 * 1000, $6 * 1000, r, (r > 2 ? "OVER" : "ok"),
+				$3 * 1000, $4 * 1000, $5 * 1000, $7 * 1000, $8 * 1000, $9 * 1000
 			exit (r > 2)
 		}' || failed=1
 	done

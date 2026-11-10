@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning, speed and space)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 023](023-v0.1-speed-bar.md) (a third gate beside its two) and [decision 088](088-benchmarks-and-the-speed-gates.md) (how it is measured and enforced)
+- **Refined by:** [decision 108](108-the-third-gate-compares-medians.md) (the gate compares the medians of each step's runs, not the means: a flush that stalls on the runner's disk no longer decides it)
 
 ## Context
 
