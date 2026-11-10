@@ -1,7 +1,8 @@
-//! The user guide against the program: every command it shows runs.
+//! The user guide, the README and SECURITY.md against the program: every command the guide shows
+//! runs, and every link points somewhere.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 mod support;
@@ -164,4 +165,75 @@ fn every_command_in_the_guide_runs() {
         .filter(|c| c != "import" && !used.contains(c))
         .collect();
     assert!(missing.is_empty(), "the guide never runs: {missing:?}");
+}
+
+/// The anchor GitHub gives each heading of `doc`: lower case, punctuation dropped, spaces as
+/// hyphens, and `-1`, `-2` after a repeat.
+fn anchors(doc: &str) -> BTreeSet<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut found = BTreeSet::new();
+    let mut fenced = false;
+    for line in doc.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        let Some(title) = line.strip_prefix('#').filter(|_| !fenced) else {
+            continue;
+        };
+        let slug: String = title
+            .trim_start_matches('#')
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter_map(|c| match c {
+                ' ' => Some('-'),
+                c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+                _ => None,
+            })
+            .collect();
+        let count = seen.entry(slug.clone()).or_default();
+        found.insert(if *count == 0 {
+            slug.clone()
+        } else {
+            format!("{slug}-{count}")
+        });
+        *count += 1;
+    }
+    found
+}
+
+/// Each `](target)` in `doc`.
+fn link_targets(doc: &str) -> Vec<String> {
+    doc.split("](")
+        .skip(1)
+        .filter_map(|rest| rest.split_once(')').map(|(t, _)| t.to_owned()))
+        .collect()
+}
+
+#[test]
+fn every_link_in_the_guide_the_readme_and_security_md_leads_somewhere() {
+    for rel in ["docs/guide.md", "README.md", "SECURITY.md"] {
+        let doc = read_doc(rel);
+        let folder = repo_root().join(rel).parent().unwrap().to_owned();
+        for target in link_targets(&doc) {
+            if target.starts_with("https://") {
+                continue;
+            }
+            let (file, anchor) = target.split_once('#').unwrap_or((&target, ""));
+            let linked = if file.is_empty() {
+                doc.clone()
+            } else {
+                let at = folder.join(file);
+                assert!(at.exists(), "{rel}: the link ({target}) leads to no file");
+                if !file.ends_with(".md") {
+                    continue;
+                }
+                std::fs::read_to_string(at).unwrap()
+            };
+            assert!(
+                anchor.is_empty() || anchors(&linked).contains(anchor),
+                "{rel}: the link ({target}) leads to no heading"
+            );
+        }
+    }
 }
