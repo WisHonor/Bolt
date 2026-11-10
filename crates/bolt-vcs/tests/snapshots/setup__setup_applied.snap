@@ -5,7 +5,7 @@ expression: applied
 {
   "applied": true,
   "bolt_json": 1,
-  "changes": [
+  "files": [
     {
       "after": null,
       "before": "# Bolt project rules, written by the Code preset (version 1).\n# This file is the project's rules: edit it freely. `bolt setup` shows how Bolt reads it.\npreset = \"code\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"100 MB\"\nask-before-saving-files-over = 10000\n",

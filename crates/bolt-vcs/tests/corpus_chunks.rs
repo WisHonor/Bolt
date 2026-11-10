@@ -153,7 +153,7 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
         }
         Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
-            assert_eq!(doc["changes"][0]["lines"], "binary", "{doc}");
+            assert_eq!(doc["changes"][0]["content"], "binary", "{doc}");
             read_well(&doc, &p, *named);
         }
     }

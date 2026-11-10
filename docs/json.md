@@ -14,6 +14,7 @@
 - **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON, and so is what Bolt says about a Git word it doesn't run ([decision 116](decisions/116-gits-words-as-shortcuts.md)).
 - **Text from the project is data.** Names, messages and paths are given exactly as they are stored, so a program can use them. They can hold anything, escape sequences included, so escape them before showing them in a terminal. Bolt's own messages (`warnings[].message`, `error.message` and `error.hint`) are already escaped.
 - **Messages are for people.** Programs should go by `kind`, `result` and the other fields, because the words of a message can change.
+- **A name means one thing within a document.** Across documents a count and a list can share a name: `lines` is a count in `import` and a list in `line`, and `saves` a count in `verify` and a list in `history`.
 
 ## 2. Pieces used by several commands
 
@@ -73,7 +74,7 @@ A folder that already has a `bolt.toml` is judged first: there `bolt start` need
 | `bolt_json` | number | `1` |
 | `preset` | string | The preset asked for. |
 | `found` | object | As in `start`. |
-| `changes` | list | One object for each of `bolt.toml` and `.boltignore` that would change: `path`; `before`, the file's text in the folder now, or `null` when there is none; and `after`, its text once written, or `null` when the switch removes it. Bytes that aren't UTF-8 show as U+FFFD. `[]` when the files already are what the preset writes. |
+| `files` | list | One object for each of `bolt.toml` and `.boltignore` that would change: `path`; `before`, the file's text in the folder now, or `null` when there is none; and `after`, its text once written, or `null` when the switch removes it. Bytes that aren't UTF-8 show as U+FFFD. `[]` when the files already are what the preset writes. |
 | `applied` | boolean | Whether the changes were written. |
 | `warnings` | list | See §4. |
 | `error` | object | Only without `--yes`, when there is something to change: `--json` can't ask, so nothing is written, the exit code is 1, and the hint names `--yes`. The rest of the document is still there, so a script can read what would change. |
@@ -175,8 +176,8 @@ Saving gives one of two documents, told apart by `result`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `lines` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too-big"`, when either side is over 64 MiB, which isn't read; or `"too-many-lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text. |
-| `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `lines` is `"text"`. |
+| `content` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too-big"`, when either side is over 64 MiB, which isn't read; or `"too-many-lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text. |
+| `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `content` is `"text"`. |
 | `timed_out` | boolean | The diff took more than 2 seconds, so Bolt stopped it: the hunks are right, but in bigger pieces than they could be. A `diff_timed_out` warning says so too. |
 | `only_line_endings` | boolean | Every line the hunks remove or add is one of a pair that differs only in its line ending (see `eol_only` below): CRLF into LF, LF into CRLF, or some of each. |
 

@@ -453,8 +453,9 @@ fn setup_preset_with_nothing_to_change_says_so() {
     assert_eq!(head(&env).0, entry);
     let (code, doc) = json(&env, &["setup", "--preset", "code"]);
     assert_eq!(code, Some(0));
-    assert_eq!(doc["changes"], serde_json::json!([]));
+    assert_eq!(doc["files"], serde_json::json!([]));
     assert_eq!(doc["applied"], false);
+    insta::assert_json_snapshot!("setup_nothing_to_change", doc);
 }
 
 #[test]

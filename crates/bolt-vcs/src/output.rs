@@ -525,7 +525,7 @@ impl fmt::Display for LinesJson<'_> {
         // The rest is small, and serde_json writes it: `{` is left out, the hunks having opened
         // the object.
         let mut rest = change_json(self.change);
-        rest["lines"] = shown.into();
+        rest["content"] = shown.into();
         rest["timed_out"] = timed_out.into();
         rest["only_line_endings"] = only_line_endings(hunks).is_some().into();
         let rest = rest.to_string();

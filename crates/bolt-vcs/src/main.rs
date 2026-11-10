@@ -597,7 +597,7 @@ fn setup_command(
         "bolt_json": BOLT_JSON,
         "preset": preset.name(),
         "found": setup_output::found_json(&plan.found),
-        "changes": setup_output::changes_json(&plan.changes),
+        "files": setup_output::changes_json(&plan.changes),
         "applied": false,
     });
     if plan.changes.is_empty() {

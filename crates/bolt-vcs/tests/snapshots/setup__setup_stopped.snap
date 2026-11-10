@@ -5,7 +5,11 @@ expression: stopped
 {
   "applied": false,
   "bolt_json": 1,
-  "changes": [
+  "error": {
+    "hint": "If they are what you want, run: bolt setup --preset custom --yes",
+    "message": "Nothing was changed: Bolt can't ask whether to apply these changes with --json."
+  },
+  "files": [
     {
       "after": null,
       "before": "# Bolt project rules, written by the Code preset (version 1).\n# This file is the project's rules: edit it freely. `bolt setup` shows how Bolt reads it.\npreset = \"code\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"100 MB\"\nask-before-saving-files-over = 10000\n",
@@ -17,10 +21,6 @@ expression: stopped
       "path": ".boltignore"
     }
   ],
-  "error": {
-    "hint": "If they are what you want, run: bolt setup --preset custom --yes",
-    "message": "Nothing was changed: Bolt can't ask whether to apply these changes with --json."
-  },
   "found": {
     "engines": [],
     "languages": []
