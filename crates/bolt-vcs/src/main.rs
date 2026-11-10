@@ -1,10 +1,12 @@
 //! The `bolt` command-line tool.
 
 mod git_words;
+mod history_output;
 mod import_output;
 mod output;
 mod progress;
 mod setup_output;
+mod show_output;
 mod style;
 
 use std::cell::{Cell, RefCell};
@@ -1300,7 +1302,7 @@ fn history_to(
     }
     let now = now_ms();
     let (_, entry) = repo.current()?;
-    let mut listed = output::History::new(match &entry.state.position {
+    let mut listed = history_output::History::new(match &entry.state.position {
         Position::OnLine(line) => Some(escape(line, false)),
         Position::AtSave(_) => None,
     });
@@ -1310,7 +1312,7 @@ fn history_to(
         heads.entry(*tip).or_default().push(escape(name, false));
     }
     let walked = for_each_on_line(repo, |id, s, short| {
-        let row = output::SaveRow {
+        let row = history_output::SaveRow {
             short: short.to_owned(),
             when: output::relative_time(s.author.time_ms, s.author.tz_offset_min, now),
             author: escape(&s.author.name, false),
@@ -1391,68 +1393,8 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
         let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
         shown_as.clone_from(&short);
+        show_output::write_head(&mut out, &id, &save, &short, &parent_title, count, now_ms())?;
         let s = style::out();
-        let now = now_ms();
-        let person = |p: &bolt_core::save::Person| {
-            let ago = output::relative_time(p.time_ms, p.tz_offset_min, now);
-            format!(
-                "{} <{}>, {}  {}",
-                escape(&p.name, false),
-                escape(&p.email, false),
-                output::date_time(p.time_ms, p.tz_offset_min),
-                s.paint(style::Role::Dim, &format!("({ago})"))
-            )
-        };
-        writeln!(
-            out,
-            "Save {} {}\n",
-            s.paint(style::Role::ChangeId, &short),
-            output::quoted_title(&save)
-        )?;
-        writeln!(out, "    Author       {}", person(&save.author))?;
-        writeln!(out, "    Saved by     {}", person(&save.saver))?;
-        let line = save.line().map_or("none".to_owned(), |line| {
-            s.paint(style::Role::Line, &escape(line, false))
-        });
-        writeln!(out, "    Line         {line}")?;
-        // By fingerprint: shortening a change ID for it could read the whole line.
-        // A merge brought in from Git has more than one; the first is the one compared with.
-        let mut named = save
-            .parents
-            .iter()
-            .map(|p| s.paint(style::Role::Fingerprint, &p.short_hex()));
-        if let Some(first) = named.next() {
-            let others: String = named.map(|p| format!(", {p}")).collect();
-            writeln!(out, "    After        {first} {parent_title}{others}")?;
-        }
-        writeln!(
-            out,
-            "    Fingerprint  {}",
-            s.paint(style::Role::Fingerprint, &id.to_hex())
-        )?;
-        // The rest of the message, indented eight, so that none of it can pass for a change row,
-        // which is indented four.
-        let message = escape(save.message.trim_end(), true);
-        let body: Vec<&str> = message
-            .lines()
-            .skip(1)
-            .skip_while(|l| l.trim().is_empty())
-            .collect();
-        if !body.is_empty() {
-            writeln!(out)?;
-        }
-        for line in body {
-            if line.trim().is_empty() {
-                writeln!(out)?;
-            } else {
-                writeln!(out, "        {line}")?;
-            }
-        }
-        if count == 0 {
-            writeln!(out, "\nNo files changed.")?;
-        } else {
-            writeln!(out, "\n{} changed:\n", output::files(count))?;
-        }
         for_each_change(store, old_root, save.root, |c| {
             writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;
             Ok::<(), Failure>(())
