@@ -2,7 +2,6 @@
 //! keeps out exactly the files Git keeps out.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use std::hash::{DefaultHasher, Hasher};
 use std::mem;
 
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -154,9 +153,9 @@ fn advance(pieces: &mut Pieces<'_>, old: &[bool], new: &mut Vec<bool>, byte: Opt
             (Token::Star | Token::Stars, None) => left,
             (Token::StarsSlash, None) => left2,
             (_, None) | (Token::Never, Some(_)) => false,
-            (Token::Byte(p), Some(t)) => diag && t == p,
-            (Token::Any, Some(t)) => diag && t != b'/',
-            (Token::Class(body), Some(t)) => diag && class(body, t, casefold).is_some_and(|c| c.0),
+            (Token::Byte(_) | Token::Any | Token::Class(_), Some(t)) => {
+                diag && takes(token, t, casefold)
+            }
             (Token::Star, Some(t)) => left || (up && t != b'/'),
             (Token::Stars, Some(_)) => left || up,
             (Token::StarsSlash, Some(t)) => left2 || (diag && t == b'/'),
@@ -171,6 +170,17 @@ fn advance(pieces: &mut Pieces<'_>, old: &[bool], new: &mut Vec<bool>, byte: Opt
         new.pop();
     }
     matched
+}
+
+/// Whether a piece that takes one byte takes `t`, a text byte already folded where letter case is
+/// ignored.
+fn takes(token: Token<'_>, t: u8, casefold: bool) -> bool {
+    match token {
+        Token::Byte(p) => t == p,
+        Token::Any => t != b'/',
+        Token::Class(body) => class(body, t, casefold).is_some_and(|c| c.0),
+        Token::Star | Token::Stars | Token::StarsSlash | Token::Never => false,
+    }
 }
 
 /// Git's `[…]`: whether it takes `t`, a text byte already folded where letter case is ignored,
@@ -265,6 +275,94 @@ struct Pattern {
     ends_with: bool,
     /// The bytes before its first wildcard.
     literal: usize,
+    /// Set for a name pattern of one-byte pieces around a single `*`, which needs no table.
+    ends: Option<Ends>,
+}
+
+/// A line of one-byte pieces around a single `*`: where the pieces before the `*` end and
+/// those after it start in `text`, and how many bytes of a name each side takes.
+struct Ends {
+    head: usize,       // text[..head] holds the pieces before the `*`
+    tail: usize,       // text[tail..] holds the pieces after it
+    head_width: usize, // pieces before the `*`, one byte of a name each
+    tail_width: usize, // pieces after it
+}
+
+impl Ends {
+    /// The shape of `text`, read as `wildmatch` reads it; `None` unless it is one-byte pieces,
+    /// one `*`, then one-byte pieces.
+    fn of(text: &[u8]) -> Option<Ends> {
+        // `wildmatch` would stop at a NUL; such a pattern is left to it.
+        if text.contains(&0) {
+            return None;
+        }
+        let mut pieces = Pieces {
+            rest: text,
+            before: None,
+            casefold: false,
+            read: Vec::new(),
+        };
+        let (mut star, mut width) = (None, 0usize);
+        loop {
+            let at = text.len().checked_sub(pieces.rest.len())?;
+            match pieces.next_piece() {
+                None => break,
+                Some(Token::Byte(_) | Token::Any | Token::Class(_)) => {
+                    width = width.checked_add(1)?
+                }
+                Some(Token::Star) if star.is_none() => {
+                    let tail = text.len().checked_sub(pieces.rest.len())?;
+                    star = Some((at, tail, width));
+                    width = 0;
+                }
+                Some(_) => return None,
+            }
+        }
+        let (head, tail, head_width) = star?;
+        Some(Ends {
+            head,
+            tail,
+            head_width,
+            tail_width: width,
+        })
+    }
+
+    /// Whether `name` matches `text`, the pattern this was read from, as `wildmatch` would say.
+    fn take(&self, text: &[u8], name: &[u8], casefold: bool) -> bool {
+        let name = until_nul(name);
+        let Some((front, back)) = name
+            .len()
+            .checked_sub(self.tail_width)
+            .and_then(|at| name.split_at_checked(at))
+        else {
+            return false;
+        };
+        let Some((head, middle)) = front.split_at_checked(self.head_width) else {
+            return false;
+        };
+        let (Some(head_text), Some(tail_text)) = (text.get(..self.head), text.get(self.tail..))
+        else {
+            return false;
+        };
+        pieces_take(head_text, head, casefold)
+            && pieces_take(tail_text, back, casefold)
+            && !middle.contains(&b'/')
+    }
+}
+
+/// Whether the one-byte pieces of `pattern` take the bytes of `text`, one each.
+fn pieces_take(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
+    let mut pieces = Pieces {
+        rest: pattern,
+        before: None,
+        casefold,
+        read: Vec::new(),
+    };
+    text.iter().all(|&b| {
+        pieces
+            .next_piece()
+            .is_some_and(|token| takes(token, fold(b, casefold), casefold))
+    })
 }
 
 impl Pattern {
@@ -277,14 +375,23 @@ impl Pattern {
             Some(rest) => (true, rest),
             None => (false, line),
         };
+        let any_depth = !text.contains(&b'/');
+        let ends_with = line
+            .split_first()
+            .is_some_and(|(&c, rest)| c == b'*' && literal_len(rest) == rest.len());
+        let literal = literal_len(text);
+        let ends = if any_depth && !ends_with && literal != text.len() {
+            Ends::of(text)
+        } else {
+            None
+        };
         Pattern {
             negative,
             dir_only,
-            any_depth: !text.contains(&b'/'),
-            ends_with: line
-                .split_first()
-                .is_some_and(|(&c, rest)| c == b'*' && literal_len(rest) == rest.len()),
-            literal: literal_len(text),
+            any_depth,
+            ends_with,
+            literal,
+            ends,
             text: text.into(),
         }
     }
@@ -338,6 +445,8 @@ fn match_basename(name: &[u8], p: &Pattern, casefold: bool) -> bool {
             .checked_sub(tail.len())
             .and_then(|at| name.get(at..))
             .is_some_and(|end| same(tail, end, casefold))
+    } else if let Some(ends) = &p.ends {
+        ends.take(&p.text, name, casefold)
     } else {
         wildmatch(&p.text, name, casefold)
     }
@@ -385,13 +494,12 @@ fn below<'a>(path: &'a [u8], folder: &[u8], casefold: bool) -> Option<&'a [u8]> 
     rest.strip_prefix(b"/")
 }
 
-/// The same for any process, so a lookup needs only the bytes; letter case is left to `same`.
+/// FNV-1a over the lowered bytes: cheap, and the same for any process, so a lookup needs only the
+/// bytes; letter case is left to `same`.
 fn folded_hash(bytes: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for &b in bytes {
-        hasher.write_u8(b.to_ascii_lowercase());
-    }
-    hasher.finish()
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
+        (hash ^ u64::from(b.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 // The lines `Rules::last_match` tries on this thread, so a test can see the lookup skip the rest.
@@ -913,6 +1021,131 @@ mod tests {
     }
 
     #[test]
+    fn gits_table_passes_through_match_basename() {
+        // A `*` and then plain text is compared by the name's end, as Git does, and that differs
+        // from `wildmatch` only on a text with a `/`, which Git never hands it; no such row has one.
+        for &(wm, iwm, text, pattern) in WILDMATCH_CASES {
+            if pattern.contains(&b'/') {
+                continue;
+            }
+            let (t, p) = (shown(text), shown(pattern));
+            let line = Pattern::parse(pattern);
+            assert_eq!(match_basename(text, &line, false), wm, "{t:?} {p:?}");
+            assert_eq!(
+                match_basename(text, &line, true),
+                iwm,
+                "{t:?} {p:?} (casefold)"
+            );
+        }
+    }
+
+    const STAR_PIECES: &[&[u8]] = &[
+        b"a",
+        b"b",
+        b"A",
+        b"B",
+        b".",
+        b"-",
+        b"_",
+        b"\xff",
+        b"?",
+        b"*",
+        b"**",
+        b"[ab]",
+        b"[!ab]",
+        b"[^a]",
+        b"[a-c]",
+        b"[]a]",
+        b"[[:digit:]]",
+        b"[[:upper:]]",
+        b"[A-C]",
+        b"\\a",
+        b"\\A",
+        b"\\*",
+        b"\\?",
+        b"\\[",
+        b"\\\\",
+        b"[",
+        b"\\",
+    ];
+    const NAME_BYTES: &[u8] = b"abcABC.-_1*?[]\\/\0\xff";
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 5_000, ..ProptestConfig::default() })]
+        #[test]
+        fn a_line_with_one_star_matches_as_wildmatch_does(
+            pieces in prop::collection::vec(prop::sample::select(STAR_PIECES), 0..8),
+            name in prop::collection::vec(prop::sample::select(NAME_BYTES), 0..13),
+            casefold: bool,
+        ) {
+            let line = pieces.concat();
+            prop_assume!(!line.contains(&b'/'));
+            let p = Pattern::parse(&line);
+            // `match_basename` as it was before a line could be matched by its two ends.
+            let before = if p.literal == p.text.len() {
+                same(&p.text, &name, casefold)
+            } else if p.ends_with {
+                let tail = &p.text[1..];
+                name.len() >= tail.len() && same(tail, &name[name.len() - tail.len()..], casefold)
+            } else {
+                wildmatch(&p.text, &name, casefold)
+            };
+            prop_assert_eq!(
+                match_basename(&name, &p, casefold),
+                before,
+                "{:?} {:?}", shown(&line), shown(&name)
+            );
+        }
+    }
+
+    #[test]
+    fn git_and_godot_lines_take_the_two_ends() {
+        let ends = |line: &str| {
+            Pattern::parse(line.as_bytes())
+                .ends
+                .map(|e| (e.head, e.tail, e.head_width, e.tail_width))
+        };
+        for (line, want) in [
+            ("*.py[co]", (0, 1, 0, 4)),
+            ("*.[aos]", (0, 1, 0, 2)),
+            ("*.[1-8]", (0, 1, 0, 2)),
+            ("cmds-*.adoc", (5, 6, 5, 5)),
+            ("mergetools-*.adoc", (11, 12, 11, 5)),
+            ("mono_crash.*.json", (11, 12, 11, 5)),
+            ("data_*", (5, 6, 5, 0)),
+            ("?*", (1, 2, 1, 0)),
+            ("a?*[bc]", (2, 3, 2, 1)),
+            // A run of stars inside a name is one `*`.
+            ("a**b", (1, 3, 1, 1)),
+        ] {
+            assert_eq!(ends(line), Some(want), "{line:?}");
+        }
+        for line in ["*a*", "**", "***", "[a", "a\\", "a/*b", "abc", "*", "*.o"] {
+            assert_eq!(ends(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_ends_fill_no_table() {
+        let rules = Rules::parse(b"*.py[co]\n*.[aos]\n", "", true);
+        CELLS.with(|cells| cells.set(0));
+        let mut hits = 0;
+        for i in 0..1_000 {
+            let ext = ["pyc", "pyo", "py", "a", "o", "s", "txt", "PYC"][i % 8];
+            let name = format!("file{i}.{ext}");
+            let casefold = i % 3 == 0;
+            if rules
+                .last_match(name.as_bytes(), name.as_bytes(), false, casefold)
+                .is_some()
+            {
+                hits += 1;
+            }
+        }
+        assert!(hits > 500, "{hits}");
+        assert_eq!(CELLS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
     fn matching_takes_time_proportional_to_its_input() {
         // Git's recursion takes exponential time on these; each `**/` doubles it.
         for (pattern, text) in [
@@ -1389,8 +1622,12 @@ mod tests {
         b"*",
         b"a/*",
         b"/a/[ab]",
+        b"a\\*",
+        b"a?",
+        b"a\\ ",
     ];
     const PATH_NAMES: &[&[u8]] = &[
+        b"",
         b"a",
         b"A",
         b"b",
