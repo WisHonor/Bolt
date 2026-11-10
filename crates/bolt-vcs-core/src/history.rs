@@ -1490,7 +1490,57 @@ mod tests {
         side_line(&mut repo, "copy", off_run, "rrrr", 1);
         assert_eq!(check(&repo, "off-run"), ["line copy"]);
         assert_eq!(check(&repo, "off-run"), ["line copy"]);
+        // Main has a list in `cache/change-ids`, so it is answered from that, with no run.
+        let main = repo.current().unwrap().1.state.lines["main"];
+        assert!(
+            crate::otherlines::OtherLines::load(&repo)
+                .run(&main)
+                .is_none()
+        );
         assert_eq!(check(&repo, "below"), ["line main", "line twin"]);
+    }
+
+    #[test]
+    fn a_run_that_goes_on_into_the_amended_line_s_list_is_named_through_it() {
+        // Main's newest save and the one two below it share a change ID.
+        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "zzzz", "kmkk", "zzzz"]);
+        side_line(&mut repo, "side", ids[4], "pppp", 2);
+        side_line(&mut repo, "below", ids[2], "pppp", 2);
+        cached_line(&repo);
+        for _ in 0..2 {
+            assert_eq!(named_both_ways(dir.path(), &repo, "main"), ["line side"]);
+        }
+        let side = repo.current().unwrap().1.state.lines["side"];
+        let kept = crate::otherlines::OtherLines::load(&repo);
+        assert_eq!(kept.run(&side).unwrap().next, Some(ids[4]));
+    }
+
+    #[test]
+    fn a_run_that_goes_on_to_no_save_is_walked_again() {
+        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "kmkk"]);
+        // A side line that holds main's change ID four saves below its newest.
+        let twin = plant(&mut repo, &[ids[1]], "kmkk", None);
+        let side = side_line(&mut repo, "side", twin, "pppp", 4);
+        let tip = side[3];
+        let change_id = repo.store().save(&tip, false).unwrap().change_id;
+        // An ID nothing has, and a folder listing's.
+        let listing = repo.store().save(&tip, false).unwrap().root;
+        let file = dir.path().join(".bolt/cache/other-lines");
+        cached_line(&repo);
+        for wrong in [Id([0x5a; 32]), listing] {
+            let mut lie = crate::otherlines::OtherLines::default();
+            lie.add(tip, &[(tip, change_id)], Some(wrong));
+            std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
+            let (by, _) = shown_for(&repo, "main");
+            assert_eq!(by, ["line side"]);
+            let kept = crate::otherlines::OtherLines::load(&repo);
+            let run = kept.run(&tip).unwrap();
+            assert_eq!(run.saves.len(), 5);
+            assert_eq!(run.next, Some(ids[1]));
+            assert_eq!(shown_for(&repo, "main"), (vec!["line side".to_owned()], 0));
+            std::fs::remove_file(&file).unwrap();
+            assert_eq!(shown_for(&repo, "main").0, ["line side"]);
+        }
     }
 
     #[test]

@@ -762,7 +762,15 @@ fn other_lines_match_their_vector() {
     let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
     assert_eq!(key, [0x42; 32]);
     let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
-    assert_eq!(OtherLines::decode(&body).unwrap().encode(), body);
+    let lines = OtherLines::decode(&body).unwrap();
+    assert_eq!(lines.encode(), body);
+    let save = |s: u8, c: u8| (Id([s; 32]), ChangeId([c; 16]));
+    let run = lines.run(&Id([0x11; 32])).unwrap();
+    assert_eq!(run.saves, [save(0x11, 0x22), save(0x33, 0x44)]);
+    assert_eq!(run.next, Some(Id([0x55; 32])));
+    let run = lines.run(&Id([0x66; 32])).unwrap();
+    assert_eq!(run.saves, [save(0x66, 0x77)]);
+    assert_eq!(run.next, None);
     assert_eq!(seal(&key, &body), sealed, "{}", v.name);
     assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
     assert_eq!(open_sealed(&[0; 32], &sealed), None);

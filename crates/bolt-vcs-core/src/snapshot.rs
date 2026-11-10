@@ -764,6 +764,30 @@ fn lines_reaching<'s>(
         ),
         Err(_) => (HashMap::new(), None),
     };
+    // From `start` back along first parents: whether the line reaches the change ID, the saves
+    // read, with their change IDs, and the save it stopped at unread, if any.
+    let walk = |start: Option<Id>, known: &HashMap<Id, bool>| {
+        let mut next = start;
+        let mut passed = Vec::new();
+        let reaches = loop {
+            let Some(at) = next else { break false };
+            // From here on this line is `line`'s list, so it reaches the change ID if the list
+            // has it here or further back.
+            if let Some(&p) = places.get(&at) {
+                break last.is_some_and(|last| last >= p);
+            }
+            if let Some(&answer) = known.get(&at) {
+                break answer;
+            }
+            let save = repo.store().save(&at, repo.signatures_allowed())?;
+            passed.push((at, save.change_id));
+            next = save.parents.first().copied();
+            if save.change_id == *change_id {
+                break true;
+            }
+        };
+        Ok::<_, StoreError>((reaches, passed, next))
+    };
     let mut known: HashMap<Id, bool> = HashMap::new();
     let mut runs: Option<OtherLines> = None;
     let mut found = Vec::new();
@@ -779,31 +803,22 @@ fn lines_reaching<'s>(
             let runs = runs.get_or_insert_with(|| OtherLines::load(repo));
             // What an earlier amend read of this line: if it doesn't hold the change ID, the
             // walk goes on from where it stopped.
-            let mut next = match runs.run(&tip) {
+            let (start, from_run) = match runs.run(&tip) {
                 Some(run) if run.saves.iter().any(|(_, c)| c == change_id) => {
                     found.push(name.as_str());
                     continue;
                 }
-                Some(run) => run.next,
-                None => Some(tip),
+                Some(run) => (run.next, true),
+                None => (Some(tip), false),
             };
-            let mut passed = Vec::new();
-            let reaches = loop {
-                let Some(at) = next else { break false };
-                // From here on this line is `line`'s list, so it reaches the change ID if the
-                // list has it here or further back.
-                if let Some(&p) = places.get(&at) {
-                    break last.is_some_and(|last| last >= p);
+            let (reaches, passed, next) = match walk(start, &known) {
+                // A run that goes on to no save is a wrong cache, not a damaged store: the line
+                // is walked again from its newest save, and the run replaced.
+                Err(_) if from_run => {
+                    runs.forget(&tip);
+                    walk(Some(tip), &known)?
                 }
-                if let Some(&answer) = known.get(&at) {
-                    break answer;
-                }
-                let save = repo.store().save(&at, repo.signatures_allowed())?;
-                passed.push((at, save.change_id));
-                next = save.parents.first().copied();
-                if save.change_id == *change_id {
-                    break true;
-                }
+                walked => walked?,
             };
             runs.add(tip, &passed, next);
             known.extend(passed.into_iter().map(|(at, _)| (at, reaches)));

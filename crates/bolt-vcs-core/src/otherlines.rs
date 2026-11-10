@@ -179,8 +179,18 @@ impl OtherLines {
     }
 
     /// The run that starts at `tip`.
-    pub(crate) fn run(&self, tip: &Id) -> Option<&Run> {
+    #[must_use]
+    pub fn run(&self, tip: &Id) -> Option<&Run> {
         self.runs.get(tip)
+    }
+
+    /// Drops the run that starts at `tip`, if there is one.
+    pub(crate) fn forget(&mut self, tip: &Id) {
+        if let Some(run) = self.runs.remove(tip) {
+            let bytes = run_bytes(run.saves.len() as u64, run.next.is_some());
+            self.bytes = self.bytes.saturating_sub(bytes);
+            self.changed = true;
+        }
     }
 
     /// Puts `read`, saves newest first with their change IDs, at the end of the run that starts
@@ -442,6 +452,10 @@ mod tests {
         assert_eq!(run.saves, [save(9), save(8), save(7)]);
         assert_eq!(run.next, None);
         assert_eq!(lines.bytes, run_bytes(3, false));
+        lines.changed = false;
+        lines.forget(&Id([9; 32]));
+        assert!(lines.run(&Id([9; 32])).is_none());
+        assert_eq!((lines.bytes, lines.changed), (0, true));
     }
 
     #[test]
