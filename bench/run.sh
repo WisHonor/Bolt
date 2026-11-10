@@ -96,8 +96,8 @@ gate_check() {
 	local failed=0 step bolt git
 	echo "== The gate: Bolt's time, Git's time, times Git's (at most 2)"
 	for step in status small-change back-to-first; do
-		bolt=$(jq -r '.results[0].mean' "$1"/*-code-bolt-"$step".json)
-		git=$(jq -r '.results[0].mean' "$1"/*-code-git-"$step".json)
+		bolt=$(jq -er '.results[0].mean' "$1"/*-code-bolt-"$step".json)
+		git=$(jq -er '.results[0].mean' "$1"/*-code-git-"$step".json)
 		awk -v s="$step" -v b="$bolt" -v g="$git" 'BEGIN {
 			r = b / g
 			printf "%-14s %8.1f ms %8.1f ms %5.2f %s\n", s, b * 1000, g * 1000, r, (r > 2 ? "OVER" : "ok")
