@@ -695,7 +695,7 @@ bolt start --preset game
 
 - In a terminal, without `--preset`, it asks which preset to use. Without a terminal (in a script), it needs `--preset code`, `--preset game` or `--preset custom`, and starts nothing otherwise.
 - In a folder that already has a `bolt.toml` (a copy of a teammate's project, say), it asks nothing and keeps those rules: `Using the rules in this folder's bolt.toml, which stay as they are:`. `--preset` is refused there; switch afterwards with `bolt setup --preset`.
-- `bolt undo` right after a start takes the rule files away again.
+- With Code or Game, a start is two entries in the undo diary: the start itself, which can't be undone, then the writing of the rule files, as `bolt setup --preset` writes them. So `bolt undo` right after a start takes the rule files away again (and gives back a `.boltignore` exactly as it was), and leaves the project.
 
 ### `bolt setup`
 
@@ -897,7 +897,7 @@ bolt undo
 
 ## 6. Undo, in depth
 
-**The diary.** Bolt keeps a diary of every command that changed something: each save, goto, discard, shelf, unshelf, undo, redo, preset switch, start and import is one entry. Each entry records the whole state afterwards: every line, where you are, the shelves, and what the command wrote in your folder. Undo goes back to an earlier entry.
+**The diary.** Bolt keeps a diary of every command that changed something: each save, goto, discard, shelf, unshelf, undo, redo, preset switch, start and import is one entry (a start with Code or Game adds a second, for writing its rule files). Each entry records the whole state afterwards: every line, where you are, the shelves, and what the command wrote in your folder. Undo goes back to an earlier entry.
 
 **What counts as a step.** One command that changed something is one step. `bolt undo` takes back the newest step not yet undone; `bolt redo` brings back the one you undid last. A new command clears what redo could bring back, as in an editor. Undo and redo are steps too, so they appear in the diary (`bolt undo --list --all` shows every entry), but each is the other's way back.
 
