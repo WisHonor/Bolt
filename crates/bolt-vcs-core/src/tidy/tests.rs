@@ -810,6 +810,24 @@ fn a_tidied_file_that_is_a_link_counts_as_absent() {
                 .is_symlink()
         );
     }
+    // Writing over the link is refused, as for any state file, before anything is removed.
+    let before = pack_names(&repo);
+    match tidy(&mut repo, 30, at, &mut |_| {}, &mut |_| {}) {
+        Err(RepoError::CantWrite { path, .. }) => assert!(path.ends_with(".bolt/state/tidied")),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(pack_names(&repo), before);
+    assert!(text_reads(&repo, "thrown away"));
+    assert!(
+        fs::symlink_metadata(&file)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&inside).unwrap(), past);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), past);
+    // With the link removed by hand, it goes on and writes the file.
+    fs::remove_file(&file).unwrap();
     tidy(&mut repo, 30, at, &mut |_| {}, &mut |_| {}).unwrap();
     assert!(text_reads(&repo, "thrown away"));
     assert!(fs::symlink_metadata(&file).unwrap().file_type().is_file());
@@ -817,8 +835,6 @@ fn a_tidied_file_that_is_a_link_counts_as_absent() {
         fs::read_to_string(&file).unwrap(),
         format!("{}\n", at - 30 * DAY)
     );
-    assert_eq!(fs::read_to_string(&inside).unwrap(), past);
-    assert_eq!(fs::read_to_string(&outside).unwrap(), past);
 }
 
 /// What `tidy` would keep now, with a 30-day window.

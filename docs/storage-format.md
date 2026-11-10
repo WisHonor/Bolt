@@ -256,7 +256,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock` | Lock file for changing commands | Yes |
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
-| `state/tidied` | The start of the undo window the last `bolt tidy` used, so a longer window later doesn't ask for what it freed (§11): a whole number of milliseconds since 1970-01-01 UTC in decimal digits, then an LF. Read with a cap of 32 bytes; a file that is anything else, or names a time later than now, counts as absent. Written whole through `tmp/` and a rename. A reader that ignores it only stops a `tidy` that could have gone on | No |
+| `state/tidied` | The start of the undo window the last `bolt tidy` used, so a longer window later doesn't ask for what it freed (§11): a whole number of milliseconds since 1970-01-01 UTC in decimal digits, then an LF. Read with a cap of 32 bytes; a file that is anything else, or names a time later than now, counts as absent. Written whole through `tmp/` and a rename. Where a link is in its place, the write is refused like any write over a link, and `tidy` stops before it removes anything. A reader that ignores it only stops a `tidy` that could have gone on | No |
 | `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), and `change-ids`, each line's change IDs (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
