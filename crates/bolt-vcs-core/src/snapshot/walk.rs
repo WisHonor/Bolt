@@ -372,9 +372,31 @@ struct WalkState {
     /// The base save's entries the walk leaves untouched, by project path: the new save keeps
     /// them as they were, whatever the folder holds there.
     untouched: HashMap<String, Child>,
+    /// The folders that hold any of those.
+    untouched_in: HashSet<String>,
     /// The folder last opened to go into, by project path, with the handle that listed it and
     /// what it holds: the walk goes on from this listing.
     listed: Option<(String, Arc<Dir>, Vec<DirEntry>)>,
+}
+
+/// What a walk knows of the folder it is in: whether it is held, whether Git would leave it out
+/// (`git_held`), and whether it holds an entry left untouched.
+#[derive(Clone, Copy)]
+struct Within {
+    held: bool,
+    git_held: bool,
+    untouched: bool,
+}
+
+/// An entry the walk judges: its project path as shown (lossily, for a name that isn't UTF-8),
+/// the folder it is in, its name if it is UTF-8, and its path as the drive and the ignore rules
+/// have it, as a path and as bytes.
+struct Met<'a> {
+    rel: &'a str,
+    folder: &'a str,
+    name: Option<&'a str>,
+    path: &'a Path,
+    bytes: &'a [u8],
 }
 
 impl WalkState {
@@ -410,6 +432,7 @@ impl WalkState {
             gitignored: HashSet::new(),
             drive,
             untouched: HashMap::new(),
+            untouched_in: HashSet::new(),
             listed: None,
         };
         rules.drop_saved("", dropped);
@@ -465,6 +488,19 @@ impl WalkState {
                 meta: None,
             };
             self.untouched.insert(path, child);
+            if !self.untouched_in.contains(rel) {
+                self.untouched_in.insert(rel.to_owned());
+            }
+        }
+    }
+
+    /// What `judged` asks about the folder `rel` for each entry in it. None of it changes once
+    /// the walk is in the folder: each is set when the folder itself is judged or noted.
+    fn within(&self, rel: &str) -> Within {
+        Within {
+            held: self.held.contains(rel),
+            git_held: self.git_held.contains(rel),
+            untouched: self.untouched_in.contains(rel),
         }
     }
 
@@ -732,57 +768,76 @@ impl WalkState {
         Ok(Rules::parse(bytes, folder, gits))
     }
 
-    /// Whether the walk keeps `path`: never what it leaves untouched, and what the ignore rules
-    /// keep out stays out, unless the base save has it. A name Git treats as `.git` or Bolt as
-    /// `.bolt` stays out too, noted for the warning. What it keeps that Git's rules alone would
-    /// leave out is noted too.
-    /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
-    /// is: the save will stop anyway.
+    /// Whether the walk keeps what is at `path`, below the project folder, as `judged` says.
+    #[cfg(test)]
     fn keeps(&mut self, path: &Path, is_dir: bool) -> bool {
-        self.judged(path, is_dir, is_dir)
+        self.judged_at(path, is_dir, is_dir)
     }
 
     /// `keeps` for a folder Bolt can't go into: a Windows reparse point that isn't a link but is
     /// marked as a folder (a cloud folder, say). The ignore rules take it for a folder, and it is
     /// never opened, for its ignore files or to see whether it holds a repository.
+    #[cfg(test)]
     fn keeps_closed_folder(&mut self, path: &Path) -> bool {
-        self.judged(path, true, false)
+        self.judged_at(path, true, false)
     }
 
-    /// `keeps` for what the ignore rules take for a folder when `is_dir`, and the walk opens only
-    /// when `opens`.
-    fn judged(&mut self, path: &Path, is_dir: bool, opens: bool) -> bool {
+    /// `judged` for the entry at `path`, below the project folder, taken apart here: for a name
+    /// that isn't UTF-8, whose bytes the ignore rules must see as they are.
+    fn judged_at(&mut self, path: &Path, is_dir: bool, opens: bool) -> bool {
+        let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        let (shown_rel, folder) = (shown(rel), shown(rel.parent().unwrap_or(rel)));
+        let bytes = path_bytes(rel);
+        let within = self.within(&folder);
+        let met = Met {
+            rel: &shown_rel,
+            folder: &folder,
+            name: rel.file_name().and_then(|n| n.to_str()),
+            path: rel,
+            bytes: &bytes,
+        };
+        self.judged(&met, within, is_dir, opens)
+    }
+
+    /// Whether the walk keeps `met`, in a folder that is as `within` says, taking it for a folder
+    /// when `is_dir` and opening it only when `opens`: never what it leaves untouched, and what
+    /// the ignore rules keep out stays out, unless the base save has it. A name Git treats as
+    /// `.git` or Bolt as `.bolt` stays out too, noted for the warning. What it keeps that Git's
+    /// rules alone would leave out is noted too.
+    /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
+    /// is: the save will stop anyway.
+    fn judged(&mut self, met: &Met, within: Within, is_dir: bool, opens: bool) -> bool {
         // A listing never outlives the folder it was made for.
         self.listed = None;
         if self.problem.is_some() {
             return false;
         }
-        let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        let (rel, folder) = (met.path, met.folder);
         // Before any rule: nothing at an untouched entry's path is read, a link's folder included.
-        if self.untouched.contains_key(&shown(rel)) {
+        if within.untouched && self.untouched.contains_key(met.rel) {
             return false;
         }
-        let folder = shown(rel.parent().unwrap_or(rel));
         // The walk is depth first, so the rules of folders `path` is not in are done with.
-        self.matcher.leave_to(&folder);
+        self.matcher.leave_to(folder);
         // Inside an ignored folder everything is ignored, as in Git: no line takes a name back,
         // so none is matched.
-        if self.held.contains(&folder) {
-            return self.saved_before(&folder, rel, is_dir);
+        if within.held {
+            return self.saved_before(folder, met, is_dir);
         }
         // Before `path`'s own ignore files are read, if it is a folder: they are for what it holds.
-        let verdict = self.matcher.verdict(path_bytes(rel), is_dir);
+        let verdict = self.matcher.verdict(met.bytes, is_dir);
         if verdict.bolt == Decision::Ignored {
-            return self.saved_before(&folder, rel, is_dir);
+            return self.saved_before(folder, met, is_dir);
         }
-        let git_ignores = self.git_held.contains(&folder) || verdict.git == Decision::Ignored;
+        let git_ignores = within.git_held || verdict.git == Decision::Ignored;
         // After the rules, so an ignored one stays out without a word, unless the base save held
         // it: `Base` dropped and named those. No save holds a `.bolt` spelling.
-        let name = rel.file_name().and_then(|n| n.to_str());
-        if name.is_some_and(|n| is_git_alias(n) || is_bolt_alias(n)) {
-            let rel = shown(rel);
-            if !self.saved_git_names.contains(&rel) {
-                self.git_names.add(rel);
+        if met
+            .name
+            .is_some_and(|n| is_git_alias(n) || is_bolt_alias(n))
+        {
+            if !self.saved_git_names.contains(met.rel) {
+                self.git_names.add(met.rel.to_owned());
             }
             return false;
         }
@@ -804,7 +859,7 @@ impl WalkState {
                             asked::lookup(self.root.join(rel));
                         }
                         let nested = (hints.git || hints.bolt) && holds_own_repository(&dir);
-                        self.listed = Some((shown(rel), dir, entries));
+                        self.listed = Some((met.rel.to_owned(), dir, entries));
                         nested
                     }
                     // A listing that fails after the open: a nested repository is still judged
@@ -813,21 +868,21 @@ impl WalkState {
                         #[cfg(test)]
                         asked::lookup(self.root.join(rel));
                         if !holds_own_repository(&dir) {
-                            self.problem.get_or_insert(folder_problem(&shown(rel), e));
+                            self.problem.get_or_insert(folder_problem(met.rel, e));
                             return false;
                         }
                         true
                     }
                 },
                 Err(e) => {
-                    self.problem.get_or_insert(folder_problem(&shown(rel), e));
+                    self.problem.get_or_insert(folder_problem(met.rel, e));
                     return false;
                 }
             };
         if nested {
-            let kept_rel = shown(rel);
+            let kept_rel = met.rel.to_owned();
             self.nested.add(kept_rel.clone());
-            let kept = self.saved_before(&folder, rel, is_dir);
+            let kept = self.saved_before(folder, met, is_dir);
             // One kept for what the last save holds there is walked from the same listing.
             if kept {
                 self.nested_held.insert(kept_rel);
@@ -842,37 +897,36 @@ impl WalkState {
             return false;
         }
         if git_ignores && is_dir {
-            self.git_held.insert(shown(rel));
+            self.git_held.insert(met.rel.to_owned());
         } else if git_ignores {
-            self.gitignored.insert(shown(rel));
+            self.gitignored.insert(met.rel.to_owned());
         }
         true
     }
 
-    /// Whether the base save has the ignored `rel` under that name in `folder`, as a folder if
+    /// Whether the base save has the ignored `met` under that name in `folder`, as a folder if
     /// and only if it is one now: what is saved stays saved, as in Git (decision 038). A folder
     /// kept this way is held: its ignore files aren't read, and it keeps only what was saved. A
     /// file or link kept this way is noted, so that a change to it can be warned about.
-    fn saved_before(&mut self, folder: &str, rel: &Path, is_dir: bool) -> bool {
+    fn saved_before(&mut self, folder: &str, met: &Met, is_dir: bool) -> bool {
         // Taking "not read" for "not saved" would record saved files as removed.
         let Some(listing) = self.old.get(folder) else {
-            self.problem.get_or_insert(unnoted(&shown(rel)));
+            self.problem.get_or_insert(unnoted(met.rel));
             return false;
         };
-        let saved = rel
-            .file_name()
-            .and_then(|name| name.to_str())
+        let saved = met
+            .name
             .and_then(|name| listing.as_ref()?.get(name))
             .is_some_and(|e| (e.kind == EntryKind::Folder) == is_dir);
         // Inside a repository of its own no rule is matched, so none is blamed for what it keeps.
         let nested = self.nested_held.contains(folder);
         if saved && is_dir {
-            self.held.insert(shown(rel));
+            self.held.insert(met.rel.to_owned());
             if nested {
-                self.nested_held.insert(shown(rel));
+                self.nested_held.insert(met.rel.to_owned());
             }
         } else if saved && !nested {
-            self.ignored.insert(shown(rel));
+            self.ignored.insert(met.rel.to_owned());
         }
         saved
     }
@@ -909,6 +963,9 @@ struct InFolder {
     left: Vec<DirEntry>,
     /// The handle that listed it, kept until its files are handed out.
     dir: Option<Arc<Dir>>,
+    within: Within,
+    /// What the walk keeps of it so far, for `Folders` once the walk leaves it.
+    children: Vec<Child>,
 }
 
 impl InFolder {
@@ -916,11 +973,13 @@ impl InFolder {
     /// its folders, so a folder past those held is opened again only to go into its next folder.
     /// `ready` is a listing already made, used if it is this folder's.
     fn listed(
-        handles: &mut Handles,
+        rules: &mut WalkState,
         ready: Option<(String, Arc<Dir>, Vec<DirEntry>)>,
         rel: String,
         depth: usize,
     ) -> Result<InFolder, SaveError> {
+        let within = rules.within(&rel);
+        let handles = &mut rules.handles;
         let (dir, mut left) = match ready {
             Some((at, dir, entries)) if at == rel => (dir, entries),
             _ => {
@@ -942,6 +1001,8 @@ impl InFolder {
             depth,
             left,
             dir: Some(dir),
+            within,
+            children: Vec::new(),
         })
     }
 }
@@ -1015,8 +1076,11 @@ fn scan_folder(
             back.push((rel, child));
         }
     }
+    // The folders that get an entry here, to sort again.
+    let mut grown = BTreeSet::new();
     for (rel, child) in back {
-        folders.entry(rel).or_default().push(child);
+        folders.entry(rel.clone()).or_default().push(child);
+        grown.insert(rel);
     }
     for (_, kept) in rules.untouched.drain() {
         limits
@@ -1033,10 +1097,14 @@ fn scan_folder(
         }
         limits.add(1).map_err(too_large)?;
         let (up, _) = kept.rel.rsplit_once('/').unwrap_or_default();
-        folders.entry(up.to_owned()).or_default().push(kept);
+        let up = up.to_owned();
+        folders.entry(up.clone()).or_default().push(kept);
+        grown.insert(up);
     }
-    for children in folders.values_mut() {
-        children.sort_by(|a, b| a.name.cmp(&b.name));
+    for rel in grown {
+        if let Some(children) = folders.get_mut(&rel) {
+            children.sort_by(|a, b| a.name.cmp(&b.name));
+        }
     }
     if rules.git_names.count > 0 {
         let left_out = git_names_left_out(&rules.git_names);
@@ -1058,20 +1126,19 @@ fn scan_folder(
     })
 }
 
-/// A file or link the walk found, still to be looked at: child `at` of `folder`, named `name`, at
-/// the project path `rel`, which the folder's listing said was `listed`.
+/// A file or link the walk found, still to be looked at: child `at` of its job's folder, named
+/// `name`, which the folder's listing said was `listed`.
 struct Look {
-    folder: String,
     at: usize,
     listed: EntryType,
     name: String,
-    rel: String,
 }
 
-/// Files of one folder to look at, with the handle that listed the folder: a folder swapped since
-/// is never looked into, and the read that opens it again by name finds other files there.
+/// Files of the folder `folder` to look at, with the handle that listed it: a folder swapped
+/// since is never looked into, and the read that opens it again by name finds other files there.
 struct Job {
     dir: Arc<Dir>,
+    folder: String,
     looks: Vec<Look>,
 }
 
@@ -1160,27 +1227,29 @@ fn walk_and_look(
     let mut found = Vec::new();
     for job in looked {
         match job {
-            Ok(looks) => found.extend(looks),
+            Ok(looks) => found.push(looks),
             Err(problem) => keep_first(&mut first, problem),
         }
     }
     if let Some((_, problem)) = first {
         return Err(problem);
     }
-    for (look, meta) in found {
-        if let Some(c) = folders
-            .get_mut(&look.folder)
-            .and_then(|c| c.get_mut(look.at))
-        {
-            c.meta = Some(meta);
+    for (folder, looks) in found {
+        let Some(children) = folders.get_mut(&folder) else {
+            continue;
+        };
+        for (at, meta) in looks {
+            if let Some(c) = children.get_mut(at) {
+                c.meta = Some(meta);
+            }
         }
     }
     Ok(folders)
 }
 
-/// A job's files, each with its details, or the first problem a look at them found: its files
-/// are in path order.
-type Looked = Result<Vec<(Look, EntryMeta)>, Problem>;
+/// A job's folder and the details of each of its files, by its place among the folder's children,
+/// or the first problem a look at them found: its files are in path order.
+type Looked = Result<(String, Vec<(usize, EntryMeta)>), Problem>;
 
 /// A looker: hands each job from `jobs` to `look_at`, until there are none. Each is looked at,
 /// even past a problem, as a later one may hold one that comes first by path.
@@ -1205,18 +1274,18 @@ fn look_at(job: Job) -> Looked {
         let meta = match job.dir.metadata(OsStr::new(&look.name)) {
             Ok(meta) => meta,
             Err(source) => {
-                let path = look.rel.clone();
-                return Err((look.rel, SaveError::Unreadable { path, source }));
+                let path = path_in(&job.folder, &look.name);
+                return Err((path.clone(), SaveError::Unreadable { path, source }));
             }
         };
         // The listing and this look disagree: it changed in between.
         if meta.kind != look.listed {
-            let path = look.rel.clone();
-            return Err((look.rel, SaveError::ChangedDuringSave { path }));
+            let path = path_in(&job.folder, &look.name);
+            return Err((path.clone(), SaveError::ChangedDuringSave { path }));
         }
-        found.push((look, meta));
+        found.push((look.at, meta));
     }
-    Ok(found)
+    Ok((job.folder, found))
 }
 
 /// The walk itself, handing the files and links it keeps to `send` a folder at a time, to be
@@ -1234,17 +1303,19 @@ fn walk_folders(
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
     // read.
-    let mut folders = Folders::from([(String::new(), Vec::new())]);
-    let top = InFolder::listed(&mut rules.handles, None, String::new(), 0);
+    let mut folders = Folders::new();
+    let top = InFolder::listed(rules, None, String::new(), 0);
     let mut path = vec![top.map_err(|problem| (String::new(), problem))?];
-    let mut job = None;
+    let mut job: Option<Job> = None;
     let mut first: Option<Problem> = None;
     while let Some(here) = path.last_mut() {
         let Some(entry) = here.left.pop() else {
-            path.pop();
+            if let Some(done) = path.pop() {
+                folders.insert(done.rel, done.children);
+            }
             continue;
         };
-        let (up, depth) = (here.rel.clone(), here.depth + 1);
+        let depth = here.depth + 1;
         // Its files come first, so once a folder is met they are all handed out.
         let listed_by = if entry.kind == EntryType::Dir {
             here.dir.take();
@@ -1256,20 +1327,33 @@ fn walk_folders(
         // ignore rules, though Bolt never goes into it.
         let closed = entry.kind == EntryType::Other && entry.folder;
         let is_dir = entry.kind == EntryType::Dir || closed;
+        let utf8 = entry.name.to_str();
         let own = |name: &str| own_folder(name, drive);
-        if is_dir && depth == 1 && entry.name.to_str().is_some_and(own) {
+        if is_dir && depth == 1 && utf8.is_some_and(own) {
             continue;
         }
-        let rel_path = Path::new(&up).join(&entry.name);
-        let rel = shown(&rel_path);
+        let rel = match utf8 {
+            Some(name) => path_in(&here.rel, name),
+            None => shown(&Path::new(&here.rel).join(&entry.name)),
+        };
         if first.as_ref().is_some_and(|(at, _)| !before(&rel, at)) {
             continue;
         }
         let visited = (|| -> Result<Option<InFolder>, SaveError> {
-            let kept = if closed {
-                rules.keeps_closed_folder(&root.join(&rel_path))
-            } else {
-                rules.keeps(&root.join(&rel_path), is_dir)
+            let opens = entry.kind == EntryType::Dir;
+            let kept = match utf8 {
+                Some(name) => {
+                    let met = Met {
+                        rel: &rel,
+                        folder: &here.rel,
+                        name: Some(name),
+                        path: Path::new(&rel),
+                        bytes: rel.as_bytes(),
+                    };
+                    rules.judged(&met, here.within, is_dir, opens)
+                }
+                // Taken apart the long way, so the ignore rules see the name's own bytes.
+                None => rules.judged_at(&root.join(&here.rel).join(&entry.name), is_dir, opens),
             };
             // Going on without the rules of an ignore file that failed would save what it keeps
             // out. They are for what is in its folder, which comes after it by path.
@@ -1279,7 +1363,7 @@ fn walk_folders(
             if !kept {
                 return Ok(None);
             }
-            let name = entry.name.to_str().ok_or_else(|| SaveError::InvalidName {
+            let name = utf8.ok_or_else(|| SaveError::InvalidName {
                 path: rel.clone(),
                 reason: "its name is not valid UTF-8".into(),
             })?;
@@ -1293,7 +1377,6 @@ fn walk_folders(
             let kind = match entry.kind {
                 EntryType::Dir => {
                     limits.check_depth(depth).map_err(too_large)?;
-                    folders.entry(rel.clone()).or_default();
                     // The walk hands a folder over before it asks about anything inside.
                     rules.note_folder(&rel, base)?;
                     Kind::Folder
@@ -1308,15 +1391,11 @@ fn walk_folders(
                 EntryType::Other => return Ok(None),
             };
             limits.add(1).map_err(too_large)?;
-            let children = folders.entry(up.clone()).or_default();
             if kind == Kind::Folder {
                 // Every file here is met before any folder, so they can be looked at now.
                 send_job(&mut job, send);
             } else {
-                let full = |j: &Job| {
-                    j.looks.len() == LOOKS_PER_JOB
-                        || j.looks.first().is_some_and(|l| l.folder != up)
-                };
+                let full = |j: &Job| j.looks.len() == LOOKS_PER_JOB || j.folder != here.rel;
                 if job.as_ref().is_some_and(full) {
                     send_job(&mut job, send);
                 }
@@ -1327,17 +1406,16 @@ fn walk_folders(
                 })?;
                 let job = job.get_or_insert_with(|| Job {
                     dir,
+                    folder: here.rel.clone(),
                     looks: Vec::new(),
                 });
                 job.looks.push(Look {
-                    folder: up,
-                    at: children.len(),
+                    at: here.children.len(),
                     listed: entry.kind,
                     name: name.to_owned(),
-                    rel: rel.clone(),
                 });
             }
-            children.push(Child {
+            here.children.push(Child {
                 name: name.to_owned(),
                 kind,
                 rel: rel.clone(),
@@ -1347,7 +1425,7 @@ fn walk_folders(
                 return Ok(None);
             }
             let ready = rules.listed.take();
-            InFolder::listed(&mut rules.handles, ready, rel.clone(), depth).map(Some)
+            InFolder::listed(rules, ready, rel.clone(), depth).map(Some)
         })();
         match visited {
             Ok(Some(inner)) => path.push(inner),

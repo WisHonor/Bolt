@@ -147,10 +147,28 @@ fn ntfs_base(name: &str) -> &str {
 /// trailing dots or spaces, a `:stream`, the short names `bolt~1` to `bolt~4`, or characters macOS
 /// ignores. It answers the same on every system.
 pub fn is_bolt_alias(name: &str) -> bool {
-    let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
-    let base = ntfs_base(&kept).to_ascii_lowercase();
+    // `ntfs_base` of the name without its ignorable characters, in ASCII lowercase; both
+    // spellings below are at most 6 characters, so a longer base is neither.
+    let mut base = ['\0'; 6];
+    let mut end = 0;
+    let chars = name.chars().filter(|&c| !is_ignorable(c));
+    for (at, c) in chars
+        .take_while(|c| !matches!(c, ':' | '/' | '\\'))
+        .enumerate()
+    {
+        let trailing = c == '.' || c == ' ';
+        match base.get_mut(at) {
+            Some(slot) => *slot = c.to_ascii_lowercase(),
+            None if trailing => continue,
+            None => return false,
+        }
+        if !trailing {
+            end = at + 1;
+        }
+    }
+    let base = base.get(..end).unwrap_or_default();
     // `bolt~1`..`bolt~4` are NTFS 8.3 short names of `.bolt` (Git accepts ~1..~4).
-    base == ".bolt" || matches!(base.as_bytes(), [b'b', b'o', b'l', b't', b'~', b'1'..=b'4'])
+    base == ['.', 'b', 'o', 'l', 't'] || matches!(base, ['b', 'o', 'l', 't', '~', '1'..='4'])
 }
 
 /// Whether Windows or macOS would take `name` for Git's own folder, `.git`. This is Git's
@@ -589,6 +607,62 @@ pub fn project_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// `is_bolt_alias` as it was first written, copying the name twice.
+    fn bolt_alias_by_copying(name: &str) -> bool {
+        let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
+        let base = ntfs_base(&kept).to_ascii_lowercase();
+        base == ".bolt" || matches!(base.as_bytes(), [b'b', b'o', b'l', b't', b'~', b'1'..=b'4'])
+    }
+
+    /// Names close to `.bolt` and `.git`: their pieces, in any letter case, among characters
+    /// macOS ignores, trailing dots and spaces, streams and backslashes.
+    fn near_alias() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            Just(".bolt"),
+            Just(".git"),
+            Just("bolt~1"),
+            Just("bolt~5"),
+            Just("git~1"),
+            Just("."),
+            Just(" "),
+            Just(":"),
+            Just("\\"),
+            Just("/"),
+            Just("\u{200C}"),
+            Just("\u{FEFF}"),
+            Just("\u{FFFF}"),
+            Just("b"),
+            Just("é"),
+        ];
+        (prop::collection::vec(piece, 0..6), any::<u8>()).prop_map(|(pieces, case)| {
+            pieces
+                .concat()
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if case >> (i % 8) & 1 == 1 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn bolt_aliases_are_found_as_they_were(name in near_alias()) {
+            prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
+        }
+
+        #[test]
+        fn bolt_aliases_are_found_as_they_were_in_any_string(name in any::<String>()) {
+            prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
+        }
+    }
 
     #[test]
     fn a_listing_rules_out_only_names_no_drive_could_find() {
