@@ -94,7 +94,7 @@ steps() {
 # run_times <file>: one step's median, mean, best and worst run, in seconds; fails if one is missing.
 run_times() {
 	jq -er '.results[0] | [.median, .mean, .min, .max]
-		| if all(type == "number") then @tsv else error("a time is missing") end' "$1"
+		| if all(type == "number") then join(" ") else error("a time is missing") end' "$1"
 }
 
 # gate_check <results>: Bolt's median against Git's for the gate's three steps; fails over 2 times.
@@ -105,13 +105,10 @@ gate_check() {
 	for step in status small-change back-to-first; do
 		bolt=$(run_times "$1"/*-code-bolt-"$step".json)
 		git=$(run_times "$1"/*-code-git-"$step".json)
-		printf '%s	%s	%s
-' "$step" "$bolt" "$git" | awk -F'	' '{
+		# Fields: the step, then Bolt's four times, then Git's four.
+		echo "$step $bolt $git" | awk '{
 			r = $2 / $6
-			printf "%-14s %8.1f ms %8.1f ms %5.2f %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f
-",
-				$1, $2 * 1000, $6 * 1000, r, (r > 2 ? "OVER" : "ok"),
-				$3 * 1000, $4 * 1000, $5 * 1000, $7 * 1000, $8 * 1000, $9 * 1000
+			printf "%-14s %8.1f ms %8.1f ms %5.2f %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f%s", $1, $2 * 1000, $6 * 1000, r, (r > 2 ? "OVER" : "ok"), $3 * 1000, $4 * 1000, $5 * 1000, $7 * 1000, $8 * 1000, $9 * 1000, ORS
 			exit (r > 2)
 		}' || failed=1
 	done
