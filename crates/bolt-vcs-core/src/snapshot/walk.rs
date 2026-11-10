@@ -305,7 +305,12 @@ pub(super) fn path_in(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         name.to_owned()
     } else {
-        format!("{rel}/{name}")
+        let mut path =
+            String::with_capacity(rel.len().saturating_add(name.len()).saturating_add(1));
+        path.push_str(rel);
+        path.push('/');
+        path.push_str(name);
+        path
     }
 }
 

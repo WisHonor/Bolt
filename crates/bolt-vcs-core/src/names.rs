@@ -147,6 +147,12 @@ fn ntfs_base(name: &str) -> &str {
 /// trailing dots or spaces, a `:stream`, the short names `bolt~1` to `bolt~4`, or characters macOS
 /// ignores. It answers the same on every system.
 pub fn is_bolt_alias(name: &str) -> bool {
+    // The characters macOS ignores are all outside ASCII, so an ASCII first byte starts the base.
+    if starts_outside(name, b".bB") {
+        return false;
+    }
+    #[cfg(test)]
+    tests::count_full_check();
     // `ntfs_base` of the name without its ignorable characters, in ASCII lowercase; both
     // spellings below are at most 6 characters, so a longer base is neither.
     let mut base = ['\0'; 6];
@@ -175,7 +181,20 @@ pub fn is_bolt_alias(name: &str) -> bool {
 /// `is_ntfs_dotgit` and `is_hfs_dotgit`, plus the look its fsck takes at every part after a
 /// backslash, and it answers the same on every system.
 pub fn is_git_alias(name: &str) -> bool {
+    // Without a backslash the name is its only part, and both checks need `.`, `g` or `G` first.
+    if starts_outside(name, b".gG") && !name.contains('\\') {
+        return false;
+    }
+    #[cfg(test)]
+    tests::count_full_check();
     is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+}
+
+/// Whether `name` starts with an ASCII byte that isn't one of `firsts`.
+fn starts_outside(name: &str, firsts: &[u8]) -> bool {
+    name.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii() && !firsts.contains(b))
 }
 
 /// Whether `name`, in the project's top folder, is the project's own `.bolt` or Git's `.git` as
@@ -662,6 +681,116 @@ mod tests {
         fn bolt_aliases_are_found_as_they_were_in_any_string(name in any::<String>()) {
             prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
         }
+    }
+
+    thread_local! {
+        static FULL_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn count_full_check() {
+        FULL_CHECKS.with(|n| n.set(n.get().saturating_add(1)));
+    }
+
+    fn git_alias_in_full(name: &str) -> bool {
+        is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+    }
+
+    fn bolt_alias_in_full(name: &str) -> bool {
+        let mut base = ['\0'; 6];
+        let mut end = 0;
+        let chars = name.chars().filter(|&c| !is_ignorable(c));
+        for (at, c) in chars
+            .take_while(|c| !matches!(c, ':' | '/' | '\\'))
+            .enumerate()
+        {
+            let trailing = c == '.' || c == ' ';
+            match base.get_mut(at) {
+                Some(slot) => *slot = c.to_ascii_lowercase(),
+                None if trailing => continue,
+                None => return false,
+            }
+            if !trailing {
+                end = at + 1;
+            }
+        }
+        let base = base.get(..end).unwrap_or_default();
+        base == ['.', 'b', 'o', 'l', 't'] || matches!(base, ['b', 'o', 'l', 't', '~', '1'..='4'])
+    }
+
+    /// Names built from pieces at the edges of the early answer: `.git` and `.bolt` spellings,
+    /// the first bytes it lets through, separators, ignorable characters and ordinary letters.
+    fn near_first_byte() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            Just(".git"),
+            Just(".GIT"),
+            Just("git~1"),
+            Just("GIT~1"),
+            Just("git~2"),
+            Just(".bolt"),
+            Just("BOLT~4"),
+            Just("bolt~5"),
+            Just("."),
+            Just("g"),
+            Just("G"),
+            Just("b"),
+            Just("B"),
+            Just(" "),
+            Just(":"),
+            Just("/"),
+            Just("\\"),
+            Just("\u{200C}"),
+            Just("\u{FEFF}"),
+            Just("é"),
+            Just("x"),
+            Just("7"),
+        ];
+        prop::collection::vec(piece, 0..=6).prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn the_early_answer_for_git_is_the_full_one(name in near_first_byte()) {
+            prop_assert_eq!(is_git_alias(&name), git_alias_in_full(&name));
+        }
+
+        #[test]
+        fn the_early_answer_for_bolt_is_the_full_one(name in near_first_byte()) {
+            prop_assert_eq!(is_bolt_alias(&name), bolt_alias_in_full(&name));
+        }
+    }
+
+    #[test]
+    fn the_early_answers_match_the_full_ones_on_every_short_string() {
+        let alphabet = [
+            '.', 'g', 'G', 'i', 't', 'b', 'o', 'l', '~', '1', '\\', ':', ' ', 'a',
+        ];
+        let mut names: Vec<String> = vec![String::new()];
+        let mut checked = 0;
+        for _ in 0..3 {
+            names = names
+                .iter()
+                .flat_map(|n| alphabet.iter().map(move |c| format!("{n}{c}")))
+                .collect();
+            for name in &names {
+                assert_eq!(is_git_alias(name), git_alias_in_full(name), "{name:?}");
+                assert_eq!(is_bolt_alias(name), bolt_alias_in_full(name), "{name:?}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 14 + 14 * 14 + 14 * 14 * 14);
+    }
+
+    #[test]
+    fn ordinary_names_never_reach_the_full_checks() {
+        let before = FULL_CHECKS.with(|n| n.get());
+        for i in 0..1000 {
+            let name = format!("file{i}.txt");
+            assert_eq!(validate_name(&name), Ok(()));
+            assert!(!is_git_alias(&name) && !is_bolt_alias(&name));
+        }
+        assert_eq!(FULL_CHECKS.with(|n| n.get()), before);
     }
 
     #[test]
