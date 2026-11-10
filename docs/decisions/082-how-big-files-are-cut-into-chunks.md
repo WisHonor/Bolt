@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-08
 - **Agenda topic:** none (milestone 5 planning)
+- **Refined by:** [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (the threshold is `bolt.toml`'s `chunk-files-over`)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 009](009-storage-engine.md) (chunking: FastCDC from 1 MB, 16 KB / 64 KB / 256 KB to start); decisions [013](013-local-data-and-offline.md) and [016](016-presets.md) (the threshold is fixed at 1 MiB until the presets make it a `bolt.toml` setting)
 

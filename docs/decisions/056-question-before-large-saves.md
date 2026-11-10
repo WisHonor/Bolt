@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-05
 - **Agenda topic:** none (milestone 3 planning, question 9; raised by the owner's import check)
+- **Refined by:** [decision 113](113-presets-what-each-writes-and-how-start-picks-one.md) (each preset's numbers); [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (the numbers are `bolt.toml` settings)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 003](003-working-copy-model.md) (a save that adds unusually much asks first) and [decision 016](016-presets.md) (presets set the threshold)
 

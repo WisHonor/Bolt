@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (refines [decision 025](025-red-team-m1-rulings.md))
-- **Refined by:** [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too); [decision 042](042-trust-hint-skips-folders-anyone-can-write-to.md) (the hint never offers `safe-folders` for a folder other accounts can write to); [decision 051](051-names-this-computer-cant-write-and-length-limits.md) (names this computer can't write; names at most 765 bytes, paths 4,096)
+- **Refined by:** [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too); [decision 042](042-trust-hint-skips-folders-anyone-can-write-to.md) (the hint never offers `safe-folders` for a folder other accounts can write to); [decision 051](051-names-this-computer-cant-write-and-length-limits.md) (names this computer can't write; names at most 765 bytes, paths 4,096); [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (a `safe-folders` entry that is itself a link doesn't count)
 - **Partly superseded by:** [decision 030](030-administrators-only-when-elevated.md) (#1: the Administrators group counts only in an elevated terminal, as in Git)
 
 ## Context

@@ -1,6 +1,6 @@
 # Bolt `--json` Formats
 
-> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05, `goto`, `discard`, `changes`, `line`, `undo` and `redo` 2026-11-06, `save --amend`, `undo --to`, `undo --list`, `shelf`, `shelf --list`, `unshelf` and `tidy` 2026-11-07, and milestone 5's changes on 2026-11-08 and 2026-11-09: `tidy`'s stop at a pack it can't read, `import`'s Git LFS fields, stops and warning and its stop at a fault in Bolt, and `save`'s stop at Git LFS pointers. It holds every document and every kind of warning these fifteen commands print (checked against the code on 2026-11-03, the documents and warnings milestone 4 added or changed on 2026-11-07, and milestone 5's on 2026-11-09). Each command that comes later adds its document here in the milestone that builds it.
+> **Status:** written in milestone 2 (2026-11-02) for `start`, `save`, `history` and `show`, as [decision 017](decisions/017-commands-and-output.md) promised; `import` added 2026-11-03, `status` 2026-11-05, `goto`, `discard`, `changes`, `line`, `undo` and `redo` 2026-11-06, `save --amend`, `undo --to`, `undo --list`, `shelf`, `shelf --list`, `unshelf` and `tidy` 2026-11-07, and milestone 5's changes on 2026-11-08 and 2026-11-09: `tidy`'s stop at a pack it can't read, `import`'s Git LFS fields, stops and warning and its stop at a fault in Bolt, and `save`'s stop at Git LFS pointers. It holds every document and every kind of warning these fifteen commands print (checked against the code on 2026-11-03, the documents and warnings milestone 4 added or changed on 2026-11-07, and milestone 5's on 2026-11-09). Each command that comes later adds its document here in the milestone that builds it. Milestone 6 (decided 2026-11-09, [decision 117](decisions/117-what-json-covers-at-v0.1.md)) adds `setup` and `verify`, `start`'s preset fields, `shelf`'s `changed_again` and four kinds of warning, and freezes `bolt_json` 1 when v0.1 is released.
 
 **In plain words.** Every Bolt command takes `--json`. Instead of text for people, it then prints one JSON document that a script, an editor plugin or the desktop app can read. This page says what is in each document, what each field means, and what `null` means where it can appear. The formats are a public interface: they are versioned, and the CLI tests keep them from changing by accident.
 
@@ -9,7 +9,9 @@
 - **One document, on stdout, in one line.** Nothing else goes to stdout: warnings and progress lines go to stderr, as text. `history`, `show`, `changes` and `undo --list --all` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
 - **`bolt_json` is the version of the format,** a number, `1` now. It is in every document.
 - **The versioning rule.** Within one `bolt_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A change that breaks the rule gets the next number. A field that can be `null` says so in its table, and says when: `start`'s `save`, for one, is `null` if the project was made but its first save couldn't be read back (a `first_save_not_read` warning says so). Check for `null` before you use such a field.
-- **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON.
+- **Frozen at v0.1.** When v0.1 is released, `bolt_json` 1 is fixed for good under the rule above ([decision 117](decisions/117-what-json-covers-at-v0.1.md)): the field names, their types and meanings, the `kind` of each warning and the exit codes. The wording of `message` and `hint` texts isn't part of it: they are for people, and may change.
+- **Never in a document, and never because of `--json`:** colour or any other terminal code, symbols picked for the terminal, progress, and the lines Bolt adds for a person at a terminal ("Next:", the hint the first time a Git word is used). With `--json` Bolt never asks a question: where it would ask a person, it fails and its hint names the flag (`--yes`, `--line`, `--preset`).
+- **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON, and so is what Bolt says about a Git word it doesn't run ([decision 116](decisions/116-gits-words-as-shortcuts.md)).
 - **Text from the project is data.** Names, messages and paths are given exactly as they are stored, so a program can use them. They can hold anything, escape sequences included, so escape them before showing them in a terminal. Bolt's own messages (`warnings[].message`, `error.message` and `error.hint`) are already escaped.
 - **Messages are for people.** Programs should go by `kind`, `result` and the other fields, because the words of a message can change.
 
@@ -20,7 +22,7 @@
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | The save's fingerprint: 64 hex digits. |
-| `change_id` | string | The save's change ID: 32 letters from `k` to `z`. |
+| `change_id` | string | The save's change ID: 32 letters from `k` to `z`, written as Jujutsu writes them (`z` for 0, `k` for 15; [decision 122](decisions/122-change-ids-in-jujutsus-letters.md)). |
 | `change_id_short` | string | The shortest start of `change_id` (at least 4 letters) that no other save on the line starts with. The whole ID if the line couldn't be read to work it out; a `change_id_not_shortened` warning says so. |
 | `message` | string | The message, as written. It can have several lines. |
 | `author` | person | Who wrote the change. |
@@ -41,7 +43,40 @@
 | `root` | string | The project's folder. |
 | `line` | string | The line the project starts on: always `"main"`. |
 | `save` | save or `null` | The first save, "Start project". **`null` means Bolt made the project but couldn't read the save back.** The command still succeeds, and a `first_save_not_read` warning says why. |
+| `preset` | string or `null` | The preset the project started with: `"code"`, `"game"` or `"custom"` ([decision 113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md)). `null` when the folder already had a `bolt.toml`, which stays as it is. |
+| `found` | object | What Bolt saw in the folder: `engines`, a list of `"unity"`, `"unreal"` and `"godot"`, and `languages`, a list of `"node"`, `"python"`, `"rust"`, `"go"`, `"dart"`, `"dotnet"`, `"maven"` and `"gradle"`. The preset's rule files are written for these. |
+| `rules_written` | list of string | The rule files the start wrote, as one undoable `setup` step after the start: `"bolt.toml"`, `".boltignore"`, or `[]` (Custom writes none; a `bolt.toml` that was there is kept). |
 | `warnings` | list | See §4. |
+
+A folder that already has a `bolt.toml` is judged first: there `bolt start` needs no `--preset` and never asks, the file stays as it is, and `preset` is `null`; giving `--preset` there fails before anything is made. In any other folder, with `--json` or without a terminal, `bolt start` needs `--preset code`, `--preset game` or `--preset custom`: without it nothing is started, and the error's hint names the flag and the preset Bolt would have suggested.
+
+### `bolt setup --json`
+
+`bolt setup` shows the project's rules as Bolt reads them from `bolt.toml` and `.boltignore` in the folder, and changes nothing ([decisions 114](decisions/114-bolt-toml-keys-and-how-bolt-reads-it.md) and [115](decisions/115-bolt-setup.md)).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `rules_file` | boolean | Whether the folder has a `bolt.toml` Bolt could read. `false` means Bolt's own values below apply, and a `rules_file_skipped` warning says why when a file is there. |
+| `preset` | string or `null` | The file's `preset` label. `null` when it has none. |
+| `chunk_files_over` | number | A file of this many bytes or more is stored in chunks. |
+| `ask_before_saving_over` | number | A save that adds more new bytes than this asks first. |
+| `ask_before_saving_files_over` | number | A save that adds more new files than this asks first. |
+| `rules` | list | The file's `[[rule]]` tables that Bolt could read, in order: `files` (list of string), and `lockable` and `conflict_markers`, each `true`, `false`, or `null` where the rule doesn't say. |
+| `ignore_lines` | number or `null` | How many lines the preset's block of `.boltignore` holds, its two mark lines not counted. `null` when the file has no block. |
+| `warnings` | list | See §4: `rules_file_skipped` and `rules_ignored` tell what in `bolt.toml` Bolt passed over. |
+
+`bolt setup --preset <name>` works out what the preset's rule files would be, and with `--yes` writes them as one step that `bolt undo` takes back:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `preset` | string | The preset asked for. |
+| `found` | object | As in `start`. |
+| `changes` | list | One object for each of `bolt.toml` and `.boltignore` that would change: `path`; `before`, the file's text in the folder now, or `null` when there is none; and `after`, its text once written, or `null` when the switch removes it. Bytes that aren't UTF-8 show as U+FFFD. `[]` when the files already are what the preset writes. |
+| `applied` | boolean | Whether the changes were written. |
+| `warnings` | list | See §4. |
+| `error` | object | Only without `--yes`, when there is something to change: `--json` can't ask, so nothing is written, the exit code is 1, and the hint names `--yes`. The rest of the document is still there, so a script can read what would change. |
 
 ### `bolt import --json`
 
@@ -286,6 +321,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 |---|---|---|
 | `bolt_json` | number | `1` |
 | `shelf` | object or `null` | The new shelf: `label`, its number (a string); `save`, its save's fingerprint (64 hex digits); and `files`, how many files it changes. `null` if there was nothing to set aside. |
+| `changed_again` | boolean | `true` when there were changes to set aside but every one of them changed again while Bolt read it, so nothing was shelved (`shelf` is `null`, and a `changed_since_plan` warning names the files): run the command again. `false` otherwise, also when `shelf` is `null` because the folder had nothing to set aside. |
 | `written` | number | Files and links put back as the save has them, links written as files included. |
 | `removed` | number | Files, links and folders removed. |
 | `not_written` | list of string | As in `goto`. |
@@ -345,6 +381,31 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `packs_written` | number | New packs written, holding what was kept from the packs written again. |
 | `packs_young` | number | Packs left as they are because they changed in the 24 hours before; a later `tidy` frees what they hold that nothing needs. |
 | `warnings` | list | See §4. |
+
+### `bolt verify --json`
+
+`bolt verify` checks everything Bolt has stored, and that the project has everything it needs ([decision 118](decisions/118-bolt-verify.md)). It changes nothing and takes no lock. First every pack: it opens, its index reads in full and matches its checksum, and every object in it reads back as what the index says (contents against their fingerprint, records decoded as their kind, each chunked file rebuilt from its chunks). Then, from the current diary entry, everything `bolt tidy` would keep: each record must read, and each file's contents, chunk list and chunks must be in some pack.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bolt_json` | number | `1` |
+| `packs` | number | Packs checked. |
+| `objects` | number | Objects read and checked in them. |
+| `bytes` | number | The packs' size on disk, in bytes. |
+| `saves` | number | Saves the project needs that were read. |
+| `entries` | number | Diary entries read, from the current one back to the first. |
+| `problems_total` | number | How many problems were found. `0` means everything checked out. |
+| `problems` | list | The problems, at most the first 1,000: `kind` (below); `pack`, the pack's file name, or `null`; `object`, the object's fingerprint (64 hex digits), or `null`; `needed_by`, for something the project needs, an object with the `save` (its fingerprint) and the `path` in it that needs the object, or `null`; and `message`, for people. |
+| `warnings` | list | See §4. `switch_unfinished` says so when a switch is unfinished, as for `status`. |
+| `error` | object | Only when `problems_total` isn't 0: the exit code is then 1. |
+
+| `kind` of problem | What it means |
+|---|---|
+| `pack_damaged` | A pack isn't a pack any more, or its index can't be read or doesn't match its checksum. |
+| `pack_unreadable` | A pack couldn't be opened or read for a reason that isn't damage (no permission, say). It may be fine. |
+| `object_damaged` | An object doesn't read back as what its pack's index says: it fails its fingerprint, doesn't decode as its kind, or, for a chunked file, its chunks don't build the file. |
+| `object_missing` | Something the project needs isn't in any pack. |
+| `head_lost` | `.bolt/state/head` is missing or names nothing Bolt can read, so what the project needs couldn't be worked out; the packs were still checked. `bolt undo --list` then lists where to pick up. |
 
 ### `bolt line --json`
 
@@ -419,7 +480,7 @@ Folders are not listed; the files in them are.
 | `files_in_use` | `goto`, `discard`, `undo`, `redo`, `shelf`, `unshelf`, and a command that finishes a switch a crash stopped | Another program (an editor or virus scanner, say) held files open on Windows for about a second, so Bolt left them as they were and wrote the rest. The switch isn't finished, so `goto`, `discard`, `undo`, `redo`, `shelf` and `unshelf` fail, naming the files: closing the program and running the command again finishes it ([decision 049](decisions/049-writing-files-one-at-a-time.md)). The message names the first 5 by path and counts the rest. |
 | `changed_since_plan` | `goto`, `discard`, `undo`, `redo`, `shelf`, `unshelf`, and a command that finishes a switch a crash stopped | Entries weren't what Bolt found when it planned the switch, a moment before (another program changed or made them, or put a link where a folder was), so Bolt left them as they are rather than lose that work. Nothing below such a folder is written either. The message names the first 5 by path and counts the rest. |
 | `links_left` | `discard`, `shelf` | Unsaved links (new, or changed) were left as they are rather than thrown away or shelved, with the folders that hold them, and nothing saved was put back in their place: an undo, or `unshelf`, could bring them back only as plain files holding their targets ([decision 071](decisions/071-a-step-records-its-change-to-the-folder.md)). That is so when this computer can't make links (Windows without Developer Mode or an administrator), and when write-out would write a link as a placeholder in the save of what was thrown away or shelved, judged from that save alone: its target is longer than 4,096 bytes, is absolute, starts with a drive letter or `\\`, climbs past the top with `..`, goes through a name that isn't a folder of that save (another link, or a new folder left out of it), or through a name Bolt never writes (a spelling of `.git` or `.bolt`, or a name this system can't hold); on Windows also when it holds a `\` or a `:`. They stay in the folder as they are: delete them by hand if they aren't wanted. The message names the first 5 by path and counts the rest. |
-| `switch_unfinished` | `status`, `changes`, `history`, `show`, `line`, `undo --list`, `shelf --list`; and a command that changes the project, when its own switch, or a stopped one it finished first, was done but couldn't remove its journal | A switch between saves was stopped (a crash, Ctrl+C, a file in use) before it was done, so some files may still be as they were. Running `goto` or `discard` again, or any command that changes the project, finishes it first; it is never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)). If the switch's journal, `.bolt/state/journal`, can't be used (it is damaged, was made for another save than the one the project is on, or names a diary entry that can't be read), the message says so instead, with the same words the refusal uses: commands that change the project refuse to run while it is there, since the folder may be half switched, and deleting it lets them go on with the files as they are (a later `save` records the folder as it is then). Commands that only read check just the journal's front, which says between which entries the switch runs ([decision 079](decisions/079-red-team-m4-rulings.md)), so damage past it shows only when a command that changes the project reads it whole and refuses it. A switch stopped just after it took effect, with only its journal left, gets a message of its own: its files are all written, and the next command that changes the project removes the journal first (`undo`, `redo` and `unshelf` then take no step of their own, [decision 075](decisions/075-crash-recovery.md)). A command whose own switch, or a stopped switch it finished first, was done but couldn't remove the journal says so in the same kind, with why, and goes on: once `head` has moved nothing fails a command. Before the same run moves `head` again (the `save` after a switch it finished, the next step of `undo 2`), that journal is replaced by the step's own or removed, and a step that can't do so stops before it changes anything. The journal is then left for the next command, unless only the flush after removing it failed: then it is gone, and only a power cut could bring it back, for the next command that changes the project to remove. A journal never outlives the head it was finished at. With `head` lost (§5) there is no such warning: the journal can't be judged. |
+| `switch_unfinished` | `status`, `changes`, `history`, `show`, `line`, `undo --list`, `shelf --list`, `verify`; and a command that changes the project, when its own switch, or a stopped one it finished first, was done but couldn't remove its journal | A switch between saves was stopped (a crash, Ctrl+C, a file in use) before it was done, so some files may still be as they were. Running `goto` or `discard` again, or any command that changes the project, finishes it first; it is never rolled back ([decision 049](decisions/049-writing-files-one-at-a-time.md)). If the switch's journal, `.bolt/state/journal`, can't be used (it is damaged, was made for another save than the one the project is on, or names a diary entry that can't be read), the message says so instead, with the same words the refusal uses: commands that change the project refuse to run while it is there, since the folder may be half switched, and deleting it lets them go on with the files as they are (a later `save` records the folder as it is then). Commands that only read check just the journal's front, which says between which entries the switch runs ([decision 079](decisions/079-red-team-m4-rulings.md)), so damage past it shows only when a command that changes the project reads it whole and refuses it. A switch stopped just after it took effect, with only its journal left, gets a message of its own: its files are all written, and the next command that changes the project removes the journal first (`undo`, `redo` and `unshelf` then take no step of their own, [decision 075](decisions/075-crash-recovery.md)). A command whose own switch, or a stopped switch it finished first, was done but couldn't remove the journal says so in the same kind, with why, and goes on: once `head` has moved nothing fails a command. Before the same run moves `head` again (the `save` after a switch it finished, the next step of `undo 2`), that journal is replaced by the step's own or removed, and a step that can't do so stops before it changes anything. The journal is then left for the next command, unless only the flush after removing it failed: then it is gone, and only a power cut could bring it back, for the next command that changes the project to remove. A journal never outlives the head it was finished at. With `head` lost (§5) there is no such warning: the journal can't be judged. |
 | `switch_finished` | `save`, `goto`, `discard`, `undo`, `redo`, `shelf`, `unshelf` and `tidy` | Before doing its own work, the command finished a switch between saves that was stopped. The message counts the files it wrote and the entries it removed. It is given even when the command then fails, since the switch is done. When only the switch's journal was left, it is removed without a warning. |
 | `diff_timed_out` | `changes` | Comparing a file line by line took more than 2 seconds, so Bolt stopped and shows its changes in bigger pieces than they could be (its `timed_out` is `true`). One warning for each such file, naming it. |
 | `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
@@ -429,6 +490,10 @@ Folders are not listed; the files in them are.
 | `duplicate_change_id` | `import` | Some commits have a `change-id` header (Jujutsu's) whose change ID another commit in the history has too, from the same header or from its own commit ID. Two saves never share a change ID, so such a header's ID went to one save at most, and each of the other commits took the change ID its own commit ID gives, as a commit without the header does. The same repository always gets the same IDs. The message counts them. |
 | `config_includes_ignored` | `import` | The Git repository's config (`.git/config`, or `config.worktree` beside it when `extensions.worktreeConfig` is set) has an `[include]` or `[includeIf]` section. Bolt doesn't read the files they name, so it can't tell whether they turn on sparse checkout, which Bolt otherwise refuses. If one does, Git left some files out of the folder, and the first save would record them as deleted; they stay in history and can be brought back. The message says how to check (`git config core.sparseCheckout`) and how to turn it off before saving. |
 | `lfs_lookalikes` | `import` | Files look like Git LFS pointers but aren't Git LFS files, and Bolt imported them as they are ([decision 085](decisions/085-importing-git-lfs-files.md)): files of any size whose first 1,024 bytes (all of a shorter one) look like a pointer (not empty, a first line starting `version https://git-lfs.github.com/spec/v1` or its pre-release's `version https://hawser.github.com/spec/v1`, a line that is `oid sha256:` and 64 hex digits, and a line starting `size `), or that Git LFS's own parser reads as one, as they are or with each LF not already after a CR turned into CR LF, cut at 1,024 bytes. Git LFS's smudge filter reads only those bytes, after Git may have turned line ends into CR LF, which pushes bytes out of them, so Git LFS may check such a file out as the file a pointer there names, whatever its size ([decisions 094](decisions/094-red-team-m5-rulings.md), [097](decisions/097-red-team-m5-session-2-rulings.md) and [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)). The message names the first 5 by path and commit, and counts them all. |
+| `rules_file_skipped` | `save`, `setup`, `start` | The folder's `bolt.toml` couldn't be used at all (it is a link or a folder, is over 1 MiB, can't be read, or isn't TOML), so Bolt's own values apply: files are chunked from 1 MiB, and a save asks first over 100 MB or 10,000 new files ([decision 114](decisions/114-bolt-toml-keys-and-how-bolt-reads-it.md)). The message says what is wrong with it. |
+| `rules_ignored` | `save`, `setup`, `start` | `bolt.toml` holds keys Bolt passed over, each named with why: a value of the wrong type or out of range, a rule without usable `files`, or a key this Bolt doesn't know, which a newer Bolt may have written. Bolt's own value applies for each. |
+| `diary_end_unreadable` | `tidy` | A diary other than the project's own (one cut off from the current entry) can't be read back to its start: an entry it names isn't in the store. `tidy` kept what it could reach from it and went on ([decision 123](decisions/123-follow-ups-done-or-moved-past-v0.1.md)). |
+| `switch_dropped` | `undo --to` | The project's `head` was lost while a switch was unfinished. Picking an entry up removed that switch's journal, which no command could finish any more: the files it had already written show as unsaved changes, and what it would have written over is kept in the switch's own saves ([decision 123](decisions/123-follow-ups-done-or-moved-past-v0.1.md)). |
 | `info_exclude_ignored` | no longer given | Until 2026-11-04, `import` said that Git's personal exclude list, `.git/info/exclude`, had patterns Bolt didn't use. Since [decision 047](decisions/047-git-personal-ignore-lists-read.md) a save reads it, and the user's own Git ignore list too, so there is nothing to say. |
 
 ## 5. Errors

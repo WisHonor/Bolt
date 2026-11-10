@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 8
-- **Refined by:** [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (`feature chunks` is added without `bolt setup`)
+- **Refined by:** [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (`feature chunks` is added without `bolt setup`); [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (the keys of `bolt.toml`, and how it is read); [decision 115](115-bolt-setup.md) (`bolt setup`); [decision 121](121-format-1-freezes-at-v0.1.md) (format 1 freezes at v0.1, and `feature chunks` stays a feature line)
 - **Partly superseded by:** [decision 038](038-gitignore-and-saved-files.md) (Bolt reads `.gitignore` files as well, so a Git import copies nothing into `.boltignore`)
 
 ## Context

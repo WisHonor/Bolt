@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-07
 - **Agenda topic:** none (milestone 4, the store's follow-ups)
+- **Refined by:** [decision 118](118-bolt-verify.md) (`bolt verify` checks every pack)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Supersedes:** [decision 066](066-a-pack-bolt-cant-open-for-another-reason.md) in part (its option C is taken now: such a pack is named in a warning)
 
