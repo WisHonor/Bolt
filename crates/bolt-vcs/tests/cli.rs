@@ -1456,6 +1456,56 @@ fn show_with_no_file_changes() {
     assert!(stdout_of(&env, &["show"]).ends_with("\n\nNo files changed.\n"));
 }
 
+/// The 12 hex digits `bolt show` names after `After`, the first parent's first.
+fn after(env: &Env, what: &[&str]) -> Vec<String> {
+    let out = stdout_of(env, &[&["show"], what].concat());
+    let line = out.lines().find(|l| l.starts_with("    After ")).unwrap();
+    line.split_whitespace()
+        .map(|w| w.trim_end_matches(','))
+        .filter(|w| w.len() == 12 && w.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `bolt show` takes back the fingerprints it names after `After` where a line's history reaches
+/// that save: always a first parent's, and a merge's other parent only while a line reaches it.
+#[test]
+fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them() {
+    for keep_the_branch in [true, false] {
+        let env = Env(support::Env::new());
+        env.commit("a.txt", "a\n", "First");
+        env.git(&["checkout", "-q", "-b", "side"]);
+        env.commit("b.txt", "b\n", "Side");
+        env.git(&["checkout", "-q", "main"]);
+        env.commit("c.txt", "c\n", "Main");
+        env.git(&["merge", "-q", "--no-ff", "-m", "Merge", "side"]);
+        if !keep_the_branch {
+            env.git(&["branch", "-q", "-D", "side"]);
+        }
+        env.import();
+        let parents = after(&env, &[]);
+        assert_eq!(parents.len(), 2, "{parents:?}");
+        assert_eq!(after(&env, &[&parents[0]]).len(), 1);
+        let out = env.bolt().args(["show", &parents[1]]).output().unwrap();
+        let taken_back = out.status.code() == Some(0);
+        assert_eq!(taken_back, keep_the_branch, "{}", text(&out.stderr));
+    }
+    // A save made on a new line from an older one: its parent is on main's history.
+    let env = project_with_two_saves();
+    let history: serde_json::Value =
+        serde_json::from_str(&stdout_of(&env, &["--json", "history"])).unwrap();
+    let older = history["saves"][1]["id"].as_str().unwrap().to_owned();
+    env.bolt().args(["goto", &older]).assert().success();
+    std::fs::write(env.root().join("new.txt"), "new\n").unwrap();
+    env.bolt()
+        .args(["save", "--line", "feature", "Away"])
+        .assert()
+        .success();
+    let parent = &after(&env, &[])[0];
+    assert!(older.starts_with(parent.as_str()));
+    assert!(stdout_of(&env, &["show", parent]).contains("\"one\""));
+}
+
 #[test]
 fn show_resolves_lines_prefixes_and_fingerprints() {
     let env = project_with_two_saves();

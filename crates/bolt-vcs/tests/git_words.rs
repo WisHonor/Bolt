@@ -243,6 +243,20 @@ fn branch_with_an_option_gets_lines_own_answer() {
 }
 
 #[test]
+fn commit_whose_line_is_given_no_name_is_refused_and_saves_nothing() {
+    let env = project();
+    write(&env, "a.txt", "changed\n");
+    let before = head(&env);
+    let out = run(&env, &["commit", "-m", "x", "--line", "--", "y"]);
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(said.contains("--line"), "{said}");
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(head(&env), before);
+    assert_eq!(changed(&env), ["a.txt"]);
+}
+
+#[test]
 fn add_explains_and_changes_nothing() {
     let env = project();
     write(&env, "new.txt", "new\n");
