@@ -1508,8 +1508,9 @@ const BLOCK: u64 = 65_536;
 const SMALL_READ: u64 = 4_096;
 
 /// The last block read of a pack's entries, and of its index, so the many small reads of records
-/// and index lines that sit side by side cost one read of the file. A pack never changes once it
-/// is named, so a block is only ever a copy of what the file holds.
+/// and index lines that sit side by side cost one read of the file. A block is read only at the
+/// second read in a row that falls in it, so reads scattered over the pack each cost a small read.
+/// A pack never changes once it is named, so a block is only ever a copy of what the file holds.
 struct Window {
     /// The file's length when it was opened.
     len: u64,
@@ -1522,6 +1523,8 @@ struct Window {
 struct Block {
     start: u64,
     bytes: Vec<u8>,
+    /// Where the block of the last read that missed starts.
+    missed: Option<u64>,
 }
 
 impl Window {
@@ -1534,8 +1537,9 @@ impl Window {
     }
 
     /// Fills `buf` with the bytes at `pos` from a block, reading the block first if it isn't the
-    /// one held. False if the read is too big, crosses a block's end, or the block can't be read
-    /// whole: the caller then reads the file itself, and reports what goes wrong.
+    /// one held and the last read that missed fell in it too. False if the read is too big,
+    /// crosses a block's end, is the first in a row to fall in its block, or the block can't be
+    /// read whole: the caller then reads the file itself, and reports what goes wrong.
     fn read(&self, file: &File, pos: u64, buf: &mut [u8]) -> bool {
         let start = pos - pos % BLOCK;
         let end = start.saturating_add(BLOCK).min(self.len);
@@ -1558,6 +1562,9 @@ impl Window {
                 buf.copy_from_slice(from);
                 return true;
             }
+            if held.missed.replace(start) != Some(start) {
+                return false;
+            }
             std::mem::take(&mut held.bytes)
         };
         let size = (end - start) as usize;
@@ -1574,7 +1581,7 @@ impl Window {
         };
         buf.copy_from_slice(from);
         if let Ok(mut held) = slot.lock() {
-            *held = Block { start, bytes };
+            (held.start, held.bytes) = (start, bytes);
         }
         true
     }
@@ -2626,9 +2633,62 @@ mod tests {
             let e = r.find(&hash_content(c)).unwrap().unwrap();
             assert!(read_any(&r, &e).unwrap() == *c);
         }
-        // One block of entries and one of the index, read once each.
+        // One block of entries and one of the index, each read at the second read that falls in
+        // it, after one small read.
         let reads = open_files::reads() - before;
-        assert!(reads <= 2, "{reads} reads");
+        assert!(reads <= 4, "{reads} reads");
+    }
+
+    /// The reads of the file that 8 bytes at `pos`, read through the window, take.
+    fn reads_for(r: &PackReader, pos: u64) -> usize {
+        let before = open_files::reads();
+        let mut got = [0u8; 8];
+        Section {
+            file: &r.file,
+            window: Some(&r.window),
+            pos,
+            end: pos + 8,
+        }
+        .read_exact(&mut got)
+        .unwrap();
+        open_files::reads() - before
+    }
+
+    /// A reader of a pack whose entries fill more than five blocks.
+    fn big_pack() -> (tempfile::TempDir, PackReader) {
+        let (root, tmp, packs) = dirs();
+        let sizes: Vec<usize> = (0..300).map(|i| 100 + i * 37 % 3000).collect();
+        let (path, _) = random_pack(&packs, &tmp, &sizes);
+        let r = PackReader::open(&path).unwrap();
+        assert!(r.window.index_start > 5 * BLOCK);
+        (root, r)
+    }
+
+    #[test]
+    fn scattered_small_reads_never_read_a_block() {
+        let (_root, r) = big_pack();
+        for k in 0..5 {
+            assert_eq!(reads_for(&r, k * BLOCK + 100), 1, "block {k}");
+        }
+        assert_eq!(r.window.held(), [(0, 0), (0, 0)]);
+    }
+
+    #[test]
+    fn a_block_is_read_at_the_second_read_in_a_row_in_it() {
+        let (_root, r) = big_pack();
+        // A small read, then the block, then nothing.
+        let run: Vec<_> = [100, 200, 300].map(|d| reads_for(&r, BLOCK + d)).into();
+        assert_eq!(run, [1, 1, 0]);
+        assert_eq!(r.window.held()[0], (BLOCK, BLOCK as usize));
+        // A read elsewhere is a small read and keeps the block; back in it, nothing. Elsewhere
+        // again, in the same block as the last miss, reads that block, and then the first block
+        // is a small read again.
+        let (far, near) = (3 * BLOCK, BLOCK);
+        let steps: Vec<_> = [far + 10, near + 400, far + 20, near + 500]
+            .map(|pos| reads_for(&r, pos))
+            .into();
+        assert_eq!(steps, [1, 0, 1, 1]);
+        assert_eq!(r.window.held()[0], (far, BLOCK as usize));
     }
 
     #[test]
@@ -2641,7 +2701,10 @@ mod tests {
         let find = |c: &[u8]| r.find(&hash_content(c)).unwrap().unwrap();
         let (across, after) = (find(&contents[1]), find(&contents[2]));
         assert_eq!(across.offset, BLOCK - 50);
-        assert!(read_any(&r, &after).unwrap() == contents[2]);
+        // Twice, so that its block is held.
+        for _ in 0..2 {
+            assert!(read_any(&r, &after).unwrap() == contents[2]);
+        }
         let held = r.window.held();
         assert_eq!(held[0].0, BLOCK);
         let before = open_files::reads();
@@ -2657,8 +2720,12 @@ mod tests {
         let r = PackReader::open(&path).unwrap();
         let find = |c: &[u8]| r.find(&hash_content(c)).unwrap().unwrap();
         let (small, big) = (find(&contents[0]), find(&contents[1]));
-        assert!(read_any(&r, &small).unwrap() == contents[0]);
+        // Twice, so that its block is held.
+        for _ in 0..2 {
+            assert!(read_any(&r, &small).unwrap() == contents[0]);
+        }
         let held = r.window.held();
+        assert!(held[0].1 > 0);
         let before = open_files::reads();
         assert!(read_any(&r, &big).unwrap() == contents[1]);
         assert!(open_files::reads() > before);

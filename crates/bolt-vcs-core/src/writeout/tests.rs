@@ -1711,6 +1711,7 @@ fn a_plan_reads_no_listing_of_the_save_it_is_on_again() {
     let saves = reads() - start;
     let start = reads();
     plan(&repo, from, to, None, false, drive, None).unwrap();
-    // The walk reads the listings on a thread of its own; this one reads only the two saves.
-    assert_eq!(reads() - start, saves);
+    // The walk reads the listings on a thread of its own; this one reads only the two saves, or
+    // less when the walk's reads left their block held.
+    assert!(reads() - start <= saves, "{} reads", reads() - start);
 }

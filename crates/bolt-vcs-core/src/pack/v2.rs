@@ -202,7 +202,8 @@ impl Index {
             });
             let at = Id(match held {
                 Some(at) => at,
-                None => read_at(file, window, self.id_pos(mid))?,
+                // Not through the window: a search's probes falling in one block aren't a run.
+                None => read_at(file, None, self.id_pos(mid))?,
             });
             match at.cmp(id) {
                 Ordering::Less => lo = mid.saturating_add(1),

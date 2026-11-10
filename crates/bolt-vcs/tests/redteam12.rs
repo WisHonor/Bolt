@@ -70,7 +70,6 @@ fn rt12_1_an_amend_among_many_lines_stays_within_memory() {
 /// read (`rchar`), which the shell that waited for it counts.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT12-2: writing out scattered small chunks reads a 64 KiB block for each record and index line"]
 fn rt12_2_a_scattered_small_read_costs_a_small_read() {
     use bolt_core::chunks::{Chunk, ChunkList};
     use bolt_core::id::hash_content;
