@@ -405,7 +405,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `pack_unreadable` | A pack couldn't be opened or read for a reason that isn't damage (no permission, say). It may be fine. |
 | `object_damaged` | An object doesn't read back as what its pack's index says: it fails its fingerprint, doesn't decode as its kind, or, for a chunked file, its chunks don't build the file. |
 | `object_missing` | Something the project needs isn't in any pack. |
-| `head_lost` | `.bolt/state/head` is missing or names nothing Bolt can read, so what the project needs couldn't be worked out; the packs were still checked. `bolt undo --list` then lists where to pick up. |
+| `head_lost` | `.bolt/state/head` is missing, can't be read, or names nothing Bolt can read, so what the project needs couldn't be worked out; the packs were still checked. `bolt undo --list` then lists where to pick up. |
 
 ### `bolt line --json`
 
