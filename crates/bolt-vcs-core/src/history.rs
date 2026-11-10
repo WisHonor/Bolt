@@ -209,10 +209,6 @@ impl LineIds {
     }
 }
 
-/// How much of the saves read to check a line's list is kept to hand out, so that a line is
-/// usually read once, without holding a line of any length.
-const HELD_BYTES: usize = 64 << 20;
-
 /// Whether the first `count` saves `saves` lists are what the list says, read from the store:
 /// each with the list's change ID, and as its first parent the next save listed, or none after
 /// the last. `each` is handed each save that passes. An error for a save the store can't give.
@@ -233,29 +229,31 @@ fn links_hold(
     Ok(true)
 }
 
-/// The saves `saves` lists, read from the store, unless one isn't what the list says. The newest
-/// of them are kept, up to `HELD_BYTES`; the check stops at a save the store can't give.
-fn checked(repo: &Repository, saves: &[(Id, ChangeId)]) -> Option<Vec<Save>> {
-    let (mut held, mut room, mut keeping) = (Vec::new(), HELD_BYTES, true);
-    let held_up = links_hold(repo, saves, saves.len(), |save| {
-        let size = save.encode().len();
-        keeping &= size <= room;
-        if keeping {
-            room -= size;
-            held.push(save);
-        }
-    });
-    match held_up {
-        // The saves before it were checked to lead to it, so a save that can't be read is on
-        // the line: it is told when history reaches it, as without the check.
-        Ok(true) | Err(_) => Some(held),
-        Ok(false) => None,
-    }
+/// Saves from `start` back along first parents, newest first, each read when asked for. A cycle
+/// can't be built (a save's fingerprint covers its parents), but a store missing a parent fails
+/// with an error, which ends the walk.
+fn chain(repo: &Repository, start: Id) -> impl Iterator<Item = Result<(Id, Save), RepoError>> + '_ {
+    let mut next = Some(start);
+    std::iter::from_fn(move || {
+        let id = next.take()?;
+        Some(match repo.store().save(&id, repo.signatures_allowed()) {
+            Ok(save) => {
+                next = save.parents.first().copied();
+                Ok((id, save))
+            }
+            Err(e) => Err(e.into()),
+        })
+    })
+}
+
+/// How many letters of each change ID of `saves` tell it from the others, in their order.
+fn lengths_of(saves: &[(Id, ChangeId)]) -> Vec<usize> {
+    short_lengths(&saves.iter().map(|(_, c)| *c).collect::<Vec<_>>())
 }
 
 /// Calls `each` with every save on the current line, newest first, and the shortest form of its
-/// change ID. The line's saves are known, and checked against the store, before the first is
-/// handed out.
+/// change ID. The saves come from their own first parents, read one at a time, so that only the
+/// save being handed out is held; the short forms come from the cache's list of the line.
 pub fn for_each_on_line<E: From<RepoError>>(
     repo: &Repository,
     mut each: impl FnMut(&Id, &Save, &str) -> Result<(), E>,
@@ -263,30 +261,41 @@ pub fn for_each_on_line<E: From<RepoError>>(
     let (_, entry) = repo.current()?;
     let (line, tip) = (line_of(&entry), tip_of(&entry)?);
     let mut cache = ChangeIds::load(repo);
-    let held = match checked(repo, cache.chain(repo, line, tip)?) {
-        Some(held) => held,
-        // A cache that is wrong about the line is dropped, and the line read from the store.
-        None => {
-            cache = ChangeIds::default();
-            cache.chain(repo, line, tip)?;
-            Vec::new()
-        }
-    };
+    cache.chain(repo, line, tip)?;
     // Kept before the saves are handed out, however that ends; asked again, it reads nothing.
     cache.store(repo, &entry.state);
-    let saves = cache.chain(repo, line, tip)?;
-    let ids: Vec<ChangeId> = saves.iter().map(|(_, c)| *c).collect();
-    let lengths = short_lengths(&ids);
-    let mut held = held.into_iter();
-    for ((id, _), len) in saves.iter().zip(lengths) {
-        let save = match held.next() {
-            Some(save) => save,
-            None => repo
-                .store()
-                .save(id, repo.signatures_allowed())
-                .map_err(RepoError::from)?,
-        };
-        each(id, &save, &save.change_id.to_letters()[..len])?;
+    let listed = cache.chain(repo, line, tip)?;
+    let lengths = lengths_of(listed);
+    let short = |lengths: &[usize], at: usize, save: &Save| {
+        let len = lengths.get(at).copied().unwrap_or(LETTERS);
+        save.change_id.to_letters()[..len].to_owned()
+    };
+    let mut walk = chain(repo, tip).enumerate();
+    let mut wrong = None;
+    let mut count = 0;
+    for (at, step) in walk.by_ref() {
+        let (id, save) = step?;
+        count = at + 1;
+        if listed.get(at) != Some(&(id, save.change_id)) {
+            wrong = Some((at, id, save));
+            break;
+        }
+        each(&id, &save, &short(&lengths, at, &save))?;
+    }
+    if wrong.is_none() && count == listed.len() {
+        return Ok(());
+    }
+    // The list isn't the line: it is dropped, the line read from the store, and the listing goes
+    // on with the line's own short forms.
+    let mut read = ChangeIds::default();
+    let lengths = lengths_of(read.chain(repo, line, tip)?);
+    read.store(repo, &entry.state);
+    if let Some((at, id, save)) = wrong {
+        each(&id, &save, &short(&lengths, at, &save))?;
+        for (at, step) in walk {
+            let (id, save) = step?;
+            each(&id, &save, &short(&lengths, at, &save))?;
+        }
     }
     Ok(())
 }
@@ -523,24 +532,6 @@ mod tests {
         };
         repo.commit(&lock, packs, &diary).unwrap();
         id
-    }
-
-    /// Saves from `start` back along first parents, newest first, read from the store.
-    fn chain(
-        repo: &Repository,
-        start: Id,
-    ) -> impl Iterator<Item = Result<(Id, Save), RepoError>> + '_ {
-        let mut next = Some(start);
-        std::iter::from_fn(move || {
-            let id = next.take()?;
-            Some(match repo.store().save(&id, false) {
-                Ok(save) => {
-                    next = save.parents.first().copied();
-                    Ok((id, save))
-                }
-                Err(e) => Err(e.into()),
-            })
-        })
     }
 
     /// `short_change_id`, by reading the line from `tip`.
@@ -984,23 +975,82 @@ mod tests {
         }
     }
 
+    /// Every save the listing hands out, with its short form.
+    fn listing(repo: &Repository) -> Vec<(Id, Save, String)> {
+        let mut shown = Vec::new();
+        for_each_on_line::<RepoError>(repo, |id, save, short| {
+            shown.push((*id, save.clone(), short.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+        shown
+    }
+
     #[test]
-    fn a_list_with_another_line_s_save_is_not_handed_out() {
+    fn a_wrong_list_changes_no_save_handed_out() {
         let (dir, mut repo, ids) = project_with(&["klmnopl", "klmnopk", "mmmm"]);
         let side = plant(&mut repo, &[ids[1]], "klmnopkl", Some("side"));
         let truth = true_line(&repo);
-        let mut lie = truth.clone();
-        lie[1] = (side, change("klmnopkl"));
-        plant_list(dir.path(), lie);
-        assert_eq!(cached_line(&repo), uncached_line(&repo));
-        // The cache now holds the line as it is.
-        let fixed = crate::changeids::ChangeIds::load(&repo);
-        assert_eq!(fixed.get("main").unwrap(), truth.as_slice());
-        // A list cut short, or one link off, is caught the same way.
-        for lie in [truth[..2].to_vec(), vec![truth[0], truth[2], truth[3]]] {
+        let cold = listing(&Repository::open(dir.path()).unwrap());
+        let mut swapped = truth.clone();
+        swapped[1] = (side, change("klmnopkl"));
+        let mut crossed = truth.clone();
+        (crossed[1].1, crossed[2].1) = (truth[2].1, truth[1].1);
+        let mut added = truth.clone();
+        added.push((Id([0x5a; 32]), change("klmnopkz")));
+        let lies = [
+            swapped,
+            crossed,
+            vec![truth[0], truth[2], truth[3]],
+            truth[..2].to_vec(),
+            added,
+        ];
+        for lie in lies {
+            let wrong = (0..).find(|&at| lie.get(at) != truth.get(at)).unwrap();
             plant_list(dir.path(), lie);
-            assert_eq!(cached_line(&repo), uncached_line(&repo));
+            let shown = listing(&repo);
+            let saves = |l: &[(Id, Save, String)]| -> Vec<(Id, Save)> {
+                l.iter().map(|(id, save, _)| (*id, save.clone())).collect()
+            };
+            assert_eq!(saves(&shown), saves(&cold));
+            // The short forms before the first wrong entry rest on the list, as all of them do.
+            let shorts = |l: &[(Id, Save, String)]| -> Vec<String> {
+                l.iter().skip(wrong).map(|(.., s)| s.clone()).collect()
+            };
+            assert_eq!(shorts(&shown), shorts(&cold));
+            let fixed = crate::changeids::ChangeIds::load(&repo);
+            assert_eq!(fixed.get("main").unwrap(), truth.as_slice());
         }
+    }
+
+    #[test]
+    fn a_warm_listing_reads_each_save_once_and_one_before_the_first() {
+        let starts = vec!["lmno"; 299];
+        let (_dir, repo, _) = project_with(&starts);
+        cached_line(&repo);
+        let before = repo.store().saves_read();
+        let mut first = None;
+        for_each_on_line::<RepoError>(&repo, |_, _, _| {
+            first.get_or_insert(repo.store().saves_read() - before);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(first, Some(1));
+        assert_eq!(repo.store().saves_read() - before, 300);
+    }
+
+    #[test]
+    fn a_listing_cut_short_reads_no_more_of_the_line() {
+        let (_dir, repo, _) = project_with(&vec!["lmno"; 99]);
+        cached_line(&repo);
+        let before = repo.store().saves_read();
+        let stopped = for_each_on_line::<RepoError>(&repo, |_, _, _| {
+            Err(RepoError::Damaged {
+                detail: "the pipe closed".into(),
+            })
+        });
+        assert!(stopped.is_err());
+        assert!(repo.store().saves_read() - before <= 2);
     }
 
     #[test]
