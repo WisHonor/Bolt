@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.99.1 and the crates already in the workspace (`blake3`, `zstd`, std threads). No new dependency. `hyperfine` is installed only on CI runners.
 
-**Spec:** decisions [099](../decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [106](../decisions/106-on-linux-and-macos-a-folder-is-still-asked-for-git-and-bolt-by-name.md), with 006, 009, 011, 023, 028, 038, 046, 048, 049, 053, 057, 061, 067, 069, 083, 084 and 088; [design.md](../design.md) §5.7 and §5.9; [storage-format.md](../storage-format.md) §10 and §11; [security.md](../security.md) T9, T20, T25 and T32; [testing.md](../testing.md) §4 and §5; [benchmarks.md](../benchmarks.md) §1 and §7; the speed session's rows of [the follow-ups](2026-11-01-milestone-1-follow-ups.md).
+**Spec:** decisions [099](../decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [108](../decisions/108-the-third-gate-compares-medians.md), with 006, 009, 011, 023, 028, 038, 046, 048, 049, 053, 057, 061, 067, 069, 083, 084 and 088; [design.md](../design.md) §5.7 and §5.9; [storage-format.md](../storage-format.md) §10 and §11; [security.md](../security.md) T9, T20, T25 and T32; [testing.md](../testing.md) §4 and §5; [benchmarks.md](../benchmarks.md) §1 and §7; the speed session's rows of [the follow-ups](2026-11-01-milestone-1-follow-ups.md).
 
 **Rulings made while building:** `2026-11-10-milestone-6-speed-rulings.md`, kept as the build goes, verbatim.
 
@@ -34,7 +34,7 @@
 
   | What | Value |
   |---|---|
-  | The gate (099) | on Git's source at `v2.56.0`: `status` with nothing changed, a small change saved, back to the first version; Bolt's mean at most 2 times Git's; 10 timed runs after a warm-up; Linux and Windows runners, each its own check |
+  | The gate (099, 108) | on Git's source at `v2.56.0`: `status` with nothing changed, a small change saved, back to the first version; Bolt's median at most 2 times Git's (decision 108, made while building: the plan first said the mean); 10 timed runs after a warm-up; Linux and Windows runners, each its own check |
   | Caches (100) | `cache/files` and `cache/change-ids`: written through `tmp/` and a rename, never flushed (neither the file nor `cache/`) |
   | When `cache/files` is written (100) | only if the bytes to write differ from the bytes read |
   | `state/lock-info`, the drive test's rename (100) | not flushed |
@@ -308,6 +308,128 @@ Every line `last_match` returns has passed `fits`, and a plain line can only fit
   3. **The switch's own work:** the saves `kept::switch_saves` and `planned` read again, the second load of the file cache in `apply`, the reads `resolve_target` and the command line make after the switch.
   4. **The save's own work:** `check_names` and `large_save` only for folders that hold a name the base doesn't.
 - [ ] **Step 3:** If a step is still over after those, the controller rules on the next structural change (walking sibling folders on several threads, or a per-folder memo in the cache), with a decision record and a plan amendment, before any code.
+
+## Task 7b: The file cache is loaded while the walk runs, and found without a search
+
+> Added while building (2026-11-10), after Task 7: a profile put the cache's load at about 1 ms that the walk doesn't need, and its searches at a third of the main thread's work.
+
+**Files:** modify `crates/bolt-vcs-core/src/filecache.rs` and `crates/bolt-vcs-core/src/snapshot.rs` (`read_folder`, `save_folder`), and their tests.
+
+**Why** (measured on GitHub's runners after Tasks 2 to 6): loading the file cache takes about 1 ms on Linux and on Windows, and nothing the walk does needs it: the walk only lists folders and looks at files; the cache is first asked after the walk, when listings are built. And each question to the cache is a binary search over every path (about a dozen string compares for Git's 4,850 files): 10.8 million instructions of the main thread's 41 million in a `status`, though the files are asked for nearly in the cache's own order.
+
+**What:**
+
+1. **Loaded while the walk runs.** In `read_folder` and `save_folder`, the cache is loaded on a helper thread started just before the walk and joined right after it (a scoped thread). What is loaded, and when it may be loaded at all, doesn't change:
+   - the drive's clock is still read first (`filecache::drive_now`), before anything else, and a cache is loaded only if that worked (and, in `read_folder`, only if not `full`);
+   - the helper is given what `FileCache::load` needs as plain values (the cache file's path, the key), not the repository;
+   - if the helper can't be started, the cache is loaded on the calling thread after the walk, as `FileCache::load` does today;
+   - a walk that fails still joins the helper before the error is returned (no thread outlives the call);
+   - a helper that panics is a cache that couldn't be loaded: an empty cache, every file read. Library code doesn't panic, so this is only the join's error arm.
+   - `save_folder` has an "early cache" (the cache a caller already loaded): when it is there, nothing is loaded.
+2. **Found without a search.** `FileCache` remembers the slot after the one it last answered from. A question first compares its path with that slot's path; only if they differ does it search as today. The answer is the search's answer in every case: the remembered slot is only where to look first.
+   - The hint lives in the cache object (a `Cell<usize>` or a `&mut self` method, whichever fits the callers without changing who may ask); it is never written to disk.
+   - `matches`, `vouch` and whatever else finds a slot by path go through the one function that does this.
+
+**Same outcome:** every command gives the result, warnings and errors it gave before. The cache's rules (the 2-second rule, kind, size, both times, file ID, a number that isn't 0), what is written and when, and the seal are untouched.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `filecache.rs`: `a_slot_is_found_where_the_last_one_ended` (a cache of 1,000 paths asked in order: a test-only counter of searches stays at 1 or 0; asked in reverse or at random, every answer is still right: compare each with a plain search); a proptest `the_hint_never_changes_an_answer` (random sorted paths, a random sequence of questions including paths that aren't there, each answered by a cache with the hint and by a fresh cache: equal).
+  - `snapshot.rs` (or the command tests in `crates/bolt-vcs/tests/status.rs`): `a_status_whose_walk_fails_leaves_no_thread_and_no_changed_cache` (make the walk fail, for example with a folder the suite's helpers make unreadable, or a name the walk refuses; the cache file is byte for byte what it was; the command's error is the walk's); the existing tests of the cache through `status` and `save` pass unchanged.
+- [ ] **Step 2: Run them.** Expected: the counter test fails (1,000 searches).
+- [ ] **Step 3: Build it.**
+- [ ] **Step 4: Run** the core suite, `status.rs`, `save.rs`, the model test, the whole workspace, fmt and clippy.
+- [ ] **Step 5: Commit** `Load the file cache while the walk runs, and find its slots in order`.
+
+## Task 8a: A saved file is matched against the ignore rules only when it changed (decision 107)
+
+> Added while building (2026-11-10): Task 8's first item, taken once the gate showed Linux still over. Its decision record is [107](../decisions/107-a-saved-files-ignore-rules-are-read-only-when-it-changed.md).
+
+**Files:** modify `crates/bolt-vcs-core/src/snapshot/walk.rs` (`judged`, `Scan`, what the walk keeps per folder), `crates/bolt-vcs-core/src/ignore.rs` (the matcher's rules in force, kept so they can be asked later), `crates/bolt-vcs-core/src/snapshot.rs` (`build_with`: the one place that asks whether a changed entry is in `ignored` or `gitignored`), and their tests.
+
+**Why:** a function-level profile of `status` on Git's source, after the earlier tasks, puts `Matcher::verdict` at 31 of the 73 million instructions the walk's thread still runs: 5,076 names matched, 4,850 of them files the last save holds, none changed. For such a file the verdict decides nothing but two warnings, and only if the file changed.
+
+**What** (decision 107, which says exactly when a name may skip the matcher):
+
+1. **In `judged`,** a name is kept without calling the matcher when ALL of these hold:
+   - the entry met is not a folder (`is_dir` is false);
+   - the last save's listing of its folder (`self.old`) holds that name as an entry that is not a folder;
+   - the folder is not held (`within.held` is false: inside an ignored folder nothing is matched anyway, and that branch stays as it is);
+   - the name is not one Git treats as `.git` or Bolt as `.bolt` (such a name takes the old path, in the old order).
+
+   Everything before the matcher in `judged` stays first and unchanged (the listing cleared, the problem check, the untouched check, `leave_to`, the held branch). A name that skips the matcher returns `true` and puts nothing into `ignored` or `gitignored`.
+2. **The rules in force are kept per folder.** For each folder the walk goes into that is not held (the top folder too), the walk keeps what a later verdict needs: the ignore rules in force for names in that folder (the same parsed rules, shared, not parsed again), and the folder's `git_held` and `nested_held` facts. A held folder keeps none: nothing in it ever skips the matcher. `Scan` hands these to the build.
+3. **In `build_with`,** where an entry that is new or changed is looked up in `ignored` and then in `gitignored`: an entry that the walk kept without matching gets its verdict now, from its folder's kept rules, and is treated exactly as `judged` would have recorded it:
+   - Bolt's verdict is `Ignored`: it counts as in `ignored`, unless its folder is inside a repository of its own (`nested_held`), in which case it counts as in neither;
+   - otherwise, if its folder is `git_held` or Git's verdict is `Ignored`: it counts as in `gitignored`;
+   - otherwise in neither.
+
+   The build knows such an entry by the very test the walk used, written once and used by both: the child is a file or a link, the save's entry of that name in that folder is there and isn't a folder, the name isn't a `.git` or `.bolt` spelling, and its folder has kept rules. Every other entry is looked up in the two sets as today. In particular a file inside a held folder is never matched late: the walk recorded it, or didn't, without the matcher, and that stays.
+4. **The matcher** gains whatever it needs so that a verdict can be asked later for a path, from rules kept earlier, with the same result as `verdict` gives during the walk for that path: same levels in the same order, the same `casefold` and Unicode handling (`drive`), the same `is_dir`. One function computes the verdict for both uses.
+
+**Same outcome:** the scan, what a save takes or leaves out, the two warnings (`a change to a saved file that a rule matches`, and the files Git's rules alone would leave out) with the same paths in the same order, and every error are unchanged.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `walk.rs`: `an_unchanged_scan_matches_no_saved_file` (a test-only counter of matcher verdicts: after a save of a folder with 50 files in 5 folders and a `.gitignore`, a second scan asks for a verdict once per folder and per new name, and for no saved file); `a_saved_file_that_became_a_folder_is_matched` and `a_folder_that_became_a_file_is_matched` (the kind differs from the save's: the matcher is asked, and the outcome is the old one).
+  - `snapshot.rs`: a proptest, `the_late_verdict_names_the_files_the_walk_would` (random small trees of up to 3 levels with names from a small alphabet, random `.gitignore` and `.boltignore` files at any level including lines with `!`, a save, then random changes: files edited, added, removed, a file replaced by a folder and back, an ignore file edited): the lists `changed` and `taken_back` that the build gives equal those from a build with the skip turned off by a test-only switch (so every name is matched during the walk, as before this task).
+  - The existing tests `a_change_to_a_saved_file_a_rule_matches_is_warned_about` and `what_boltignore_takes_back_from_gitignore_is_warned_about_when_new_or_changed` pass unchanged.
+- [ ] **Step 2: Run them.** Expected: the counter test fails (a verdict per saved file).
+- [ ] **Step 3: Build it.**
+- [ ] **Step 4: Run** the walk's and the snapshot's tests, `ignore_vs_git`, the command tests for `status`, `save` and `goto`, the model test, then the whole workspace, fmt and clippy.
+- [ ] **Step 5: Commit** `Match a saved file against the ignore rules only when it changed`.
+
+## Task 8c: Names that can't be `.git` or `.bolt` are answered at their first byte, and a path is built without `format!`
+
+> Added while building (2026-11-10), from the profile taken after Task 8a.
+
+**Files:** modify `crates/bolt-vcs-core/src/names.rs` (`is_git_alias`, `is_bolt_alias`) and `crates/bolt-vcs-core/src/snapshot/walk.rs` (where a name's path is built), and their tests.
+
+**Why** (callgrind, `bolt status` on Git's source, GitHub's Linux runner, after the earlier tasks: the walk's thread runs 74.7 million instructions): `is_git_alias` 4.25 million and `is_bolt_alias` 3.96 million (each is asked twice for every name: once when the name is judged, once when it is validated), and `alloc::fmt::format` 4.4 million, called from `walk_folders` to build each name's path. All three are per-name costs that an ordinary name shouldn't pay.
+
+**What:**
+
+1. **`is_bolt_alias`** answers `false` at once for a name whose first byte is an ASCII byte other than `.`, `b` or `B`. Why that is exact: the function looks at the name's base, which is a prefix of the name once the characters macOS ignores are dropped (all of them are outside ASCII), and a base can only be `.bolt` or `bolt~1` to `bolt~4` in any letter case. So the first character that isn't ignored must be `.` or `b`; an ASCII first byte is that character.
+2. **`is_git_alias`** answers `false` at once for a name that holds no backslash and whose first byte is an ASCII byte other than `.`, `g` or `G`. Why: without a backslash the name is its only part; `.git` on macOS must start with `.` once ignored characters are dropped; on NTFS the base is `.git` or `git~1` in any letter case. Check this claim against `is_hfs_dotgit` and `is_ntfs_dotgit` as they are written (for example whether the NTFS check accepts other short names or leading characters) and narrow the early answer if the code accepts more than this text says: the early answer must never differ from the full check.
+3. Every other name goes through the full check, unchanged.
+4. **The path of a name in a folder** (`path_in` in `walk.rs`, or wherever the walk now builds `up + "/" + name`) is built with one allocation of the right size and two `push_str` calls instead of `format!`. Same string.
+
+**Same outcome on every string.** These two functions decide which names are left out of a save as look-alikes of `.git` and `.bolt`; a name wrongly answered `false` would be saved and could later be written back as a working `.git`. Nothing may change in what they answer.
+
+- [ ] **Step 1: Write the failing test and the property tests.**
+  - `names.rs`: keep the full checks as private functions in the test module (`git_alias_in_full`, `bolt_alias_in_full`: the bodies as they are before this task). Property tests `the_early_answer_for_git_is_the_full_one` and `the_early_answer_for_bolt_is_the_full_one`: strings built from pieces chosen to sit near the edges (`.git`, `.GIT`, `git~1`, `GIT~1`, `git~2`, `.bolt`, `BOLT~4`, `bolt~5`, `.`, `g`, `G`, `b`, `B`, ` `, `.`, `:`, `/`, `\`, the ignored code points U+200C and U+FEFF, a letter outside ASCII, ordinary letters and digits), 0 to 6 pieces each, in any order, 10,000 cases: the function equals its full check. And exhaustively: every string of 1 to 3 bytes from a 14-byte alphabet (`.`, `g`, `G`, `i`, `t`, `b`, `o`, `l`, `~`, `1`, `\`, `:`, ` `, `a`) for both functions.
+  - A counter test (test-only counter in the full checks): judging 1,000 ordinary names (`file123.txt` and the like) runs the full check for none of them.
+  - The existing table tests and the proptests of the earlier task pass unchanged.
+- [ ] **Step 2: Run them.** Expected: the counter test fails; the property tests pass before and after.
+- [ ] **Step 3: Build it.**
+- [ ] **Step 4: Run** `names::` and the walk's tests, the corpus tests that plant look-alike names (search the tests for `is_git_alias`, `git~1` and `.g\u{200c}it`), the whole workspace, fmt and clippy.
+- [ ] **Step 5: Commit** `Answer at the first byte for names that can't be .git or .bolt`.
+
+## Task 8d: A pack is read a window at a time, and an unchanged folder is compared without copying its names
+
+> Added while building (2026-11-10), from the profile taken after Task 8c.
+
+**Files:** modify `crates/bolt-vcs-core/src/pack.rs` (the reader's `Section::read`, or wherever every read of an open pack goes through) and `crates/bolt-vcs-core/src/snapshot.rs` (`build_with`: the comparison of a folder's children with the last save's listing), and their tests.
+
+**Why** (measured on GitHub's runners after the earlier tasks): `bolt status` on Git's source still makes 700 reads of its pack on Linux (three for each of the 226 listings the walk reads: two in the index, one for the entry), each a system call on the walk's thread; on Windows a read costs several microseconds. Those listings were written by one save, side by side in the pack, and their index lines sit side by side too. And the build makes an `Entry` for every child of every folder (4,850 name copies) only to find the folder equal to the last save's listing and throw them away.
+
+**What:**
+
+1. **A read window in the pack reader.** A reader keeps the last block it read from the pack file and answers a read that falls wholly inside that block from memory:
+   - a read of at most 4 KiB that isn't inside the block reads a whole block of 64 KiB (65,536 bytes) starting at the read's offset rounded down to a multiple of 64 KiB, clipped to the file's length as the reader knows it, keeps it, and answers from it; a read that straddles two blocks, or is bigger than 4 KiB, is made as today, straight from the file, and leaves the block alone;
+   - two blocks are kept for each reader: one for the area of entries, one for the index (they are read alternately); each is 64 KiB at most, so an open pack costs at most 128 KiB more;
+   - what a read returns is byte for byte what the file holds at that offset: the block is only ever a copy of a range of an immutable file (a pack never changes once it is named; a reader holds its file open). Every record and every chunk is still checked against its fingerprint after it is read, as today;
+   - a short read (the file is shorter than the reader thought) is the same error it is today, from the same place: if the block can't be read whole, fall back to today's direct read and let that report;
+   - the blocks sit behind whatever makes the reader usable from several threads today (the worker threads read packs too): no data race, and no lock held across a system call longer than today.
+2. **The unchanged test without copies.** In `build_with`, a folder is found unchanged by comparing each child, in order, with the base listing's entry at the same place: name, kind, ID and size, with the count equal. Do that comparison on borrowed values, and only when it fails build the `Vec<Entry>` and the listing as today. The result must be exactly today's: the same folders take the base's ID, the same folders are built, and what is built is the same listing. Keep one function that says "these children are that listing" and keep the field-by-field test (`assert_one_change_is_seen` and its cases, the carried-over test) passing unchanged.
+
+**Same outcome:** no stored byte, no result, no warning, no error and no order of writes changes.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `pack.rs`: `reads_inside_a_block_are_answered_from_memory` (the test-only read counter: reading 100 small records that sit within 64 KiB of a pack makes at most a handful of file reads, where today it makes one or more for each); `a_read_across_two_blocks_is_made_from_the_file` and `a_big_read_is_made_from_the_file` (a record that straddles a block edge, and one over 4 KiB: the bytes are right, and the kept block is unchanged); `a_pack_shorter_than_its_index_says_fails_as_before` (truncate a pack inside a block: the error kind and message are today's); a proptest `a_window_never_changes_what_is_read` (random offsets and lengths over a pack of a few hundred kilobytes, read through the reader and straight from the file: equal bytes, any order).
+  - `snapshot.rs`: `an_unchanged_folder_copies_no_name` (a test-only counter of entries built: an unchanged status builds none; a status with one changed file builds only the folders on the way to it).
+- [ ] **Step 2: Run them.** Expected: the two counter tests fail.
+- [ ] **Step 3: Build it.**
+- [ ] **Step 4: Run** the pack, store and snapshot tests, `pack_memory.rs` (it measures on Linux; it must compile here), the model test, the whole workspace, fmt and clippy.
+- [ ] **Step 5: Commit** `Read packs a block at a time, and compare an unchanged folder without copying names`.
 
 ## Task 9: Big files are flushed while they are written (decision 102)
 
