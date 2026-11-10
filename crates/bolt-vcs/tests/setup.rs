@@ -517,6 +517,177 @@ fn setup_refuses_a_rules_file_that_is_a_folder() {
     assert!(err.contains("hint: "), "{err}");
 }
 
+/// The lines of `.boltignore` outside its first preset block, each with its own line ending.
+fn outside_the_block(file: &[u8]) -> Vec<&[u8]> {
+    let mut lines = Vec::new();
+    let mut inside = false;
+    let mut passed = false;
+    for line in file.split_inclusive(|&b| b == b'\n') {
+        let bare = line.strip_suffix(b"\n").unwrap_or(line);
+        let bare = bare.strip_suffix(b"\r").unwrap_or(bare);
+        if !passed && !inside && bare.starts_with(b"# >>> Bolt preset") {
+            inside = true;
+        } else if inside && bare == b"# <<< Bolt preset" {
+            (inside, passed) = (false, true);
+        } else if !inside {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+#[test]
+fn line_endings_and_odd_bytes_outside_the_block_survive_a_round_trip() {
+    let block = presets::boltignore_block(Preset::Game, &Found::default()).unwrap();
+    // CRLF everywhere, a block included.
+    let crlf = b"mine/\r\n*.log\r\n\r\n# >>> Bolt preset: code, version 1.\r\nold/\r\n# <<< Bolt \
+                 preset\r\nafter/\r\nno-end"
+        .to_vec();
+    // Bytes that aren't UTF-8, and no block.
+    let odd = b"caf\xe9/\n\xff\xfe raw \x80\nlast".to_vec();
+    for before in [crlf, odd] {
+        let env = Env::empty();
+        ok(&env, &["start", "--preset", "custom"]);
+        let path = env.root().join(".boltignore");
+        fs::write(&path, &before).unwrap();
+        ok(&env, &["setup", "--preset", "game", "--yes"]);
+        let after = fs::read(&path).unwrap();
+        if outside_the_block(&before).len() == before.split_inclusive(|&b| b == b'\n').count() {
+            // No block: the preset's goes on top, one empty line before the file as it was.
+            assert_eq!(after, [block.as_bytes(), b"\n", &before].concat());
+        } else {
+            assert_eq!(outside_the_block(&after), outside_the_block(&before));
+        }
+        ok(&env, &["undo"]);
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+/// The executable bit of a rule file stays through a preset switch, and undo puts it back.
+#[cfg(unix)]
+#[test]
+fn the_executable_bit_of_a_rule_file_stays_through_setup_and_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let rule_files = [("bolt.toml", "# mine\n"), (".boltignore", "own/\n")];
+    for (name, bytes) in rule_files {
+        let path = env.root().join(name);
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let executable = |name: &str| {
+        let mode = fs::metadata(env.root().join(name))
+            .unwrap()
+            .permissions()
+            .mode();
+        mode & 0o111 != 0
+    };
+    ok(&env, &["setup", "--preset", "code", "--yes"]);
+    assert!(executable("bolt.toml") && executable(".boltignore"));
+    ok(&env, &["undo"]);
+    for (name, bytes) in rule_files {
+        assert_eq!(fs::read_to_string(env.root().join(name)).unwrap(), bytes);
+        assert!(executable(name), "{name}");
+    }
+    ok(&env, &["redo"]);
+    assert!(executable("bolt.toml") && executable(".boltignore"));
+}
+
+#[test]
+fn a_hostile_preset_label_is_shown_escaped_and_bounded() {
+    let short = "\u{1b}[2J\nnext\u{202e}";
+    let long = format!("\u{1b}[2J{}", "x".repeat(10_000));
+    let in_toml = |label: &str| {
+        label
+            .replace('\u{1b}', "\\u001b")
+            .replace('\n', "\\n")
+            .replace('\u{202e}', "\\u202e")
+    };
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    for label in [short.to_owned(), long] {
+        let file = format!("preset = \"{}\"\n", in_toml(&label));
+        fs::write(env.root().join("bolt.toml"), file).unwrap();
+        let (code, out, err) = run(&env, &["setup"]);
+        assert_eq!(code, Some(0), "{err}");
+        support::assert_escaped(&out, "setup");
+        support::assert_escaped(&err, "setup's warnings");
+        assert!(out.len() + err.len() < 2_000, "{out}{err}");
+        let out_bytes = env
+            .bolt()
+            .args(["--json", "setup"])
+            .output()
+            .unwrap()
+            .stdout;
+        let raw = out_bytes.strip_suffix(b"\n").unwrap();
+        assert!(!raw.iter().any(|b| *b < 0x20), "{}", text(raw));
+        let doc: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        if label == short {
+            assert!(
+                out.starts_with("Using \\x1b[2J\\x0anext\\u{202e} settings"),
+                "{out}"
+            );
+            assert_eq!(doc["preset"], short);
+        } else {
+            // Longer than 64 bytes: passed over, named but not shown.
+            assert!(out.starts_with("Using the rules in bolt.toml:"), "{out}");
+            assert!(err.contains("preset: it is longer than 64 bytes"), "{err}");
+            assert!(!err.contains("xxxxx"), "{err}");
+            assert_eq!(doc["preset"], serde_json::Value::Null);
+        }
+    }
+}
+
+#[test]
+fn start_with_a_link_or_another_spelling_at_bolt_toml_starts_nothing() {
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir(outside.path().join("rules")).unwrap();
+    fs::write(outside.path().join("rules.toml"), "preset = \"x\"\n").unwrap();
+    for to_a_file in [false, true] {
+        let env = Env::empty();
+        let link = env.root().join("bolt.toml");
+        if to_a_file {
+            if !support::link_file(&outside.path().join("rules.toml"), &link) {
+                continue;
+            }
+        } else {
+            support::link_folder(&outside.path().join("rules"), &link);
+        }
+        let (code, out, err) = run(&env, &["start", "--preset", "code"]);
+        assert_eq!(code, Some(1), "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("this folder already has a bolt.toml"), "{err}");
+        assert!(!is_project(env.root()));
+        assert!(fs::symlink_metadata(&link).is_ok());
+        assert!(!env.root().join(".boltignore").exists());
+    }
+    assert_eq!(
+        fs::read_to_string(outside.path().join("rules.toml")).unwrap(),
+        "preset = \"x\"\n"
+    );
+    assert_eq!(
+        fs::read_dir(outside.path().join("rules")).unwrap().count(),
+        0
+    );
+    // Another letter case: the same name where the drive ignores case, another name elsewhere.
+    let env = Env::empty();
+    fs::write(env.root().join("Bolt.toml"), "# mine\n").unwrap();
+    let ignores_case = env.root().join("bolt.toml").exists();
+    let (code, _, err) = run(&env, &["start", "--preset", "code"]);
+    assert_eq!(
+        fs::read_to_string(env.root().join("Bolt.toml")).unwrap(),
+        "# mine\n"
+    );
+    if ignores_case {
+        assert_eq!(code, Some(1), "{err}");
+        assert!(err.contains("this folder already has a bolt.toml"), "{err}");
+        assert!(!is_project(env.root()));
+    } else {
+        assert_eq!(code, Some(0), "{err}");
+    }
+}
+
 #[cfg(feature = "fault-injection")]
 mod on_a_terminal {
     use super::*;

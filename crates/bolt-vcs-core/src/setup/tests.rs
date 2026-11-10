@@ -453,6 +453,21 @@ fn a_setup_stopped_at_any_write_is_finished_by_the_next_command() {
             None,
             "fault {n}"
         );
+        if recorded {
+            // The step's two saves hold the files as they were and as written, and undo and
+            // redo move between them.
+            let change = head_entry(&repo).1.folder_change.unwrap();
+            let id = |b: &[u8]| Some(hash_content(b));
+            assert_eq!(held(&repo, change.from, "bolt.toml"), id(b"# mine\n"));
+            assert_eq!(held(&repo, change.from, ".boltignore"), None);
+            assert_eq!(held(&repo, change.to, "bolt.toml"), id(&code_toml()));
+            assert_eq!(held(&repo, change.to, ".boltignore"), id(block.as_bytes()));
+            let who = who();
+            undo(&mut repo, &step(&who), &mut |_| {}).unwrap();
+            assert_eq!(files(dir.path()), holding(start), "undo after fault {n}");
+            redo(&mut repo, &step(&who), &mut |_| {}).unwrap();
+            assert_eq!(files(dir.path()), holding(done), "redo after fault {n}");
+        }
         if result.is_err() && recorded {
             finished_later += 1;
         }
