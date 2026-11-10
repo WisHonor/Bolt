@@ -391,14 +391,25 @@ fn by_fingerprint_prefix(
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     let text = text.to_ascii_lowercase();
     if let Some(id) = Id::from_hex(&text) {
-        // A line the cache knows at its newest save may hold it; the current one first.
+        // A line the cache knows at its newest save may hold it; the current one first. It is
+        // shown to be on the line, link by link from its newest save, before it is believed.
         let mut cache = ChangeIds::load(repo);
         if let Some(line) = line_of(entry) {
             cache.chain(repo, Some(line), tip_of(entry)?)?;
         }
-        let reached = cache.reaches(&entry.state, &id);
+        let checked = cache.reaches(&entry.state, &id).map(|(saves, at)| {
+            matches!(
+                links_hold(repo, saves, at.saturating_add(1), |_| {}),
+                Ok(true)
+            )
+        });
+        if checked == Some(false) {
+            // The lists are dropped; the current line's, read from the store, is kept.
+            cache = ChangeIds::default();
+            cache.chain(repo, line_of(entry), tip_of(entry)?)?;
+        }
         cache.store(repo, &entry.state);
-        if reached {
+        if checked == Some(true) {
             return Ok(vec![(id, text)]);
         }
     }
@@ -1122,6 +1133,36 @@ mod tests {
             let (cached, cold) = resolved(dir.path(), &repo, &lie, "klmnopk");
             assert_eq!(cached, cold);
             assert_eq!(cold, format!("{:?}", Ok::<Id, ()>(ids[2])));
+        }
+    }
+
+    #[test]
+    fn a_whole_id_a_list_holds_wrongly_is_found_as_without_the_list() {
+        let (dir, mut repo, ids) = project_with(&["klmnopl", "klmnopk", "mmmm"]);
+        let listing = repo.store().save(&ids[3], false).unwrap().root;
+        let stray = plant(&mut repo, &[], "nnnn", None);
+        let truth = true_line(&repo);
+        for (stranger, change_id) in [(listing, change("pppp")), (stray, change("nnnn"))] {
+            let mut lie = truth.clone();
+            lie.insert(1, (stranger, change_id));
+            let (cached, cold) = resolved(dir.path(), &repo, &lie, &stranger.to_hex());
+            assert_eq!(cached, cold);
+            assert!(cold.starts_with("Err(NotFound"), "{cold}");
+            let fixed = crate::changeids::ChangeIds::load(&repo);
+            assert_eq!(fixed.get("main").unwrap(), truth.as_slice());
+        }
+    }
+
+    #[test]
+    fn a_whole_id_costs_what_its_save_is_far_from_the_newest() {
+        let (_dir, repo, ids) = project_with(&vec!["lmno"; 30]);
+        cached_line(&repo);
+        for (back, most) in [(0, 2), (10, 12)] {
+            let id = ids[ids.len() - 1 - back];
+            let before = repo.store().saves_read();
+            assert_eq!(resolve(&repo, &id.to_hex()).unwrap(), id);
+            let read = repo.store().saves_read() - before;
+            assert!(read <= most, "{read} saves read for one {back} back");
         }
     }
 

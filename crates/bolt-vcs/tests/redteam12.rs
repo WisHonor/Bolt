@@ -136,7 +136,6 @@ fn rt12_2_a_scattered_small_read_costs_a_small_read() {
 /// a folder listing's ID makes `goto` of that ID fail with "object … is FolderListing, not Save"
 /// (or "is not in the store" for an ID of nothing), where main says no save matches.
 #[test]
-#[ignore = "RT12-3: a lying change-ID list makes goto of a full ID that is no save fail with a store error"]
 fn rt12_3_goto_of_a_full_id_no_save_has_says_no_save_matches() {
     use bolt_core::keyed::{self, KEY_LEN};
     use bolt_core::repo::Repository;

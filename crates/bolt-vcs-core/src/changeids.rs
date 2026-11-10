@@ -288,13 +288,16 @@ impl ChangeIds {
         Ok(())
     }
 
-    /// Whether a line of `state` reaches `id` along first parents, by the lists that start at
-    /// the line's newest save. `false` says nothing: the cache may not know the line.
-    pub(crate) fn reaches(&self, state: &State, id: &Id) -> bool {
-        state.lines.iter().any(|(name, tip)| {
-            self.lines.get(name).is_some_and(|saves| {
-                saves.first().is_some_and(|(first, _)| first == tip) && at(saves, id).is_some()
-            })
+    /// A list of a line of `state` that starts at the line's newest save and holds `id`, and
+    /// where it holds it. `None` says nothing: the cache may not know the line.
+    pub(crate) fn reaches(&self, state: &State, id: &Id) -> Option<(&[(Id, ChangeId)], usize)> {
+        state.lines.iter().find_map(|(name, tip)| {
+            let saves = self.lines.get(name)?;
+            if saves.first().is_some_and(|(first, _)| first == tip) {
+                Some((saves.as_slice(), at(saves, id)?))
+            } else {
+                None
+            }
         })
     }
 
