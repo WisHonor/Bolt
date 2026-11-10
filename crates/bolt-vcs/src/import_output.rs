@@ -64,8 +64,9 @@ pub fn import_text(report: &ImportReport, standing: &str) -> String {
                 _ => "",
             };
             format!(
-                "{kind}{} → {}",
+                "{kind}{} {} {}",
                 escape(&r.git, false),
+                crate::style::out().sym(crate::style::Sym::Arrow),
                 escape(&r.bolt, false)
             )
         })

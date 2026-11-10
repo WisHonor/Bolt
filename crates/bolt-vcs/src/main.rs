@@ -2,6 +2,7 @@
 
 mod import_output;
 mod output;
+mod style;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -751,12 +752,6 @@ fn changes_command(
         Some(_) => None,
         None => git_excludes_file(repo.root())?,
     };
-    // The older Windows console shows colour codes as text until a console call turns them on,
-    // and that call is unsafe code for the platform crate: no colour on Windows for now.
-    let color = !cfg!(windows)
-        && !json
-        && std::io::stdout().is_terminal()
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     let timed_out = RefCell::new(Vec::new());
     let shown = Cell::new(0_usize);
     let note = |path: &str, lines: &Lines| {
@@ -827,12 +822,7 @@ fn changes_command(
             if shown.get() > 1 {
                 wrote(writeln!(out))?;
             }
-            wrote(output::write_lines(
-                &mut out,
-                &file_change(c),
-                &lines,
-                color,
-            ))
+            wrote(output::write_lines(&mut out, &file_change(c), &lines))
         })
         .and_then(|()| {
             let (warnings, short) = warnings();
@@ -1498,12 +1488,12 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         &std::env::current_dir()?,
     )?));
     let window = undo_window_days()?;
-    let terminal = std::io::stderr().is_terminal();
+    let terminal = style::err().width.is_some();
     let done = tidy::tidy(repo, window, now_ms(), &mut waiting, &mut |to_free| {
         if terminal {
             output::tell(&format!(
                 "Tidying: about {} to free",
-                output::format_size(to_free)
+                bolt_core::text::bytes(to_free)
             ));
         }
     })?;
@@ -1801,6 +1791,7 @@ fn finished_switch(repo: &Repository) -> Option<String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    style::find_out(cli.json);
     // The project a command opens is kept here, so that if the command fails, the error can list
     // what the project's store had noticed by then.
     let mut opened = None;

@@ -13,11 +13,13 @@ use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::shelf::ShelfInfo;
 use bolt_core::switch::DiscardOutcome;
-use bolt_core::text::{escape, thousands};
+use bolt_core::text::{bytes, escape, thousands};
 use bolt_core::tidy::TidyReport;
 use bolt_core::undo::{Effect, Taken};
 use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
+
+use crate::style::{self, Role, Sym};
 
 /// The version of every JSON document `bolt --json` prints.
 pub const BOLT_JSON: u32 = 1;
@@ -379,18 +381,19 @@ pub fn failed_document(mut done: Value, failure: &Failure, warnings: &[Warning])
 /// A file's change as people see it, its path escaped.
 pub fn change_line(c: &FileChange) -> String {
     let p = escape(c.path, false);
-    let size = |s: Option<u64>| format_size(s.unwrap_or(0));
+    let size = |s: Option<u64>| bytes(s.unwrap_or(0));
+    let arrow = style::out().sym(Sym::Arrow);
     match c.change {
         ChangeKind::Added => format!("  added     {p}  ({})", size(c.new_size)),
         ChangeKind::Removed => format!("  removed   {p}  ({})", size(c.old_size)),
         ChangeKind::Modified => format!(
-            "  modified  {p}  ({} → {})",
+            "  modified  {p}  ({} {arrow} {})",
             size(c.old_size),
             size(c.new_size)
         ),
         ChangeKind::KindChanged => {
             let old = c.old_kind.map_or("none", |k| k.as_str());
-            format!("  changed   {p}  ({old} → {})", c.kind.as_str())
+            format!("  changed   {p}  ({old} {arrow} {})", c.kind.as_str())
         }
     }
 }
@@ -453,21 +456,10 @@ fn tag_name(tag: Tag) -> &'static str {
 }
 
 /// Writes a file's change with its lines, in the unified form, for people, a line at a time. The
-/// header starts with a letter, which no line of the file shown below it can. Colored when
-/// `color`.
-pub fn write_lines(
-    out: &mut dyn Write,
-    c: &FileChange,
-    lines: &Lines,
-    color: bool,
-) -> io::Result<()> {
-    let paint = |code: &str, text: &str| {
-        if color {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
-    };
+/// header starts with a letter, which no line of the file shown below it can. Coloured as stdout
+/// allows.
+pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Result<()> {
+    let screen = style::out();
     let header = change_line(c);
     let header = header.trim_start();
     let hunks = match lines {
@@ -493,12 +485,12 @@ pub fn write_lines(
             "@@ -{},{} +{},{} @@",
             h.old_start, h.old_lines, h.new_start, h.new_lines
         );
-        writeln!(out, "{}", paint("36", &at))?;
+        writeln!(out, "{}", screen.paint(Role::Hunk, &at))?;
         for ((tag, line), eol) in h.lines.iter().zip(eol_only(h)) {
-            let (mark, code) = match tag {
-                Tag::Same => (' ', ""),
-                Tag::Removed => ('-', "31"),
-                Tag::Added => ('+', "32"),
+            let (mark, role) = match tag {
+                Tag::Same => (' ', None),
+                Tag::Removed => ('-', Some(Role::Removed)),
+                Tag::Added => ('+', Some(Role::Added)),
             };
             let body = line
                 .strip_suffix(b"\r\n")
@@ -513,10 +505,9 @@ pub fn write_lines(
             if eol && line.ends_with(b"\r\n") {
                 shown.push_str(" (CRLF)");
             }
-            if code.is_empty() {
-                writeln!(out, "{shown}")?;
-            } else {
-                writeln!(out, "{}", paint(code, &shown))?;
+            match role {
+                Some(role) => writeln!(out, "{}", screen.paint(role, &shown))?,
+                None => writeln!(out, "{shown}")?,
             }
             if body.is_none() {
                 writeln!(out, "\\ No newline at end of file")?;
@@ -697,19 +688,30 @@ pub fn warnings_json(warnings: &[Warning]) -> Value {
 /// them, before the error, which then doesn't tell them again.
 static TOLD: Mutex<Vec<Warning>> = Mutex::new(Vec::new());
 
-/// Prints each warning on stderr for people, once; a damaged copy also gets the hint.
+/// Prints each warning on stderr for people, once, after an empty line; a damaged copy also gets
+/// the hint.
 pub fn print_warnings(warnings: &[Warning]) {
+    let screen = style::err();
     let mut told = TOLD.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut damaged = false;
+    let (mut first, mut damaged) = (true, false);
     for w in warnings {
         if !told.contains(w) {
-            tell(&format!("warning: {}", w.message));
+            if first {
+                tell("");
+                first = false;
+            }
+            tell(&screen.prefixed(Role::Warning, "warning:", &w.message));
             damaged |= w.kind == warning::DAMAGED_PACK;
             told.push(w.clone());
         }
     }
     if damaged {
-        tell("hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it.");
+        tell("");
+        tell(&screen.prefixed(
+            Role::Hint,
+            "hint:",
+            "Bolt didn't use the damaged copy. Ask for help before trying to repair it.",
+        ));
     }
 }
 
@@ -832,9 +834,12 @@ pub fn print_error(json: bool, failure: &Failure, warnings: &[Warning]) {
 /// escaping still can't drive the terminal; only the newlines Bolt writes survive, the pieces
 /// having had theirs escaped.
 fn tell_failure(failure: &Failure) {
-    tell(&format!("error: {}", escape(&failure.message, true)));
+    let screen = style::err();
+    let message = escape(&failure.message, true);
+    tell(&screen.prefixed(Role::Error, "error:", &message));
     if let Some(hint) = &failure.hint {
-        tell(&format!("hint: {}", escape(hint, true)));
+        tell("");
+        tell(&screen.prefixed(Role::Hint, "hint:", &escape(hint, true)));
     }
 }
 
@@ -983,7 +988,7 @@ pub fn tidied(report: &TidyReport) -> String {
     };
     let mut text = format!(
         "Freed {} ({removed} removed, {} written).\n",
-        format_size(freed),
+        bytes(freed),
         report.packs_written
     );
     match report.packs_young {
@@ -1000,25 +1005,6 @@ pub fn tidied(report: &TidyReport) -> String {
         }
     }
     text
-}
-
-/// 1024-based size: bytes below 1 KiB, else KB, MB or GB with one decimal.
-#[allow(clippy::cast_precision_loss)]
-pub fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64;
-    let mut unit = "";
-    for u in ["KB", "MB", "GB"] {
-        value /= 1024.0;
-        unit = u;
-        // Round first: 1023.95 KB must read as 1.0 MB, not 1024.0 KB.
-        if (value * 10.0).round() < 10240.0 {
-            break;
-        }
-    }
-    format!("{value:.1} {unit}")
 }
 
 #[cfg(test)]
@@ -1262,20 +1248,6 @@ mod tests {
         assert_eq!(ago(31 * 86_400), "1970-01-10");
         assert_eq!(relative_time(0, 120, now), "1970-01-01");
         assert_eq!(relative_time(now + 5000, 0, now), "just now");
-        let sizes = [0, 1023, 1024, 1536, 1 << 20, 3 << 30, 5 << 40].map(format_size);
-        assert_eq!(
-            sizes,
-            [
-                "0 B",
-                "1023 B",
-                "1.0 KB",
-                "1.5 KB",
-                "1.0 MB",
-                "3.0 GB",
-                "5120.0 GB"
-            ]
-        );
-        assert_eq!(format_size(1024 * 1024 - 51), "1.0 MB");
     }
 
     #[test]
@@ -1290,7 +1262,7 @@ mod tests {
         };
         assert_eq!(
             tidied(&report),
-            "Freed 2.9 KB (1 pack removed, 1 written).\nLeft 1 pack changed in the last 24 hours \
+            "Freed 2.9 KiB (1 pack removed, 1 written).\nLeft 1 pack changed in the last 24 hours \
              as it is: a later bolt tidy frees what it holds that nothing needs.\n"
         );
         let nothing = TidyReport::default();
