@@ -108,7 +108,7 @@ gate_check() {
 		# Fields: the step, then Bolt's four times, then Git's four.
 		echo "$step $bolt $git" | awk '{
 			r = $2 / $6
-			printf "%-14s %8.1f ms %8.1f ms %5.2f %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f%s", $1, $2 * 1000, $6 * 1000, r, (r > 2 ? "OVER" : "ok"), $3 * 1000, $4 * 1000, $5 * 1000, $7 * 1000, $8 * 1000, $9 * 1000, ORS
+			printf "%-14s %8.1f ms %8.1f ms %6.3f %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f%s", $1, $2 * 1000, $6 * 1000, r, (r > 2 ? "OVER" : "ok"), $3 * 1000, $4 * 1000, $5 * 1000, $7 * 1000, $8 * 1000, $9 * 1000, ORS
 			exit (r > 2)
 		}' || failed=1
 	done
