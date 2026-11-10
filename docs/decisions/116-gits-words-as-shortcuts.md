@@ -35,7 +35,7 @@ Decision 017 chose Bolt's own words, with Git's accepted quietly so that people 
 | `diff` | `changes` |
 | `log` | `history` |
 | `checkout <target>`, `switch <target>` | `goto <target>` |
-| `restore <paths>` | `discard <paths>` |
+| `restore <paths>` (at least one path) | `discard <paths>` |
 | `stash`, `stash push` | `shelf` |
 | `stash pop` | `unshelf` |
 | `stash list` | `shelf --list` |
@@ -52,10 +52,12 @@ Each prints two or three lines on stderr saying what Bolt does instead, and ends
 - `add`: there is no staging step; `bolt save` saves every change, new files included, and `bolt save "message" <paths>` saves some.
 - `rm`, `mv`: delete or move the file itself; the next save records it.
 - `reset`: `bolt undo` takes back the last command, `bolt discard` throws away unsaved changes, `bolt goto <save>` goes to an older save.
+- `restore` with no path: Git refuses that, and `bolt discard` with no path throws away every unsaved change, so Bolt doesn't guess: it says to name the files (`bolt discard <paths>`), or to run `bolt discard` itself for everything.
 - `checkout -b`, `switch -c`, `branch <name>`: a line starts when you save away from a line, with `bolt save --line <name>`.
 - `stash apply`, `stash drop`, `stash clear`, `stash show`: `bolt unshelf` brings a shelf back, and keeping or dropping one isn't built yet.
 - `merge`, `rebase`, `cherry-pick`, `tag`, `blame`: combining lines, tags and `who` arrive in v0.2.
-- `clone`, `fetch`, `pull`, `push`, `remote`, `revert`: syncing arrives in v0.3.
+- `clone`, `fetch`, `pull`, `push`, `remote`: syncing arrives in v0.3.
+- `revert`: Bolt's `reverse` arrives in v0.3; until then `bolt undo` takes back your own last command.
 - `clean`: Bolt never deletes files it doesn't keep; `bolt tidy` frees space inside `.bolt` only.
 
 Any other word is an unknown command, with clap's suggestion when one is close.
@@ -76,4 +78,5 @@ Any other word is an unknown command, with clap's suggestion when one is close.
 - A Git user's first `bolt commit -m "…"` works and teaches `bolt save`.
 - The shortcut table is small on purpose. Git forms outside it get Bolt's own error for the Bolt command, which names that command.
 - [storage-format.md](../storage-format.md) §10 describes `git-words`. It is read with a cap and never trusted: a word it lists only silences a hint.
-- Words reserved for later Bolt commands (`tag`, `lock`) stay free: a shortcut never takes a word Bolt uses or plans to use (decision 017).
+- No shortcut runs under a word Bolt uses or plans to use (decision 017): `tag` is only explained for now, and becomes Bolt's own command when tags arrive.
+- A shortcut never does more than its Git form asked: `restore` without a path is the one place where the Bolt command would, and it is explained instead.

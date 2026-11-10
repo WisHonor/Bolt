@@ -18,7 +18,7 @@ Order: the answer, then the warnings, then the next step. With `--json`, stdout 
 Each is found out once, when the command starts, for stdout and stderr separately.
 
 - **A terminal:** the stream is one (`std::io::IsTerminal`).
-- **Colour** on a stream: it is a terminal, `NO_COLOR` is unset or empty, `TERM` isn't `dumb`, `--json` wasn't given, and on Windows either `WT_SESSION` is set or the console agreed to read colour codes (`anstyle_query::windows::enable_ansi_colors()` returned `Some(true)`; it asks for stdout and stderr together, so on the older console a redirected stdout leaves stderr without colour).
+- **Colour** on a stream: it is a terminal, `NO_COLOR` is unset or empty, `TERM` isn't `dumb`, `--json` wasn't given, and on Windows either `WT_SESSION` is set or the console agreed to read colour codes (`anstyle_query::windows::enable_ansi_colors()` returned `Some(true)`; it asks for stdout and stderr together and fails unless both are the console, so on the older console redirecting either leaves the other without colour).
 - **Symbols** on a stream: it is a terminal and, on macOS and Linux, the first of `LC_ALL`, `LC_CTYPE` and `LANG` that is set and not empty names UTF-8 (`UTF-8` or `utf8`, in any letter case); on Windows, `WT_SESSION` or `TERM_PROGRAM` is set. `BOLT_ASCII=1` turns symbols off everywhere. `BOLT_ASCII=0` turns them on for any terminal. No other value of `BOLT_ASCII` means anything.
 - **Width** of a stream that is a terminal: what the system says (the `terminal_size` crate); 80 when it won't say. A stream that isn't a terminal has no width: nothing on it is wrapped or cut.
 
@@ -104,7 +104,7 @@ Importing commits        ██████░░░░░░░░░░░░�
 
 ## 9. Numbers, times and names
 
-- **Sizes:** 1,024 bytes to the KiB: `512 B`, `31 KiB`, `240 MiB`, `1.2 GiB`. One decimal below 10 of a unit, none from 10 up; bytes always whole.
+- **Sizes:** 1,024 bytes to the KiB: `512 B`, `31 KiB`, `240 MiB`, `1.2 GiB`. One decimal below 10 of a unit, none from 10 up; bytes always whole. **A size that is a setting** (`bolt setup`, and what `bolt start` says about a preset) is shown as `bolt.toml` would write it: the largest unit that gives the number of bytes exactly, the 1,024 family tried first, so 100,000,000 bytes is `100 MB` and 1,073,741,824 is `1 GiB`.
 - **Counts:** a comma between thousands (`12,000 files`); real plurals (`1 file`, `2 files`).
 - **Times:** `just now`, `5 min ago`, `2 h ago`, `1 day ago`, `3 days ago` up to 30 days, then the date, in the save's own time zone.
 - **Change IDs:** the shortest start no other save on the line shares, at least 4 letters. **Fingerprints and diary entries:** 12 hex digits in lists.

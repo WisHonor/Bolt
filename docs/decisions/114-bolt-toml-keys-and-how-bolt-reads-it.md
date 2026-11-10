@@ -16,7 +16,7 @@ In v0.1 two settings change what Bolt does: the size from which files are stored
 
 **A file, or a value, Bolt can't use**
 - **A. Stop the command,** as a `.boltignore` Bolt can't read stops a save. Strict, but a typo in `bolt.toml` would then stop `bolt discard bolt.toml`, the command that puts the file back.
-- **B. Warn and use Bolt's default for what can't be read.** Each default is the careful side: files are chunked from 1 MiB, and the question is asked from 100 MB. A file can make Bolt ask less only with a value Bolt can read, which is the project's own choice.
+- **B. Warn and use Bolt's default for what can't be read.** For the two settings v0.1 acts on, the default is the careful side: files are chunked from 1 MiB, and the question is asked from 100 MB. A file can make Bolt ask less only with a value Bolt can read, which is the project's own choice. A rule Bolt can't read is passed over too; v0.1 never acts on rules, and what combining (v0.2) and locking (v0.3) do with a `bolt.toml` that holds rules they couldn't read is theirs to decide, with the warning to go by.
 
 **How sizes are written**
 - **A. A number of bytes** (`chunk-files-over = 1048576`). Nothing to parse, hard to read.
@@ -51,14 +51,14 @@ conflict-markers = false
 | `lockable` (in a rule) | `true` or `false` | `false` | The file can be locked. Recorded only: locking arrives with syncing (v0.3, decision 014). |
 | `conflict-markers` (in a rule) | `true` or `false` | `true` | Whether a conflict in the file is shown with markers inside it. Recorded only: conflicts arrive with combining (v0.2, decision 007). |
 
-- **A size** is a whole number, then optional spaces, then a unit: `B`, `KB`, `MB`, `GB`, `TB` (1,000 bytes to the kilobyte) or `KiB`, `MiB`, `GiB`, `TiB` (1,024), spelled exactly so. No fractions.
+- **A size** is a whole number, then optional spaces, then a unit: `B`, `KB`, `MB`, `GB`, `TB` (1,000 bytes to the kilobyte) or `KiB`, `MiB`, `GiB`, `TiB` (1,024), spelled exactly so. No fractions. `bolt setup` shows a setting's size in the largest unit that gives it exactly, the 1,024 family first: `1 MiB`, `100 MB`.
 - **`chunk-files-over` is the smallest size that is cut**, as decision 082's "1 MiB to 128 GiB" is: with `"1 MiB"`, a file of exactly 1,048,576 bytes is cut. It can't go below 1 MiB. It changes which files are stored as chunks, never an ID.
 - **The draft's `moves-with-asset` is not a key yet.** It comes with move notes (v0.2). A v0.1 Bolt that meets it warns, as for any key it doesn't know.
 - No key names a program, and nothing in the file is ever run (decision 008).
 
 ### How it is read
 
-- **The file:** `bolt.toml` in the project's top folder, a regular file of at most 1 MiB, read through the folder Bolt holds open and never through a link (decision 048). The copy that counts is the one in the folder, saved or not (decision 016).
+- **The file:** `bolt.toml` in the project's top folder, a regular file of at most 1 MiB in TOML 1.1.0 (every TOML 1.0 file is one), read through the folder Bolt holds open and never through a link (decision 048). The copy that counts is the one in the folder, saved or not (decision 016).
 - **No file** means Bolt's defaults, without a word. That is what a Custom project has ([decision 113](113-presets-what-each-writes-and-how-start-picks-one.md)).
 - **A file Bolt can't use at all** (a link, a folder or special file, over 1 MiB, unreadable, or not TOML) is passed over: Bolt's defaults apply, and a `rules_file_skipped` warning says why.
 - **A key Bolt can't use** is passed over, the rest of the file still counts, and one `rules_ignored` warning names each such key and why: a value of the wrong kind or out of range, a rule without usable `files`, or a key this Bolt doesn't know, which a newer Bolt may have written (decision 008).

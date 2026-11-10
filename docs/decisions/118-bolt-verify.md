@@ -35,14 +35,14 @@ Everyday commands open packs only when a lookup reaches them, skip the index che
 
    A pack that can't be opened or read is a problem that names it and says why, damage and other reasons apart (decisions 066 and 078). One bad object doesn't end the check: the rest of the pack is still checked.
 2. **What the project needs.** Starting from `state/head`: every diary entry back to the first; everything the current state reaches (each line, the save the project is at, shelves, tags, server lines, with all their history); and what undo needs for the steps inside the undo window. This is what `bolt tidy` keeps (decisions 077 and 079), worked out by the same code. Every record on the way must read and decode, and every file's contents, chunk list and chunks must be in some pack. Something missing is a problem that names the object and what needs it.
-   - A save that only an old step needs, and that isn't there, is not a problem: an earlier `tidy` freed it, and that step just can't be undone any more ([decision 123](123-follow-ups-done-or-moved-past-v0.1.md), RT7-2).
+   - The undo window is counted as `tidy` counts it: from the later of now minus the window and the time the last `tidy` recorded in `state/tidied` ([decision 123](123-follow-ups-done-or-moved-past-v0.1.md), RT7-2). So what an earlier `tidy` freed is never asked for, and anything else that is missing is a problem.
    - **A lost `head`** is a problem of its own, with the hint decision 075 gives (`bolt undo --list`, then `bolt undo --to`); the first check still runs.
    - **A switch left unfinished** is told as it is to `status`, as a warning, not a problem.
 3. **Not checked:** the caches (Bolt rebuilds them), `tmp/`, and the files in the folder (`bolt status --full` reads those).
 
 ### While other commands run
 
-`verify` takes no lock. It lists the packs, checks them, lists them again, and checks any new ones, until a listing brings nothing new. A pack that is gone when its turn comes was merged or tidied away, which is not a problem; what the project needs is then looked for in the packs that are there at the end. So a save, a merge or a `tidy` running beside it can't make it report damage that isn't there.
+`verify` takes no lock. It lists the packs, checks them, lists them again, and checks any new ones, until a listing brings nothing new. A pack that is gone when its turn comes was merged or tidied away, which is not a problem. What the project needs is looked for in the indexes of the packs that are there. Before anything is reported as missing, `verify` looks once more from the start: it reads `head` again, lists the packs again, and works out again what is needed and where it is; only what is still missing then is a problem. A merge or a `tidy` writes its new packs before it removes an old one, so at every moment each object is in some pack, and a second look finds what moved during the first. So a save, a merge or a `tidy` running beside it can't make it report damage that isn't there.
 
 ### What it says
 

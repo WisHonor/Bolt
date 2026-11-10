@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 016](016-presets.md) (preset contents, detection and the `bolt start` screen); [decision 056](056-question-before-large-saves.md) (presets set the question's numbers); [decision 071](071-a-step-records-its-change-to-the-folder.md) (a new step, `setup`, that writes the rule files)
-- **Supersedes in part:** [decision 016](016-presets.md), the sentence "An existing `.gitignore` is offered for import into `.boltignore`"
+- **Supersedes in part:** [decision 016](016-presets.md): the sentence "An existing `.gitignore` is offered for import into `.boltignore`"; and, for Custom alone, "Presets are written out in full" (Custom writes no file)
 
 ## Context
 
@@ -16,7 +16,7 @@ Two things changed since decision 016. Bolt reads `.gitignore` files as they are
 ## Options
 
 **What Custom writes**
-- **A. Nothing.** Custom is "Bolt's plain defaults" (decision 016), and a project with no `bolt.toml` already gets them: every project made before milestone 6, and every imported one, is such a project.
+- **A. Nothing.** Custom is "Bolt's plain defaults" (decision 016), and a project with no `bolt.toml` already gets them: every project made before milestone 6, and every imported one, is such a project. Decision 016 wanted every preset written out so that no rule is hidden or differs between two people's Bolt versions. Bolt's own values for an absent key are part of format 1 and freeze with it ([decision 121](121-format-1-freezes-at-v0.1.md)), so a project with no file reads the same in every Bolt, and `bolt setup` shows the values.
 - **B. A `bolt.toml` that spells the defaults out.** Easier to discover, but it freezes today's defaults into every Custom project, and every script and test that starts a project gains a new unsaved file.
 
 **Where an engine's ignore list comes from**
@@ -50,12 +50,12 @@ Choice [2]:
 ```
 
 - The answer is `1`, `2`, `3` or a preset's name; an empty answer takes the suggestion; anything else asks again. The question and its choices go to stderr.
-- **Without a terminal, or with `--json`,** `bolt start` without `--preset` stops before it makes anything, exit code 1: it can't ask, names `--preset`, and says which preset it would have suggested ([decision 017](017-commands-and-output.md): no questions without a terminal). Bolt never picks a preset for a script.
-- **A folder that already has a `bolt.toml`** is a project that already has its rules (a teammate's copy without its `.bolt/`, say). `bolt start` asks nothing, writes nothing and says the rules that are there stay; `--preset` is refused there, before anything is made, with a hint to start without it and switch afterwards with `bolt setup --preset`.
+- **A folder that already has a `bolt.toml`** is a project that already has its rules (a teammate's copy without its `.bolt/`, say). This is judged first. There `bolt start` asks nothing, needs neither a terminal nor the flag, writes no rule file and says the rules that are there stay; `--preset` is refused there, before anything is made, with a hint to start without it and switch afterwards with `bolt setup --preset`.
+- **Without a terminal, or with `--json`,** in a folder that has no `bolt.toml`, `bolt start` without `--preset` stops before it makes anything, exit code 1: it can't ask, names `--preset`, and says which preset it would have suggested ([decision 017](017-commands-and-output.md): no questions without a terminal). Bolt never picks a preset for a script.
 
 ### Detection
 
-- It looks at the names in the project's top folder, and adds up file sizes below it. It reads no file's contents and runs nothing (decision 016).
+- It looks at the names in the project's top folder (and, for Unity, in `ProjectSettings`), and adds up file sizes below it. It reads no file's contents and runs nothing (decision 016).
 - **Engines:** Unity when `ProjectSettings/ProjectVersion.txt` and an `Assets` folder are there; Unreal when a top-level name ends in `.uproject`; Godot when `project.godot` is there.
 - **Code:** a top-level `package.json` (Node), `pyproject.toml`, `requirements.txt` or `setup.py` (Python), `Cargo.toml` (Rust), `go.mod` (Go), `pubspec.yaml` (Dart), a name ending in `.sln` or `.csproj` (.NET), `pom.xml` (Maven), `build.gradle` or `build.gradle.kts` (Gradle).
 - **The suggestion:** Game when an engine is found, else Code when a language is, else Custom.
@@ -93,15 +93,15 @@ Nothing enforces `lockable` before syncing arrives (v0.3), and nothing uses `con
 ```
 
 - **Unity:** `.utmp/`, `/[Ll]ibrary/`, `/[Tt]emp/`, `/[Oo]bj/`, `/[Bb]uild/`, `/[Bb]uilds/`, `/[Ll]ogs/`, `/[Uu]ser[Ss]ettings/`, `/[Mm]emory[Cc]aptures/`, `/[Rr]ecordings/`, `.vs/`, `.gradle/`, `ExportedObj/`, `.consulo/`, `/*.csproj`, `/*.unityproj`, `/*.sln`, `/*.slnx`, `/*.booproj`, `*.suo`, `*.user`, `*.userprefs`, `*.pidb`, `*.svd`, `*.pdb`, `*.mdb`, `*.opendb`, `*.VC.db`, `*.pidb.meta`, `*.pdb.meta`, `*.mdb.meta`, `sysinfo.txt`, `mono_crash.*`, `/*_BackUpThisFolder_ButDontShipItWithYourGame/`, `/*_BurstDebugInformation_DoNotShip/`, `crashlytics-build.properties`, `/[Aa]ssets/_Recovery/`, `/[Aa]ssets/_Recovery.meta`, `/[Aa]ssets/Addressables_Temp/`, `/[Aa]ssets/Addressables_Temp.meta`, `/UIElementsSchema/`.
-- **Unreal:** `.vs/`, `/Binaries/`, `Plugins/**/Binaries/`, `Build/*`, `!Build/*/`, `Build/*/**`, `!Build/*/PakBlacklist*.txt`, `!Build/**/*.ico`, `/Saved/`, `/Intermediate/`, `Plugins/**/Intermediate/`, `/DerivedDataCache/`, `*_BuiltData.uasset`, `/*.sln`, `/*.slnx`, `*.suo`, `*.opensdf`, `*.sdf`, `*.VC.db`, `*.VC.opendb`, `*.xcodeproj`, `*.xcworkspace`.
+- **Unreal:** `.vs/`, `/Binaries/`, `/Saved/`, `/Intermediate/`, `Plugins/**/Intermediate/`, `/DerivedDataCache/`, `*_BuiltData.uasset`, `/*.sln`, `/*.slnx`, `*.suo`, `*.opensdf`, `*.sdf`, `*.VC.db`, `*.VC.opendb`, `*.xcodeproj`, `*.xcworkspace`.
 - **Godot:** `.godot/`, `.import/`, `export.cfg`, `export_credentials.cfg`, `.mono/`, `mono_crash.*.json`.
-- **Code,** for each language found: Node `node_modules/`, `dist/`, `.npm/`, `.next/`, `.nuxt/`, `.cache/`, `.parcel-cache/`, `.svelte-kit/`, `.turbo/`, `coverage/`, `npm-debug.log*`, `yarn-debug.log*`, `yarn-error.log*`, `*.tsbuildinfo`; Python `__pycache__/`, `*.py[cod]`, `.venv/`, `venv/`, `dist/`, `*.egg-info/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.tox/`, `.ipynb_checkpoints/`; Rust `target/`; Go `*.test`, `*.coverprofile`; Dart `.dart_tool/`, `/build/`, `.flutter-plugins`, `.flutter-plugins-dependencies`; .NET `[Bb]in/`, `[Oo]bj/`, `.vs/`, `*.user`, `*.suo`; Maven `target/`; Gradle `.gradle/`, `**/build/`, `!**/src/**/build/`. Then, always: `.env`, `.env.*`, `!.env.example`.
+- **Code,** for each language found: Node `node_modules/`, `.npm/`, `.next/`, `.nuxt/`, `.cache/`, `.parcel-cache/`, `.svelte-kit/`, `.turbo/`, `coverage/`, `npm-debug.log*`, `yarn-debug.log*`, `yarn-error.log*`, `*.tsbuildinfo`; Python `__pycache__/`, `*.py[cod]`, `.venv/`, `venv/`, `dist/`, `*.egg-info/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.tox/`, `.ipynb_checkpoints/`; Rust `target/`; Go `*.test`, `*.coverprofile`; Dart `.dart_tool/`, `/build/`, `.flutter-plugins`, `.flutter-plugins-dependencies`; .NET `[Bb]in/`, `[Oo]bj/`, `.vs/`, `*.user`, `*.suo`; Maven `target/`; Gradle `.gradle/`, `**/build/`, `!**/src/**/build/`. Then, always: `.env`, `.env.*`, `!.env.example`.
 
-The rule for the lists: **when in doubt, save it.** They hold caches, files the tool makes again, build output and crash files. They leave out every template line that would keep a file out only for its extension when an asset can have that extension (`*.obj`, `*.exe`, `*.dll`, `*.log`, `*.tmp`, `*.unitypackage`, Unreal's `SourceArt/` lines, Godot's `data_*/`). Project files an engine generates at the top (`*.sln`, `*.csproj`) are named at the top only, so a real one deeper down is saved. The lists come from GitHub's templates (github/gitignore, CC0) as read on 2026-11-09.
+The rule for the lists: **when in doubt, save it.** They hold caches, files the tool makes again, build output and crash files. They leave out every template line that would keep a file out only for its extension when an asset can have that extension (`*.obj`, `*.exe`, `*.dll`, `*.log`, `*.tmp`, `*.unitypackage`, Unreal's `SourceArt/` lines, Godot's `data_*/`), and every folder that teams do commit things in: Unreal's `Build/`, which holds each platform's icons and packaging files, the `Binaries/` of plugins, which is all a binary-only plugin is, and Node's `dist/`, which some projects publish from. Project files an engine generates at the top (`*.sln`, `*.csproj`) are named at the top only, so a real one deeper down is saved. The lists come from GitHub's templates (github/gitignore, CC0) as read on 2026-11-09.
 
 - **Game with no engine found** (an empty folder, say) writes the common rules and no engine's lines, and says so; `bolt setup --preset game` adds them once the engine has made its project.
 - **A `.boltignore` that is already there** keeps every line it has: the block goes in at its top, so the lines below it, the user's own, win.
-- **An existing `.gitignore` is not copied.** Bolt reads it as it is (decision 038).
+- **An existing `.gitignore` is not copied.** Bolt reads it as it is (decision 038). The block's lines count after a `.gitignore`'s in the same folder, so they also override a line there that takes a file back; a line below the block in `.boltignore` has the last word.
 - **Custom** writes no file. `bolt setup` then shows Bolt's defaults.
 
 ### How the files are written

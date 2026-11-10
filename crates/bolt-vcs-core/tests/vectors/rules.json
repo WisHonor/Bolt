@@ -585,6 +585,99 @@
     ]
   },
   {
+    "name": "preset-64-bytes-in-32-characters",
+    "toml": "preset = \"éééééééééééééééééééééééééééééééé\"\n",
+    "skipped": false,
+    "preset": "éééééééééééééééééééééééééééééééé",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "preset-66-bytes-in-33-characters",
+    "toml": "preset = \"ééééééééééééééééééééééééééééééééé\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "preset"
+    ]
+  },
+  {
+    "name": "rule-with-a-pattern-that-is-not-text",
+    "toml": "[[rule]]\nfiles = [\"*.a\", 3]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "several-bad-settings-in-one-rule-in-byte-order",
+    "toml": "[[rule]]\nfiles = [\"*.a\"]\nzzz = 1\nlockable = 3\nconflict-markers = \"x\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.a"
+        ],
+        "lockable": null,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": [
+      "rule[1].conflict-markers",
+      "rule[1].lockable",
+      "rule[1].zzz"
+    ]
+  },
+  {
+    "name": "top-level-names-before-rules",
+    "toml": "zebra = 1\n\n[[rule]]\nlockable = true\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "zebra",
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "toml-1-1-inline-table-over-several-lines",
+    "toml": "rule = [\n  { files = [\"*.x\"],\n    lockable = true,\n  },\n]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.x"
+        ],
+        "lockable": true,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": []
+  },
+  {
     "name": "not-toml",
     "toml": "this is not = = toml\n",
     "skipped": true,

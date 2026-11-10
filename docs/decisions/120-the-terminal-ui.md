@@ -24,7 +24,7 @@ Bolt knows nothing about the terminal's width, and writes `→` and `…` whatev
 - **C. No colour on Windows,** Bolt's main platform.
 
 **The terminal's width**
-- **A. A new small dependency,** `terminal_size`, the crate clap itself uses to wrap help. It asks the system; its own dependencies are already in Bolt.
+- **A. A new small dependency,** `terminal_size` (0.4.4), the crate clap itself uses to wrap help. It asks the system; the two crates it is built on, `rustix` and `windows-sys`, are already in Bolt at the versions it asks for.
 - **B. Bolt's own call in the platform crate:** safe on macOS and Linux through `rustix`, `unsafe` on Windows.
 - **C. Always assume 80 columns.** No dependency, and none of the canvas's width rules.
 
@@ -44,11 +44,11 @@ Bolt knows nothing about the terminal's width, and writes `→` and `…` whatev
 
 ### Layout
 
-- **The outcome comes first:** one line at the left edge that starts with what happened, in the past tense: `Saved`, `Updated` (an amend), `Switched to`, `Threw away`, `Undid`, `Redid`, `Shelved`, `Unshelved`, `Started`, `Imported`, `Freed`, `Verified`. A command that only reports (`status`, `history`, `line`) opens with where you are. "Nothing to save: …" and its like are plain lines, exit code 0.
+- **The outcome comes first:** one line at the left edge that starts with what happened, in the past tense: `Saved`, `Updated` (an amend), `Switched to`, `Threw away`, `Undid`, `Redid`, `Shelved`, `Unshelved`, `Started`, `Imported`, `Freed`, `Verified`. A command that only reports (`status`, `history`, `line`, `show`) opens with where you are. "Nothing to save: …" and its like are plain lines, exit code 0.
 - **Details** follow after one blank line, indented four spaces; bullets are `•` and a space. Lists with a place marker (`history`, `line`, `undo --list`) put the marker `▸` at the left edge and indent the other rows two spaces.
 - **`error:`** says what happened; **`hint:`** follows after a blank line and says what to do. The words of every error, warning and hint stay Bolt's own, from the code: the canvas changes how they are laid out, not what they say.
 - **`warning:`** lines come after the answer, one blank line before the first, one line each.
-- **`Next:`** names the most likely next command, as the last line, at most one per command. **`Changed your mind? bolt undo`** ends the commands whose result may surprise (`discard`, `goto`, `setup`, `unshelf`).
+- **`Next:`** names the most likely next command, as the last line, at most one per command. **`Changed your mind? bolt undo`** ends the commands whose result may surprise (`discard`, `goto`, `setup --preset`, `unshelf`).
 - Never two blank lines in a row, and none at the end. No boxes, banners or rules; the one separator is the dim line between files in `bolt changes`.
 
 ### Colour
@@ -65,13 +65,13 @@ Bolt uses the terminal's own sixteen colours, never fixed RGB, and every colour 
 | A change ID | magenta, bold |
 | A fingerprint, a line's name, a path | blue |
 | Added and removed (words, counts, diff lines) | green and red |
-| `changed` and `kind changed` | yellow |
+| `modified` and `kind changed` | yellow |
 | A diff's `@@` line | cyan |
 | What can be skipped (times, authors, counts in brackets) | dim (SGR 2) |
 | The number a question turns on; the place marker | bold |
 
 - **When:** a stream gets colour when it is a terminal, `NO_COLOR` is unset or empty, and `TERM` isn't `dumb`. stdout and stderr are judged each on its own. `--json` never has any.
-- **On Windows** Bolt first asks the console to read colour codes (`anstyle_query::windows::enable_ansi_colors`, option B). Inside Windows Terminal that is always so. On the older console the request covers stdout and stderr together, so when stdout is redirected there, stderr stays plain.
+- **On Windows** Bolt first asks the console to read colour codes (`anstyle_query::windows::enable_ansi_colors`, option B). Inside Windows Terminal that is always so. On the older console the request covers stdout and stderr together and fails unless both are the console, so when either is redirected there, the other stays plain.
 - Nothing essential is ever said in dim text or by colour alone.
 
 ### Symbols
@@ -99,12 +99,12 @@ Bolt writes the symbols only to a terminal known to show them: on macOS and Linu
 
 - A bar shows on stderr, only in a terminal, only after 400 ms of work, redrawn at most ten times a second on one line, and erased when the work ends; the outcome line is the summary. Its shape: a label padded to 24 characters, a bar of 24 cells, the percentage, then done and total (`Importing commits        ██████░░░░░░░░░░░░░░░░░░  26%  334 / 1,284`). Under 70 columns the counts go; under 50 the bar goes too.
 - Work with no known total shows the label, `…` and a turning mark instead.
-- Bars: an import's three passes (reading Git's history, checking Git LFS files, importing commits) and `bolt verify`. `save`, `goto`, `discard`, `shelf`, `unshelf`, `undo`, `redo` and `tidy` show the turning mark with what they are doing, since the engine doesn't yet report how far a save is.
+- Bars: an import's three passes (reading Git's history, checking Git LFS files, importing commits) and `bolt verify`. `save`, `goto`, `discard`, `shelf`, `unshelf`, `undo`, `redo`, `tidy` and `setup --preset` show the turning mark with what they are doing, since the engine doesn't yet report how far a save is.
 - Without a terminal nothing is printed while a command works, as today.
 
 ### Numbers, times and names
 
-- **Sizes** are 1024-based with their true names: `512 B`, `31 KiB`, `240 MiB`, `1.2 GiB`; one decimal below 10, none from 10 up. Today's two formatters (one 1024-based but labelled "MB", one 1000-based) become this one.
+- **Sizes** are 1024-based with their true names: `512 B`, `31 KiB`, `240 MiB`, `1.2 GiB`; one decimal below 10, none from 10 up. Today's two formatters (one 1024-based but labelled "MB", one 1000-based) become this one. A size that is a setting is shown as `bolt.toml` would write it, in the largest unit that gives it exactly (`100 MB`, `1 GiB`), so the default of 100,000,000 bytes reads `100 MB`, not `95 MiB`.
 - **Counts** take thousands separators: `12,000 files`. Plurals are real: `1 file`, `2 files`.
 - **Times** stay as they are: relative up to 30 days (`2 h ago`), then the date.
 - **Change IDs** are the shortest unique start of at least 4 letters; fingerprints show 12 hex digits in lists.
@@ -135,7 +135,7 @@ The facts win, each time. The review's list is the checklist; these are its head
 ## Consequences
 
 - Bolt has colour on Windows without new `unsafe` code of its own, so milestone 6 doesn't wait on a line-by-line review for it. `anstyle-query` becomes a direct dependency of the command-line crate; `Cargo.lock` gains nothing for it.
-- `terminal_size` is one new package in `Cargo.lock`, for the command-line crate only.
+- `terminal_size` 0.4.4 is one new package in `Cargo.lock`, for the command-line crate only: it brings no second copy of anything.
 - Almost every message's layout changes, and the CLI tests that match text change with it. Tests run without a terminal, so they see the plain forms: no colour, no symbols, nothing wrapped.
 - [docs/terminal.md](../terminal.md) holds these rules as the reference the code is checked against.
 - `save` and its neighbours show a turning mark, not a bar; a real bar waits for the engine to report progress, a row in the follow-ups.
