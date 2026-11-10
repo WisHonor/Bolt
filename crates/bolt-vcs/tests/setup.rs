@@ -584,6 +584,12 @@ fn the_executable_bit_of_a_rule_file_stays_through_setup_and_undo() {
         mode & 0o111 != 0
     };
     ok(&env, &["setup", "--preset", "code", "--yes"]);
+    // Rewritten, not left alone.
+    let code = presets::bolt_toml(Preset::Code, &Found::default()).unwrap();
+    assert_eq!(
+        fs::read_to_string(env.root().join("bolt.toml")).unwrap(),
+        code
+    );
     assert!(executable("bolt.toml") && executable(".boltignore"));
     ok(&env, &["undo"]);
     for (name, bytes) in rule_files {

@@ -16,7 +16,7 @@ use bolt_core::presets::{self, Engine, Found, LOOK_AT_MOST, Language, Preset};
 use serde_json::Value;
 use support::{
     CLEAR, Env, TITLE, assert_escaped, copies_of, head, link_file, link_folder, run_limited, text,
-    write_noise,
+    without_bolts_codes, write_noise,
 };
 
 /// `bolt <args>` in the project's folder: its exit code, stdout and stderr.
@@ -358,9 +358,6 @@ fn a_rules_file_whose_keys_and_values_hold_escape_codes() {
         toml(TITLE)
     );
     let file = file.replace('\u{2028}', "\\u2028");
-    // `start` in a folder that brings the file, then `save` and `setup` in the project.
-    let env = Env::empty();
-    fs::write(env.root().join("bolt.toml"), &file).unwrap();
     let mut ways: Vec<Option<bool>> = vec![None];
     if cfg!(feature = "fault-injection") {
         ways.push(Some(true));
@@ -376,14 +373,28 @@ fn a_rules_file_whose_keys_and_values_hold_escape_codes() {
         assert_eq!(code, Some(0), "{args:?}: {err}");
         assert_escaped(&out, &format!("{args:?} stdout"));
         assert_escaped(&err, &format!("{args:?} stderr"));
+        // On the terminal colour really is on, so this isn't a second plain run.
+        let coloured = out.contains("\x1b[0m") || err.contains("\x1b[0m");
+        assert_eq!(coloured, terminal.is_some(), "{args:?}: {out:?} {err:?}");
         (out, err)
     };
-    let (_, err) = said_by(&env, &["start"], None);
-    assert!(
-        err.contains("warning: Bolt passed over these parts"),
-        "{err}"
-    );
-    assert!(err.contains("\\x1b[2J\\u{202e}key"), "{err}");
+    // `start` in a folder that brings the file, in a log and on a terminal, each in a copy of it.
+    for terminal in ways.clone() {
+        let env = Env::empty();
+        fs::write(env.root().join("bolt.toml"), &file).unwrap();
+        let (_, err) = said_by(&env, &["start"], terminal);
+        let err = without_bolts_codes(&err);
+        let err = err.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            err.contains("warning: Bolt passed over these parts"),
+            "{err}"
+        );
+        assert!(err.contains("\\x1b[2J\\u{202e}key"), "{err}");
+    }
+    // Then `save` and `setup` in the project.
+    let env = Env::empty();
+    fs::write(env.root().join("bolt.toml"), &file).unwrap();
+    said_by(&env, &["start"], None);
     for (n, terminal) in ways.into_iter().enumerate() {
         fs::write(env.root().join("a.txt"), format!("{n}\n")).unwrap();
         let (_, err) = said_by(&env, &["save", "Rules"], terminal);
@@ -649,10 +660,10 @@ fn plant_names(dir: &Path, n: u64) {
 
 #[test]
 fn a_folder_of_a_million_names_is_looked_at_in_bounded_time() {
-    // Two and a half times what a look meets before it stops, to be sure it stops; planting a
-    // million names would take minutes on Windows and prove no more.
+    // A quarter more than a look meets before it stops, to be sure it stops; planting a million
+    // names would take minutes on Windows and prove no more.
     let env = Env::empty();
-    plant_names(env.root(), LOOK_AT_MOST * 5 / 2);
+    plant_names(env.root(), LOOK_AT_MOST * 5 / 4);
     plant_every_engines_files(env.root());
     let (code, said) = bounded(&env, &["start"]);
     assert_eq!(code, Some(1), "{said}");
@@ -733,27 +744,28 @@ fn engine_files_deeper_than_a_look_goes_change_nothing() {
 #[test]
 fn rule_files_inside_an_imported_repository_are_data_like_any_other() {
     let env = Env::new();
-    // History holds a file that isn't TOML, then rules that keep a 3 MiB file whole.
+    // History holds a file that isn't TOML, then rules that would cut a 3 MiB file.
     env.commit("bolt.toml", &"[".repeat(100_000), "Broken rules");
-    env.commit("bolt.toml", "chunk-files-over = \"8 MiB\"\n", "Rules");
+    env.commit("bolt.toml", "chunk-files-over = \"2 MiB\"\n", "Rules");
     let big = write_noise(&env.root().join("big.bin"), 7, 3 << 20);
     env.git(&["add", "big.bin"]);
     env.git(&["commit", "-q", "-m", "Big"]);
-    // The folder's copy, changed and not committed, is the one that counts.
+    // The folder's copy, changed and not committed, is the one that counts: it keeps the file
+    // whole, where Git's copy and Bolt's own 1 MiB would both cut it.
     fs::write(
         env.root().join("bolt.toml"),
-        "chunk-files-over = \"2 MiB\"\n",
+        "chunk-files-over = \"8 MiB\"\n",
     )
     .unwrap();
     let (code, doc) = json(&env, &["import"]);
     assert_eq!(code, Some(0), "{doc}");
     assert!(rules_warnings(&doc).is_empty(), "{doc}");
-    assert_eq!(copies_of(env.root(), &big), [ObjectKind::ChunkList]);
+    assert_eq!(copies_of(env.root(), &big), [ObjectKind::Content]);
     // And a save reads it from the folder too.
     let other = write_noise(&env.root().join("other.bin"), 8, 3 << 20);
     let (code, doc) = json(&env, &["save", "Other"]);
     assert_eq!(code, Some(0), "{doc}");
-    assert_eq!(copies_of(env.root(), &other), [ObjectKind::ChunkList]);
+    assert_eq!(copies_of(env.root(), &other), [ObjectKind::Content]);
     let (_, shown) = json(&env, &["setup"]);
-    assert_eq!(shown["chunk_files_over"], 2 << 20);
+    assert_eq!(shown["chunk_files_over"], 8 << 20);
 }
