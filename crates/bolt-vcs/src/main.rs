@@ -1,5 +1,6 @@
 //! The `bolt` command-line tool.
 
+mod git_words;
 mod import_output;
 mod output;
 mod progress;
@@ -8,6 +9,7 @@ mod style;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -42,6 +44,7 @@ use bolt_core::undo::{self, StepInfo, StepRequest};
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
 use clap::{Parser, Subcommand};
+use git_words::Typed;
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
 
@@ -2144,7 +2147,20 @@ fn finished_switch(repo: &Repository) -> Option<String> {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut typed = std::env::args_os();
+    let program = typed.next().unwrap_or_else(|| "bolt".into());
+    let typed: Vec<OsString> = typed.collect();
+    let json = typed.iter().any(|a| a == "--json");
+    let (args, shortcut) = match git_words::translate(typed) {
+        Typed::Bolt(args) => (args, None),
+        Typed::Shortcut { word, args } => (args, Some(word)),
+        Typed::Explain(text) => {
+            style::find_out(json);
+            git_words::explain(text);
+            return ExitCode::from(2);
+        }
+    };
+    let cli = Cli::parse_from(std::iter::once(program).chain(args));
     style::find_out(cli.json);
     // The project a command opens is kept here, so that if the command fails, the error can list
     // what the project's store had noticed by then.
@@ -2177,12 +2193,16 @@ fn main() -> ExitCode {
         Command::Unshelf { number } => unshelf_command(cli.json, number.as_deref(), &mut opened),
         Command::Tidy => tidy_command(cli.json, &mut opened),
     };
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             let noticed = opened.map_or_else(Vec::new, |repo| repo.store().warnings());
             output::print_error(cli.json, &failure, &noticed);
             ExitCode::from(1)
         }
+    };
+    if let Some(word) = shortcut {
+        git_words::teach(word);
     }
+    code
 }
