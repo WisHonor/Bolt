@@ -2187,7 +2187,7 @@ fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_s
     let (code, said) = with_reader_gone(&env, &["history"]);
     assert_eq!(code, Some(0), "{said}");
     assert!(
-        said.starts_with("\nwarning: A switch between saves was stopped before it was done"),
+        said.starts_with("warning: A switch between saves was stopped before it was done"),
         "{said}"
     );
     env.overwrite("a.txt", "mine\n");
@@ -2289,7 +2289,7 @@ fn warned_about() -> (support::Env, String) {
     (env, ids[0].to_hex())
 }
 
-const PLACEHOLDER_WARNING: &str = "\nwarning: Wrote 1 link as plain files holding their targets: \
+const PLACEHOLDER_WARNING: &str = "warning: Wrote 1 link as plain files holding their targets: \
                                    they lead out of the project, or this computer can't make \
                                    links (on Windows that takes Developer Mode):\n  out\n";
 

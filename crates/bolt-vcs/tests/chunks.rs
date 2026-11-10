@@ -164,7 +164,7 @@ fn an_import_reads_each_big_blob_once() {
         who: &who,
         command: "import",
         lfs_storage: None,
-        progress: &mut |_, _| {},
+        progress: &mut |_, _, _| {},
     };
     import_git(env.root(), &mut req, &mut None).unwrap();
     // Git's copy of each once, and a little besides: reading one twice passes 130 MiB.
@@ -216,7 +216,7 @@ fn a_long_history_of_a_big_file_imports_within_the_allowance() {
         who: &who,
         command: "import",
         lfs_storage: None,
-        progress: &mut |_, _| {},
+        progress: &mut |_, _, _| {},
     };
     let imported = import_git(env.root(), &mut req, &mut None);
     set_test_delta_limits(None);
@@ -255,7 +255,7 @@ fn a_history_past_the_allowance_imports_once_git_stores_big_files_whole() {
             who: &who,
             command: "import",
             lfs_storage: None,
-            progress: &mut |_, _| {},
+            progress: &mut |_, _, _| {},
         };
         set_test_delta_limits(Some((4 * MIB, DELTA_BASE_CACHE)));
         let imported = import_git(env.root(), &mut req, &mut None);

@@ -101,7 +101,7 @@ fn import_here(dir: &Path) -> Result<ImportReport, ImportError> {
         time_ms: 0,
         tz_offset_min: 0,
     };
-    let progress = &mut |_, _| {};
+    let progress = &mut |_, _, _| {};
     let mut req = ImportRequest {
         who: &who,
         command: "import",

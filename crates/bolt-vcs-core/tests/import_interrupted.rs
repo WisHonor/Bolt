@@ -62,7 +62,7 @@ fn import(dir: &Path) -> Result<ImportReport, ImportError> {
             who: &who,
             command: "import",
             lfs_storage: None,
-            progress: &mut |_, _| {},
+            progress: &mut |_, _, _| {},
         },
         &mut None,
     )

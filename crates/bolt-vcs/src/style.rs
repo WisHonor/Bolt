@@ -1,6 +1,6 @@
 //! What the terminal can show: colour, symbols and width, found out once; and the lines laid out
 //! by them.
-// Not every command prints through all of this yet.
+// Some roles and symbols are here for the whole design before any command shows them.
 #![allow(dead_code)]
 
 use std::io::{self, IsTerminal};
@@ -197,9 +197,9 @@ impl Sym {
     }
 }
 
-/// Columns `text` takes. shortcut: one per character, so wide CJK text counts short; measure
-/// display width if it ever matters.
-fn columns(text: &str) -> usize {
+/// Columns `text` takes, counted one per character: Bolt's own words and symbols are one column
+/// each, and a wide character in a project's name only makes its row run a little long.
+pub(crate) fn columns(text: &str) -> usize {
     text.chars().count()
 }
 
@@ -216,6 +216,14 @@ impl Screen {
     pub fn sym(self, sym: Sym) -> &'static str {
         let (symbol, plain) = sym.forms();
         if self.symbols { symbol } else { plain }
+    }
+
+    /// The turning mark at its `step`th turn.
+    pub fn turn(self, step: usize) -> char {
+        const SYMBOLS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        const PLAIN: [char; 4] = ['|', '/', '-', '\\'];
+        let marks: &[char] = if self.symbols { &SYMBOLS } else { &PLAIN };
+        marks[step % marks.len()]
     }
 
     /// `prefix` then `message`, wrapped under the message's text when this is a terminal.
@@ -293,7 +301,7 @@ fn wrap(line: &str, room: usize, lines: &mut Vec<String>) {
 }
 
 /// Whether lines meant only for people go on stderr.
-fn for_people() -> bool {
+pub(crate) fn for_people() -> bool {
     FOUND
         .get()
         .is_some_and(|f| !f.json && f.err.width.is_some())
@@ -504,7 +512,7 @@ mod tests {
             [0, 1023, 1024, 10_380_902, 10 << 20, 1_288_490_189].map(bolt_core::text::bytes);
         assert_eq!(
             sizes,
-            ["0 B", "1023 B", "1.0 KiB", "9.9 MiB", "10 MiB", "1.2 GiB"]
+            ["0 B", "1,023 B", "1.0 KiB", "9.9 MiB", "10 MiB", "1.2 GiB"]
         );
     }
 

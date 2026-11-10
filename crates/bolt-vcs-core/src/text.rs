@@ -78,7 +78,7 @@ pub fn bytes(n: u64) -> String {
     };
     // The biggest unit `n` reaches, or the next one up when rounding makes it 1,024 of this one.
     let Some(&(mut unit, mut name)) = UNITS.iter().rev().find(|(unit, _)| n >= *unit) else {
-        return format!("{n} B");
+        return format!("{} B", thousands(n));
     };
     if rounded(unit) >= 1 << 10
         && let Some(&(up, up_name)) = UNITS.iter().find(|(u, _)| *u > unit)
@@ -137,7 +137,7 @@ mod tests {
             [
                 "0 B",
                 "1 B",
-                "1023 B",
+                "1,023 B",
                 "1.0 KiB",
                 "1.5 KiB",
                 "95 MiB",

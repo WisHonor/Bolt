@@ -90,7 +90,7 @@ fn a_slow_diff_is_cut_at_its_deadline_and_said() {
     assert!(text(&out.stdout).contains("+x"), "{}", text(&out.stdout));
     assert_eq!(
         text(&out.stderr),
-        "\nwarning: Bolt stopped comparing a.txt line by line after 2 seconds, so its changes \
+        "warning: Bolt stopped comparing a.txt line by line after 2 seconds, so its changes \
          show in bigger pieces than they could.\n"
     );
 }

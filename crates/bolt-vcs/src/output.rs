@@ -1,10 +1,9 @@
 //! What `bolt` prints: JSON shapes, warnings and error messages.
 
 use std::fmt::{self, Write as _};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
 
 use bolt_core::changes::{Endings, Lines, Tag, eol_only, only_line_endings};
 use bolt_core::diary::{Action, DiaryEntry, Position};
@@ -13,12 +12,13 @@ use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
 use bolt_core::shelf::ShelfInfo;
 use bolt_core::switch::DiscardOutcome;
-use bolt_core::text::{bytes, escape, thousands};
+use bolt_core::text::{bytes, escape};
 use bolt_core::tidy::TidyReport;
 use bolt_core::undo::{Effect, Taken};
 use bolt_core::warning::{self, Warning};
 use serde_json::{Value, json};
 
+use crate::progress;
 use crate::style::{self, Role, Sym};
 
 /// The version of every JSON document `bolt --json` prints.
@@ -576,6 +576,9 @@ fn noting<T>(done: io::Result<T>) -> io::Result<T> {
 
 impl Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !buf.is_empty() {
+            PRINTED_ANY.store(true, Ordering::Relaxed);
+        }
         noting(guarded(&FAILED, || self.inner.write(buf)))
     }
 
@@ -590,10 +593,24 @@ pub fn print_out(text: &str) {
     let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
 }
 
-/// Writes `line` on stderr. A line stderr can't take is lost, never a panic: its reader may have
-/// gone with stdout's.
+/// Writes `line` on stderr, with any progress off the screen first. A line stderr can't take is
+/// lost, never a panic: its reader may have gone with stdout's.
 pub fn tell(line: &str) {
-    let _ = writeln!(io::stderr().lock(), "{line}");
+    TOLD_ANY.store(true, Ordering::Relaxed);
+    progress::tell(line);
+}
+
+/// Whether the command has written on stderr, and on stdout.
+static TOLD_ANY: AtomicBool = AtomicBool::new(false);
+static PRINTED_ANY: AtomicBool = AtomicBool::new(false);
+
+/// Whether a person reading stderr has seen something from this command already: a line on
+/// stderr, or its answer on stdout when both are on a terminal.
+fn seen_any() -> bool {
+    TOLD_ANY.load(Ordering::Relaxed)
+        || PRINTED_ANY.load(Ordering::Relaxed)
+            && style::out().width.is_some()
+            && style::err().width.is_some()
 }
 
 /// What a changing command whose output was lost did all the same.
@@ -626,7 +643,11 @@ pub fn ended(
     if let Some(failure) = &failure {
         tell_failure(failure);
     }
-    let _ = write!(io::stderr().lock(), "{}", taken());
+    let taken = taken();
+    if !taken.is_empty() {
+        TOLD_ANY.store(true, Ordering::Relaxed);
+        let _ = write!(io::stderr().lock(), "{taken}");
+    }
     print_warnings(warnings);
     let wrote = FAILED.get().map(|(_, why)| Failure {
         message: why.clone(),
@@ -688,18 +709,18 @@ pub fn warnings_json(warnings: &[Warning]) -> Value {
 /// them, before the error, which then doesn't tell them again.
 static TOLD: Mutex<Vec<Warning>> = Mutex::new(Vec::new());
 
-/// Prints each warning on stderr for people, once, after an empty line; a damaged copy also gets
-/// the hint.
+/// Prints each warning on stderr for people, once, after an empty line when something came
+/// before them; a damaged copy also gets the hint.
 pub fn print_warnings(warnings: &[Warning]) {
     let screen = style::err();
     let mut told = TOLD.lock().unwrap_or_else(PoisonError::into_inner);
     let (mut first, mut damaged) = (true, false);
     for w in warnings {
         if !told.contains(w) {
-            if first {
+            if first && seen_any() {
                 tell("");
-                first = false;
             }
+            first = false;
             tell(&screen.prefixed(Role::Warning, "warning:", &w.message));
             damaged |= w.kind == warning::DAMAGED_PACK;
             told.push(w.clone());
@@ -864,72 +885,6 @@ fn date(time_ms: i64, tz_offset_min: i16) -> String {
     });
     // A time outside the calendar can't be shown as a date; show the raw number instead.
     zoned.map_or_else(|_| format!("{time_ms} ms"), |z| z.date().to_string())
-}
-
-/// A line such as "Importing commits: 1,234 of 5,678" on stderr while a long step runs, or
-/// "Reading Git's history: 1,234 commits" while it can't say yet how many there are, kept up to
-/// date at most four times a second, and only in a terminal.
-pub struct Progress<W: Write> {
-    what: &'static str,
-    /// What is counted, said after the count when there is no total.
-    unit: &'static str,
-    out: W,
-    terminal: bool,
-    since: Instant,
-    last: (u64, Option<u64>),
-    shown: bool,
-}
-
-impl Progress<std::io::Stderr> {
-    pub fn new(what: &'static str, unit: &'static str) -> Self {
-        let out = std::io::stderr();
-        let terminal = out.is_terminal();
-        Progress::to(what, unit, out, terminal)
-    }
-}
-
-impl<W: Write> Progress<W> {
-    /// Progress written to `out`, which is a terminal or isn't.
-    fn to(what: &'static str, unit: &'static str, out: W, terminal: bool) -> Self {
-        Progress {
-            what,
-            unit,
-            out,
-            terminal,
-            since: Instant::now(),
-            last: (0, None),
-            shown: false,
-        }
-    }
-
-    pub fn update(&mut self, done: u64, total: Option<u64>) {
-        self.last = (done, total);
-        if self.terminal && self.since.elapsed() >= Duration::from_millis(250) {
-            self.show();
-            self.since = Instant::now();
-        }
-    }
-
-    /// Ends the line, with the last count, if one is shown; called again, it does nothing.
-    pub fn finish(&mut self) {
-        if self.shown {
-            self.show();
-            let _ = writeln!(self.out);
-            self.shown = false;
-        }
-    }
-
-    /// A failed write only loses the progress line, so it is let go.
-    fn show(&mut self) {
-        let (done, total) = self.last;
-        let done = thousands(done);
-        let _ = match total {
-            Some(total) => write!(self.out, "\r{}: {done} of {}", self.what, thousands(total)),
-            None => write!(self.out, "\r{}: {done} {}", self.what, self.unit),
-        };
-        let _ = self.out.flush();
-        self.shown = true;
-    }
 }
 
 /// What `bolt discard` did, for people; `everywhere` when it was given no paths.
@@ -1332,48 +1287,6 @@ mod tests {
             discarded(&changed_again, false),
             "Nothing was discarded there: your files changed while Bolt was discarding them. Run \
              the same bolt discard again.\n"
-        );
-    }
-
-    #[test]
-    fn progress_shows_only_in_a_terminal_and_at_most_four_times_a_second() {
-        let a_while_ago = || {
-            Instant::now()
-                .checked_sub(Duration::from_millis(300))
-                .unwrap()
-        };
-        let importing =
-            |terminal| Progress::to("Importing commits", "commits", Vec::new(), terminal);
-        // Without a terminal, nothing, however long the step takes.
-        let mut quiet = importing(false);
-        quiet.since = a_while_ago();
-        quiet.update(1, Some(2));
-        quiet.finish();
-        assert!(quiet.out.is_empty());
-        // In one, nothing for the first quarter of a second, so a quick step shows nothing.
-        let mut quick = importing(true);
-        quick.update(1, Some(2));
-        quick.finish();
-        assert!(quick.out.is_empty());
-        // Then at most once a quarter of a second, and the last count when it ends, once.
-        let mut slow = importing(true);
-        slow.since = a_while_ago();
-        slow.update(2, Some(1234));
-        slow.update(3, Some(1234));
-        slow.finish();
-        slow.finish();
-        assert_eq!(
-            String::from_utf8(slow.out).unwrap(),
-            "\rImporting commits: 2 of 1,234\rImporting commits: 3 of 1,234\n"
-        );
-        // A step that can't say yet how many there are counts what it has done.
-        let mut reading = Progress::to("Reading Git's history", "commits", Vec::new(), true);
-        reading.since = a_while_ago();
-        reading.update(1234, None);
-        reading.finish();
-        assert_eq!(
-            String::from_utf8(reading.out).unwrap(),
-            "\rReading Git's history: 1,234 commits\rReading Git's history: 1,234 commits\n"
         );
     }
 }

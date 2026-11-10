@@ -175,8 +175,9 @@ fn project_with_a_damaged_copy_of_its_licence() -> Env {
     env
 }
 
+/// Without a terminal the answer goes elsewhere, so stderr starts with the warning itself.
 #[test]
-fn warnings_come_after_an_empty_line_each_with_its_prefix() {
+fn warnings_each_have_their_prefix_and_stderr_never_starts_with_an_empty_line() {
     let env = project_with_a_damaged_copy_of_its_licence();
     let out = bolt_in_a_log(&env, env.root())
         .args(["save", "Add licence"])
@@ -185,12 +186,100 @@ fn warnings_come_after_an_empty_line_each_with_its_prefix() {
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
     let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(lines.len(), 4, "{said:?}");
-    assert_eq!(lines[0], "", "{said:?}");
-    assert!(lines[1].starts_with("warning: pack "), "{said:?}");
-    assert_eq!(lines[2], "", "{said:?}");
+    assert_eq!(lines.len(), 3, "{said:?}");
+    assert!(lines[0].starts_with("warning: pack "), "{said:?}");
+    assert_eq!(lines[1], "", "{said:?}");
     assert_eq!(
-        lines[3],
+        lines[2],
         "hint: Bolt didn't use the damaged copy. Ask for help before trying to repair it."
     );
+}
+
+/// On a terminal the answer and the warning share the screen, so an empty line parts them.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_warning_after_the_answer_on_a_terminal_comes_after_one_empty_line() {
+    let env = project_with_a_damaged_copy_of_its_licence();
+    let out = bolt_on_a_terminal(&env, env.root())
+        .args(["save", "Add licence"])
+        .output()
+        .unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(text(&out.stdout).starts_with("Saved "));
+    assert!(
+        said.starts_with("\n\x1b[1;33mwarning:\x1b[0m pack"),
+        "{said:?}"
+    );
+    assert!(!said.starts_with("\n\n"), "{said:?}");
+}
+
+/// A failing command whose first words are a warning starts with it, on a terminal or not.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_failing_command_that_warns_first_starts_with_the_warning() {
+    for terminal in [false, true] {
+        let env = Env::empty();
+        env.bolt().arg("start").assert().success();
+        let first = support::main_tip(&env).to_hex();
+        std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+        std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+        env.bolt().args(["save", "Two files"]).assert().success();
+        // A goto stopped after removing a.txt, then a.txt written again, in the way of finishing
+        // it.
+        let stopped = env
+            .bolt()
+            .args(["goto", &first])
+            .env("BOLT_FAULT_FAIL", "switch:changed")
+            .output()
+            .unwrap();
+        assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+        std::fs::write(env.root().join("a.txt"), "mine\n").unwrap();
+        let mut cmd = if terminal {
+            bolt_on_a_terminal(&env, env.root())
+        } else {
+            bolt_in_a_log(&env, env.root())
+        };
+        let out = cmd.args(["goto", "main"]).output().unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{said}");
+        assert!(out.stdout.is_empty(), "{said}");
+        assert!(said.contains("warning:"), "{said}");
+        assert!(!said.starts_with('\n'), "{said:?}");
+    }
+}
+
+/// Progress is for people at a terminal: a script sees none, whatever its environment asks for.
+#[test]
+fn no_progress_reaches_stderr_without_a_terminal() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    env.commit("b.txt", "b\n", "Second");
+    // A sign of Git LFS, so the import looks for its files too.
+    std::fs::create_dir(env.root().join(".git/lfs")).unwrap();
+    for args in [&["import"][..], &["save", "Third"]] {
+        if args[0] == "save" {
+            std::fs::write(env.root().join("c.txt"), "c\n").unwrap();
+        }
+        let out = bolt_in_a_log(&env, env.root()).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
+    }
+}
+
+/// `tidy` tells how much it is about to free only to a person, never beside `--json`.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn tidy_tells_its_estimate_only_to_a_person() {
+    let env = project_with_a_change();
+    let said = |args: &[&str]| {
+        let out = bolt_on_a_terminal(&env, env.root())
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        text(&out.stderr)
+    };
+    assert!(said(&["tidy"]).starts_with("Tidying: about "));
+    assert_eq!(said(&["--json", "tidy"]), "");
 }

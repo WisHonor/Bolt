@@ -47,9 +47,20 @@ pub struct ImportRequest<'a> {
     /// The `lfs.storage` the user's own Git settings set (`config::git_lfs_storage`), around
     /// which the repository's own setting comes, as in Git.
     pub lfs_storage: Option<&'a UserLfsStorage>,
-    /// Called as the first pass reads each commit, with how many it has read and `None`, then
-    /// after each commit is converted, with how many are done and how many there are.
-    pub progress: &'a mut dyn FnMut(u64, Option<u64>),
+    /// Called as each pass goes: with how many commits it has done, and how many there are once
+    /// that is known.
+    pub progress: &'a mut dyn FnMut(ImportPass, u64, Option<u64>),
+}
+
+/// Which pass an import is in, for its progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportPass {
+    /// Reading Git's history: how many commits there are isn't known yet.
+    ReadingHistory,
+    /// Looking at every commit's Git LFS files, when the repository shows a sign of Git LFS.
+    CheckingLfs,
+    /// Converting each commit.
+    Importing,
 }
 
 /// What an import brought in, and what it left out (decision 033's summary). Names and paths
@@ -493,7 +504,7 @@ struct Plan {
 fn plan(
     root: &Path,
     lfs_storage: Option<&UserLfsStorage>,
-    progress: &mut dyn FnMut(u64, Option<u64>),
+    progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
@@ -522,7 +533,14 @@ fn plan(
     }
     let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS, progress)?;
     let setting = lfs_storage.as_ref();
-    check_lfs_objects(&git, &head_commit, &order, setting, &SaveLimits::default)?;
+    check_lfs_objects(
+        &git,
+        &head_commit,
+        &order,
+        setting,
+        &SaveLimits::default,
+        progress,
+    )?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -567,7 +585,7 @@ fn carry_out(
     let total = order.len() as u64;
     for (done, id) in (1..).zip(&order) {
         converter.commit(id)?;
-        (req.progress)(done, Some(total));
+        (req.progress)(ImportPass::Importing, done, Some(total));
     }
     converter.finish()?;
     // Each tag goes into the list as it is read, in the list's order, and is let go: the tags
@@ -856,7 +874,7 @@ fn in_order(
     git: &git::Repo,
     roots: &BTreeSet<GitId>,
     most_extra: u64,
-    progress: &mut dyn FnMut(u64, Option<u64>),
+    progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<(Vec<GitId>, HashSet<ChangeId>), ImportError> {
     let mut walk = FirstPass {
         git,
@@ -898,7 +916,7 @@ fn in_order(
 /// stack: a commit on the way down costs 4 bytes for each parent it still has to go into.
 struct FirstPass<'g> {
     git: &'g git::Repo,
-    progress: &'g mut dyn FnMut(u64, Option<u64>),
+    progress: &'g mut dyn FnMut(ImportPass, u64, Option<u64>),
     /// Commits read so far.
     read: u64,
     most_extra: u64,
@@ -951,7 +969,7 @@ impl FirstPass<'_> {
         }
         let commit = outline(self.git, &id)?;
         self.read = self.read.saturating_add(1);
-        (self.progress)(self.read, None);
+        (self.progress)(ImportPass::ReadingHistory, self.read, None);
         let mut parents = commit.parents;
         self.headers.extend(commit.change_id);
         self.extra = self
@@ -1096,13 +1114,15 @@ const MAX_MISSING_LISTED: usize = 20;
 /// Without one, the converter stops at the first missing object it meets. Each pointer goes
 /// through the `LfsRules` the converter follows, from `setting`, so what stops one stops the
 /// other. Each commit's walk counts only trees not walked before, against fresh `limits`, so it
-/// may let through a commit the converter will refuse; past them it stops looking.
+/// may let through a commit the converter will refuse; past them it stops looking. `progress`
+/// hears how many commits it has looked at.
 fn check_lfs_objects(
     git: &git::Repo,
     head: &GitId,
     order: &[GitId],
     setting: Option<&LfsElsewhere>,
     limits: &dyn Fn() -> SaveLimits,
+    progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<(), ImportError> {
     let tree = outline(git, head)?.tree;
     if !git.has_lfs_folder()? && !lfs_attribute(git, &tree)? {
@@ -1119,10 +1139,12 @@ fn check_lfs_objects(
         count: 0,
         bytes: 0,
     };
-    for commit in order {
+    let total = order.len() as u64;
+    for (done, commit) in (1..).zip(order) {
         if !check.commit(commit, limits())? {
             break;
         }
+        progress(ImportPass::CheckingLfs, done, Some(total));
     }
     if check.count == 0 {
         return Ok(());
@@ -1402,7 +1424,7 @@ mod tests {
                 who: &who(),
                 command: "import",
                 lfs_storage: None,
-                progress: &mut |_, _| {},
+                progress: &mut |_, _, _| {},
             },
             &mut None,
         )
@@ -1596,8 +1618,11 @@ mod tests {
         let mut want = vec![a, b, c];
         want.sort();
         want.extend([merge, tip]);
-        assert_eq!(in_order(&repo, &roots, 3, &mut |_, _| {}).unwrap().0, want);
-        let e = in_order(&repo, &roots, 2, &mut |_, _| {}).unwrap_err();
+        assert_eq!(
+            in_order(&repo, &roots, 3, &mut |_, _, _| {}).unwrap().0,
+            want
+        );
+        let e = in_order(&repo, &roots, 2, &mut |_, _, _| {}).unwrap_err();
         assert!(
             e.to_string()
                 .contains("more than 2 parents beyond their first"),
@@ -1629,7 +1654,10 @@ mod tests {
             ([two, tip_two], [one, tip_one])
         };
         let want: Vec<GitId> = [shared].into_iter().chain(first).chain(second).collect();
-        assert_eq!(in_order(&repo, &roots, 0, &mut |_, _| {}).unwrap().0, want);
+        assert_eq!(
+            in_order(&repo, &roots, 0, &mut |_, _, _| {}).unwrap().0,
+            want
+        );
     }
 
     /// Bolt doesn't follow a config's includes, so an import of a repository whose config has one
@@ -1893,8 +1921,8 @@ mod tests {
         let head = id(Commit, second.as_bytes()).to_hex();
         git.loose_ref("refs/heads/main", &format!("{head}\n"));
         // Once the first commit is converted, after the first pass.
-        let mut progress = |done: u64, total: Option<u64>| {
-            if total.is_some() && done == 1 {
+        let mut progress = |pass, done: u64, _: Option<u64>| {
+            if pass == ImportPass::Importing && done == 1 {
                 std::fs::remove_file(&later).unwrap();
             }
         };
@@ -1966,7 +1994,7 @@ mod tests {
         };
         let scan = |dir: &Path, commit: &GitId, limits: &dyn Fn() -> SaveLimits| {
             let repo = git::Repo::open(dir).unwrap();
-            check_lfs_objects(&repo, commit, &[*commit], None, limits)
+            check_lfs_objects(&repo, commit, &[*commit], None, limits, &mut |_, _, _| {})
         };
         let small = |depth, entries| move || SaveLimits::new(depth, entries);
         let missing = |r| matches!(r, Err(ImportError::LfsMissing { count: 1, .. }));
@@ -2022,7 +2050,14 @@ mod tests {
         };
         let (dir, commit) = made(b"120000");
         let repo = git::Repo::open(dir.path()).unwrap();
-        let first = check_lfs_objects(&repo, &commit, &[commit], None, &SaveLimits::default);
+        let first = check_lfs_objects(
+            &repo,
+            &commit,
+            &[commit],
+            None,
+            &SaveLimits::default,
+            &mut |_, _, _| {},
+        );
         assert!(first.is_ok(), "{first:?}");
         drop(repo);
         let report = import(dir.path()).unwrap();
@@ -2044,7 +2079,14 @@ mod tests {
         assert_eq!(target, pointer);
         let (dir, commit) = made(b"100644");
         let repo = git::Repo::open(dir.path()).unwrap();
-        let first = check_lfs_objects(&repo, &commit, &[commit], None, &SaveLimits::default);
+        let first = check_lfs_objects(
+            &repo,
+            &commit,
+            &[commit],
+            None,
+            &SaveLimits::default,
+            &mut |_, _, _| {},
+        );
         assert!(matches!(
             first,
             Err(ImportError::LfsMissing { count: 1, .. })
@@ -2078,7 +2120,7 @@ mod tests {
         let order = [one, two, three];
         let scan = |entries| {
             let limits = move || SaveLimits::new(10, entries);
-            check_lfs_objects(&repo, &three, &order, None, &limits)
+            check_lfs_objects(&repo, &three, &order, None, &limits, &mut |_, _, _| {})
         };
         assert!(matches!(
             scan(3),
@@ -2122,7 +2164,14 @@ mod tests {
         std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
         let repo = git::Repo::open(dir.path()).unwrap();
         let order = [first, second];
-        match check_lfs_objects(&repo, &second, &order, None, &SaveLimits::default) {
+        match check_lfs_objects(
+            &repo,
+            &second,
+            &order,
+            None,
+            &SaveLimits::default,
+            &mut |_, _, _| {},
+        ) {
             Err(ImportError::LfsMissing {
                 first: listed,
                 count,
@@ -2155,11 +2204,50 @@ mod tests {
                 who: &who(),
                 command: "import",
                 lfs_storage: None,
-                progress: &mut |done, total| heard.push((done, total)),
+                progress: &mut |pass, done, total| heard.push((pass, done, total)),
             },
             &mut None,
         );
         assert_eq!(report.unwrap().commits, 2);
-        assert_eq!(heard, [(1, None), (2, None), (1, Some(2)), (2, Some(2))]);
+        use ImportPass::{Importing, ReadingHistory};
+        assert_eq!(
+            heard,
+            [
+                (ReadingHistory, 1, None),
+                (ReadingHistory, 2, None),
+                (Importing, 1, Some(2)),
+                (Importing, 2, Some(2))
+            ]
+        );
+    }
+
+    /// With a sign of Git LFS, the look for its files says how many commits it has looked at.
+    #[test]
+    fn an_import_reports_its_first_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
+        let tree = git.tree(&[]);
+        let first = commit_on(&git, &tree, &[], "one\n");
+        let second = commit_on(&git, &tree, &[first], "two\n");
+        git.loose_ref("refs/heads/main", &format!("{}\n", second.to_hex()));
+        let mut heard = Vec::new();
+        import_git(
+            dir.path(),
+            &mut ImportRequest {
+                who: &who(),
+                command: "import",
+                lfs_storage: None,
+                progress: &mut |pass, done, total| heard.push((pass, done, total)),
+            },
+            &mut None,
+        )
+        .unwrap();
+        let checking: Vec<_> = heard
+            .iter()
+            .filter(|(pass, ..)| *pass == ImportPass::CheckingLfs)
+            .map(|&(_, done, total)| (done, total))
+            .collect();
+        assert_eq!(checking, [(1, Some(2)), (2, Some(2))]);
     }
 }

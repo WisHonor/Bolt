@@ -2,6 +2,7 @@
 
 mod import_output;
 mod output;
+mod progress;
 mod style;
 
 use std::cell::{Cell, RefCell};
@@ -22,7 +23,7 @@ use bolt_core::history::{
     LineIds, ResolveError, current_save, for_each_on_line, resolve, short_change_id,
 };
 use bolt_core::id::{ChangeId, Id};
-use bolt_core::import::{ImportError, ImportRequest, import_git};
+use bolt_core::import::{ImportError, ImportPass, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
@@ -334,27 +335,25 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
     let who = now_person(&load_identity(Some(&root))?);
     let lfs_storage = git_lfs_storage(&root)?;
-    let mut reading = output::Progress::new("Reading Git's history", "commits");
-    let mut importing = output::Progress::new("Importing commits", "commits");
+    let mut bar = progress::Bar::new("Reading Git's history");
     let imported = import_git(
         &root,
         &mut ImportRequest {
             who: &who,
             command: "import",
             lfs_storage: Some(&lfs_storage),
-            // The first pass can't say how many commits there are; the second can.
-            progress: &mut |done, total| match total {
-                None => reading.update(done, None),
-                Some(_) => {
-                    reading.finish();
-                    importing.update(done, total);
-                }
+            progress: &mut |pass, done, total| {
+                bar.set_label(match pass {
+                    ImportPass::ReadingHistory => "Reading Git's history",
+                    ImportPass::CheckingLfs => "Checking Git LFS files",
+                    ImportPass::Importing => "Importing commits",
+                });
+                bar.update(done, total, false);
             },
         },
         opened,
     );
-    reading.finish();
-    importing.finish();
+    bar.finish();
     let report = imported?;
     // A project made from an import opens only where one made by `start` would.
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
@@ -385,14 +384,18 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     output::print_done(&text, &warnings)
 }
 
-/// Asks in the terminal for the new line's name; `None` if there is no terminal to ask in.
-fn ask_line_name() -> Result<Option<String>, Failure> {
+/// Asks in the terminal for the new line's name, with `working` off the screen meanwhile; `None`
+/// if there is no terminal to ask in.
+fn ask_line_name(working: &progress::Working) -> Result<Option<String>, Failure> {
     if !std::io::stdin().is_terminal() {
         return Ok(None);
     }
+    working.pause();
     let _ = write!(std::io::stderr(), "Name a new line for this save: ");
     let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
+    let read = std::io::stdin().lock().read_line(&mut answer);
+    working.resume();
+    read?;
     let answer = answer.trim();
     if answer.is_empty() {
         return Err(Failure {
@@ -462,26 +465,30 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
         amend,
     };
     let mut on_wait = waiting;
+    let working = progress::Working::start("Saving");
     // With --json nothing is asked, so a large save stops and names --yes.
     let mut said_no = false;
     let mut confirm = |large: &LargeSave| {
         if yes || json {
             return yes;
         }
+        working.pause();
         let answer = ask_large(large);
+        working.resume();
         said_no = answer == Some(false);
         answer.unwrap_or(false)
     };
     let asked;
     let saved = match save_folder(repo, &req, &mut on_wait, &mut confirm) {
         // Only now is it known that the save is at a save: a stopped switch may have moved it.
-        Err(SaveError::NeedsLineName) if !json && let Some(name) = ask_line_name()? => {
+        Err(SaveError::NeedsLineName) if !json && let Some(name) = ask_line_name(&working)? => {
             asked = name;
             req.new_line = Some(&asked);
             save_folder(repo, &req, &mut on_wait, &mut confirm)
         }
         done => done,
     };
+    drop(working);
     let outcome = match saved {
         Err(SaveError::LargeSave(_)) if said_no => {
             return Err(Failure {
@@ -1032,14 +1039,17 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
     let target = resolve_target(repo, text)?;
-    let done = goto(
-        repo,
-        &target,
-        &who,
-        "goto",
-        git_excludes.as_deref(),
-        &mut waiting,
-    )?;
+    let done = {
+        let _working = progress::Working::start("Writing files");
+        goto(
+            repo,
+            &target,
+            &who,
+            "goto",
+            git_excludes.as_deref(),
+            &mut waiting,
+        )
+    }?;
     let mut warnings = done.applied.warnings.clone();
     // The switch has happened, so a save that can't be read back only goes unnamed.
     let save = repo
@@ -1108,14 +1118,17 @@ fn discard_command(
         .collect::<Result<Vec<_>, _>>()?;
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = discard(
-        repo,
-        (!paths.is_empty()).then_some(&paths[..]),
-        &who,
-        "discard",
-        git_excludes.as_deref(),
-        &mut waiting,
-    )?;
+    let done = {
+        let _working = progress::Working::start("Writing files");
+        discard(
+            repo,
+            (!paths.is_empty()).then_some(&paths[..]),
+            &who,
+            "discard",
+            git_excludes.as_deref(),
+            &mut waiting,
+        )
+    }?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
     let text = if json {
@@ -1157,11 +1170,13 @@ fn undo_command(
         git_excludes: git_excludes.as_deref(),
     };
     let on_wait = &mut waiting;
+    let working = progress::Working::start("Writing files");
     let done = match to {
         Some(to) => undo::undo_to(repo, to, &req, on_wait),
         None if redo => undo::redo(repo, &req, on_wait),
         None => undo::undo(repo, &req, on_wait),
     };
+    drop(working);
     let (taken, shelved, finished, head_lost, mut warnings, failure) = match done {
         Ok(done) => (
             done.taken,
@@ -1309,7 +1324,10 @@ fn shelf_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut waiting)?;
+    let working = progress::Working::start("Writing files");
+    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut waiting);
+    drop(working);
+    let done = done?;
     let made = match &done {
         Shelved::Made(made) => Some(made),
         Shelved::Nothing { .. } => None,
@@ -1406,7 +1424,10 @@ fn unshelf_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut waiting)?;
+    let working = progress::Working::start("Writing files");
+    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut waiting);
+    drop(working);
+    let done = done?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
     let text = if json {
@@ -1488,15 +1509,17 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         &std::env::current_dir()?,
     )?));
     let window = undo_window_days()?;
-    let terminal = style::err().width.is_some();
+    let working = progress::Working::start("Tidying");
     let done = tidy::tidy(repo, window, now_ms(), &mut waiting, &mut |to_free| {
-        if terminal {
+        if style::for_people() {
             output::tell(&format!(
                 "Tidying: about {} to free",
                 bolt_core::text::bytes(to_free)
             ));
         }
-    })?;
+    });
+    drop(working);
+    let done = done?;
     let warnings = repo.store().warnings();
     let text = if json {
         let document = json!({

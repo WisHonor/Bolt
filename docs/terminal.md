@@ -68,7 +68,7 @@ Bolt draws no boxes, banners or rules beyond that separator.
 - **Details** come after one empty line, indented 4 spaces. Bullets are the bullet symbol and one space.
 - **Lists with a place marker** put the marker at the left edge and start every other row with two spaces.
 - **Columns** are at least two spaces apart; text is left-aligned, numbers and sizes right-aligned. A table is as wide as what it holds and is never padded out to the terminal's width.
-- **Empty lines:** one after an outcome line that has details; one before the first `warning:`; one before a `hint:`, a `Next:` or a "Changed your mind?" line. Never two in a row, never one at the end.
+- **Empty lines:** one after an outcome line that has details; one before the first `warning:` when anything was printed before it (the answer counts only when stdout and stderr are both a terminal), so stderr never starts with an empty line; one before a `hint:`, a `Next:` or a "Changed your mind?" line. Never two in a row, never one at the end.
 
 ## 6. Errors, warnings and the next step
 
@@ -97,14 +97,14 @@ Only on a terminal, and only in lists and tables:
 Importing commits        ██████░░░░░░░░░░░░░░░░░░  26%  334 / 1,284
 ```
 
-  the label padded to 24 characters, two spaces, 24 cells, two spaces, the percentage right-aligned in 4 characters, two spaces, then done and total. Under 70 columns the last part goes; under 50 the cells go too, leaving the label and the percentage.
+  the label padded to 24 characters (cut with the cut mark when longer), a space, 24 cells, a space, the percentage right-aligned in 4 characters, two spaces, then done and total, as in the example. Under 70 columns the last part goes; under 50 the cells go too, leaving the label and the percentage. A line is kept short of the terminal's last column, so it never wraps.
 - **A turning mark,** when it isn't: the label, a space, the cut mark, a space and one of `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` in turn (`|/-\` without symbols).
 - **Who shows what:** `import` shows a bar for each of its passes (reading Git's history, checking Git LFS files, importing commits); `verify` shows a bar by bytes read; `save`, `goto`, `discard`, `shelf`, `unshelf`, `undo`, `redo`, `tidy` and `setup --preset` show the turning mark with what they are doing ("Saving", "Writing files", "Tidying").
-- A question, or the line that says Bolt is waiting for another command, takes the progress line off the screen first.
+- A question, or the line that says Bolt is waiting for another command, takes the progress line off the screen first. So does any line told on stderr while the turning mark turns, such as `tidy`'s "Tidying: about … to free"; the mark comes back below it. The line is erased with `ESC[2K` where stderr shows colour, and with spaces over it otherwise.
 
 ## 9. Numbers, times and names
 
-- **Sizes:** 1,024 bytes to the KiB: `512 B`, `31 KiB`, `240 MiB`, `1.2 GiB`. One decimal below 10 of a unit, none from 10 up; bytes always whole. **A size that is a setting** (`bolt setup`, and what `bolt start` says about a preset) is shown as `bolt.toml` would write it: the largest unit that gives the number of bytes exactly, the 1,024 family tried first, so 100,000,000 bytes is `100 MB` and 1,073,741,824 is `1 GiB`.
+- **Sizes:** 1,024 bytes to the KiB: `512 B`, `31 KiB`, `240 MiB`, `1.2 GiB`. One decimal below 10 of a unit, none from 10 up; bytes always whole. A comma between thousands in every unit (`1,023 B`, `1,023 KiB`). **A size that is a setting** (`bolt setup`, and what `bolt start` says about a preset) is shown as `bolt.toml` would write it: the largest unit that gives the number of bytes exactly, the 1,024 family tried first, so 100,000,000 bytes is `100 MB` and 1,073,741,824 is `1 GiB`.
 - **Counts:** a comma between thousands (`12,000 files`); real plurals (`1 file`, `2 files`).
 - **Times:** `just now`, `5 min ago`, `2 h ago`, `1 day ago`, `3 days ago` up to 30 days, then the date, in the save's own time zone.
 - **Change IDs:** the shortest start no other save on the line shares, at least 4 letters. **Fingerprints and diary entries:** 12 hex digits in lists.
