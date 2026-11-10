@@ -379,24 +379,216 @@ pub fn failed_document(mut done: Value, failure: &Failure, warnings: &[Warning])
     done
 }
 
-/// A file's change as people see it, its path escaped.
-pub fn change_line(c: &FileChange) -> String {
-    let p = escape(c.path, false);
-    let size = |s: Option<u64>| bytes(s.unwrap_or(0));
-    let arrow = style::out().sym(Sym::Arrow);
-    match c.change {
-        ChangeKind::Added => format!("  added     {p}  ({})", size(c.new_size)),
-        ChangeKind::Removed => format!("  removed   {p}  ({})", size(c.old_size)),
-        ChangeKind::Modified => format!(
-            "  modified  {p}  ({} {arrow} {})",
-            size(c.old_size),
-            size(c.new_size)
-        ),
-        ChangeKind::KindChanged => {
-            let old = c.old_kind.map_or("none", |k| k.as_str());
-            format!("  changed   {p}  ({old} {arrow} {})", c.kind.as_str())
+/// A file's change as people see it: its kind's word and colour, its path escaped, and what it
+/// holds (a size, two sizes, or two kinds).
+pub struct Row {
+    word: &'static str,
+    role: Role,
+    path: String,
+    held: String,
+}
+
+impl Row {
+    pub fn of(c: &FileChange) -> Row {
+        let size = |s: Option<u64>| bytes(s.unwrap_or(0));
+        let arrow = style::out().sym(Sym::Arrow);
+        let (word, role, held) = match c.change {
+            ChangeKind::Added => ("added", Role::Added, size(c.new_size)),
+            ChangeKind::Removed => ("removed", Role::Removed, size(c.old_size)),
+            ChangeKind::Modified => (
+                "modified",
+                Role::Changed,
+                format!("{} {arrow} {}", size(c.old_size), size(c.new_size)),
+            ),
+            ChangeKind::KindChanged => {
+                let old = c.old_kind.map_or("none", |k| k.as_str());
+                let held = format!("{old} {arrow} {}", c.kind.as_str());
+                ("kind changed", Role::Changed, held)
+            }
+        };
+        Row {
+            word,
+            role,
+            path: escape(c.path, false),
+            held,
         }
     }
+}
+
+/// How wide a table of changes' columns are: as wide as what they hold.
+#[derive(Default)]
+pub struct Columns {
+    word: usize,
+    path: usize,
+    held: usize,
+}
+
+impl Columns {
+    pub fn fit(&mut self, row: &Row) {
+        self.word = self.word.max(style::columns(row.word));
+        self.path = self.path.max(style::columns(&row.path));
+        self.held = self.held.max(style::columns(&row.held));
+    }
+
+    /// Makes the path column as wide as the widest path shown once cut, for a table whose rows
+    /// are all at hand. Without it, a table with a cut path is as wide as the terminal lets it be.
+    pub fn settle(&mut self, s: style::Screen, rows: &[Row]) {
+        let room = self.room(s);
+        self.path = (rows.iter())
+            .map(|r| style::columns(&s.fit_path(&r.path, room)))
+            .max()
+            .unwrap_or(0);
+    }
+
+    fn room(&self, s: style::Screen) -> usize {
+        let others = 4 + self.word + 2 + 2 + self.held;
+        s.width.map_or(usize::MAX, |w| w.saturating_sub(others))
+    }
+
+    /// `row` in the table, indented four: on a terminal its path is cut from the middle when the
+    /// row would pass the width.
+    pub fn line(&self, s: style::Screen, row: &Row) -> String {
+        let room = self.room(s);
+        let path = s.fit_path(&row.path, room);
+        let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
+        format!(
+            "    {}{}  {}{}  {}{}",
+            s.paint(row.role, row.word),
+            pad(row.word, self.word),
+            s.paint(Role::Path, &path),
+            pad(&path, self.path.min(room)),
+            pad(&row.held, self.held),
+            row.held
+        )
+    }
+}
+
+/// A save as `bolt history` lists it, each piece escaped: its change ID, when it was written, by
+/// whom, its message's first line, and the lines whose newest save it is.
+pub struct SaveRow {
+    pub short: String,
+    pub when: String,
+    pub author: String,
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+/// How many rows `bolt history` reads before it sets its columns: it never holds a whole line,
+/// so a wider row after them runs long.
+const HELD: usize = 1_000;
+
+/// `bolt history`'s list, written as its rows come.
+pub struct History {
+    /// The line the project is on, escaped; `None` at a save.
+    line: Option<String>,
+    held: Vec<SaveRow>,
+    widths: Option<[usize; 3]>,
+    written: usize,
+}
+
+impl History {
+    pub fn new(line: Option<String>) -> History {
+        History {
+            line,
+            held: Vec::new(),
+            widths: None,
+            written: 0,
+        }
+    }
+
+    pub fn add(&mut self, out: &mut dyn Write, row: SaveRow) -> io::Result<()> {
+        if let Some(widths) = self.widths {
+            return self.write_row(out, &row, widths);
+        }
+        self.held.push(row);
+        if self.held.len() >= HELD {
+            self.lay_out(out)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self, out: &mut dyn Write) -> io::Result<()> {
+        match self.widths {
+            Some(_) => Ok(()),
+            None => self.lay_out(out),
+        }
+    }
+
+    /// Sets the columns from the rows held, then writes the heading and them.
+    fn lay_out(&mut self, out: &mut dyn Write) -> io::Result<()> {
+        let s = style::out();
+        let widths = self.held.iter().fold([0; 3], |w, r| {
+            [
+                w[0].max(style::columns(&r.short)),
+                w[1].max(style::columns(&r.when)),
+                w[2].max(style::columns(&r.author)),
+            ]
+        });
+        self.widths = Some(widths);
+        let heading = match &self.line {
+            Some(line) => format!("Saves on line {}, newest first:", s.paint(Role::Line, line)),
+            None => format!(
+                "At save {}, not on a line. Saves back from it, newest first:",
+                self.held
+                    .first()
+                    .map_or(String::new(), |r| s.paint(Role::ChangeId, &r.short))
+            ),
+        };
+        writeln!(out, "{heading}\n")?;
+        for row in std::mem::take(&mut self.held) {
+            self.write_row(out, &row, widths)?;
+        }
+        Ok(())
+    }
+
+    /// A row: the place marker on the first, the save you're at; the message cut at its end on a
+    /// terminal, so that the row and its lines' names fit.
+    fn write_row(
+        &mut self,
+        out: &mut dyn Write,
+        row: &SaveRow,
+        widths: [usize; 3],
+    ) -> io::Result<()> {
+        let s = style::out();
+        let marker = match self.written {
+            0 => s.paint(Role::Bold, s.sym(Sym::Marker)),
+            _ => " ".to_owned(),
+        };
+        self.written += 1;
+        let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
+        let lead = 2 + widths[0] + 2 + widths[1] + 2 + widths[2] + 2;
+        let named: usize = row.lines.iter().map(|l| 4 + style::columns(l)).sum();
+        let room = s
+            .width
+            .map_or(usize::MAX, |w| w.saturating_sub(lead + named));
+        let mut text = format!(
+            "{marker} {}{}  {}{}  {}{}  {}",
+            s.paint(Role::ChangeId, &row.short),
+            pad(&row.short, widths[0]),
+            s.paint(Role::Dim, &row.when),
+            pad(&row.when, widths[1]),
+            s.paint(Role::Dim, &row.author),
+            pad(&row.author, widths[2]),
+            s.cut_end(&row.title, room)
+        );
+        for line in &row.lines {
+            let _ = write!(text, "  [{}]", s.paint(Role::Line, line));
+        }
+        writeln!(out, "{}", text.trim_end())
+    }
+}
+
+/// A save's message's first line, escaped, in double quotes.
+pub fn quoted_title(save: &Save) -> String {
+    format!(
+        "\"{}\"",
+        escape(save.message.lines().next().unwrap_or_default(), false)
+    )
+}
+
+/// `n` files, with a comma between thousands.
+pub fn files(n: usize) -> String {
+    counted(n as u64, "file", "files")
 }
 
 /// A file's change with its lines, as `bolt changes --json` gives it. It is written as it is
@@ -461,8 +653,31 @@ fn tag_name(tag: Tag) -> &'static str {
 /// allows.
 pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Result<()> {
     let screen = style::out();
-    let header = change_line(c);
-    let header = header.trim_start();
+    let row = Row::of(c);
+    let mut header = format!(
+        "{}  {}",
+        screen.paint(row.role, row.word),
+        screen.paint(Role::Path, &row.path)
+    );
+    if let Lines::Hunks { hunks, .. } = lines {
+        let count = |tag: Tag| -> usize {
+            hunks
+                .iter()
+                .map(|h| h.lines.iter().filter(|(t, _)| *t == tag).count())
+                .sum()
+        };
+        let _ = write!(
+            header,
+            "  {} {}",
+            screen.paint(Role::Added, &format!("+{}", count(Tag::Added))),
+            screen.paint(Role::Removed, &format!("-{}", count(Tag::Removed)))
+        );
+    }
+    let _ = write!(
+        header,
+        "  {}",
+        screen.paint(Role::Dim, &format!("({})", row.held))
+    );
     let hunks = match lines {
         Lines::Binary => return writeln!(out, "{header}  (binary: no lines shown)"),
         Lines::TooBig => return writeln!(out, "{header}  (over 64 MiB: no lines shown)"),
@@ -516,6 +731,16 @@ pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Re
         }
     }
     Ok(())
+}
+
+/// What parts two files in `bolt changes`: on a terminal a dim rule across it, up to 100 columns;
+/// elsewhere an empty line, as a rule of `-` could pass for a removed line.
+pub fn between_files() -> String {
+    let s = style::out();
+    match s.width {
+        Some(_) => s.paint(Role::Dim, &s.sym(Sym::Rule).repeat(s.line_room().min(100))),
+        None => String::new(),
+    }
 }
 
 /// Standard output. What it couldn't take is remembered for the whole command (its reader went
@@ -880,12 +1105,24 @@ pub fn relative_time(time_ms: i64, tz_offset_min: i16, now_ms: i64) -> String {
 }
 
 fn date(time_ms: i64, tz_offset_min: i16) -> String {
+    zoned(time_ms, tz_offset_min, "%Y-%m-%d")
+}
+
+/// The date, time and zone of `time_ms`, in the save's own zone: `2026-11-08 12:14 +01:00`.
+pub fn date_time(time_ms: i64, tz_offset_min: i16) -> String {
+    zoned(time_ms, tz_offset_min, "%Y-%m-%d %H:%M %:z")
+}
+
+fn zoned(time_ms: i64, tz_offset_min: i16, format: &str) -> String {
     let zoned = jiff::Timestamp::from_millisecond(time_ms).and_then(|ts| {
         let offset = jiff::tz::Offset::from_seconds(i32::from(tz_offset_min) * 60)?;
         Ok(ts.to_zoned(jiff::tz::TimeZone::fixed(offset)))
     });
     // A time outside the calendar can't be shown as a date; show the raw number instead.
-    zoned.map_or_else(|_| format!("{time_ms} ms"), |z| z.date().to_string())
+    zoned.map_or_else(
+        |_| format!("{time_ms} ms"),
+        |z| z.strftime(format).to_string(),
+    )
 }
 
 /// What `bolt discard` did, for people; `everywhere` when it was given no paths.
@@ -967,7 +1204,7 @@ pub fn tidied(report: &TidyReport) -> String {
 const PROBLEMS_SHOWN: usize = 20;
 
 /// `n`, then `one` or `many`.
-fn counted(n: u64, one: &str, many: &str) -> String {
+pub fn counted(n: u64, one: &str, many: &str) -> String {
     format!("{} {}", thousands(n), if n == 1 { one } else { many })
 }
 
@@ -1439,6 +1676,7 @@ mod tests {
         assert_eq!(ago(31 * 86_400), "1970-01-10");
         assert_eq!(relative_time(0, 120, now), "1970-01-01");
         assert_eq!(relative_time(now + 5000, 0, now), "just now");
+        assert_eq!(date_time(90 * 60_000, 60), "1970-01-01 02:30 +01:00");
     }
 
     #[test]

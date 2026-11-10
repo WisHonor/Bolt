@@ -206,3 +206,90 @@ hint: Bolt can't repair a project in this version. Saves that don't use the dama
 - **Without symbols** (§4) the marks are `+` and `x`, and the cut mark is `...`. Without a terminal it is the same text, plain, and stderr holds only the warnings and the hint, with no bar.
 - **The hint** says the same however the problems were found. When `head` is lost it first gives that error's own hint (`bolt undo --list`, then `bolt undo --to`). There is no `error:` line: the outcome line on stdout is the error, and `--json`'s `error` holds it, with the hint.
 - A switch left unfinished is a `warning:` (`switch_unfinished`), as for `bolt status`, and doesn't change the exit code.
+
+### `bolt save`
+
+While it works, a terminal's stderr shows the turning mark `Saving` (§8).
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| Saved | `Saved <id> "<message's first line>" on <line>  (2 files)` | | |
+| Saved on a new line (`--line`, or the name asked for) | the same, `on` the new line | `You're on the new line <line>.` | |
+| Saved what paths name | the same | `Only what you named was saved: bolt status lists the changes left out.` | |
+| Updated (`--amend`) | `Updated save <id> "<message's first line>" on <line>  (2 files)` | `The ID stays the same.` | |
+| The files couldn't be counted | the same, ending `(couldn't count the changed files)` | | |
+| Nothing to save | `Nothing to save: no changes since your last save, <id> "<message>".` (`Nothing to save there: it matches your last save, …` with paths) | `No line was made: …` when `--line` was given | |
+| Nothing to amend | `Nothing to amend: your files match your last save, <id> "<message>", and so does the message.` (`what you named matches` with paths) | | |
+
+- The count is files, never lines: counting lines would slow every save. `on <line>` is left out for a save that names no line.
+- **Colour:** `Saved` and `Updated` green and bold, the ID magenta and bold, the line blue, the count dim.
+- The questions and stops (a large save, a save away from a line, the first save's line endings and Git LFS pointers) keep their words and flags (§10); only their layout follows §6.
+
+### `bolt status`
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| On a line | `On line <line> at save <id> "<message>"  (2 h ago)` | | |
+| At a save | `At save <id> "<message>", not on a line  (2 h ago)` | | |
+| Nothing changed | the outcome line, then at once `Nothing changed since then.` | | |
+| Changes | the outcome line; after an empty line `Changed since then (3 files):` | after an empty line, a row a change | `Next: save them with: bolt save "describe your change"` |
+| Entries not written here | after the rest, `Not written here, because this computer can't hold them as they are (saves keep them as they were):` | a path a row | |
+
+- **A row:** the kind (`added`, `removed`, `modified`, `kind changed`), the path, then what it holds, right-aligned: the size, `2 B → 4 B` for a modified file, `file → folder` for a kind changed. Rows are in path order; each column is as wide as what it holds. On a terminal a path that would pass the width loses folders from its middle (§7), and the column is as wide as the widest path shown.
+- The time is when the save was written (its author's). Sizes are measured; no line counts.
+- **Colour:** the ID magenta and bold, the line and the paths blue, `added` green, `removed` red, `modified` and `kind changed` yellow, the time and the count dim.
+- `--full` changes how hard status looks, not what it prints. An unfinished switch is a `warning:` (`switch_unfinished`) after the answer.
+
+### `bolt changes`
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| Changes | none: each file's header, then its hunks | | |
+| Nothing changed | `Nothing changed since <id> "<message>".` (`Nothing changed in those paths since …` with paths) | | |
+| `--save`, nothing | `Save <id> "<message>" changed no files.` (`… no files in those paths.`) | | |
+
+- **A file's header:** the kind, the path, `+N -M` (lines added and removed) for a text file, then what it holds in brackets, as in `bolt status`: `modified  Assets/Player.cs  +2 -1  (6 B → 7 B)`. A file shown without lines says why after it (`(binary: no lines shown)`, `(over 64 MiB: no lines shown)`, `(over 1,000,000 lines: no lines shown)`), and a line-ending-only change says so (`(only line endings changed: LF to CRLF)`).
+- **Hunks** are standard: `@@ -a,b +c,d @@`, three lines of context, `(CRLF)` after a line of a pair that differs only in its ending.
+- **Between files:** on a terminal the dim `─` rule, one column short of the width and at most 100 long; without a terminal an empty line, as no line of a file can be one and a rule of `-` could pass for a removed line.
+- **Colour:** the kind as in `bolt status`, the path blue, `+N` and `+` lines green, `-M` and `-` lines red, `@@` lines cyan, the bracket dim. Context lines have none.
+- There is no summary line first: `bolt changes` prints each file as it compares it, and knows the totals only at the end. A diff that took over 2 seconds is a `warning:` (`diff_timed_out`).
+
+### `bolt history`
+
+```text
+Saves on line main, newest first:
+
+▸ ptvz   2 h ago     Ana Lima    Add double jump  [main]
+  kxqmz  3 days ago  Ana Lima    First playable
+  kxqmr  5 days ago  Ben Okafor  Add rock textures
+```
+
+- **The heading:** `Saves on line <line>, newest first:`; at a save, `At save <id>, not on a line. Saves back from it, newest first:`. Every save is listed, from where you are back.
+- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is. Columns are as wide as the first 1,000 rows need: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
+- **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line names blue.
+
+### `bolt show`
+
+```text
+Save ptvz "Add double jump"
+
+    Author       Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
+    Saved by     Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
+    Line         main
+    After        kxqmz "First playable"
+    Fingerprint  d77a81f736da0b96a75602567a49fa760764e22213b6852cda7b6660f926f3ed
+
+        Second jump while airborne, plus 0.1 s of coyote time off ledges.
+
+2 files changed:
+
+    added     Assets/Scripts/DoubleJump.cs  1.2 KiB
+    modified  Assets/Scripts/Player.cs      6 B → 7 B
+```
+
+then, on a terminal, `Next: see its lines with: bolt changes --save <id>` when it changed files.
+
+- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `After` names the save before it (a merge brought in from Git adds the other parents' fingerprints); the fingerprint is whole.
+- **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
+- **The changes** are rows as in `bolt status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
+- **Colour:** IDs magenta and bold, the line blue, the fingerprints blue, the rows as in `bolt status`, the times in brackets dim.

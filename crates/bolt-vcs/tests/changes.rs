@@ -124,7 +124,8 @@ fn a_file_of_too_many_lines_shows_without_lines_quickly() {
 fn nothing_matching_is_said_plainly() {
     // The first save, of an empty folder, changed no files.
     let env = project(&[]);
-    let short = |out: &str| out.split_whitespace().nth(1).unwrap().to_owned();
+    // The save's change ID, then its message.
+    let short = |out: &str| out.split(" changed").next().unwrap()[5..].to_owned();
     let first = env.state().1.lines["main"].to_hex();
     let save = changes(&env, &["--save", &first]);
     assert!(

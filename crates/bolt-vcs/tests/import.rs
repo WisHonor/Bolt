@@ -28,15 +28,15 @@ fn a_simple_repository_imports() {
     assert_eq!(history.status.code(), Some(0), "{}", text(&history.stderr));
     let history = text(&history.stdout);
     let lines: Vec<&str> = history.lines().collect();
-    assert_eq!(lines.len(), 2, "{history}");
-    assert!(lines[0].contains("Ada Lovelace") && lines[0].contains("Second save"));
-    assert!(lines[1].contains("Ada Lovelace") && lines[1].contains("First save"));
+    assert_eq!(lines.len(), 4, "{history}");
+    assert!(lines[2].contains("Ada Lovelace") && lines[2].contains("Second save"));
+    assert!(lines[3].contains("Ada Lovelace") && lines[3].contains("First save"));
 
     let show = env.bolt().arg("show").output().unwrap();
     assert_eq!(show.status.code(), Some(0), "{}", text(&show.stderr));
     let show = text(&show.stdout);
     assert!(show.contains("Ada Lovelace") && show.contains("    With a body."));
-    assert!(show.contains("added     b.txt"), "{show}");
+    assert!(show.contains("    added  b.txt  "), "{show}");
 
     let (repo, state) = env.state();
     assert_eq!(state.position, Position::OnLine("main".into()));
@@ -234,7 +234,7 @@ fn a_detached_head_puts_you_at_its_save() {
     // `history` starts from there.
     let history = env.bolt().arg("history").output().unwrap();
     let history = text(&history.stdout);
-    assert_eq!(history.lines().count(), 1, "{history}");
+    assert_eq!(history.lines().count(), 3, "{history}");
     // A save there needs a new line, and the hint says how to name it.
     env.overwrite("a.txt", "changed\n");
     let out = env.save(&["Change it"]);
@@ -620,7 +620,7 @@ fn an_imported_save_shows_the_letters_its_change_id_header_has() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["saves"][0]["change_id"], letters);
     let shown = text(&env.bolt().arg("history").output().unwrap().stdout);
-    assert!(shown.starts_with("zyxw"), "{shown}");
+    assert!(shown.contains("\n> zyxw "), "{shown}");
 }
 
 #[test]
@@ -768,7 +768,7 @@ fn converted_line_endings_stop_the_first_save() {
     // Nothing was written: not a save, not an object.
     assert_eq!(env.standing(), before);
     let history = env.bolt().arg("history").output().unwrap();
-    assert_eq!(text(&history.stdout).lines().count(), 3);
+    assert_eq!(text(&history.stdout).lines().count(), 5);
 
     let out = env
         .bolt()

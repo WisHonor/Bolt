@@ -861,20 +861,42 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 });
                 format!("{}\n", with_ignored(document, ignored.as_ref()))
             } else {
-                let title = escape(save.message.lines().next().unwrap_or_default(), false);
+                let s = style::out();
                 let counted = match changed_files {
-                    Some(1) => "(1 file)".to_owned(),
-                    Some(n) => format!("({n} files)"),
+                    Some(n) => format!("({})", output::files(n)),
                     None => "(couldn't count the changed files)".to_owned(),
                 };
-                let made = if replaced.is_some() {
-                    "Amended"
-                } else {
-                    "Saved"
+                let made = match replaced {
+                    Some(_) => format!("{} save", s.paint(style::Role::Ok, "Updated")),
+                    None => s.paint(style::Role::Ok, "Saved"),
                 };
-                let mut text = format!("{made} {short}  \"{title}\"  {counted}\n");
+                let on = save.line().map_or(String::new(), |line| {
+                    format!(" on {}", s.paint(style::Role::Line, &escape(line, false)))
+                });
+                let mut text = format!(
+                    "{made} {} {}{on}  {}\n",
+                    s.paint(style::Role::ChangeId, &short),
+                    output::quoted_title(&save),
+                    s.paint(style::Role::Dim, &counted)
+                );
+                let mut details = Vec::new();
+                if replaced.is_some() {
+                    details.push("The ID stays the same.".to_owned());
+                }
                 if let Some(line) = req.new_line {
-                    text += &format!("You're on the new line {}.\n", escape(line, false));
+                    details.push(format!("You're on the new line {}.", escape(line, false)));
+                }
+                if only.is_some() {
+                    details.push(format!(
+                        "Only what you named was saved: {} lists the changes left out.",
+                        s.paint(style::Role::Command, "bolt status")
+                    ));
+                }
+                if !details.is_empty() {
+                    text += "\n";
+                }
+                for detail in details {
+                    text += &format!("    {detail}\n");
                 }
                 text
             };
@@ -897,20 +919,23 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
+                let s = style::out();
+                let last_save = format!(
+                    "your last save, {} {}",
+                    s.paint(style::Role::ChangeId, &short),
+                    output::quoted_title(&last)
+                );
                 let mut text = if amend {
                     let what = if paths.is_empty() {
                         "your files match"
                     } else {
                         "what you named matches"
                     };
-                    format!(
-                        "Nothing to amend: {what} your last save ({short}), and so does the \
-                         message.\n"
-                    )
+                    format!("Nothing to amend: {what} {last_save}, and so does the message.\n")
                 } else if paths.is_empty() {
-                    format!("Nothing to save: no changes since your last save ({short}).\n")
+                    format!("Nothing to save: no changes since {last_save}.\n")
                 } else {
-                    format!("Nothing to save there: it matches your last save ({short}).\n")
+                    format!("Nothing to save there: it matches {last_save}.\n")
                 };
                 if req.new_line.is_some() {
                     text += "No line was made: a new line starts with a save, so change a file \
@@ -1018,29 +1043,61 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                 })
             );
         }
+        let s = style::out();
+        let at = format!(
+            "{} {}",
+            s.paint(style::Role::ChangeId, &short),
+            output::quoted_title(save)
+        );
+        let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
+        let when = s.paint(style::Role::Dim, &format!("({when})"));
         match &found.position {
-            Position::OnLine(line) => writeln!(out, "On line {}.", escape(line, false))?,
-            Position::AtSave(_) => writeln!(out, "At save {short}, not on a line.")?,
+            Position::OnLine(line) => {
+                let line = s.paint(style::Role::Line, &escape(line, false));
+                writeln!(out, "On line {line} at save {at}  {when}")?;
+            }
+            Position::AtSave(_) => writeln!(out, "At save {at}, not on a line  {when}")?,
         }
         if found.changes.is_empty() {
-            writeln!(out, "Nothing changed since {short}.")?;
-        }
-        for c in &found.changes {
-            writeln!(out, "{}", output::change_line(&file_change(c)))?;
+            writeln!(out, "Nothing changed since then.")?;
+        } else {
+            let count = output::files(found.changes.len());
+            let count = s.paint(style::Role::Dim, &format!("({count})"));
+            writeln!(out, "\nChanged since then {count}:\n")?;
+            let rows: Vec<output::Row> = found
+                .changes
+                .iter()
+                .map(|c| output::Row::of(&file_change(c)))
+                .collect();
+            let mut columns = output::Columns::default();
+            rows.iter().for_each(|row| columns.fit(row));
+            columns.settle(s, &rows);
+            for row in &rows {
+                writeln!(out, "{}", columns.line(s, row))?;
+            }
         }
         if !found.not_written_here.is_empty() {
             writeln!(
                 out,
-                "Not written here, because this computer can't hold them as they are (saves keep \
-                 them as they were):"
+                "\nNot written here, because this computer can't hold them as they are (saves keep \
+                 them as they were):\n"
             )?;
             for path in &found.not_written_here {
-                writeln!(out, "  {}", escape(path, false))?;
+                let room = s.width.map_or(usize::MAX, |w| w.saturating_sub(4));
+                let path = s.fit_path(&escape(path, false), room);
+                writeln!(out, "    {}", s.paint(style::Role::Path, &path))?;
             }
         }
         Ok(())
     })();
-    output::ended(None, String::new, &warnings, None)
+    output::ended(None, String::new, &warnings, None)?;
+    if !json && !found.changes.is_empty() {
+        style::next(&format!(
+            "save them with: {}",
+            style::err().paint(style::Role::Command, "bolt save \"describe your change\"")
+        ));
+    }
+    Ok(())
 }
 
 /// Why `bolt changes` stopped: a file couldn't be read, or what it shows couldn't be written.
@@ -1166,12 +1223,18 @@ fn changes_command(
         walk(&mut |path, c, lines| {
             note(path, &lines);
             if shown.get() > 1 {
-                wrote(writeln!(out))?;
+                wrote(writeln!(out, "{}", output::between_files()))?;
             }
             wrote(output::write_lines(&mut out, &file_change(c), &lines))
         })
         .and_then(|()| {
             let (warnings, short) = warnings();
+            let s = style::out();
+            let short = format!(
+                "{} {}",
+                s.paint(style::Role::ChangeId, &short),
+                output::quoted_title(&saved)
+            );
             if shown.get() == 0 {
                 let said = match (save, only) {
                     (Some(_), None) => writeln!(out, "Save {short} changed no files."),
@@ -1236,17 +1299,28 @@ fn history_to(
         );
     }
     let now = now_ms();
-    for_each_on_line(repo, |_, s, short| {
-        let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
-        let title = s.message.lines().next().unwrap_or_default();
-        writeln!(
-            out,
-            "{short}  {when}  {}  {}",
-            escape(&s.author.name, false),
-            escape(title, false)
-        )?;
+    let (_, entry) = repo.current()?;
+    let mut listed = output::History::new(match &entry.state.position {
+        Position::OnLine(line) => Some(escape(line, false)),
+        Position::AtSave(_) => None,
+    });
+    let walked = for_each_on_line(repo, |id, s, short| {
+        let row = output::SaveRow {
+            short: short.to_owned(),
+            when: output::relative_time(s.author.time_ms, s.author.tz_offset_min, now),
+            author: escape(&s.author.name, false),
+            title: escape(s.message.lines().next().unwrap_or_default(), false),
+            lines: (entry.state.lines.iter())
+                .filter(|(_, tip)| *tip == id)
+                .map(|(name, _)| escape(name, false))
+                .collect(),
+        };
+        listed.add(out, row)?;
         Ok::<(), Failure>(())
-    })?;
+    });
+    // What was read before a damaged save is still shown, before the error.
+    listed.finish(out)?;
+    walked?;
     let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
     warnings.extend(repo.store().warnings());
     Ok(warnings)
@@ -1264,15 +1338,24 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let early = unfinished.clone();
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
-    let old_root = match save.parents.first() {
-        Some(p) => Some(store.save(p, repo.signatures_allowed())?.root),
+    let parent = match save.parents.first() {
+        Some(p) => Some((*p, store.save(p, repo.signatures_allowed())?)),
         None => None,
     };
+    let old_root = parent.as_ref().map(|(_, p)| p.root);
     // Counting first holds the saves to the limits and reads them for damage before anything is
-    // printed, so a save that can't be listed prints only the error. The changes are then
-    // printed as the walk finds them, and none is kept.
-    let count = count_changes(store, old_root, save.root)?;
+    // printed, so a save that can't be listed prints only the error. It also sets the table's
+    // columns. The changes are then printed as the walk finds them, and none is kept.
+    let (mut count, mut columns) = (0_usize, output::Columns::default());
+    for_each_change(store, old_root, save.root, |c| {
+        count += 1;
+        if !json {
+            columns.fit(&output::Row::of(&c));
+        }
+        Ok::<(), StoreError>(())
+    })?;
     let mut out = output::Stdout::new();
+    let mut shown_as = String::new();
     let done = (|| -> Result<Vec<Warning>, Failure> {
         if json {
             // The document `json!` would make, in pieces: serde_json writes an object's keys in
@@ -1300,32 +1383,93 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         }
         let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
         let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-        let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
+        shown_as.clone_from(&short);
+        let s = style::out();
+        let now = now_ms();
+        let person = |p: &bolt_core::save::Person| {
+            let ago = output::relative_time(p.time_ms, p.tz_offset_min, now);
+            format!(
+                "{} <{}>, {}  {}",
+                escape(&p.name, false),
+                escape(&p.email, false),
+                output::date_time(p.time_ms, p.tz_offset_min),
+                s.paint(style::Role::Dim, &format!("({ago})"))
+            )
+        };
         writeln!(
             out,
-            "Save {short} · {} · {when}",
-            escape(&save.author.name, false)
+            "Save {} {}\n",
+            s.paint(style::Role::ChangeId, &short),
+            output::quoted_title(&save)
         )?;
-        // Indented, as Git does, so that no line of the message can pass for a change below it.
-        for line in escape(save.message.trim_end(), true).lines() {
+        writeln!(out, "    Author       {}", person(&save.author))?;
+        writeln!(out, "    Saved by     {}", person(&save.saver))?;
+        let line = save.line().map_or("none".to_owned(), |line| {
+            s.paint(style::Role::Line, &escape(line, false))
+        });
+        writeln!(out, "    Line         {line}")?;
+        if let Some((parent_id, parent)) = &parent {
+            let named = short_or_whole(repo, parent_id, &parent.change_id, &mut warnings);
+            let mut after = format!(
+                "{} {}",
+                s.paint(style::Role::ChangeId, &named),
+                output::quoted_title(parent)
+            );
+            // Bolt's own saves have one; a merge brought in from Git has more.
+            for other in save.parents.iter().skip(1) {
+                after += &format!(
+                    ", {}",
+                    s.paint(style::Role::Fingerprint, &other.short_hex())
+                );
+            }
+            writeln!(out, "    After        {after}")?;
+        }
+        writeln!(
+            out,
+            "    Fingerprint  {}",
+            s.paint(style::Role::Fingerprint, &id.to_hex())
+        )?;
+        // The rest of the message, indented eight, so that none of it can pass for a change row,
+        // which is indented four.
+        let message = escape(save.message.trim_end(), true);
+        let body: Vec<&str> = message
+            .lines()
+            .skip(1)
+            .skip_while(|l| l.trim().is_empty())
+            .collect();
+        if !body.is_empty() {
+            writeln!(out)?;
+        }
+        for line in body {
             if line.trim().is_empty() {
                 writeln!(out)?;
             } else {
-                writeln!(out, "    {line}")?;
+                writeln!(out, "        {line}")?;
             }
         }
-        writeln!(out)?;
+        if count == 0 {
+            writeln!(out, "\nNo files changed.")?;
+        } else {
+            writeln!(out, "\n{} changed:\n", output::files(count))?;
+        }
         for_each_change(store, old_root, save.root, |c| {
-            writeln!(out, "{}", output::change_line(&c))?;
+            writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;
             Ok::<(), Failure>(())
         })?;
-        if count == 0 {
-            writeln!(out, "  (no file changes)")?;
-        }
         warnings.extend(store.warnings());
         Ok(warnings)
     })();
-    output::listed(done, || so_far(early, repo))
+    output::listed(done, || so_far(early, repo))?;
+    if !json && count > 0 {
+        style::next(&format!(
+            "see its lines with: {}",
+            style::err().paint(
+                style::Role::Command,
+                &format!("bolt changes --save {shown_as}")
+            )
+        ));
+    }
+    Ok(())
 }
 
 fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {

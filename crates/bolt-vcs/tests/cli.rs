@@ -824,20 +824,23 @@ fn save_then_nothing_to_save() {
     let stdout = text(&out.stdout);
     let short = stdout
         .strip_prefix("Saved ")
-        .and_then(|s| s.strip_suffix("  \"Add two files\"  (2 files)\n"))
+        .and_then(|s| s.strip_suffix(" \"Add two files\" on main  (2 files)\n"))
         .unwrap_or_else(|| panic!("{stdout:?}"));
     assert_eq!(short.len(), 4);
     let out = env.bolt().args(["save", "Again"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
         text(&out.stdout),
-        format!("Nothing to save: no changes since your last save ({short}).\n")
+        format!("Nothing to save: no changes since your last save, {short} \"Add two files\".\n")
     );
     std::fs::write(env.root().join("a.txt"), "changed").unwrap();
     let out = env.bolt().args(["save", "Change a"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
-    assert!(stdout.ends_with("  \"Change a\"  (1 file)\n"), "{stdout:?}");
+    assert!(
+        stdout.ends_with(" \"Change a\" on main  (1 file)\n"),
+        "{stdout:?}"
+    );
 }
 
 /// What `bolt.toml` Bolt can't use is told by `bolt save`, in words and in `--json`, and by no
@@ -946,10 +949,7 @@ fn yes_skips_the_question() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).ends_with(
-        "  \"Add art\"  (1 file)
-"
-    ));
+    assert!(text(&out.stdout).ends_with(" \"Add art\" on main  (1 file)\n"));
 }
 
 /// Microsoft's list of reserved names doesn't hold `COM0` and `LPT0`, and Windows makes them as
@@ -1135,9 +1135,9 @@ fn save_is_reported_as_saved_when_the_line_cant_be_read_to_shorten_its_id() {
         before
     );
     let shown = stdout.strip_prefix("Saved ").expect(&stdout);
-    let (id, rest) = shown.split_once("  ").expect(&stdout);
+    let (id, rest) = shown.split_once(' ').expect(&stdout);
     assert_eq!(id.len(), 32, "the whole change ID: {stdout:?}");
-    assert_eq!(rest, "\"two\"  (1 file)\n");
+    assert_eq!(rest, "\"two\" on main  (1 file)\n");
     assert!(
         stderr.contains(
             "warning: The save was made, but Bolt couldn't read this line's older saves to \
@@ -1345,8 +1345,19 @@ fn history_lists_newest_first() {
     let env = project_with_two_saves();
     let out = stdout_of(&env, &["history"]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "{out}");
-    for (line, msg) in lines.iter().zip(["two", "one", "Start project"]) {
+    assert_eq!(
+        lines[..2],
+        ["Saves on line main, newest first:", ""],
+        "{out}"
+    );
+    assert_eq!(lines.len(), 5, "{out}");
+    assert!(lines[2].ends_with("  [main]"), "{out}");
+    let rows = lines[2..].iter().zip(["two", "one", "Start project"]);
+    for (n, (line, msg)) in rows.enumerate() {
+        // The save you're at is marked, and the line's name follows its newest save.
+        let (mark, line) = line.split_at(2);
+        assert_eq!(mark, if n == 0 { "> " } else { "  " }, "{out}");
+        let line = line.strip_suffix("  [main]").unwrap_or(line);
         let cols: Vec<&str> = line.split("  ").collect();
         assert_eq!(cols.len(), 4, "{line:?}");
         assert!(cols[0].len() >= 4);
@@ -1372,24 +1383,29 @@ fn show_lists_what_a_save_changed() {
     let out = stdout_of(&env, &["show"]);
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("Save "), "{out}");
-    assert!(lines[0].ends_with(" · Test · just now"), "{out}");
+    assert!(lines[0].ends_with(" \"mix\""), "{out}");
+    assert!(lines[2].starts_with("    Author       Test <"), "{out}");
+    assert!(lines[2].ends_with("  (just now)"), "{out}");
+    assert!(lines[3].ends_with("  (just now)"), "{out}");
+    assert!(lines[5].ends_with(" \"base\""), "{out}");
     assert_eq!(
-        &lines[1..],
+        &lines[7..],
         [
-            "    mix",
             "",
-            "    more",
+            "        more",
             "",
-            "  added     a.txt  (1 B)",
-            "  modified  b.txt  (1 B -> 4 B)",
-            "  removed   c.txt  (1 B)"
+            "3 files changed:",
+            "",
+            "    added     a.txt         1 B",
+            "    modified  b.txt  1 B -> 4 B",
+            "    removed   c.txt         1 B"
         ],
         "{out}"
     );
 }
 
-/// A message is the author's to write, so `show` indents every line of it by four spaces, as Git
-/// does: none of its lines can start with the two spaces and the word of a change line.
+/// A message is the author's to write, so `show` indents every line of it after the first by
+/// eight spaces: none of them can start with the four spaces and the word of a change row.
 #[test]
 fn show_indents_the_message_so_it_cannot_fake_a_change() {
     let env = Env::new();
@@ -1398,25 +1414,31 @@ fn show_indents_the_message_so_it_cannot_fake_a_change() {
         .assert()
         .success();
     std::fs::write(env.root().join("invoice.pdf"), "pdf").unwrap();
-    let message = "add the invoice\n\n  removed   payroll.xlsx  (12 KB)";
+    let message = "add the invoice\n\n    removed  payroll.xlsx  12 KiB";
     env.bolt().args(["save", message]).assert().success();
     let out = stdout_of(&env, &["show"]);
     // The only line that can pass for a change is the one real change.
+    let kinds = ["added ", "removed ", "modified ", "kind changed "];
     let like_changes: Vec<&str> = out
         .lines()
-        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .filter(|l| {
+            l.strip_prefix("    ")
+                .is_some_and(|row| kinds.iter().any(|k| row.starts_with(k)))
+        })
         .collect();
-    assert_eq!(like_changes, ["  added     invoice.pdf  (3 B)"], "{out}");
+    assert_eq!(like_changes, ["    added  invoice.pdf  3 B"], "{out}");
     // Every line of the message is there: indented, its own spaces kept, blank lines blank.
     let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].ends_with(" \"add the invoice\""), "{out}");
     assert_eq!(
-        &lines[1..],
+        &lines[7..],
         [
-            "    add the invoice",
             "",
-            "      removed   payroll.xlsx  (12 KB)",
+            "            removed  payroll.xlsx  12 KiB",
             "",
-            "  added     invoice.pdf  (3 B)"
+            "1 file changed:",
+            "",
+            "    added  invoice.pdf  3 B"
         ],
         "{out}"
     );
@@ -1434,7 +1456,7 @@ fn show_with_no_file_changes() {
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
-    assert!(stdout_of(&env, &["show"]).ends_with("  (no file changes)\n"));
+    assert!(stdout_of(&env, &["show"]).ends_with("\n\nNo files changed.\n"));
 }
 
 #[test]
@@ -1646,7 +1668,7 @@ fn commands_work_from_a_subfolder() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).contains("From sub"));
     let out = stdout_of_in(&env, &sub, &["show"]);
-    assert!(out.contains("added     project/sub/f.txt"), "{out}");
+    assert!(out.contains("    added  project/sub/f.txt  "), "{out}");
 }
 
 fn stdout_of_in(env: &Env, dir: &Path, args: &[&str]) -> String {
@@ -1962,7 +1984,7 @@ fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
     assert!(stdout.starts_with("Saved "), "{stdout:?}");
     assert!(!stdout.contains("(0 files)"), "{stdout:?}");
     assert!(
-        stdout.ends_with("  \"my work\"  (couldn't count the changed files)\n"),
+        stdout.ends_with(" \"my work\" on main  (couldn't count the changed files)\n"),
         "{stdout:?}"
     );
     // The reason is on stderr, with the words the document has.
@@ -2105,9 +2127,10 @@ fn save_does_not_hold_every_long_path_of_the_save_before_it() {
     let out = bolt_capped(&env, &["save", "my work"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     // The long paths are all gone from the new save, and `mine.txt` is new.
-    let want = format!("  \"my work\"  ({} files)\n", LONG_FOLDERS * LONG_FILES + 1);
+    assert_eq!(LONG_FOLDERS * LONG_FILES + 1, 62_501);
+    let want = " \"my work\" on main  (62,501 files)\n";
     let stdout = text(&out.stdout);
-    assert!(stdout.ends_with(&want), "{stdout:?}");
+    assert!(stdout.ends_with(want), "{stdout:?}");
 }
 
 /// Each change ID cut to the fewest letters, at least four, that no other ID starts with.
@@ -2154,9 +2177,11 @@ fn history_shows_every_save_with_the_fewest_letters_that_keep_it_unique() {
     let want = shortest_unique(&change_ids);
     assert!(want.iter().any(|s| s.len() > 4), "no change IDs collided");
     assert_eq!(field("change_id_short"), want);
+    // After the heading and its empty line, each row is the marker's place, then the ID.
     let printed: Vec<String> = stdout_of(&env, &["history"])
         .lines()
-        .map(|line| line.split("  ").next().unwrap().to_owned())
+        .skip(2)
+        .map(|line| line[2..].split("  ").next().unwrap().to_owned())
         .collect();
     assert_eq!(printed, want);
 }
@@ -2294,9 +2319,9 @@ fn paths_are_relative_to_the_current_folder() {
         serde_json::json!(["sub/a.txt"])
     );
     let shown = stdout_of_in(&env, &sub, &["show"]);
-    assert!(shown.contains("added     sub/a.txt"), "{shown}");
+    assert!(shown.contains("    added  sub/a.txt  "), "{shown}");
     assert!(
-        !shown.contains("b.png") && !shown.contains("added     a.txt"),
+        !shown.contains("b.png") && !shown.contains("added  a.txt"),
         "{shown}"
     );
     // A pattern is matched from here too, and `..` reaches above.

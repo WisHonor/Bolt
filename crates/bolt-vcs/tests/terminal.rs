@@ -75,7 +75,7 @@ fn no_color_turns_colour_off_and_keeps_symbols() {
         .unwrap();
     let shown = text(&out.stdout);
     assert!(
-        shown.starts_with("modified  a.txt  (2 B → 4 B)\n"),
+        shown.starts_with("modified  a.txt  +1 -1  (2 B → 4 B)\n"),
         "{shown:?}"
     );
     assert!(!shown.contains('\x1b'), "{shown:?}");
@@ -92,7 +92,10 @@ fn bolt_ascii_turns_symbols_off_and_keeps_colour() {
         .unwrap();
     let shown = text(&out.stdout);
     assert!(
-        shown.starts_with("modified  a.txt  (2 B -> 4 B)\n"),
+        shown.starts_with(
+            "\x1b[33mmodified\x1b[0m  \x1b[34ma.txt\x1b[0m  \x1b[32m+1\x1b[0m \x1b[31m-1\x1b[0m  \
+             \x1b[2m(2 B -> 4 B)\x1b[0m\n"
+        ),
         "{shown:?}"
     );
     assert!(
@@ -143,8 +146,8 @@ fn without_a_terminal_bolts_own_words_are_plain() {
     std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
     run(&["save", "first"]);
     std::fs::write(env.root().join("a.txt"), "abc\n").unwrap();
-    assert!(run(&["status"]).contains("(2 B -> 4 B)"));
-    assert!(run(&["changes"]).contains("(2 B -> 4 B)"));
+    assert!(run(&["status"]).contains("  2 B -> 4 B"));
+    assert!(run(&["changes"]).contains("  (2 B -> 4 B)"));
     run(&["save", "second"]);
     for args in [
         &["history"][..],
@@ -216,7 +219,7 @@ fn a_warning_after_the_answer_on_a_terminal_comes_after_one_empty_line() {
         .unwrap();
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
-    assert!(text(&out.stdout).starts_with("Saved "));
+    assert!(text(&out.stdout).starts_with("\x1b[1;32mSaved\x1b[0m "));
     assert!(
         said.starts_with("\n\x1b[1;33mwarning:\x1b[0m pack"),
         "{said:?}"
@@ -302,6 +305,326 @@ fn no_progress_reaches_stderr_without_a_terminal() {
             }
         }
     }
+}
+
+/// `bolt` in `dir` on a terminal `width` columns wide, without colour or symbols, so that a test
+/// can read the layout.
+#[cfg(feature = "fault-injection")]
+fn bolt_at_width(env: &Env, dir: &Path, width: usize) -> assert_cmd::Command {
+    let mut cmd = bolt_on_a_terminal(env, dir);
+    cmd.env("BOLT_FAKE_TERMINAL", width.to_string())
+        .env("NO_COLOR", "1")
+        .env("BOLT_ASCII", "1");
+    cmd
+}
+
+/// A project just started, with no rule files.
+fn started() -> Env {
+    let env = Env::empty();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    env
+}
+
+/// What `args` print on stdout and stderr, in a log or on a terminal `width` columns wide.
+fn run_at(env: &Env, width: Option<usize>, args: &[&str]) -> (String, String) {
+    let mut cmd = match width {
+        None => bolt_in_a_log(env, env.root()),
+        #[cfg(feature = "fault-injection")]
+        Some(width) => bolt_at_width(env, env.root(), width),
+        #[cfg(not(feature = "fault-injection"))]
+        Some(_) => unreachable!("a terminal is faked only with fault injection"),
+    };
+    let out = cmd.args(args).output().unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
+    (text(&out.stdout), said)
+}
+
+/// The widths a command is tried at: none, then 60, 80 and 120 columns where a terminal can be
+/// faked.
+fn widths() -> Vec<Option<usize>> {
+    let mut widths = vec![None];
+    if cfg!(feature = "fault-injection") {
+        widths.extend([Some(60), Some(80), Some(120)]);
+    }
+    widths
+}
+
+/// The change ID a save's outcome line names.
+fn saved_id(said: &str) -> &str {
+    said.split(' ').nth(1).unwrap()
+}
+
+#[test]
+fn save_says_saved_then_the_id_the_message_and_the_line() {
+    let env = started();
+    for (n, width) in widths().into_iter().enumerate() {
+        std::fs::write(env.root().join("a.txt"), format!("{n}\n")).unwrap();
+        let (shown, _) = run_at(&env, width, &["save", "Add a"]);
+        let id = saved_id(&shown);
+        assert!(id.len() >= 4 && id.bytes().all(|b| (b'k'..=b'z').contains(&b)));
+        assert_eq!(
+            shown,
+            format!("Saved {id} \"Add a\" on main  (1 file)\n"),
+            "{width:?}"
+        );
+    }
+}
+
+#[test]
+fn an_amend_says_updated_and_that_the_id_stays() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    let (saved, _) = run_at(&env, None, &["save", "Add a"]);
+    std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+    let (updated, _) = run_at(&env, None, &["save", "--amend", "Add a and b"]);
+    assert_eq!(
+        updated,
+        format!(
+            "Updated save {} \"Add a and b\" on main  (2 files)\n\n    The ID stays the same.\n",
+            saved_id(&saved)
+        )
+    );
+}
+
+#[test]
+fn nothing_to_save_names_the_last_save_and_exits_0() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    let (saved, _) = run_at(&env, None, &["save", "Add a"]);
+    let (again, said) = run_at(&env, None, &["save", "Again"]);
+    assert_eq!(
+        again,
+        format!(
+            "Nothing to save: no changes since your last save, {} \"Add a\".\n",
+            saved_id(&saved)
+        )
+    );
+    assert_eq!(said, "");
+}
+
+#[test]
+fn a_partial_save_says_what_it_left_out() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+    let (shown, _) = run_at(&env, None, &["save", "Only a", "a.txt"]);
+    assert_eq!(
+        shown,
+        format!(
+            "Saved {} \"Only a\" on main  (1 file)\n\n    Only what you named was saved: bolt \
+             status lists the changes left out.\n",
+            saved_id(&shown)
+        )
+    );
+}
+
+#[test]
+fn status_opens_with_where_you_are_then_lists_changes_in_columns() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    std::fs::write(env.root().join("c.txt"), "c\n").unwrap();
+    let (saved, _) = run_at(&env, None, &["save", "First"]);
+    let id = saved_id(&saved);
+    let (shown, _) = run_at(&env, None, &["status"]);
+    assert_eq!(
+        shown,
+        format!("On line main at save {id} \"First\"  (just now)\nNothing changed since then.\n")
+    );
+    std::fs::write(env.root().join("a.txt"), "abc\n").unwrap();
+    std::fs::remove_file(env.root().join("c.txt")).unwrap();
+    std::fs::create_dir(env.root().join("sub")).unwrap();
+    std::fs::write(env.root().join("sub/new.txt"), "n\n").unwrap();
+    let (shown, said) = run_at(&env, None, &["status"]);
+    let row =
+        |kind: &str, path: &str, size: &str| format!("    {kind:<8}  {path:<11}  {size:>10}\n");
+    assert_eq!(
+        shown,
+        format!(
+            "On line main at save {id} \"First\"  (just now)\n\nChanged since then (3 files):\n\n{}{}{}",
+            row("modified", "a.txt", "2 B -> 4 B"),
+            row("removed", "c.txt", "2 B"),
+            row("added", "sub/new.txt", "2 B"),
+        )
+    );
+    assert_eq!(said, "");
+}
+
+#[test]
+fn status_cuts_a_long_path_from_its_middle_only_on_a_terminal() {
+    let env = started();
+    let path = "Assets/Textures/Environment/Cliffs/Rocks/Cliff_Large_01_Albedo_4K.psd";
+    std::fs::create_dir_all(env.root().join("Assets/Textures/Environment/Cliffs/Rocks")).unwrap();
+    std::fs::write(env.root().join(path), "p\n").unwrap();
+    for width in widths() {
+        let (shown, said) = run_at(&env, width, &["status"]);
+        let row = shown.lines().last().unwrap();
+        match width {
+            Some(w) if w < 100 => {
+                assert!(row.starts_with("    added  Assets/.../"), "{w}: {shown}");
+                assert!(
+                    row.ends_with("/Cliff_Large_01_Albedo_4K.psd  2 B"),
+                    "{w}: {shown}"
+                );
+                assert!(shown.lines().all(|l| l.len() <= w), "{w}: {shown}");
+            }
+            _ => assert_eq!(row, format!("    added  {path}  2 B"), "{width:?}"),
+        }
+        // A person at a terminal is told what to do next; a log isn't.
+        assert_eq!(said.contains("Next: "), width.is_some(), "{said}");
+    }
+}
+
+#[test]
+fn history_marks_the_current_save_and_cuts_long_messages_at_the_end() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    run_at(&env, None, &["save", "First"]);
+    std::fs::write(env.root().join("a.txt"), "b\n").unwrap();
+    let long = "word ".repeat(30);
+    let long = long.trim_end();
+    run_at(&env, None, &["save", long]);
+    for width in widths() {
+        let (shown, _) = run_at(&env, width, &["history"]);
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(
+            lines[..2],
+            ["Saves on line main, newest first:", ""],
+            "{shown}"
+        );
+        assert!(lines[2].starts_with("> "), "{shown}");
+        assert!(lines[2].ends_with("  [main]"), "{shown}");
+        assert!(
+            lines[3].starts_with("  ") && lines[3].ends_with("  First"),
+            "{shown}"
+        );
+        // The first save, made by `bolt start`, has no message.
+        assert_eq!(lines.len(), 5, "{shown}");
+        match width {
+            Some(w) => {
+                assert!(lines[2].ends_with("...  [main]"), "{w}: {shown}");
+                assert!(lines.iter().all(|l| l.len() <= w), "{w}: {shown}");
+            }
+            None => assert!(lines[2].contains(long), "{shown}"),
+        }
+    }
+}
+
+#[test]
+fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
+    let env = started();
+    std::fs::write(env.root().join("big.bin"), vec![b'x'; 2048]).unwrap();
+    let (saved, _) = run_at(&env, None, &["save", "Big\n\nA body line."]);
+    let id = saved_id(&saved);
+    for width in widths() {
+        let (shown, said) = run_at(&env, width, &["show"]);
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(
+            lines[..2],
+            [format!("Save {id} \"Big\"").as_str(), ""],
+            "{shown}"
+        );
+        assert!(lines[2].starts_with("    Author       Test <"), "{shown}");
+        assert!(lines[3].starts_with("    Saved by     Test <"), "{shown}");
+        assert_eq!(lines[4], "    Line         main", "{shown}");
+        assert!(lines[5].starts_with("    After        "), "{shown}");
+        let fingerprint = lines[6].strip_prefix("    Fingerprint  ").unwrap();
+        assert!(fingerprint.len() == 64 && fingerprint.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(
+            lines[7..],
+            [
+                "",
+                "        A body line.",
+                "",
+                "1 file changed:",
+                "",
+                "    added  big.bin  2.0 KiB"
+            ],
+            "{shown}"
+        );
+        assert_eq!(
+            said.contains(&format!(
+                "Next: see its lines with: bolt changes --save {id}"
+            )),
+            width.is_some(),
+            "{said}"
+        );
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn changes_colours_only_added_removed_and_hunk_lines() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\nb\nc\n").unwrap();
+    std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+    env.bolt().args(["save", "First"]).assert().success();
+    std::fs::write(env.root().join("a.txt"), "a\nB\nc\n").unwrap();
+    std::fs::write(env.root().join("b.txt"), "bb\n").unwrap();
+    let out = bolt_on_a_terminal(&env, env.root())
+        .arg("changes")
+        .output()
+        .unwrap();
+    let shown = text(&out.stdout);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines[..7],
+        [
+            "\x1b[33mmodified\x1b[0m  \x1b[34ma.txt\x1b[0m  \x1b[32m+1\x1b[0m \x1b[31m-1\x1b[0m  \
+             \x1b[2m(6 B → 6 B)\x1b[0m",
+            "\x1b[36m@@ -1,3 +1,3 @@\x1b[0m",
+            " a",
+            "\x1b[31m-b\x1b[0m",
+            "\x1b[32m+B\x1b[0m",
+            " c",
+            &format!("\x1b[2m{}\x1b[0m", "─".repeat(79)),
+        ],
+        "{shown}"
+    );
+    assert!(
+        lines[7].starts_with("\x1b[33mmodified\x1b[0m  \x1b[34mb.txt"),
+        "{shown}"
+    );
+    // At other widths the separator spans the width, up to 100 columns.
+    for (width, rule) in [(60, 59), (120, 100)] {
+        let (shown, _) = run_at(&env, Some(width), &["changes"]);
+        assert!(
+            shown.contains(&format!("\n{}\n", "-".repeat(rule))),
+            "{shown}"
+        );
+    }
+    // Without a terminal files are parted by an empty line, as no line of a file can be.
+    let (shown, _) = run_at(&env, None, &["changes"]);
+    assert!(
+        shown.contains(" c\n\nmodified  b.txt  +1 -1  (2 B -> 3 B)\n"),
+        "{shown}"
+    );
+}
+
+/// The lines meant only for people (`Next:`) go to a terminal: a log sees the answer alone.
+#[test]
+fn each_of_these_commands_prints_no_new_line_without_a_terminal() {
+    let env = started();
+    std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+    for args in [
+        &["save", "First"][..],
+        &["status"],
+        &["changes"],
+        &["history"],
+        &["show"],
+    ] {
+        let (shown, said) = run_at(&env, None, args);
+        assert_eq!(said, "", "{args:?}");
+        assert!(!shown.contains("Next:"), "{args:?}: {shown}");
+        assert!(!shown.contains('\x1b'), "{args:?}: {shown}");
+        assert!(!shown.contains(SYMBOLS), "{args:?}: {shown}");
+    }
+    std::fs::write(env.root().join("a.txt"), "b\n").unwrap();
+    let (_, said) = run_at(&env, None, &["status"]);
+    assert_eq!(said, "");
 }
 
 /// `tidy` tells how much it is about to free only to a person, never beside `--json`.

@@ -1361,11 +1361,11 @@ fn text_from_the_repository_is_shown_escaped() {
     let history = run("history");
     assert_escaped(
         &history,
-        &format!("  {HOSTILE_SHOWN}  Fix {HOSTILE_SHOWN}\n"),
+        &format!("  {HOSTILE_SHOWN}  Fix {HOSTILE_SHOWN}  ["),
     );
     let show = run("show");
-    assert_escaped(&show, &format!(" · {HOSTILE_SHOWN} · "));
-    assert_escaped(&show, &format!("\n    Fix {HOSTILE_SHOWN}\n"));
+    assert_escaped(&show, &format!("\n    Author       {HOSTILE_SHOWN} <"));
+    assert_escaped(&show, &format!(" \"Fix {HOSTILE_SHOWN}\"\n"));
 
     // And in errors: a branch with no commits yet, and a ref name Git refuses.
     let (env, git) = repo();

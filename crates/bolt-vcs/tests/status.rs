@@ -121,14 +121,17 @@ fn status_lists_added_modified_removed_and_kind_changes() {
     let out = env.bolt().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let said = text(&out.stdout);
-    assert!(said.starts_with("On line main.\n"), "{said}");
-    for line in [
-        "  modified  a.txt",
-        "  removed   b.txt",
-        "  added     new\\u{202e}.txt",
-        "  removed   sub/s.txt",
+    assert!(said.starts_with("On line main at save "), "{said}");
+    // The kind column is as wide as its widest word: "kind changed" where a kind changed.
+    let width = if kind_changed { 12 } else { 8 };
+    for (kind, path) in [
+        ("modified", "a.txt"),
+        ("removed", "b.txt"),
+        ("added", "new\\u{202e}.txt"),
+        ("removed", "sub/s.txt"),
     ] {
-        assert!(said.contains(line), "{line:?} in {said}");
+        let line = format!("    {kind:<width$}  {path} ");
+        assert!(said.contains(&line), "{line:?} in {said}");
     }
     assert!(!said.contains('\u{202e}'), "{said}");
     // Saving makes it clean again.
@@ -410,7 +413,7 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
     assert!(
         said.ends_with(
             "Not written here, because this computer can't hold them as they are (saves keep \
-             them as they were):\n  deps/lib\n  lib\n"
+             them as they were):\n\n    deps/lib\n    lib\n"
         ),
         "{said}"
     );
