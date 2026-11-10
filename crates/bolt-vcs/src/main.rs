@@ -1,6 +1,7 @@
 //! The `bolt` command-line tool.
 
 mod git_words;
+mod goto_output;
 mod help;
 mod history_output;
 mod import_output;
@@ -1564,64 +1565,10 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         });
         format!("{document}\n")
     } else {
-        let s = style::out();
-        let at = match &save {
-            Some(save) => format!(
-                "{} {}",
-                s.paint(style::Role::ChangeId, &short),
-                output::quoted_title(save)
-            ),
-            None => s.paint(style::Role::Fingerprint, &short),
-        };
-        let switched = s.paint(style::Role::Ok, "Switched");
-        if !stepped {
-            let already = match &done.position {
-                Position::OnLine(line) => {
-                    let line = s.paint(style::Role::Line, &escape(line, false));
-                    format!("Already on line {line}, at save {at}.\n")
-                }
-                Position::AtSave(_) => format!("Already at save {at}.\n"),
-            };
-            return output::print_done(&already, &warnings);
-        }
-        let mut text = match &done.position {
-            Position::OnLine(line) => {
-                let line = s.paint(style::Role::Line, &escape(line, false));
-                format!("{switched} to line {line} at save {at}.\n")
-            }
-            Position::AtSave(_) => format!("{switched} to save {at}. You are not on a line.\n"),
-        };
-        let (written, removed) = (done.applied.written, done.applied.removed);
-        let mut details = vec![match (written, removed) {
-            (0, 0) => "No file needed changing.".to_owned(),
-            (0, removed) => format!("{} removed.", output::files(removed)),
-            (written, 0) => format!("{} written.", output::files(written)),
-            (written, removed) => format!(
-                "{} written, {} removed.",
-                output::files(written),
-                bolt_core::text::thousands(removed as u64)
-            ),
-        }];
-        if done.carried > 0 {
-            let carried = output::files(done.carried);
-            details.push(format!("Your unsaved changes in {carried} came along."));
-        }
-        if let Position::AtSave(id) = &done.position {
-            details.push("Saving here asks for a new line's name.".to_owned());
-            if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
-                let line = escape(line, false);
-                let goto = s.paint(style::Role::Command, &format!("bolt goto {line}"));
-                details.push(format!("To keep saving on {line}: {goto}"));
-            }
-        }
-        text.push('\n');
-        for detail in details {
-            text += &format!("    {detail}\n");
-        }
-        text
+        goto_output::switched(&done, &short, save.as_ref(), &lines, stepped)
     };
     output::print_done(&text, &warnings)?;
-    if !json {
+    if !json && stepped {
         style::changed_your_mind();
     }
     Ok(())
