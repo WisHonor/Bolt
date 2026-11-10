@@ -213,28 +213,44 @@ impl LineIds {
 /// usually read once, without holding a line of any length.
 const HELD_BYTES: usize = 64 << 20;
 
-/// The saves `saves` lists, read from the store, unless one isn't what the list says: the same
-/// change ID, and as its first parent the next save listed, or none after the last. The newest
-/// of them are kept, up to `HELD_BYTES`; the check stops at a save the store can't give.
-fn checked(repo: &Repository, saves: &[(Id, ChangeId)]) -> Option<Vec<Save>> {
-    let (mut held, mut room) = (Vec::new(), HELD_BYTES);
-    for (at, (id, change_id)) in saves.iter().enumerate() {
-        // The saves before it were checked to lead here, so a save that can't be read is on the
-        // line: it is told when history reaches it, as without the check.
-        let Ok(save) = repo.store().save(id, repo.signatures_allowed()) else {
-            return Some(held);
-        };
+/// Whether the first `count` saves `saves` lists are what the list says, read from the store:
+/// each with the list's change ID, and as its first parent the next save listed, or none after
+/// the last. `each` is handed each save that passes. An error for a save the store can't give.
+fn links_hold(
+    repo: &Repository,
+    saves: &[(Id, ChangeId)],
+    count: usize,
+    mut each: impl FnMut(Save),
+) -> Result<bool, crate::store::StoreError> {
+    for (at, (id, change_id)) in saves.iter().enumerate().take(count) {
+        let save = repo.store().save(id, repo.signatures_allowed())?;
         let next = saves.get(at + 1).map(|(next, _)| next);
         if save.change_id != *change_id || save.parents.first() != next {
-            return None;
+            return Ok(false);
         }
+        each(save);
+    }
+    Ok(true)
+}
+
+/// The saves `saves` lists, read from the store, unless one isn't what the list says. The newest
+/// of them are kept, up to `HELD_BYTES`; the check stops at a save the store can't give.
+fn checked(repo: &Repository, saves: &[(Id, ChangeId)]) -> Option<Vec<Save>> {
+    let (mut held, mut room, mut keeping) = (Vec::new(), HELD_BYTES, true);
+    let held_up = links_hold(repo, saves, saves.len(), |save| {
         let size = save.encode().len();
-        if held.len() == at && size <= room {
+        keeping &= size <= room;
+        if keeping {
             room -= size;
             held.push(save);
         }
+    });
+    match held_up {
+        // The saves before it were checked to lead to it, so a save that can't be read is on
+        // the line: it is told when history reaches it, as without the check.
+        Ok(true) | Err(_) => Some(held),
+        Ok(false) => None,
     }
-    Some(held)
 }
 
 /// Calls `each` with every save on the current line, newest first, and the shortest form of its
@@ -307,13 +323,16 @@ fn by_change_prefix(
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     let (line, tip) = (line_of(entry), tip_of(entry)?);
     let mut cache = ChangeIds::load(repo);
-    let listed = starting_with(cache.chain(repo, line, tip)?, text);
-    // The one save the list names is read to be sure; no save or several, from the store.
+    let saves = cache.chain(repo, line, tip)?;
+    let listed = starting_with(saves, text);
+    // The one save the list names is shown to be on the line, link by link from its newest save;
+    // no save or several, from the store. That the list hides no second save of the line with
+    // this start is trusted, as the short IDs Bolt prints trust it: showing it reads the line.
     let sure = match listed.as_slice() {
-        [(id, _)] => repo
-            .store()
-            .save(id, repo.signatures_allowed())
-            .is_ok_and(|save| save.change_id.to_letters().starts_with(text)),
+        [(id, _)] => saves
+            .iter()
+            .position(|(s, _)| s == id)
+            .is_some_and(|at| matches!(links_hold(repo, saves, at + 1, |_| {}), Ok(true))),
         _ => false,
     };
     if sure {
@@ -1025,6 +1044,47 @@ mod tests {
             let (cached, cold) = resolved(dir.path(), &repo, &lie, "klmnopk");
             assert_eq!(cached, cold);
             assert_eq!(cold, format!("{:?}", Ok::<Id, ()>(ids[2])));
+        }
+    }
+
+    #[test]
+    fn a_list_with_another_line_s_save_names_no_save() {
+        let (dir, mut repo, ids) = project_with(&["klmnopl", "klmnopk", "mmmm"]);
+        let side = plant(&mut repo, &[ids[1]], "nopqrs", Some("side"));
+        let mut lie = true_line(&repo);
+        lie[1] = (side, change("nopqrs"));
+        let (cached, cold) = resolved(dir.path(), &repo, &lie, "nopqr");
+        assert_eq!(cached, cold);
+        // A line named like it is the line, as with no cache.
+        let work = plant(&mut repo, &[ids[0]], "workkk", Some("elsewhere"));
+        name_line(&mut repo, "work", ids[1]);
+        let mut lie = true_line(&repo);
+        lie[1] = (work, change("workkk"));
+        let (cached, cold) = resolved(dir.path(), &repo, &lie, "work");
+        assert_eq!(cached, cold);
+        assert_eq!(cold, format!("{:?}", Ok::<Id, ()>(ids[1])));
+    }
+
+    #[test]
+    fn a_change_id_costs_what_its_save_is_far_from_the_newest() {
+        let starts: Vec<String> = (0..200u8)
+            .map(|n| format!("{}{}", char::from(b'k' + n / 16), char::from(b'k' + n % 16)))
+            .collect();
+        let starts: Vec<&str> = starts.iter().map(String::as_str).collect();
+        let (_dir, repo, ids) = project_with(&starts);
+        cached_line(&repo);
+        for (back, most) in [(1, 4), (50, 55)] {
+            let id = ids[ids.len() - 1 - back];
+            let letters = repo
+                .store()
+                .save(&id, false)
+                .unwrap()
+                .change_id
+                .to_letters();
+            let before = repo.store().saves_read();
+            assert_eq!(resolve(&repo, &letters).unwrap(), id);
+            let read = repo.store().saves_read() - before;
+            assert!(read <= most, "{read} saves read for one {back} back");
         }
     }
 
