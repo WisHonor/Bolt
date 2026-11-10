@@ -344,7 +344,7 @@ While it writes, a terminal's stderr shows the turning mark `Writing files` (§8
 
 - The save is named by its change ID, or by the first 12 hex digits of its fingerprint when it can't be read. Counts are of what the switch wrote and removed; it doesn't say how many were added or changed, nor list the unsaved changes that came along.
 - A switch a crash stopped is a `warning:` (`switch_unfinished`) until a command finishes it; there is no `--continue`.
-- **Already there:** a goto to where the project already is changes nothing and records no step, so it says so plainly, names the save as `Switched to` would, and offers no `bolt undo`, which would take back the step before it. Bolt tells by reading `.bolt/state/head` before and after. A goto from a save to the line whose newest it is changes only the position: that is a step, and says `Switched to`.
+- **Already there:** a goto to where the project already is changes nothing and records no step, so it says so plainly, names the save as `Switched to` would, and offers no `bolt undo`, which would take back the step before it. The engine says whether the goto recorded a step of its own. A goto that first finishes a stopped command and then finds the project already there says the same: the step it finished is the stopped command's, not its own. A goto from a save to the line whose newest it is changes only the position: that is a step, and says `Switched to`.
 - **Colour:** `Switched` green and bold, the ID magenta and bold, the line blue, the `bolt goto` of the last detail cyan.
 
 ### `bolt discard`
@@ -354,7 +354,7 @@ While it writes, a terminal's stderr shows the turning mark `Writing files` (§8
 | State | Outcome line | Details | Next step |
 |---|---|---|---|
 | One file | `Threw away your unsaved changes to <path>.` | `A safety copy of it was kept.` | `Changed your mind? bolt undo` |
-| Several | `Threw away your unsaved changes to 4 files.` (`to 1 folder` when only folders changed) | `A safety copy of each was kept.`, or `Safety copies of the 3 that held unsaved work were kept.` (a deleted file put back needs none) | the same |
+| Several | `Threw away your unsaved changes to 4 files.` (`to 1 folder` when only folders changed) | `A safety copy of each was kept.`, or `Safety copies of the 3 that held unsaved work were kept.` (`A safety copy of the 1 that held unsaved work was kept.` when one did; a deleted file put back needs none) | the same |
 | Nothing | `Nothing to discard: your files match your last save.` (`Nothing to discard there: it matches your last save.` with paths) | | |
 | Nothing could be | `Nothing was discarded: …` (the files changed while Bolt worked, or only unsaved links were left), and a `warning:` says why | | |
 
@@ -448,9 +448,10 @@ While it works, a terminal's stderr shows the turning mark `Tidying`, and above 
 | State | Outcome line | Details | Next step |
 |---|---|---|---|
 | Freed | `Freed 1.2 GiB  (3 packs removed, 1 written)` | `Left 2 packs changed in the last 24 hours as they are: a later bolt tidy frees what they hold that nothing needs.` when it did | |
-| Nothing to free (it found nothing to free and changed no pack) | `Nothing to free: storage holds 4.8 GiB.` | the same | |
+| Nothing to free (it found nothing to free, and freed nothing, whatever small packs it rewrote whole) | `Nothing to free: storage holds 4.8 GiB.` | the same | |
 | Something to free, but no pack could be removed | `Nothing could be freed: storage still holds 4.8 GiB.`, then a `warning:` a pack saying why it stayed | the same | |
 | A pack it can't read | stdout gets nothing; stderr has the error and its hint, below; nothing was removed | | |
+| A pack holding a conflict record | stdout gets nothing; stderr has the error and its hint, below; nothing was removed | | |
 
 A pack it can't read, on stderr (`can't be read (<why>)` in place of `is damaged (<why>)` when it couldn't be read; `<pack>` is the pack's whole path, as the system writes it):
 
@@ -458,6 +459,14 @@ A pack it can't read, on stderr (`can't be read (<why>)` in place of `is damaged
 error: Bolt can't tidy this project: pack <pack> is damaged (the file does not start with BOLTPACK).
 
 hint: Nothing was removed. Check the pack's permissions. If it is damaged for good, moving it out of .bolt/store/packs lets `bolt tidy` run, losing what only it holds, and the chunks only its chunk lists name.
+```
+
+A pack holding a conflict record, which this version doesn't follow, on stderr:
+
+```text
+error: Bolt can't tidy this project: pack <pack> holds a conflict record, which this version of Bolt doesn't follow.
+
+hint: Nothing was removed, and the project works as before. A version of Bolt that follows them can tidy it.
 ```
 
 - It keeps what lines, shelves, the diary and every step in the undo window need, and leaves packs changed in the last 24 hours as they are. It isn't a step, so undo doesn't take it back.

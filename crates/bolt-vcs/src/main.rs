@@ -1522,8 +1522,6 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
     let target = resolve_target(repo, text)?;
-    // A goto to where the project already is records no step: `head` stays.
-    let head_before = repo.head().ok();
     let done = {
         let _working = progress::Working::start("Writing files");
         goto(
@@ -1535,7 +1533,6 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             &mut waiting,
         )
     }?;
-    let stepped = head_before.is_none() || repo.head().ok() != head_before;
     let mut warnings = done.applied.warnings.clone();
     // The switch has happened, so a save that can't be read back only goes unnamed.
     let save = repo
@@ -1567,10 +1564,11 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         });
         format!("{document}\n")
     } else {
-        goto_output::switched(&done, &short, save.as_ref(), &lines, stepped)
+        goto_output::switched(&done, &short, save.as_ref(), &lines)
     };
     output::print_done(&text, &warnings)?;
-    if !json && stepped {
+    // A goto to where the project already is records no step, so has nothing to undo.
+    if !json && done.recorded {
         style::changed_your_mind();
     }
     Ok(())

@@ -33,6 +33,8 @@ pub struct GotoOutcome {
     pub safety_copies: usize,
     /// Unsaved changes that came along to the new save; 0 when there was nothing to switch.
     pub carried: usize,
+    /// Whether this goto recorded a step of its own; not when the project already was there.
+    pub recorded: bool,
 }
 
 /// What `discard` did.
@@ -640,6 +642,7 @@ fn go(
             applied: switch_warnings(plan, Applied::default(), earlier),
             safety_copies: 0,
             carried: 0,
+            recorded: false,
         });
     }
     let carried = plan.carried;
@@ -663,6 +666,7 @@ fn go(
         applied,
         safety_copies,
         carried,
+        recorded: true,
     })
 }
 

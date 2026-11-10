@@ -1365,6 +1365,31 @@ fn unshelf_that_only_finishes_a_stopped_switch_offers_no_undo() {
     );
 }
 
+/// A goto that finishes the stopped goto to the same save, and then is already there, recorded no
+/// step of its own: it says so, and offers no undo of the stopped command's step.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn goto_that_finishes_a_stopped_switch_and_is_then_already_there_offers_no_undo() {
+    let (env, first, _) = two_saves();
+    let stopped = env
+        .bolt()
+        .args(["goto", &first])
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+    let (before, _) = support::head(&env);
+    let (shown, said) = run_at(&env, Some(80), &["goto", &first]);
+    assert!(
+        shown.starts_with("Already at save ") && shown.ends_with(" \"First\".\n"),
+        "{shown}"
+    );
+    assert!(!said.contains("Changed your mind"), "{said:?}");
+    // `head` moved only to the entry the stopped goto wrote: no step of this goto's own.
+    let (_, now) = support::head(&env);
+    assert_eq!((now.command.as_str(), now.parent), ("goto", Some(before)));
+}
+
 /// A left-out entry whose name reads like one of the summary's own details never starts a line
 /// of the summary: it isn't broken, and a name that doesn't fit beside its heading gets a row of
 /// its own, further in.

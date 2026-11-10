@@ -12,14 +12,13 @@ use crate::output;
 use crate::style::{self, Role};
 
 /// `bolt goto`'s outcome line and details. `short` names the save it is at, `save` is that save
-/// if it could be read, and `lines` are the project's lines now. `stepped` is whether the goto
-/// recorded a step: when it didn't, the project already was there, and only that is said.
+/// if it could be read, and `lines` are the project's lines now. A goto that recorded no step
+/// found the project already there, and only that is said.
 pub fn switched(
     done: &GotoOutcome,
     short: &str,
     save: Option<&Save>,
     lines: &BTreeMap<String, Id>,
-    stepped: bool,
 ) -> String {
     let s = style::out();
     let at = match save {
@@ -31,7 +30,7 @@ pub fn switched(
         None => s.paint(Role::Fingerprint, short),
     };
     let switched = s.paint(Role::Ok, "Switched");
-    if !stepped {
+    if !done.recorded {
         return match &done.position {
             Position::OnLine(line) => {
                 let line = s.paint(Role::Line, &escape(line, false));
