@@ -17,7 +17,7 @@ use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, valida
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
 use crate::encoding::DecodeError;
-use crate::filecache::{self, FileCache};
+use crate::filecache::{self, FileCache, FileState};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
@@ -484,9 +484,21 @@ pub fn save_folder(
     }
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
-    let cache = now.map(|_| FileCache::load(repo)).unwrap_or_default();
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let base = Base::new(repo.store(), parent.root, SaveLimits::default());
+    let walked = || {
+        walk(
+            repo.root(),
+            base,
+            SaveLimits::default(),
+            drive,
+            req.git_excludes,
+        )
+    };
+    let (scan, cache) = match now {
+        Some(_) => FileCache::load_during(repo, walked),
+        None => (walked(), FileCache::default()),
+    };
     let Scan {
         mut handles,
         mut folders,
@@ -497,13 +509,7 @@ pub fn save_folder(
         gitignored,
         mut warnings,
         ..
-    } = walk(
-        repo.root(),
-        base,
-        SaveLimits::default(),
-        drive,
-        req.git_excludes,
-    )?;
+    } = scan?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
     let imported = parent.extra.contains_key(EXTRA_GIT_COMMIT);
     // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
@@ -1065,11 +1071,10 @@ fn vouched_by(trusted: &FileCache, c: &Child, was: Option<&Entry>) -> Option<(Id
 
 impl Contents for Storing<'_> {
     fn vouched(&mut self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
-        let known = vouched_by(&self.cache, c, was)?;
-        if let Some(meta) = &c.meta {
-            self.cache.vouch(&c.rel, meta);
-        }
-        Some(known)
+        // As `vouched_by`, with the entry kept in the same step.
+        let held = |k: &FileState| was.is_some_and(|e| (e.id, e.size) == (k.id, k.size));
+        let known = self.cache.vouch_if(&c.rel, c.meta.as_ref()?, held)?;
+        Some((known.id, known.size))
     }
 
     fn file(
@@ -1770,13 +1775,22 @@ pub(crate) fn read_folder(
     // Taken before the walk, so a file changed during it is too new to trust next time. Without
     // it no time can be trusted, so every file is read and nothing cached.
     let now = filecache::drive_now(repo).ok();
-    let cache = match now {
-        Some(_) if !full => FileCache::load(repo),
-        _ => FileCache::default(),
-    };
     let drive = match drive {
         Some(drive) => drive,
         None => drive::probe(repo.tmp_folder()).map_err(RepoError::from)?,
+    };
+    let walked = || {
+        walk(
+            repo.root(),
+            Base::new(repo.store(), base, SaveLimits::default()),
+            SaveLimits::default(),
+            drive,
+            git_excludes,
+        )
+    };
+    let (scan, cache) = match now {
+        Some(_) if !full => FileCache::load_during(repo, walked),
+        _ => (walked(), FileCache::default()),
     };
     let Scan {
         mut handles,
@@ -1788,13 +1802,7 @@ pub(crate) fn read_folder(
         ignored,
         gitignored,
         mut warnings,
-    } = walk(
-        repo.root(),
-        Base::new(repo.store(), base, SaveLimits::default()),
-        SaveLimits::default(),
-        drive,
-        git_excludes,
-    )?;
+    } = scan?;
     let mut reading = Reading {
         cache,
         listings: HashMap::new(),
@@ -3189,6 +3197,30 @@ mod tests {
         let cache = FileCache::load(&repo);
         assert!(cache.matches("a.txt", &a).is_some());
         assert!(cache.matches("c.txt", &c).is_none());
+    }
+
+    #[test]
+    fn a_status_whose_walk_fails_leaves_no_thread_and_no_changed_cache() {
+        let (dir, mut repo) = project();
+        write_old(dir.path(), "a.txt", b"a");
+        save_now(&mut repo).unwrap();
+        let stored = dir.path().join(".bolt/cache/files");
+        let before = fs::read(&stored).unwrap();
+        // A new file a finished scan would add to the cache, and an ignore list the walk refuses.
+        write_old(dir.path(), "b.txt", b"b");
+        let own = tempfile::tempdir().unwrap();
+        let list = own.path().join("ignore");
+        fs::write(
+            &list,
+            vec![b'#'; crate::safe_fs::MAX_IGNORE_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let err = crate::status::status(&repo, false, Some(&list)).unwrap_err();
+        assert!(matches!(err, SaveError::Ignore { .. }), "{err}");
+        let err = save_with(&mut repo, Some(&list)).unwrap_err();
+        assert!(matches!(err, SaveError::Ignore { .. }), "{err}");
+        // The cache's helper was joined before the error came back; nothing wrote the cache.
+        assert_eq!(fs::read(&stored).unwrap(), before);
     }
 
     #[test]

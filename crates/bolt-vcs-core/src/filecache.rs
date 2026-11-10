@@ -4,11 +4,13 @@
 //! empty.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{self, Write};
+use std::path::Path;
 
-use bolt_platform::dir::{EntryMeta, EntryType};
+use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::Id;
@@ -72,6 +74,10 @@ pub struct FileCache {
     added: BTreeMap<String, Entry>,
     /// `body` is what `cache/files` holds, so writing the same again can be skipped.
     loaded: bool,
+    /// The slot after the last one asked for: files are asked for nearly in the slots' order.
+    next: Cell<usize>,
+    #[cfg(test)]
+    searches: Cell<usize>,
 }
 
 impl FileCache {
@@ -202,8 +208,7 @@ impl FileCache {
         Ok(FileCache {
             body,
             slots,
-            added: BTreeMap::new(),
-            loaded: false,
+            ..FileCache::default()
         })
     }
 
@@ -211,12 +216,35 @@ impl FileCache {
     /// handle's key, or the handle has none.
     #[must_use]
     pub fn load(repo: &Repository) -> FileCache {
-        let Some(key) = repo.cache_key() else {
+        FileCache::load_from(repo.cache_folder(), &repo.cache_dir(), repo.cache_key())
+    }
+
+    /// `load`, on a helper thread while `meanwhile` runs on this one. Without a thread, the cache
+    /// is loaded here afterwards; a helper that fails gives an empty cache.
+    pub(crate) fn load_during<T>(
+        repo: &Repository,
+        meanwhile: impl FnOnce() -> T,
+    ) -> (T, FileCache) {
+        let (folder, shown, key) = (repo.cache_folder(), repo.cache_dir(), repo.cache_key());
+        std::thread::scope(|scope| {
+            let helper = std::thread::Builder::new()
+                .spawn_scoped(scope, move || FileCache::load_from(folder, &shown, key));
+            let done = meanwhile();
+            let cache = match helper {
+                Ok(helper) => helper.join().unwrap_or_default(),
+                Err(_) => FileCache::load(repo),
+            };
+            (done, cache)
+        })
+    }
+
+    /// The cache in the folder `cache/`, shown as `cache_dir`, sealed with `key`.
+    fn load_from(folder: &Dir, cache_dir: &Path, key: Option<&[u8; keyed::KEY_LEN]>) -> FileCache {
+        let Some(key) = key else {
             return FileCache::default();
         };
-        let shown = repo.cache_dir().join(FILE);
-        let read =
-            safe_fs::read_capped_in(repo.cache_folder(), OsStr::new(FILE), &shown, MAX_BYTES);
+        let shown = cache_dir.join(FILE);
+        let read = safe_fs::read_capped_in(folder, OsStr::new(FILE), &shown, MAX_BYTES);
         let Ok(mut bytes) = read else {
             return FileCache::default();
         };
@@ -241,9 +269,23 @@ impl FileCache {
 
     /// The slot of `path`, if the body holds it.
     fn find(&self, path: &str) -> Option<usize> {
-        self.slots
-            .binary_search_by(|s| self.path_of(s).cmp(path.as_bytes()))
-            .ok()
+        let next = self.next.get();
+        let at = if self
+            .slots
+            .get(next)
+            .is_some_and(|s| self.path_of(s) == path.as_bytes())
+        {
+            Ok(next)
+        } else {
+            #[cfg(test)]
+            self.searches.set(self.searches.get().saturating_add(1));
+            self.slots
+                .binary_search_by(|s| self.path_of(s).cmp(path.as_bytes()))
+        };
+        // After a path the cache doesn't hold, the next one asked for is likely where it would go.
+        self.next
+            .set(at.map_or_else(|gap| gap, |i| i.saturating_add(1)));
+        at.ok()
     }
 
     /// What the cache knows of `path`, if the file there is still the same file, with that kind,
@@ -251,10 +293,16 @@ impl FileCache {
     /// 0 is never trusted: some network and FUSE drives give every file that number.
     #[must_use]
     pub fn matches(&self, path: &str, meta: &EntryMeta) -> Option<&FileState> {
-        let entry = self
+        self.trusted(path, meta).map(|(_, s)| s)
+    }
+
+    /// `matches`, with the slot the entry came from, if not from what this scan recorded.
+    fn trusted(&self, path: &str, meta: &EntryMeta) -> Option<(Option<usize>, &FileState)> {
+        let slot = self
             .find(path)
+            .filter(|&i| self.slots.get(i).is_some_and(|s| !s.gone));
+        let entry = slot
             .and_then(|i| self.slots.get(i))
-            .filter(|s| !s.gone)
             .map(|s| &s.entry)
             .or_else(|| self.added.get(path))
             .filter(|e| !e.racy)?;
@@ -265,14 +313,27 @@ impl FileCache {
             && s.changed_ns == meta.changed_ns
             && s.file_id == meta.file_id
             && meta.file_id.1 != 0)
-            .then_some(s)
+            .then_some((slot, s))
     }
 
     /// `matches`, and keeps the entry for the next write.
     pub fn vouch(&mut self, path: &str, meta: &EntryMeta) -> Option<FileState> {
-        let state = *self.matches(path, meta)?;
-        if let Some(slot) = self.find(path).and_then(|i| self.slots.get_mut(i)) {
-            slot.kept |= !slot.gone;
+        self.vouch_if(path, meta, |_| true)
+    }
+
+    /// `vouch`, if `keep` takes what the cache knows.
+    pub fn vouch_if(
+        &mut self,
+        path: &str,
+        meta: &EntryMeta,
+        keep: impl FnOnce(&FileState) -> bool,
+    ) -> Option<FileState> {
+        let (slot, state) = self
+            .trusted(path, meta)
+            .map(|(slot, s)| (slot, *s))
+            .filter(|(_, s)| keep(s))?;
+        if let Some(slot) = slot.and_then(|i| self.slots.get_mut(i)) {
+            slot.kept = true;
         }
         Some(state)
     }
@@ -800,6 +861,100 @@ mod tests {
             let back = FileCache::load(&repo);
             assert!(back.matches("a", &file(1, THEN)).is_some());
             assert!(back.matches("b", &file(2, THEN)).is_none());
+        }
+    }
+
+    /// A cache read back from a body holding `paths`, each with the ID `[1; 32]`.
+    fn read_back<'a>(paths: impl IntoIterator<Item = &'a str>) -> FileCache {
+        let mut cache = FileCache::default();
+        for path in paths {
+            cache.record(path, &file(1, THEN), Id([1; 32]));
+        }
+        FileCache::decode(&cache.encode()).unwrap()
+    }
+
+    /// The slot a plain search finds.
+    fn searched(cache: &FileCache, path: &str) -> Option<usize> {
+        cache
+            .slots
+            .binary_search_by(|s| cache.path_of(s).cmp(path.as_bytes()))
+            .ok()
+    }
+
+    #[test]
+    fn a_slot_is_found_where_the_last_one_ended() {
+        let paths: Vec<String> = (0..1000)
+            .map(|i| format!("d{:02}/f{i:04}.txt", i / 100))
+            .collect();
+        let cache = read_back(paths.iter().map(String::as_str));
+        for path in &paths {
+            assert!(cache.matches(path, &file(1, THEN)).is_some(), "{path}");
+        }
+        assert!(cache.searches.get() <= 1, "{}", cache.searches.get());
+
+        let mut asked: Vec<&str> = paths.iter().map(String::as_str).rev().collect();
+        asked.extend(["", "a", "d00", "d05/f0500.txt!", "zz", "d09/f0999.txt"]);
+        let mut seed = 7u64;
+        for _ in 0..1000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            asked.push(&paths[(seed >> 33) as usize % paths.len()]);
+        }
+        for path in asked {
+            assert_eq!(cache.find(path), searched(&cache, path), "{path}");
+            let known = searched(&cache, path).is_some();
+            assert_eq!(cache.matches(path, &file(1, THEN)).is_some(), known);
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Ask {
+        Matches(String),
+        Vouch(String),
+        Record(String),
+    }
+
+    fn ask() -> impl Strategy<Value = Ask> {
+        let path = "[ab/]{0,4}";
+        prop_oneof![
+            path.prop_map(Ask::Matches),
+            path.prop_map(Ask::Vouch),
+            path.prop_map(Ask::Record),
+        ]
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn the_hint_never_changes_an_answer(
+            paths in proptest::collection::btree_set("[ab/]{0,4}", 0..12),
+            asks in proptest::collection::vec(ask(), 0..40),
+        ) {
+            let mut hinted = read_back(paths.iter().map(String::as_str));
+            // Pointed past the end before every question, it always searches.
+            let mut plain = hinted.clone();
+            let meta = file(1, THEN);
+            for ask in asks {
+                plain.next.set(usize::MAX);
+                match ask {
+                    Ask::Matches(p) => {
+                        prop_assert_eq!(hinted.find(&p), searched(&plain, &p));
+                        prop_assert_eq!(
+                            hinted.matches(&p, &meta).copied(),
+                            plain.matches(&p, &meta).copied()
+                        );
+                    }
+                    Ask::Vouch(p) => {
+                        prop_assert_eq!(hinted.vouch(&p, &meta), plain.vouch(&p, &meta));
+                    }
+                    Ask::Record(p) => {
+                        hinted.record(&p, &meta, Id([2; 32]));
+                        plain.record(&p, &meta, Id([2; 32]));
+                    }
+                }
+            }
+            prop_assert_eq!(hinted.body_of(false, None), plain.body_of(false, None));
+            prop_assert_eq!(hinted.encode(), plain.encode());
         }
     }
 }
