@@ -1052,7 +1052,7 @@ impl PackReader {
             ZSTD => {
                 let frame_header = &data[..data.len().min(ZSTD_MAX_FRAME_HEADER as usize)];
                 let stated = zstd::zstd_safe::get_frame_content_size(frame_header);
-                if !stated.is_ok_and(|n| n.is_none_or(|n| n == size)) {
+                if !stated.is_ok_and(|n| n.is_none_or(|n| n == size)) || !one_plain_frame(data) {
                     return Ok(None);
                 }
                 let Ok(size) = usize::try_from(size) else {
@@ -1202,6 +1202,31 @@ thread_local! {
     // Kept, so reading many small entries doesn't make a decompressor for each.
     static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
         const { RefCell::new(None) };
+}
+
+/// Whether `data` is one modern zstd frame and nothing more, with a window the streamed decoder
+/// takes. The one-call decoder takes frames the streamed one refuses, so only these go to it.
+fn one_plain_frame(data: &[u8]) -> bool {
+    const MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+    const MAX_WINDOW: u64 = 1 << 27;
+    if !data.starts_with(&MAGIC)
+        || zstd::zstd_safe::find_frame_compressed_size(data) != Ok(data.len())
+    {
+        return false;
+    }
+    let Some(&descriptor) = data.get(4) else {
+        return false;
+    };
+    let window = if descriptor & 0x20 != 0 {
+        // A single segment's window is its content size.
+        zstd::zstd_safe::get_frame_content_size(data).ok().flatten()
+    } else {
+        data.get(5).and_then(|&b| {
+            let base = 1u64.checked_shl(10 + u32::from(b >> 3))?;
+            (base >> 3).checked_mul(u64::from(b & 7))?.checked_add(base)
+        })
+    };
+    window.is_some_and(|w| w <= MAX_WINDOW)
 }
 
 /// zstd tells its errors apart only by their text.
@@ -1966,7 +1991,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     enum Damage {
         Header,
         FrameSize,
@@ -1974,11 +1999,34 @@ mod tests {
         FewerBytes,
         CutShort,
         Fingerprint { zstd: bool },
+        HugeWindow,
+        SecondFrame,
+        Legacy,
+        UnknownCompression,
+        RawSizeDiffers,
+        PackCutShort,
+    }
+
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+    /// One frame of raw blocks holding `bytes`, declaring their size and a window of 2^30: over
+    /// the streamed decoder's limit, under zstd's own.
+    fn huge_window_frame(bytes: &[u8]) -> Vec<u8> {
+        let mut frame = ZSTD_MAGIC.to_vec();
+        frame.extend_from_slice(&[0x80, 0xA0]);
+        frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        let blocks: Vec<&[u8]> = bytes.chunks(128 << 10).collect();
+        for (i, block) in blocks.iter().enumerate() {
+            let last = u32::from(i + 1 == blocks.len());
+            frame.extend_from_slice(&((block.len() as u32) << 3 | last).to_le_bytes()[..3]);
+            frame.extend_from_slice(block);
+        }
+        frame
     }
 
     /// Reading an entry of `len` random bytes stored as `kind` with `damage` done to it, told
-    /// without its ID or the pack's path.
-    fn read_damaged(kind: ObjectKind, len: usize, damage: Damage) -> String {
+    /// without its ID or the pack's path, and the reads it took.
+    fn read_damaged(kind: ObjectKind, len: usize, damage: Damage) -> (String, usize) {
         let (_root, tmp, packs) = dirs();
         let mut data = vec![0u8; len];
         getrandom::fill(&mut data).unwrap();
@@ -2013,6 +2061,22 @@ mod tests {
                 };
                 (zstd, stored)
             }
+            Damage::HugeWindow => (true, huge_window_frame(&data)),
+            Damage::SecondFrame => {
+                let mut frames = zstd::bulk::compress(&data, 3).unwrap();
+                // No content size, a window of 2^30, one empty last block.
+                frames.extend_from_slice(&ZSTD_MAGIC);
+                frames.extend_from_slice(&[0x00, 0xA0, 0x01, 0x00, 0x00]);
+                (true, frames)
+            }
+            Damage::Legacy => {
+                let mut frame = vec![0x27, 0xB5, 0x2F, 0xFD];
+                // Fixed bytes, so both sizes meet the same old-format header.
+                frame.extend_from_slice(&[0; 64]);
+                (true, frame)
+            }
+            Damage::UnknownCompression | Damage::PackCutShort => (false, data.clone()),
+            Damage::RawSizeDiffers => (false, longer.clone()),
         };
         let p = Prepared {
             id,
@@ -2025,61 +2089,107 @@ mod tests {
         let path = w.finish(&packs).unwrap().unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         let entry = entries(&PackReader::open(&path).unwrap())[0];
-        if let Damage::Header = damage {
+        let at = entry.offset as usize;
+        match damage {
             // The low byte of the uncompressed size.
-            bytes[entry.offset as usize + 33] ^= 1;
-            std::fs::write(&path, &bytes).unwrap();
+            Damage::Header => bytes[at + 33] ^= 1,
+            Damage::UnknownCompression => bytes[at + 49] = 2,
+            _ => {}
         }
+        std::fs::write(&path, &bytes).unwrap();
         let r = PackReader::open(&path).unwrap();
+        if let Damage::PackCutShort = damage {
+            let cut = entry.offset + ENTRY_HEADER_LEN + entry.stored_size / 2;
+            let file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(cut).unwrap();
+        }
+        let before = open_files::reads();
         let shown = match read_any(&r, &entry) {
             Ok(_) => "read".to_string(),
             Err(PackError::Corrupt { reason, .. }) => format!("damaged: {reason}"),
             Err(e) => e.to_string(),
         };
-        shown.replace(&id.to_string(), "<id>")
+        let reads = open_files::reads() - before;
+        (shown.replace(&id.to_string(), "<id>"), reads)
     }
 
     #[test]
     fn a_small_entry_is_refused_as_a_streamed_one_is() {
         let invalid = "damaged: the zstd data of <id> is invalid: ";
+        let wrong_size = "damaged: <id> does not have its recorded size";
+        // `None`: whatever the streamed path says, the decoder's own words.
         let cases = [
             (
                 Damage::Header,
-                "damaged: the header of <id> does not match the index",
+                Some("damaged: the header of <id> does not match the index"),
             ),
             (
                 Damage::FrameSize,
-                "damaged: the zstd frame of <id> has the wrong size",
+                Some("damaged: the zstd frame of <id> has the wrong size"),
             ),
-            (
-                Damage::MoreBytes,
-                "damaged: <id> does not have its recorded size",
-            ),
-            (
-                Damage::FewerBytes,
-                "damaged: <id> does not have its recorded size",
-            ),
-            (Damage::CutShort, invalid),
+            (Damage::MoreBytes, Some(wrong_size)),
+            (Damage::FewerBytes, Some(wrong_size)),
+            (Damage::CutShort, None),
             (
                 Damage::Fingerprint { zstd: false },
-                "object <id> does not match its fingerprint",
+                Some("object <id> does not match its fingerprint"),
             ),
             (
                 Damage::Fingerprint { zstd: true },
-                "object <id> does not match its fingerprint",
+                Some("object <id> does not match its fingerprint"),
             ),
+            (Damage::HugeWindow, None),
+            (Damage::SecondFrame, None),
+            (Damage::Legacy, None),
+            (
+                Damage::UnknownCompression,
+                Some("damaged: <id> has an unknown compression"),
+            ),
+            (
+                Damage::RawSizeDiffers,
+                Some("damaged: <id> has an unknown compression"),
+            ),
+            (Damage::PackCutShort, Some(wrong_size)),
         ];
         for kind in [ObjectKind::Content, ObjectKind::FolderListing] {
             for (damage, expected) in cases {
-                let small = read_damaged(kind, ONE_READ as usize - 4096, damage);
-                let streamed = read_damaged(kind, ONE_READ as usize + 4096, damage);
+                let (small, reads) = read_damaged(kind, ONE_READ as usize - 4096, damage);
+                let (streamed, _) = read_damaged(kind, ONE_READ as usize + 4096, damage);
                 assert_eq!(small, streamed, "{kind:?} {damage:?}");
-                assert!(small.starts_with(expected), "{kind:?} {damage:?}: {small}");
-                if expected != invalid {
+                // Only a wrong fingerprint, checked after either path, is settled by the one read.
+                let settled = matches!(damage, Damage::Fingerprint { .. });
+                assert_eq!(reads == 1, settled, "{kind:?} {damage:?}: {reads} reads");
+                if damage == Damage::CutShort {
+                    assert!(small.starts_with(invalid), "{kind:?} {damage:?}: {small}");
+                }
+                if let Some(expected) = expected {
                     assert_eq!(small, expected, "{kind:?} {damage:?}");
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_one_plain_frame_goes_to_the_one_call_decoder() {
+        let bytes = b"plain frame ".repeat(100);
+        let plain = zstd::bulk::compress(&bytes, 3).unwrap();
+        assert!(one_plain_frame(&plain));
+        let mut streamed = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        std::io::Write::write_all(&mut streamed, &bytes).unwrap();
+        assert!(one_plain_frame(&streamed.finish().unwrap()));
+
+        // A real frame, which the one-call decoder takes whatever its window.
+        let huge = huge_window_frame(&bytes);
+        assert!(!one_plain_frame(&huge));
+        assert_eq!(zstd::bulk::decompress(&huge, bytes.len()).unwrap(), bytes);
+        let mut twice = plain.clone();
+        twice.extend_from_slice(&plain);
+        assert!(!one_plain_frame(&twice));
+        let mut legacy = plain.clone();
+        legacy[0] = 0x27;
+        assert!(!one_plain_frame(&legacy));
+        assert!(!one_plain_frame(&plain[..plain.len() - 1]));
+        assert!(!one_plain_frame(&[]));
     }
 
     #[test]

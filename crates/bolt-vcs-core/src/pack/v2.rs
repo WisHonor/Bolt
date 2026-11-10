@@ -349,4 +349,27 @@ mod tests {
         absent.0[31] ^= 1;
         assert!(pack.find(&absent).unwrap().is_none());
     }
+
+    #[test]
+    fn a_long_range_is_narrowed_before_it_is_read() {
+        let root = tempfile::tempdir().unwrap();
+        let (tmp, packs) = (root.path().join("tmp"), root.path().join("packs"));
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::create_dir(&packs).unwrap();
+        // 300 IDs that all start with the same byte: more than one read's worth.
+        let contents: Vec<[u8; 4]> = (0u32..)
+            .map(u32::to_le_bytes)
+            .filter(|c| crate::id::hash_content(c).0[0] == 0)
+            .take(300)
+            .collect();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let ids: Vec<_> = contents.iter().map(|c| w.add_content(c).unwrap()).collect();
+        let pack = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
+        for id in &ids {
+            let before = open_files::reads();
+            assert_eq!(pack.find(id).unwrap().unwrap().id, *id);
+            let reads = open_files::reads() - before;
+            assert!(reads <= 4, "{id} took {reads} reads");
+        }
+    }
 }
