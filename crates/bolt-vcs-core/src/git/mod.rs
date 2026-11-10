@@ -288,8 +288,8 @@ impl GitError {
 }
 
 /// A `NotYours` message: it names the `.git` folder, whose owner was asked.
-fn owner_message(git: &Path, refusal: &RepoError) -> String {
-    let git = escape(&git.display().to_string(), false);
+fn owner_message(path: &Path, refusal: &RepoError) -> String {
+    let git = escape(&path.display().to_string(), false);
     match refusal {
         RepoError::NotYours { .. } => {
             format!("The Git repository at {git} belongs to another user account.")
@@ -306,6 +306,13 @@ fn owner_message(git: &Path, refusal: &RepoError) -> String {
             "Bolt couldn't find out who owns the Git repository at {git}: {}",
             escape(&source.to_string(), false)
         ),
+        RepoError::SafeFolderIsLink { entry, refusal } => {
+            format!(
+                "{} {}",
+                owner_message(path, refusal),
+                repo::passed_over(entry)
+            )
+        }
         // The user's settings, which hold safe-folders, can't be read.
         other => other.to_string(),
     }

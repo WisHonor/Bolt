@@ -73,6 +73,12 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     OwnerLookupFailed { path: PathBuf, source: io::Error },
+    /// `refusal`, though safe-folders lists `entry`: a link, which never counts.
+    #[error("{refusal} {}", passed_over(entry))]
+    SafeFolderIsLink {
+        entry: PathBuf,
+        refusal: Box<RepoError>,
+    },
     #[error(
         "The .bolt folder at {} changed while Bolt looked at it.",
         escape(&root.display().to_string(), false)
@@ -193,6 +199,7 @@ impl RepoError {
             | RepoError::OwnerUnknown { path }
             | RepoError::OwnerLookupFailed { path, .. }
             | RepoError::AdminsNotElevated { path } => Some(path.as_path()),
+            RepoError::SafeFolderIsLink { refusal, .. } => refusal.trust_path(),
             _ => None,
         }
     }
@@ -200,6 +207,9 @@ impl RepoError {
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
+        if let RepoError::SafeFolderIsLink { refusal, .. } = self {
+            return refusal.hint();
+        }
         if let Some(path) = self.trust_path() {
             let trust = config::trust_hint(path);
             return Some(if matches!(self, RepoError::AdminsNotElevated { .. }) {
@@ -557,8 +567,10 @@ pub(crate) fn counts_as_users(owner: &io::Result<Owner>) -> bool {
 }
 
 /// Whether Bolt may use the project at `root`, given who owns the folder and its `.bolt` (or why
-/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. The
-/// Administrators group is the user's only while it is switched on in this terminal.
+/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. An
+/// entry that is itself a link never counts: whoever can swap a trusted folder for one would move
+/// the trust to wherever it leads. The Administrators group is the user's only while it is
+/// switched on in this terminal.
 pub(crate) fn owner_allows(
     owners: impl IntoIterator<Item = io::Result<Owner>>,
     root: &Path,
@@ -577,12 +589,40 @@ pub(crate) fn owner_allows(
             source,
         }),
     });
-    match refusal {
-        Some(refusal) if !safe.iter().any(|folder| config::same_folder(folder, root)) => {
-            Err(refusal)
+    let Some(refusal) = refusal else {
+        return Ok(());
+    };
+    // Its last part only: a link above it, such as macOS's `/var`, is followed as usual.
+    let is_link = |folder: &Path| {
+        let tidied: PathBuf = folder.components().collect();
+        fs::symlink_metadata(tidied).is_ok_and(|meta| meta.is_symlink())
+    };
+    let mut passed_over = None;
+    for folder in safe
+        .iter()
+        .filter(|folder| config::same_folder(folder, root))
+    {
+        if !is_link(folder) {
+            return Ok(());
         }
-        _ => Ok(()),
+        passed_over.get_or_insert_with(|| folder.clone());
     }
+    Err(match passed_over {
+        Some(entry) => RepoError::SafeFolderIsLink {
+            entry,
+            refusal: Box::new(refusal),
+        },
+        None => refusal,
+    })
+}
+
+/// What a refusal adds when safe-folders lists the folder only through `entry`, a link.
+pub(crate) fn passed_over(entry: &Path) -> String {
+    format!(
+        "Its safe-folders entry {} doesn't count: it is a link (or a junction), and Bolt never \
+         trusts a folder through one.",
+        escape(&entry.display().to_string(), false)
+    )
 }
 
 /// What `bolt start` tells the user when the project at `root` will open only from an
@@ -3550,6 +3590,12 @@ mod tests {
                     path: PathBuf::from(HOSTILE),
                 }),
             },
+            RepoError::SafeFolderIsLink {
+                entry: PathBuf::from(HOSTILE),
+                refusal: Box::new(RepoError::NotYours {
+                    path: PathBuf::from(HOSTILE),
+                }),
+            },
             RepoError::Unfinished {
                 root: PathBuf::from(HOSTILE),
                 stored: false,
@@ -3573,6 +3619,7 @@ mod tests {
                     | RepoError::AdminsNotElevated { .. }
                     | RepoError::OwnerLookupFailed { .. }
                     | RepoError::StartStopped { .. }
+                    | RepoError::SafeFolderIsLink { .. }
             ) {
                 assert_hostile_text_escaped(&e.hint().unwrap());
             }
@@ -3836,5 +3883,60 @@ mod tests {
         // Another stop is fixed where it is, so the switch can still finish.
         let other = stopped(RepoError::Io(std::io::Error::other("no space")));
         assert!(!other.hint().unwrap().contains("state/journal"));
+    }
+
+    /// A link at `link` to the folder `target`: a junction on Windows, a symbolic link elsewhere.
+    fn folder_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        crate::test_support::junction(link, target);
+        #[cfg(unix)]
+        assert!(crate::test_support::symlink(target, link));
+    }
+
+    #[test]
+    fn a_safe_folders_entry_that_is_a_link_does_not_count() {
+        let dir = tempdir();
+        let (root, link) = (dir.path().join("project"), dir.path().join("trusted"));
+        std::fs::create_dir(&root).unwrap();
+        folder_link(&link, &root);
+        let owners = || [Ok(Owner::Other), Ok(Owner::User)];
+        let slashed = PathBuf::from(format!("{}{}", link.display(), std::path::MAIN_SEPARATOR));
+        for entry in [link.clone(), slashed] {
+            let Err(e) = owner_allows(owners(), &root, std::slice::from_ref(&entry)) else {
+                panic!("{} counted", entry.display());
+            };
+            match &e {
+                RepoError::SafeFolderIsLink {
+                    entry: named,
+                    refusal,
+                } => {
+                    assert_eq!(*named, entry);
+                    assert!(matches!(**refusal, RepoError::NotYours { .. }), "{e:?}");
+                }
+                other => panic!("{other:?}"),
+            }
+            let said = e.to_string();
+            assert!(
+                said.starts_with("The project at ")
+                    && said.contains("belongs to another user account.")
+                    && said.contains("trusted")
+                    && said.contains("is a link"),
+                "{said}"
+            );
+            assert!(e.hint().unwrap().contains("safe-folders"), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn a_safe_folders_entry_that_is_a_real_folder_still_counts() {
+        let dir = tempdir();
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let owners = || [Ok(Owner::Other), Ok(Owner::User)];
+        assert!(owner_allows(owners(), &root, std::slice::from_ref(&root)).is_ok());
+        // A link above the entry's own folder is followed, as on macOS, where `/var` is one.
+        let above = dir.path().join("above");
+        folder_link(&above, dir.path());
+        assert!(owner_allows(owners(), &root, &[above.join("project")]).is_ok());
     }
 }
