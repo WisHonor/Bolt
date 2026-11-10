@@ -5,7 +5,6 @@ expression: "doc(&[\"unshelf\"])"
 {
   "bolt_json": 1,
   "carried": 0,
-  "files_in_use": [],
   "finished": false,
   "not_written": [],
   "placeholders": [],

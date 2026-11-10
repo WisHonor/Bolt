@@ -370,7 +370,6 @@ pub fn shelved_json(done: &Shelved, warnings: &[Warning]) -> Value {
         "removed": applied.removed,
         "not_written": applied.not_written,
         "placeholders": applied.placeholders,
-        "files_in_use": applied.in_use,
         "warnings": warnings_json(warnings),
     })
 }

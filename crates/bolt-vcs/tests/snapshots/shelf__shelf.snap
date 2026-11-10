@@ -5,7 +5,6 @@ expression: "doc(&[\"shelf\", \"Mine\"])"
 {
   "bolt_json": 1,
   "changed_again": false,
-  "files_in_use": [],
   "not_written": [],
   "placeholders": [],
   "removed": 3,

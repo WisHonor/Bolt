@@ -4,7 +4,6 @@ expression: doc
 ---
 {
   "bolt_json": 1,
-  "files_in_use": [],
   "not_written": [],
   "placeholders": [],
   "position": {

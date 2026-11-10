@@ -4,7 +4,6 @@ expression: "discard_json(&env, &[])"
 ---
 {
   "bolt_json": 1,
-  "files_in_use": [],
   "folders": 0,
   "not_written": [],
   "placeholders": [],

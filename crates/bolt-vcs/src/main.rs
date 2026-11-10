@@ -1552,7 +1552,6 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             "removed": done.applied.removed,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
-            "files_in_use": done.applied.in_use,
             "safety_copies": done.safety_copies,
             "warnings": output::warnings_json(&warnings),
         });
@@ -1603,7 +1602,6 @@ fn discard_command(
             "folders": done.folders,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
-            "files_in_use": done.applied.in_use,
             "safety_copies": done.safety_copies,
             "warnings": output::warnings_json(&warnings),
         });
@@ -1919,7 +1917,6 @@ fn unshelf_command(
             "carried": done.carried,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
-            "files_in_use": done.applied.in_use,
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")
