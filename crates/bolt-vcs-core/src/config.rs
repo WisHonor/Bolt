@@ -812,6 +812,13 @@ fn git_path(
             ))),
         };
     };
+    // Someone writing `~\x` on Windows most likely meant their own home folder.
+    if let Some(after) = rest.strip_prefix('\\') {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}: only `~/` names your home folder, and Git \
+             stops at this too; write `~/{after}` or the whole path instead"
+        )));
+    }
     // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
     if !from_home(value.as_bytes()) {
         return Err(place.error(format!(
@@ -2073,7 +2080,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            said.contains("~\\ign") && said.contains("full path"),
+            said.contains("~\\ign: only `~/` names your home folder")
+                && said.contains("write `~/ign` or the whole path"),
             "{said}"
         );
         std::fs::write(&gitconfig, "[include]\n\tpath = ~\\\\inc\n").unwrap();
@@ -2081,7 +2089,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            said.contains("~\\inc") && said.contains("full path"),
+            said.contains("~\\inc: only `~/` names your home folder")
+                && said.contains("write `~/inc` or the whole path"),
             "{said}"
         );
     }
