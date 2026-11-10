@@ -330,7 +330,7 @@ fn an_ambiguous_target_lists_the_saves() {
     plant_with_change_id(env.root(), ChangeId([0; 16]));
     plant_with_change_id(env.root(), ChangeId(second));
     let before = env.standing();
-    let out = env.bolt().args(["goto", "kkkk"]).output().unwrap();
+    let out = env.bolt().args(["goto", "zzzz"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let said = text(&out.stderr);
     assert!(said.contains("matches more than one save"), "{said}");

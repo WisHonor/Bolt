@@ -579,6 +579,40 @@ fn the_same_repository_imports_to_the_same_saves_anywhere() {
     assert_eq!(saves(env.root()), saves(copy.path()));
 }
 
+/// A commit Jujutsu made shows in Bolt with the letters of its `change-id` header.
+#[test]
+fn an_imported_save_shows_the_letters_its_change_id_header_has() {
+    let env = Env::new();
+    let blob = env.git_input(&["hash-object", "-w", "--stdin"], b"a\n");
+    let tree = env.git_input(
+        &["mktree"],
+        format!("100644 blob {blob}\ta.txt\n").as_bytes(),
+    );
+    let letters = "zyxwvutsrqponmlkzyxwvutsrqponmlk";
+    let raw = format!(
+        "tree {tree}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\
+         change-id {letters}\n\nFirst\n"
+    );
+    let args = [
+        "hash-object",
+        "-t",
+        "commit",
+        "--literally",
+        "-w",
+        "--stdin",
+    ];
+    let commit = env.git_input(&args, raw.as_bytes());
+    env.git(&["update-ref", "refs/heads/main", &commit]);
+    env.git(&["reset", "-q", "--hard"]);
+    env.import();
+
+    let out = env.bolt().args(["--json", "history"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["saves"][0]["change_id"], letters);
+    let shown = text(&env.bolt().arg("history").output().unwrap().stdout);
+    assert!(shown.starts_with("zyxw"), "{shown}");
+}
+
 #[test]
 fn nested_bolt_folders_are_warned_about() {
     let env = Env::new();

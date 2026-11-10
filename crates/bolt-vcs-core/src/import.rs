@@ -1688,12 +1688,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (git, first) = one_commit(dir.path());
         let own = ChangeId::from_git_commit(first.as_bytes());
-        // The same ID in Jujutsu's letters, which run from `z` for 0.
-        let letters: String = own
-            .to_letters()
-            .bytes()
-            .map(|c| char::from(b'k' + b'z' - c))
-            .collect();
+        let letters = own.to_letters();
         let tree = git.tree(&[]);
         // A root on another branch, made to come before `main`'s in the import's order.
         let side = (0..)

@@ -349,7 +349,7 @@ fn by_fingerprint_prefix(
     Ok(found)
 }
 
-/// Finds a save from text: a line name, else a change-ID prefix (letters `k`-`z`, unique on
+/// Finds a save from text: a line name, else a change-ID prefix (lowercase `k`-`z`, unique on
 /// the current line), else at least 8 hex digits of a fingerprint. Fails with `NotFound`,
 /// `Ambiguous`, `LineOrSave`, or a repository problem.
 pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError> {
