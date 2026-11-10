@@ -331,14 +331,23 @@ fn pick_up(
         }
     };
     let entry = repo.entry(&to)?;
-    // Every save its state names must read, so that the pick never strands the project.
-    let unusable = |detail: String| SwitchError::EntryUnusable { entry: to, detail };
-    let tip = tip_of(&entry).map_err(|e| unusable(e.to_string()))?;
+    // Every record its state names must read, so that the pick never strands the project.
+    let unusable = |what, detail: String| SwitchError::EntryUnusable {
+        entry: to,
+        what,
+        detail,
+    };
+    let saves = "one of its saves";
+    let tip = tip_of(&entry).map_err(|e| unusable(saves, e.to_string()))?;
     let shelved = entry.state.shelves.iter().map(|(_, save)| save);
     for save in entry.state.lines.values().chain(shelved).chain([&tip]) {
         let read = repo.store().save(save, repo.signatures_allowed());
-        read.map_err(|e| unusable(e.to_string()))?;
+        read.map_err(|e| unusable(saves, e.to_string()))?;
     }
+    repo.tag_list(&entry.state)
+        .map_err(|e| unusable("its tag list", e.to_string()))?;
+    repo.server_lines(&entry.state)
+        .map_err(|e| unusable("its server lines", e.to_string()))?;
     // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.
     // Dropped before the new entry, so a crash between them never leaves it to refuse every command.
     let mut applied = Applied::default();

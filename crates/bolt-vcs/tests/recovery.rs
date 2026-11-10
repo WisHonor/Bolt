@@ -524,6 +524,33 @@ fn undo_to_with_a_lost_head_refuses_an_entry_whose_saves_cant_be_read() {
 }
 
 #[test]
+fn a_pick_up_refuses_an_entry_whose_tag_list_or_server_lines_cannot_be_read() {
+    for what in ["tag list", "server lines"] {
+        let (env, [_, _, two]) = project();
+        // A crashed command's entry naming records the store doesn't hold.
+        let broken = plant_end(&env, two, |e| match what {
+            "tag list" => e.state.tags = Some(Id([0x77; 32])),
+            _ => e.state.server_lines = Some(Id([0x77; 32])),
+        });
+        fs::remove_file(head_file(&env)).unwrap();
+        let stored = packs(&env);
+        let (_, said) = refused(&env, &["undo", "--to", &broken.to_hex()[..8]]);
+        let why = format!(
+            "error: Diary entry {} can't be made current: its {what} can't be read (",
+            broken.short_hex()
+        );
+        assert!(said.contains(&why), "{said}");
+        assert!(
+            said.contains("hint: Pick another: bolt undo --list shows"),
+            "{said}"
+        );
+        assert!(!head_file(&env).exists());
+        assert_eq!(packs(&env), stored);
+        ok(&env, &["undo", "--to", &two.to_hex()[..8]]);
+    }
+}
+
+#[test]
 fn undo_list_with_a_lost_head_goes_on_past_an_entry_whose_pack_is_gone() {
     let (env, [start, one, two]) = project();
     // The middle entry is lost with its pack, and the head too.

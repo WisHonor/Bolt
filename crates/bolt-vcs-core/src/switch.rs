@@ -111,14 +111,18 @@ pub enum SwitchError {
         listed(entries.iter().map(Id::to_hex).take(NAMED), entries.len() as u64)
     )]
     EntryAmbiguous { text: String, entries: Vec<Id> },
-    /// A lost `head` can't be picked up from `entry`: a save its state names can't be read.
+    /// A lost `head` can't be picked up from `entry`: `what` its state names (one of its saves,
+    /// its tag list or its server lines) can't be read.
     #[error(
-        "Diary entry {} can't be made current: one of its saves can't be read ({}), so nothing \
-         was changed.",
+        "Diary entry {} can't be made current: {what} can't be read ({}), so nothing was changed.",
         entry.short_hex(),
         escape(detail, false)
     )]
-    EntryUnusable { entry: Id, detail: String },
+    EntryUnusable {
+        entry: Id,
+        what: &'static str,
+        detail: String,
+    },
     /// The saves of a step can't be read: `tidy` removed them, or they were lost.
     #[error(
         "The step of diary entry {} can't be undone or redone: what it changed can't be read \
