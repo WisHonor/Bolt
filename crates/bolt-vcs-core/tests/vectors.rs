@@ -630,9 +630,9 @@ struct SealedVector {
     sealed: String,
 }
 
-/// `main` at save 11…11 with change IDs 22…22 and 33…33, and `side` at 44…44 with 22…22, as
-/// storage-format.md §10 lays them out.
-fn change_ids_body() -> String {
+/// Version 1, which Bolt no longer reads: `main` at save 11…11 with change IDs 22…22 and 33…33,
+/// and `side` at 44…44 with 22…22.
+fn change_ids_v1_body() -> String {
     let id = |byte: &str, n: usize| byte.repeat(n);
     format!(
         "424f4c5443484944010204{}{}02{}{}04{}{}01{}",
@@ -646,15 +646,40 @@ fn change_ids_body() -> String {
     )
 }
 
+/// The project at save 33…33 (change ID 44…44), `main` at 11…11 (22…22) and then 33…33, and
+/// `side` at 55…55 (22…22), as storage-format.md §10 lays them out.
+fn change_ids_body() -> String {
+    let id = |byte: &str, n: usize| byte.repeat(n);
+    format!(
+        "424f4c544348494402030001{}{}04{}02{}{}{}{}04{}01{}{}",
+        id("33", 32),
+        id("44", 16),
+        hex(b"main"),
+        id("11", 32),
+        id("22", 16),
+        id("33", 32),
+        id("44", 16),
+        hex(b"side"),
+        id("55", 32),
+        id("22", 16)
+    )
+}
+
 #[test]
-#[ignore = "prints the vector; run by hand to regenerate tests/vectors/change_ids.json"]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/change_ids.json"]
 fn print_change_ids_vector() {
     let key = [0x42; 32];
-    let body = change_ids_body();
+    let line = |name: &str, body: &str| {
+        format!(
+            "  {{\"name\": \"{name}\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}",
+            hex(&key),
+            hex(&bolt_core::keyed::seal(&key, &unhex(body)))
+        )
+    };
     println!(
-        "[\n  {{\"name\": \"two-lines\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
-        hex(&key),
-        hex(&bolt_core::keyed::seal(&key, &unhex(&body)))
+        "[\n{},\n{}\n]",
+        line("two-lines", &change_ids_v1_body()),
+        line("version-2", &change_ids_body())
     );
 }
 
@@ -668,25 +693,28 @@ fn change_ids_match_their_vector() {
     );
     let vectors: Vec<SealedVector> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    // The body is the one the layout above gives.
-    assert_eq!(vectors[0].body, change_ids_body());
-    for v in vectors {
+    // The bodies are the ones the layouts above give.
+    assert_eq!(vectors[0].body, change_ids_v1_body());
+    assert_eq!(vectors[1].body, change_ids_body());
+    for v in &vectors {
         let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
         let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
         assert_eq!(seal(&key, &body), sealed, "{}", v.name);
         assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
         assert_eq!(open_sealed(&[0; 32], &sealed), None);
-        let ids = ChangeIds::decode(&body).unwrap();
-        assert_eq!(ids.encode(), body);
-        let main = ids.get("main").unwrap();
-        assert_eq!(main.0, Id([0x11; 32]));
-        assert_eq!(main.1, [ChangeId([0x22; 16]), ChangeId([0x33; 16])]);
-        let side = ids.get("side").unwrap();
-        assert_eq!(
-            (side.0, side.1),
-            (Id([0x44; 32]), &[ChangeId([0x22; 16])][..])
-        );
     }
+    // A version 1 cache is ignored, and rebuilt.
+    assert!(ChangeIds::decode(&unhex(&vectors[0].body)).is_err());
+    let body = unhex(&vectors[1].body);
+    let ids = ChangeIds::decode(&body).unwrap();
+    assert_eq!(ids.encode(), body);
+    let save = |s: u8, c: u8| (Id([s; 32]), ChangeId([c; 16]));
+    assert_eq!(ids.get("").unwrap(), [save(0x33, 0x44)]);
+    assert_eq!(
+        ids.get("main").unwrap(),
+        [save(0x11, 0x22), save(0x33, 0x44)]
+    );
+    assert_eq!(ids.get("side").unwrap(), [save(0x55, 0x22)]);
 }
 
 /// `a.txt`, 3 bytes, modified at 1,700,000,000.123456789 s, changed at 1,700,000,001.5 s, file 9

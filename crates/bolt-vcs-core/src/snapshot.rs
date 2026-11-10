@@ -626,11 +626,17 @@ pub fn save_folder(
     Save::decode(&encoded, false).map_err(StoreError::from)?;
     let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
     // Worked out before the commit, so that nothing after it can fail the save. The line's
-    // change IDs come from the cache, which then learns this one; an amend keeps the same IDs.
+    // saves come from the cache, which then learns this one; an amend takes the place of the
+    // save it amends.
     let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo));
-    let shortened = cache
-        .line(repo, line, parent_id)
-        .map(|ids| history::short_among(ids, &save.change_id, req.amend));
+    let shortened = cache.chain(repo, Some(line), parent_id).map(|saves| {
+        let behind = if req.amend {
+            saves.get(1..).unwrap_or_default()
+        } else {
+            saves
+        };
+        history::short_in(behind, &save_id, &save.change_id)
+    });
     let short_change_id = shortened.unwrap_or_else(|why| {
         warnings.push(Warning::new(
             warning::CHANGE_ID_NOT_SHORTENED,
@@ -709,9 +715,9 @@ fn shown_elsewhere(
         if name != line
             && (tip == id
                 || cache
-                    .line(repo, name, tip)?
-                    .binary_search(&save.change_id)
-                    .is_ok())
+                    .chain(repo, Some(name), tip)?
+                    .iter()
+                    .any(|(_, c)| *c == save.change_id))
         {
             by.push(format!("line {name}"));
         }

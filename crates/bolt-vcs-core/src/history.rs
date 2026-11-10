@@ -64,23 +64,6 @@ impl From<crate::store::StoreError> for ResolveError {
     }
 }
 
-/// Saves from `start` back along first parents, newest first, each read when asked for. A cycle
-/// can't be built (a save's fingerprint covers its parents), but a store missing a parent fails
-/// with an error, which ends the walk.
-fn chain(repo: &Repository, start: Id) -> impl Iterator<Item = Result<(Id, Save), RepoError>> + '_ {
-    let mut next = Some(start);
-    std::iter::from_fn(move || {
-        let id = next.take()?;
-        Some(match repo.store().save(&id, repo.signatures_allowed()) {
-            Ok(save) => {
-                next = save.parents.first().copied();
-                Ok((id, save))
-            }
-            Err(e) => Err(e.into()),
-        })
-    })
-}
-
 /// The newest save of the current line, or the checked-out save.
 pub(crate) fn tip_of(entry: &DiaryEntry) -> Result<Id, RepoError> {
     match &entry.state.position {
@@ -95,6 +78,14 @@ pub(crate) fn tip_of(entry: &DiaryEntry) -> Result<Id, RepoError> {
                 })
         }
         Position::AtSave(id) => Ok(*id),
+    }
+}
+
+/// The current line, or `None` at a save.
+fn line_of(entry: &DiaryEntry) -> Option<&str> {
+    match &entry.state.position {
+        Position::OnLine(name) => Some(name),
+        Position::AtSave(_) => None,
     }
 }
 
@@ -131,7 +122,7 @@ fn short_lengths(ids: &[ChangeId]) -> Vec<usize> {
 
 /// The shortest form of `change_id` among the sorted `ids`, leaving one copy of it out when
 /// `itself` (it is the change ID of one of their saves).
-pub(crate) fn short_among(ids: &[ChangeId], change_id: &ChangeId, itself: bool) -> String {
+fn short_among(ids: &[ChangeId], change_id: &ChangeId, itself: bool) -> String {
     let at = ids.partition_point(|c| c < change_id);
     let (below, mut above) = ids.split_at(at);
     if itself && above.first() == Some(change_id) {
@@ -147,34 +138,34 @@ pub(crate) fn short_among(ids: &[ChangeId], change_id: &ChangeId, itself: bool) 
     change_id.to_letters()[..short_len(common)].to_owned()
 }
 
+/// The shortest form of `change_id`, the change ID of the save `id`, that no other of `saves`
+/// starts with.
+pub(crate) fn short_in(saves: &[(Id, ChangeId)], id: &Id, change_id: &ChangeId) -> String {
+    let common = saves
+        .iter()
+        .filter(|(other, _)| other != id)
+        .map(|(_, other)| common_letters(change_id, other))
+        .max()
+        .unwrap_or(0);
+    change_id.to_letters()[..short_len(common)].to_owned()
+}
+
 /// The shortest form of `change_id` (at least 4 letters) that no other save on the current line
-/// starts with. `id` is the save it belongs to, on the line or not. The line's change IDs come
-/// from the cache when it is current.
+/// starts with. `id` is the save it belongs to, on the line or not.
 pub fn short_change_id(
     repo: &Repository,
     id: &Id,
     change_id: &ChangeId,
 ) -> Result<String, RepoError> {
     let (_, entry) = repo.current()?;
-    let tip = tip_of(&entry)?;
-    let Position::OnLine(line) = &entry.state.position else {
-        return walk_short(repo, tip, id, change_id);
-    };
     let mut cache = ChangeIds::load(repo);
-    let ids = cache.line(repo, line, tip)?;
-    let listed = ids.binary_search(change_id).is_ok();
-    let short = match (listed, *id == tip) {
-        (false, _) => Some(short_among(ids, change_id, false)),
-        (true, true) => Some(short_among(ids, change_id, true)),
-        // Whether `id` is on the line, or another save there has its change ID, only the line
-        // says.
-        (true, false) => None,
-    };
+    let short = short_in(
+        cache.chain(repo, line_of(&entry), tip_of(&entry)?)?,
+        id,
+        change_id,
+    );
     cache.store(repo, &entry.state);
-    match short {
-        Some(short) => Ok(short),
-        None => walk_short(repo, tip, id, change_id),
-    }
+    Ok(short)
 }
 
 /// The current line's saves and their change IDs, read once and kept as IDs alone, to shorten
@@ -188,12 +179,12 @@ pub struct LineIds {
 impl LineIds {
     /// Reads the current line, or the saves back from the one the project is at.
     pub fn read(repo: &Repository) -> Result<LineIds, RepoError> {
-        let (mut change_ids, mut saves) = (Vec::new(), HashSet::new());
-        for step in chain(repo, current_save(repo)?) {
-            let (id, save) = step?;
-            change_ids.push(save.change_id);
-            saves.insert(id);
-        }
+        let (_, entry) = repo.current()?;
+        let mut cache = ChangeIds::load(repo);
+        let line = cache.chain(repo, line_of(&entry), tip_of(&entry)?)?;
+        let mut change_ids: Vec<ChangeId> = line.iter().map(|(_, c)| *c).collect();
+        let saves = line.iter().map(|(id, _)| *id).collect();
+        cache.store(repo, &entry.state);
         change_ids.sort_unstable();
         Ok(LineIds { change_ids, saves })
     }
@@ -218,57 +209,28 @@ impl LineIds {
     }
 }
 
-/// `short_change_id`, by reading the line from `tip`.
-fn walk_short(
-    repo: &Repository,
-    tip: Id,
-    id: &Id,
-    change_id: &ChangeId,
-) -> Result<String, RepoError> {
-    let mut common = 0;
-    for step in chain(repo, tip) {
-        let (other, save) = step?;
-        if other != *id {
-            common = common.max(common_letters(change_id, &save.change_id));
-        }
-    }
-    Ok(change_id.to_letters()[..short_len(common)].to_owned())
-}
-
 /// Calls `each` with every save on the current line, newest first, and the shortest form of its
-/// change ID. The line's change IDs come first, from the cache when it is current and otherwise
-/// by reading the line once for them alone, so that only the save being handed out is held.
+/// change ID. The line's saves are known before the first is handed out, and each is read from
+/// the store as it is, so that only that one is held.
 pub fn for_each_on_line<E: From<RepoError>>(
     repo: &Repository,
     mut each: impl FnMut(&Id, &Save, &str) -> Result<(), E>,
 ) -> Result<(), E> {
     let (_, entry) = repo.current()?;
-    let tip = tip_of(&entry)?;
-    let ids = match &entry.state.position {
-        Position::OnLine(line) => {
-            let mut cache = ChangeIds::load(repo);
-            let ids = cache.line(repo, line, tip)?.to_vec();
-            cache.store(repo, &entry.state);
-            ids
-        }
-        Position::AtSave(_) => {
-            let mut ids = chain(repo, tip)
-                .map(|step| step.map(|(_, save)| save.change_id))
-                .collect::<Result<Vec<ChangeId>, RepoError>>()?;
-            ids.sort_unstable();
-            ids
-        }
-    };
+    let (line, tip) = (line_of(&entry), tip_of(&entry)?);
+    let mut cache = ChangeIds::load(repo);
+    cache.chain(repo, line, tip)?;
+    // Kept before the saves are handed out, however that ends; asked again, it reads nothing.
+    cache.store(repo, &entry.state);
+    let saves = cache.chain(repo, line, tip)?;
+    let ids: Vec<ChangeId> = saves.iter().map(|(_, c)| *c).collect();
     let lengths = short_lengths(&ids);
-    for step in chain(repo, tip) {
-        let (id, save) = step?;
-        let at = ids.partition_point(|c| *c < save.change_id);
-        // Every save of the line is among `ids`; all its letters if somehow not.
-        let len = match ids.get(at) {
-            Some(c) if *c == save.change_id => lengths[at],
-            _ => LETTERS,
-        };
-        each(&id, &save, &save.change_id.to_letters()[..len])?;
+    for ((id, _), len) in saves.iter().zip(lengths) {
+        let save = repo
+            .store()
+            .save(id, repo.signatures_allowed())
+            .map_err(RepoError::from)?;
+        each(id, &save, &save.change_id.to_letters()[..len])?;
     }
     Ok(())
 }
@@ -286,20 +248,22 @@ fn one_of(text: &str, mut found: Vec<(Id, String)>) -> Result<Id, ResolveError> 
     }
 }
 
-/// The saves on the line from `tip` whose change ID starts with `text`, each with its change ID.
+/// The saves on the current line whose change ID starts with `text`, each with its change ID.
 fn by_change_prefix(
     repo: &Repository,
-    tip: Id,
+    entry: &DiaryEntry,
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
-    let mut found = Vec::new();
-    for step in chain(repo, tip) {
-        let (id, save) = step?;
-        let letters = save.change_id.to_letters();
-        if letters.starts_with(text) {
-            found.push((id, letters));
-        }
-    }
+    let mut cache = ChangeIds::load(repo);
+    let found = cache
+        .chain(repo, line_of(entry), tip_of(entry)?)?
+        .iter()
+        .filter_map(|(id, change_id)| {
+            let letters = change_id.to_letters();
+            letters.starts_with(text).then_some((*id, letters))
+        })
+        .collect();
+    cache.store(repo, &entry.state);
     Ok(found)
 }
 
@@ -332,6 +296,18 @@ fn by_fingerprint_prefix(
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     let text = text.to_ascii_lowercase();
+    if let Some(id) = Id::from_hex(&text) {
+        // A line the cache knows at its newest save may hold it; the current one first.
+        let mut cache = ChangeIds::load(repo);
+        if let Some(line) = line_of(entry) {
+            cache.chain(repo, Some(line), tip_of(entry)?)?;
+        }
+        let reached = cache.reaches(&entry.state, &id);
+        cache.store(repo, &entry.state);
+        if reached {
+            return Ok(vec![(id, text)]);
+        }
+    }
     let mut found = Vec::new();
     each_once(
         entry.state.lines.values().copied(),
@@ -393,7 +369,7 @@ fn by_id(
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     if !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b)) {
-        return by_change_prefix(repo, tip_of(entry)?, text);
+        return by_change_prefix(repo, entry, text);
     }
     if is_hex_start(text) {
         return by_fingerprint_prefix(repo, entry, text);
@@ -466,6 +442,32 @@ mod tests {
         };
         repo.commit(&lock, packs, &diary).unwrap();
         id
+    }
+
+    /// Saves from `start` back along first parents, newest first, read from the store.
+    fn chain(
+        repo: &Repository,
+        start: Id,
+    ) -> impl Iterator<Item = Result<(Id, Save), RepoError>> + '_ {
+        let mut next = Some(start);
+        std::iter::from_fn(move || {
+            let id = next.take()?;
+            Some(match repo.store().save(&id, false) {
+                Ok(save) => {
+                    next = save.parents.first().copied();
+                    Ok((id, save))
+                }
+                Err(e) => Err(e.into()),
+            })
+        })
+    }
+
+    /// `short_change_id`, by reading the line from `tip`.
+    fn walk_short(repo: &Repository, tip: Id, id: &Id, change_id: &ChangeId) -> String {
+        let saves: Vec<(Id, ChangeId)> = chain(repo, tip)
+            .map(|s| s.map(|(id, save)| (id, save.change_id)).unwrap())
+            .collect();
+        short_in(&saves, id, change_id)
     }
 
     /// The user's own cache key, as the command line hands it over.
@@ -820,14 +822,15 @@ mod tests {
         shown
     }
 
-    /// A cache that says `main`, at its newest save, holds one save more than it does, whose ID
-    /// shares 7 letters with `klmnopk`.
+    /// A cache that has `main`'s saves right, but gives its oldest a change ID that shares 7
+    /// letters with `klmnopk`.
     fn lying_cache(repo: &Repository) -> crate::changeids::ChangeIds {
-        let tip = current_save(repo).unwrap();
-        let mut ids: Vec<ChangeId> = chain(repo, tip).map(|s| s.unwrap().1.change_id).collect();
-        ids.push(change("klmnopkl"));
+        let mut saves: Vec<(Id, ChangeId)> = chain(repo, current_save(repo).unwrap())
+            .map(|s| s.map(|(id, save)| (id, save.change_id)).unwrap())
+            .collect();
+        saves.last_mut().unwrap().1 = change("klmnopkl");
         let mut lie = crate::changeids::ChangeIds::default();
-        lie.set("main", tip, ids);
+        lie.set("main", saves);
         lie
     }
 
@@ -878,17 +881,27 @@ mod tests {
     enum Step {
         Save(&'static str),
         Back(usize),
+        /// Moves `main` to one of the saves made so far: back, forward or elsewhere.
+        To(usize),
         Side(&'static str),
         Amend,
+        /// Goes to one of the saves made so far, off the line.
+        Goto(usize),
+        OnLine,
     }
 
+    const STARTS: [&str; 5] = ["klmn", "klmo", "klmnop", "zzzz", "lmno"];
+
     fn step() -> impl Strategy<Value = Step> {
-        let start = prop::sample::select(vec!["klmn", "klmo", "klmnop", "zzzz", "lmno"]);
+        let start = prop::sample::select(STARTS.to_vec());
         prop_oneof![
             3 => start.clone().prop_map(Step::Save),
             1 => (0..4usize).prop_map(Step::Back),
+            1 => any::<usize>().prop_map(Step::To),
             1 => start.prop_map(Step::Side),
             1 => Just(Step::Amend),
+            1 => any::<usize>().prop_map(Step::Goto),
+            1 => Just(Step::OnLine),
         ]
     }
 
@@ -918,49 +931,135 @@ mod tests {
         (save_id, save.change_id, short_change_id)
     }
 
+    /// Puts the project at `position`, as `goto` would, without touching the folder.
+    fn set_position(repo: &mut Repository, position: Position) {
+        let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        state.position = position;
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "goto".into(),
+            who: who(),
+            bolt_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        let packs = repo.new_packs().unwrap();
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    /// Everything the cache answers for, as `repo` answers it, for the saves `saves`.
+    fn answers(repo: &Repository, saves: &[Id]) -> Vec<String> {
+        let mut out = vec![format!("{:?}", cached_line(repo))];
+        let line = LineIds::read(repo).unwrap();
+        for id in saves {
+            let change_id = repo.store().save(id, false).unwrap().change_id;
+            out.push(short_change_id(repo, id, &change_id).unwrap());
+            out.push(format!(
+                "{} {}",
+                line.short(id, &change_id),
+                line.shared(id, &change_id)
+            ));
+            out.push(format!("{:?}", resolve(repo, &change_id.to_letters())));
+            out.push(format!("{:?}", resolve(repo, &id.to_hex())));
+            out.push(format!("{:?}", resolve(repo, &id.to_hex().to_uppercase())));
+        }
+        for start in STARTS {
+            out.push(format!("{:?}", resolve(repo, start)));
+        }
+        out.push(format!("{:?}", resolve(repo, &Id([0x5a; 32]).to_hex())));
+        out
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(24))]
-        // Saves the cache never saw, undos that move a line back, saves off the line, and amends
-        // that give a new save an old change ID, with the cache read and rewritten in between:
-        // the short IDs are always the uncached ones.
+        // Saves the cache never saw, undos that move a line back and forward again, saves off the
+        // line, amends that give a new save an old change ID, and the project at a save, with the
+        // cache read and rewritten in between: every answer is the one a handle with no cache
+        // gives.
         #[test]
-        fn short_ids_match_the_uncached_ones(steps in prop::collection::vec(step(), 1..10)) {
-            let (_dir, mut repo, mut saves) = project_with(&[]);
+        fn answers_match_the_uncached_ones(steps in prop::collection::vec(step(), 1..12)) {
+            let (dir, mut repo, mut saves) = project_with(&[]);
             for step in steps {
                 match step {
                     Step::Save(start) => {
-                        let tip = current_save(&repo).unwrap();
+                        let tip = repo.current().unwrap().1.state.lines["main"];
                         saves.push(plant(&mut repo, &[tip], start, Some("main")));
                     }
                     Step::Back(n) => {
-                        let back = chain(&repo, current_save(&repo).unwrap()).nth(n);
-                        if let Some(Ok((id, _))) = back {
+                        let tip = repo.current().unwrap().1.state.lines["main"];
+                        let back = chain(&repo, tip).nth(n).map(|s| s.unwrap().0);
+                        if let Some(id) = back {
                             move_line(&mut repo, "main", id);
                         }
                     }
+                    Step::To(n) => move_line(&mut repo, "main", saves[n % saves.len()]),
                     Step::Side(start) => saves.push(plant(&mut repo, &[saves[0]], start, None)),
                     // A message no save has yet, so there is always something to amend.
                     Step::Amend => {
-                        let (id, change_id, short) = amend(&mut repo, &format!("{}", saves.len()));
-                        prop_assert_eq!(short, walk_short(&repo, id, &id, &change_id).unwrap());
-                        saves.push(id);
+                        if matches!(repo.current().unwrap().1.state.position, Position::OnLine(_)) {
+                            let message = format!("{}", saves.len());
+                            let (id, change_id, short) = amend(&mut repo, &message);
+                            prop_assert_eq!(short, walk_short(&repo, id, &id, &change_id));
+                            saves.push(id);
+                        }
                     }
+                    Step::Goto(n) => set_position(&mut repo, Position::AtSave(saves[n % saves.len()])),
+                    Step::OnLine => set_position(&mut repo, Position::OnLine("main".into())),
                 }
                 prop_assert_eq!(cached_line(&repo), uncached_line(&repo));
+                let cold = Repository::open(dir.path()).unwrap();
+                prop_assert_eq!(answers(&repo, &saves), answers(&cold, &saves));
                 let tip = current_save(&repo).unwrap();
-                let line = LineIds::read(&repo).unwrap();
                 for id in &saves {
                     let change_id = repo.store().save(id, false).unwrap().change_id;
-                    let walked = walk_short(&repo, tip, id, &change_id).unwrap();
+                    let walked = walk_short(&repo, tip, id, &change_id);
                     prop_assert_eq!(&short_change_id(&repo, id, &change_id).unwrap(), &walked);
-                    prop_assert_eq!(line.short(id, &change_id), walked);
                     let another = chain(&repo, tip)
                         .map(Result::unwrap)
                         .any(|(other, save)| other != *id && save.change_id == change_id);
+                    let line = LineIds::read(&repo).unwrap();
                     prop_assert_eq!(line.shared(id, &change_id), another);
                 }
             }
         }
+    }
+
+    /// The saves read by going to the save before the newest of a line of `len` saves and back,
+    /// by its change ID and by its whole ID, once a command has shown the line.
+    fn reads_to_go_back_and_forth(len: u8) -> usize {
+        let starts: Vec<String> = (0..len)
+            .map(|n| format!("{}{}", char::from(b'k' + n / 16), char::from(b'k' + n % 16)))
+            .collect();
+        let starts: Vec<&str> = starts.iter().map(String::as_str).collect();
+        let (_dir, mut repo, ids) = project_with(&starts);
+        let before = ids[ids.len() - 2];
+        let letters = repo
+            .store()
+            .save(&before, false)
+            .unwrap()
+            .change_id
+            .to_letters();
+        cached_line(&repo);
+        let read = repo.store().saves_read();
+        for text in [&letters[..4], "main", &before.to_hex(), "main"] {
+            let target = crate::lines::resolve_target(&repo, text).unwrap();
+            let done =
+                crate::switch::goto(&mut repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
+            let save = repo.store().save(&done.save, false).unwrap();
+            short_change_id(&repo, &done.save, &save.change_id).unwrap();
+        }
+        repo.store().saves_read() - read
+    }
+
+    #[test]
+    fn a_goto_to_the_save_before_reads_no_line() {
+        assert_eq!(
+            reads_to_go_back_and_forth(20),
+            reads_to_go_back_and_forth(120)
+        );
     }
 
     #[test]
