@@ -267,7 +267,7 @@ Two sessions build it at once, each with its own steps, decisions and red-team s
 
 ### Speed and space
 
-Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [102](decisions/102-big-files-are-flushed-while-they-are-written.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). It starts from a profile of where the time goes ([benchmarks.md](benchmarks.md) §7). The plan's task numbers are added in brackets when the plan is written.
+Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [103](decisions/103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). It starts from a profile of where the time goes ([benchmarks.md](benchmarks.md) §7). The plan's task numbers are added in brackets when the plan is written.
 
 **0. Measure** ✅ (2026-11-10)
 - `status`, a small save and `goto` timed from the inside on Git's source and on Godot's demos, on GitHub's Linux and Windows runners and on the laptop; the big-file steps Git or Git LFS wins; where Godot's space goes.

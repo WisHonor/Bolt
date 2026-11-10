@@ -340,7 +340,7 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 
 ## 7. Where the time went, before milestone 6
 
-**In plain words.** Before making anything faster, Bolt was timed from the inside: a throwaway build printed how long each part of `status`, a small save and `goto` took, on GitHub's runners and on the Windows laptop. On a small project nearly all of the time is the walk of the project folder, which one thread does a folder and a name at a time. Most of that walk is work Git doesn't do, or does once. Bolt's own look at each file, which several threads share, is never what a command waits for. On big files the time is the one flush to the disk at the very end. These are the numbers [decisions 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [102](decisions/102-big-files-are-flushed-while-they-are-written.md) start from.
+**In plain words.** Before making anything faster, Bolt was timed from the inside: a throwaway build printed how long each part of `status`, a small save and `goto` took, on GitHub's runners and on the Windows laptop. On a small project nearly all of the time is the walk of the project folder, which one thread does a folder and a name at a time. Most of that walk is work Git doesn't do, or does once. Bolt's own look at each file, which several threads share, is never what a command waits for. On big files the time is the one flush to the disk at the very end. These are the numbers [decisions 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [103](decisions/103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) start from.
 
 ### How it was measured
 

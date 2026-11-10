@@ -208,6 +208,7 @@ Questions 2 to 12 were decided by Claude on 2026-11-05 at the owner's request to
 - [x] Caches are written without a flush, and the file cache only when it changed (refines decisions 011 and 053) → [decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md)
 - [x] The walk lists a folder before it looks for `.git`, `.bolt` and ignore files in it (refines decisions 038 and 046) → [decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)
 - [x] Big files are flushed while they are written (refines decisions 009 and 049) → [decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)
+- [x] Where Git keeps less: zstd level 3 and the chunk sizes stay (refines decisions 009, 082 and 088) → [decision 103](decisions/103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md)
 
 ## 5. Design
 
