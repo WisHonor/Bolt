@@ -193,9 +193,11 @@ impl Listed {
 /// all-ASCII name by ASCII letter case at most; any name outside ASCII and Bolt can't tell, so all
 /// four could be there.
 pub fn listed_hints<'a>(names: impl Iterator<Item = (&'a OsStr, Option<&'a OsStr>)>) -> Listed {
+    // Elsewhere a FAT or NTFS drive answers to a short name (`.GIT`) its listing doesn't show.
+    let unlisted_short_names = cfg!(not(windows));
     let mut hints = Listed {
-        git: false,
-        bolt: false,
+        git: unlisted_short_names,
+        bolt: unlisted_short_names,
         gitignore: false,
         boltignore: false,
     };
@@ -597,13 +599,35 @@ mod tests {
                     .map(|(n, s)| (OsStr::new(n), s.map(OsStr::new))),
             )
         };
-        let only = |git, bolt, gitignore, boltignore| Listed {
-            git,
-            bolt,
+        // Off Windows a listing shows no short names, so `.git` and `.bolt` are always asked for.
+        let by_listing = cfg!(windows);
+        let only = |git: bool, bolt: bool, gitignore, boltignore| Listed {
+            git: git || !by_listing,
+            bolt: bolt || !by_listing,
             gitignore,
             boltignore,
         };
         let none = only(false, false, false, false);
+        #[cfg(windows)]
+        assert_eq!(
+            hints(&[("a.txt", None)]),
+            Listed {
+                git: false,
+                bolt: false,
+                gitignore: false,
+                boltignore: false
+            }
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            hints(&[("a.txt", None)]),
+            Listed {
+                git: true,
+                bolt: true,
+                gitignore: false,
+                boltignore: false
+            }
+        );
         assert_eq!(hints(&[]), none);
         assert_eq!(hints(&[("a.txt", None), ("sub", None)]), none);
         assert_eq!(hints(&[(".git", None)]), only(true, false, false, false));

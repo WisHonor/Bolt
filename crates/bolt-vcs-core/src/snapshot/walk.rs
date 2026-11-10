@@ -46,8 +46,8 @@ pub(super) fn holds_own_repository(dir: &Dir) -> bool {
             .is_ok_and(|m| m.kind == EntryType::Dir)
 }
 
-/// How often a walk asked the drive about a folder, by the folder's full path: the times it
-/// looked for a repository of its own there, and the ignore files it tried to open.
+/// How often a walk asked the drive about a folder, by the folder's full path: the names it asked
+/// for in looking for a repository of its own there, and the ignore files it tried to open.
 #[cfg(test)]
 mod asked {
     use std::collections::BTreeMap;
@@ -62,8 +62,9 @@ mod asked {
         *n = (n.0 + lookups, n.1 + opens);
     }
 
+    /// A look for a repository there, which asks for `.git`, then `.bolt`.
     pub(super) fn lookup(folder: PathBuf) {
-        note(folder, 1, 0);
+        note(folder, 2, 0);
     }
 
     pub(super) fn open(folder: PathBuf) {
@@ -751,6 +752,8 @@ impl WalkState {
     /// `keeps` for what the ignore rules take for a folder when `is_dir`, and the walk opens only
     /// when `opens`.
     fn judged(&mut self, path: &Path, is_dir: bool, opens: bool) -> bool {
+        // A listing never outlives the folder it was made for.
+        self.listed = None;
         if self.problem.is_some() {
             return false;
         }
@@ -786,7 +789,6 @@ impl WalkState {
         // After the rules, so an ignored one stays out without a word. Only now is the folder
         // opened and listed: an ignored one may be one Bolt can't read. The drive is asked for a
         // name only where the listing could hold it, and the walk then uses that same listing.
-        self.listed = None;
         let mut hints = Listed::ALL;
         let nested = opens
             && match self.handles.held(rel).map(Arc::clone) {
@@ -805,11 +807,16 @@ impl WalkState {
                         self.listed = Some((shown(rel), dir, entries));
                         nested
                     }
-                    // A repository Bolt may search but not list is left out, as before.
-                    Err(_) if holds_own_repository(&dir) => true,
+                    // A listing that fails after the open: a nested repository is still judged
+                    // by name.
                     Err(e) => {
-                        self.problem.get_or_insert(folder_problem(&shown(rel), e));
-                        return false;
+                        #[cfg(test)]
+                        asked::lookup(self.root.join(rel));
+                        if !holds_own_repository(&dir) {
+                            self.problem.get_or_insert(folder_problem(&shown(rel), e));
+                            return false;
+                        }
+                        true
                     }
                 },
                 Err(e) => {
@@ -2064,8 +2071,12 @@ mod tests {
         dir.metadata(OsStr::new(name)).is_ok()
     }
 
+    /// The names asked for `.git` and `.bolt` in a folder of plain ASCII names: none on Windows,
+    /// whose listing shows short names, and both elsewhere, where it doesn't.
+    const PLAIN_LOOKUPS: usize = if cfg!(windows) { 0 } else { 2 };
+
     #[test]
-    fn a_folder_of_plain_names_is_not_asked_for_git_bolt_or_ignore_files() {
+    fn a_folder_of_plain_names_is_asked_for_git_and_bolt_only_off_windows() {
         let (dir, mut repo) = project();
         let root = dir.path();
         write(root, "sub/a.txt", b"x");
@@ -2077,8 +2088,18 @@ mod tests {
             saved_paths(&repo, saved),
             ["sub", "sub/B.c", "sub/a.txt", "sub/sub", "sub/sub/x.txt"]
         );
-        assert_eq!(asked::at(&repo.root().join("sub")), (0, 0));
-        assert_eq!(asked::at(&repo.root().join("sub/sub")), (0, 0));
+        assert_eq!(asked::at(&repo.root().join("sub")), (PLAIN_LOOKUPS, 0));
+        assert_eq!(asked::at(&repo.root().join("sub/sub")), (PLAIN_LOOKUPS, 0));
+    }
+
+    #[test]
+    fn a_folder_of_plain_names_opens_no_ignore_file() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "lib/main.rs", b"x");
+        write(root, "lib/README", b"x");
+        save_now(&mut repo).unwrap();
+        assert_eq!(asked::at(&repo.root().join("lib")).1, 0);
     }
 
     #[test]
@@ -2104,10 +2125,11 @@ mod tests {
         }
     }
 
-    /// A repository Bolt may search but not list is still found, and left out.
+    /// Folders are opened for reading, so one Bolt may search but not list can't be opened, and
+    /// the save stops there even if it holds a repository.
     #[cfg(unix)]
     #[test]
-    fn a_nested_repository_that_cannot_be_listed_is_left_out() {
+    fn a_nested_repository_that_cannot_be_listed_stops_the_save() {
         use std::os::unix::fs::PermissionsExt;
         let (dir, mut repo) = project();
         let root = dir.path();
@@ -2122,10 +2144,10 @@ mod tests {
         if root_user {
             return;
         }
-        let saved = saved.unwrap();
-        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
-        assert_eq!(kinds, ["nested_projects_left_out"]);
-        assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        match saved {
+            Err(SaveError::Unreadable { path, .. }) => assert_eq!(path, "wt"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
     }
 
     #[test]
@@ -2156,8 +2178,7 @@ mod tests {
         let saved = save_now(&mut repo).unwrap();
         assert!(warnings_of(&saved).is_empty(), "{saved:?}");
         assert_eq!(saved_paths(&repo, saved).len(), 2);
-        let (lookups, opens) = asked::at(&repo.root().join("sub"));
-        assert!(lookups > 0 && opens == 2, "{lookups} {opens}");
+        assert_eq!(asked::at(&repo.root().join("sub")), (2, 2));
     }
 
     #[test]
@@ -2196,8 +2217,8 @@ mod tests {
                 "sub/c.txt"
             ]
         );
-        assert_eq!(asked::at(&repo.root().join("sub")), (0, 2));
-        assert_eq!(asked::at(&repo.root().join("only")), (0, 1));
+        assert_eq!(asked::at(&repo.root().join("sub")), (PLAIN_LOOKUPS, 2));
+        assert_eq!(asked::at(&repo.root().join("only")), (PLAIN_LOOKUPS, 1));
     }
 
     #[test]
@@ -2215,7 +2236,7 @@ mod tests {
         } else {
             assert_eq!(paths, ["sub", "sub/.GITIGNORE", "sub/a.log", "sub/b.txt"]);
         }
-        assert_eq!(asked::at(&repo.root().join("sub")), (0, 1));
+        assert_eq!(asked::at(&repo.root().join("sub")), (PLAIN_LOOKUPS, 1));
     }
 
     /// The user's own list, then `.git/info/exclude`, then the project's own rules, as in Git: the
