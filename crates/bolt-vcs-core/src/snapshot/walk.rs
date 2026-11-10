@@ -4,7 +4,7 @@
 //! (decision 048).
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -228,17 +228,26 @@ impl Noted {
 }
 
 /// The most folders a save holds open at once (half macOS's default limit of 256 open files, which
-/// counts packs and the rest too): past them, a folder is opened again from the
-/// deepest one held, a name at a time.
+/// counts packs and the rest too).
 const MOST_HELD: usize = 128;
 
-/// The project's folders a save holds open: the top, those below it on the way to the folder last
-/// asked for, at most `MOST_HELD - 2`, and that folder itself when it is deeper than those. So at
-/// most `MOST_HELD` are open, and one more for a moment while the next is opened.
+/// Past the folders a save can hold, it keeps those every this many levels down and lets the
+/// shallowest others go. Going back up a chain as deep as a path allows (2,048 levels, 42 kept),
+/// it then opens each folder again once at most, from the nearest one kept above it.
+const KEPT_EVERY: usize = 48;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times `Handles` has opened each folder on this thread, by project path.
+    static OPENED: std::cell::RefCell<HashMap<PathBuf, usize>> = std::cell::RefCell::default();
+}
+
+/// The project's folders a save holds open: the top, and folders on the way down to the one last
+/// asked for, each with its project path and depth, at most `most - 1` of them. So at most
+/// `MOST_HELD` are open, and one more for a moment while the next is opened.
 pub(super) struct Handles {
     top: Arc<Dir>,
-    down: Vec<(OsString, Arc<Dir>)>,
-    past: Option<(PathBuf, Arc<Dir>)>,
+    down: Vec<(PathBuf, usize, Arc<Dir>)>,
     /// The most it holds; less than `MOST_HELD` while others hold folders too.
     most: usize,
 }
@@ -249,7 +258,6 @@ impl Handles {
         Ok(Handles {
             top: Arc::new(Dir::open_top(root)?),
             down: Vec::new(),
-            past: None,
             most: MOST_HELD,
         })
     }
@@ -262,43 +270,45 @@ impl Handles {
 
     /// `dir`, as a handle that can be kept after this set lets it go.
     fn held(&mut self, rel: &Path) -> io::Result<&Arc<Dir>> {
-        let names: Vec<&OsStr> = rel.iter().collect();
-        let same = self
+        while self
             .down
-            .iter()
-            .zip(&names)
-            .take_while(|((held, _), name)| held.as_os_str() == **name)
-            .count();
-        self.down.truncate(same);
-        while self.down.len() < self.most.saturating_sub(2)
-            && let Some(&name) = names.get(self.down.len())
+            .last()
+            .is_some_and(|(path, ..)| !rel.starts_with(path))
         {
-            let next = self.deepest().open_dir(name)?;
-            self.down.push((name.to_owned(), Arc::new(next)));
+            self.down.pop();
         }
-        let Some((first, rest)) = names
-            .get(self.down.len()..)
-            .and_then(<[&OsStr]>::split_first)
-        else {
-            return Ok(self.deepest());
-        };
-        // Deeper than those held: the folder last opened down there, or one in it, or else again
-        // from the deepest held.
-        let dir = match self.past.take() {
-            Some((path, dir)) if path == rel => dir,
-            Some((path, dir)) if rel.parent() == Some(path.as_path()) => {
-                Arc::new(dir.open_dir(rest.last().unwrap_or(first))?)
-            }
-            other => {
-                drop(other);
-                let mut dir = self.deepest().open_dir(first)?;
-                for name in rest {
-                    dir = dir.open_dir(name)?;
-                }
-                Arc::new(dir)
-            }
-        };
-        Ok(&self.past.insert((rel.to_owned(), dir)).1)
+        let (mut path, from) = self.down.last().map_or_else(
+            || (PathBuf::new(), 0),
+            |(path, depth, _)| (path.clone(), *depth),
+        );
+        let mut at = Arc::clone(self.deepest());
+        for (depth, name) in rel.iter().enumerate().skip(from) {
+            let next = Arc::new(at.open_dir(name)?);
+            path.push(name);
+            #[cfg(test)]
+            OPENED.with_borrow_mut(|o| *o.entry(path.clone()).or_default() += 1);
+            self.make_room();
+            let depth = depth.saturating_add(1);
+            self.down.push((path.clone(), depth, Arc::clone(&next)));
+            at = next;
+        }
+        Ok(self.deepest())
+    }
+
+    /// Lets go of folders held until one more fits: the shallowest not kept every `KEPT_EVERY`
+    /// levels, never the deepest, which the next is opened from; else the shallowest.
+    fn make_room(&mut self) {
+        let room = self.most.saturating_sub(1).max(1);
+        while self.down.len() >= room {
+            let others = self.down.len().saturating_sub(1);
+            let at = self
+                .down
+                .iter()
+                .take(others)
+                .position(|&(_, depth, _)| !depth.is_multiple_of(KEPT_EVERY))
+                .unwrap_or(0);
+            self.down.remove(at);
+        }
     }
 
     /// The folder at the project path `rel`, as `dir` opens it, or what a save says when it can't.
@@ -319,7 +329,7 @@ impl Handles {
     }
 
     fn deepest(&self) -> &Arc<Dir> {
-        self.down.last().map_or(&self.top, |(_, dir)| dir)
+        self.down.last().map_or(&self.top, |(.., dir)| dir)
     }
 }
 
@@ -1623,7 +1633,6 @@ fn walk_and_look(
     // Only the top: what is read next opens its folders again by name, so a file in a folder
     // swapped since the walk is found to be another file, never read as this one.
     rules.handles.down.clear();
-    rules.handles.past = None;
     let (mut folders, mut first) = match walked {
         Ok(folders) => (folders, None),
         Err(problem) => (Folders::new(), Some(problem)),
@@ -4706,6 +4715,46 @@ mod tests {
         let down = |levels: usize| "d/".repeat(levels);
         assert_eq!(tree[&format!("{}x", down(600))].1, b"bottom");
         assert_eq!(tree[&format!("{}e07/x", down(299))].1, b"e");
+    }
+
+    /// The build reads files deepest folder first. Past the folders held, each folder is still
+    /// opened only a few times, not once again for every folder below it.
+    #[test]
+    fn reading_a_deep_chain_deepest_first_opens_each_folder_a_few_times() {
+        use bolt_platform::dir::Dir;
+        use std::io::Write;
+        let (dir, repo) = project();
+        {
+            let n = OsStr::new;
+            let mut at = Dir::open_top(dir.path()).unwrap();
+            for _ in 0..200 {
+                at.create_new(n("x"), false)
+                    .unwrap()
+                    .write_all(b"x")
+                    .unwrap();
+                at.create_dir(n("d")).unwrap();
+                at = at.open_dir(n("d")).unwrap();
+            }
+        }
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        OPENED.with_borrow_mut(HashMap::clear);
+        crate::snapshot::build(
+            repo.store(),
+            &mut packs,
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+            &Noted::default(),
+        )
+        .unwrap();
+        let opened = OPENED.with_borrow_mut(std::mem::take);
+        let total: usize = opened.values().sum();
+        let most = opened.values().copied().max().unwrap_or(0);
+        assert!(
+            most <= 2,
+            "a folder opened {most} times, {total} opens in all"
+        );
     }
 
     /// Lets `gate`'s lookers go at the `sends`th job the walk sends, from this thread.

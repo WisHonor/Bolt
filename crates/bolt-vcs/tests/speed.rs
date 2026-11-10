@@ -1,14 +1,15 @@
-//! The two speed gates for v0.1. Slow, so ignored; run nightly and by hand, one at a time:
+//! The two speed gates for v0.1, and the deepest chain of folders a save takes. Slow, so ignored;
+//! run nightly and by hand, one at a time:
 //! `cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact <test>`
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 mod support;
-use support::{Env, run_limited, text};
+use support::{Env, main_tip, run_limited, text};
 
 const FILES: usize = 100_000;
 const PER_FOLDER: usize = 100;
@@ -89,6 +90,76 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
         ended.peak_bytes <= MOST_BYTES,
         "peaked above {MOST_BYTES} bytes"
     );
+}
+
+/// The deepest chain of folders a save takes, 2,048 levels of `d`, with a file in each but the
+/// last, whose path would pass 4,096 bytes: a save, a status that reads every file again, and a
+/// `goto` that empties the folder and one that writes the chain out again, each timed.
+#[test]
+#[ignore = "slow: saves the deepest chain of folders, a file in each"]
+fn the_deepest_chain_of_folders_with_a_file_in_each() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let first = main_tip(&env).to_hex();
+    let Some(_chain) = Chain::make(env.root(), 2048) else {
+        return;
+    };
+    let timed = |args: &[&str]| {
+        let started = Instant::now();
+        let out = env.bolt().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        started.elapsed().as_secs_f64()
+    };
+    println!("save: {:.2} s", timed(&["save", "Chain", "--yes"]));
+    let second = main_tip(&env).to_hex();
+    fs::remove_file(env.root().join(".bolt/cache/files")).unwrap();
+    println!("status, nothing vouched for: {:.2} s", timed(&["status"]));
+    println!("goto the save before: {:.2} s", timed(&["goto", &first]));
+    assert!(!env.root().join("d").exists());
+    println!("goto the chain again: {:.2} s", timed(&["goto", &second]));
+}
+
+/// `levels` nested folders named `d`, each but the deepest holding a file `x`, removed from the
+/// bottom up when dropped, as a path that long can't be removed whole everywhere.
+struct Chain {
+    top: PathBuf,
+    bottom: PathBuf,
+}
+
+impl Chain {
+    /// `None`, with the reason printed, where the system can't make it.
+    fn make(top: &Path, levels: usize) -> Option<Chain> {
+        let mut chain = Chain {
+            top: top.to_path_buf(),
+            bottom: top.to_path_buf(),
+        };
+        for level in 0..levels {
+            let made = if level == 0 {
+                Ok(())
+            } else {
+                fs::write(chain.bottom.join("x"), b"x")
+            };
+            chain.bottom.push("d");
+            if let Err(e) = made.and_then(|()| fs::create_dir(&chain.bottom)) {
+                chain.bottom.pop();
+                println!("Skipped: this system can't make {levels} nested folders: {e}");
+                return None;
+            }
+        }
+        Some(chain)
+    }
+}
+
+impl Drop for Chain {
+    fn drop(&mut self) {
+        while self.bottom != self.top {
+            let _ = fs::remove_file(self.bottom.join("x"));
+            if fs::remove_dir(&self.bottom).is_err() {
+                break;
+            }
+            self.bottom.pop();
+        }
+    }
 }
 
 /// Writes the memory gate's file where `BOLT_GATE_FILE` says, to measure a save by hand on a
