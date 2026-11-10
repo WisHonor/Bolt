@@ -9,6 +9,7 @@ use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
 use crate::drive::Drive;
+use crate::fsio::Done;
 use crate::history::tip_of;
 use crate::id::{Id, is_hex_start};
 use crate::journal::Journal;
@@ -350,16 +351,19 @@ fn pick_up(
         .map_err(|e| unusable("its server lines", e.to_string()))?;
     // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.
     // Dropped before the new entry, so a crash between them never leaves it to refuse every command.
-    let mut applied = Applied::default();
+    // Told through the store at once, so a pick-up that then fails still says so.
     if !matches!(Journal::read_front(repo), Ok(None)) {
-        Journal::remove_before_head(repo, lock)?;
-        applied.warnings.push(Warning::new(
+        let done = Journal::remove(repo, lock)?;
+        repo.store().note(Warning::new(
             warning::SWITCH_DROPPED,
             "A switch between saves was stopped, and the project's head was lost before it was \
              finished, so no command could finish it: Bolt dropped it, writing no file. The files \
              it had already written show as unsaved changes, and what it would have written over \
              is kept in that switch's own saves.",
         ));
+        if let Done::NotFlushed(e) = done {
+            return Err(RepoError::from(e).into());
+        }
     }
     let made = DiaryEntry {
         parent: Some(to),
@@ -379,7 +383,7 @@ fn pick_up(
         before: entry.state.clone(),
         after: entry.state.clone(),
         effects: Vec::new(),
-        applied,
+        applied: Applied::default(),
         entry,
     })
 }

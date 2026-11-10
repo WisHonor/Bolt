@@ -450,7 +450,7 @@ Folders are not listed; the files in them are.
 
 ## 4. Warnings
 
-`warnings` is in every document, the one for a failed command included, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. When a command finishes, people see each one on stderr as `warning: <message>`. A command that fails lists the warnings it had found before it failed in its document, and people are shown only the error, except for the warnings of a stopped switch the command finished first (`switch_finished`, `changed_since_plan`, `placeholders_written`, `not_written_here`) and `head_not_flushed`, of a step whose head had moved: that happened all the same, so they come before the error. When stdout can't take what a command prints, stderr gets it instead, in the order §5 gives.
+`warnings` is in every document, the one for a failed command included, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. When a command finishes, people see each one on stderr as `warning: <message>`. A command that fails lists the warnings it had found before it failed in its document, and people are shown only the error, except for the warnings of a stopped switch the command finished first (`switch_finished`, `changed_since_plan`, `placeholders_written`, `not_written_here`) `head_not_flushed`, of a step whose head had moved, and `switch_dropped`, of a stopped switch an `undo --to` dropped before it failed: that happened all the same, so they come before the error. When stdout can't take what a command prints, stderr gets it instead, in the order §5 gives.
 
 | Field | Type | Meaning |
 |---|---|---|

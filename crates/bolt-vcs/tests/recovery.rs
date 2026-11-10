@@ -631,6 +631,58 @@ fn a_stopped_switch_from_a_lost_head_is_dropped_without_writing_a_file() {
     assert_eq!(text(&out.stderr), "");
 }
 
+/// A pick-up that fails once it has dropped a stopped switch still says it dropped it, and the
+/// next one goes on.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_pick_up_that_fails_after_dropping_a_switch_still_says_so() {
+    let dropped = "A switch between saves was stopped, and the project's head was lost";
+    for json_out in [false, true] {
+        let (env, [_, one, _]) = project();
+        let save = entry(&env, one).state.lines["main"];
+        let out = env
+            .bolt()
+            .args(["goto", &save.to_hex()])
+            .env("BOLT_FAULT_FAIL", "switch:changed")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        fs::remove_file(head_file(&env)).unwrap();
+        let to = one.to_hex()[..8].to_owned();
+        let mut args = vec!["undo", "--to", &to];
+        if json_out {
+            args.insert(0, "--json");
+        }
+        let out = env
+            .bolt()
+            .args(&args)
+            .env("BOLT_FAULT_FAIL", "journal:removed")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        assert!(!env.root().join(".bolt/state/journal").exists());
+        let said = text(&out.stderr);
+        if json_out {
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            let kinds: Vec<&str> = doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| w["kind"].as_str().unwrap())
+                .collect();
+            assert!(kinds.contains(&"switch_dropped"), "{doc}");
+        } else {
+            let (warned, failed) = (said.find(dropped), said.find("error:"));
+            assert!(
+                warned.is_some() && failed.is_some() && warned < failed,
+                "{said}"
+            );
+        }
+        ok(&env, &["undo", "--to", &to]);
+        assert_eq!(head(&env).1.parent, Some(one));
+    }
+}
+
 #[cfg(feature = "fault-injection")]
 #[test]
 fn an_undo_to_picking_up_a_lost_head_stopped_anywhere_leaves_it_lost_or_picked_up() {
