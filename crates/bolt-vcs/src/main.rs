@@ -914,7 +914,8 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     details.push("The ID stays the same.".to_owned());
                 }
                 if let Some(line) = req.new_line {
-                    details.push(format!("You're on the new line {}.", escape(line, false)));
+                    let line = style::whole(&escape(line, false));
+                    details.push(format!("You're on the new line {line}."));
                 }
                 if only.is_some() {
                     details.push(format!(
@@ -926,7 +927,8 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     text += "\n";
                 }
                 for detail in details {
-                    text += &format!("    {detail}\n");
+                    text += &s.detail(None, &detail);
+                    text.push('\n');
                 }
                 text
             };
@@ -2334,14 +2336,14 @@ fn finished_switch(repo: &Repository) -> Option<String> {
 
 /// What a command line clap stopped at prints: Bolt's own help when help was asked for, or when
 /// no command was given, which still ends with 2; clap's own message for anything else.
-fn help_or_usage_error(e: &clap::Error, args: &[OsString]) -> ExitCode {
+fn help_or_usage_error(e: &clap::Error, args: &[OsString], json: bool) -> ExitCode {
     use clap::error::ErrorKind;
     let code = match e.kind() {
         ErrorKind::DisplayHelp => 0,
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 2,
         _ => e.exit(),
     };
-    style::find_out(false);
+    style::find_out(json);
     // The command asked about: the first word that isn't an option, or the one after `help`.
     let mut words = args
         .iter()
@@ -2373,7 +2375,7 @@ fn main() -> ExitCode {
     };
     let cli = match Cli::try_parse_from(std::iter::once(program).chain(args.iter().cloned())) {
         Ok(cli) => cli,
-        Err(e) => return help_or_usage_error(&e, &args),
+        Err(e) => return help_or_usage_error(&e, &args, json),
     };
     style::find_out(cli.json);
     // The project a command opens is kept here, so that if the command fails, the error can list
@@ -2470,5 +2472,21 @@ mod tests {
             }
         }
         assert!(help::examples("commit").is_empty());
+    }
+
+    #[test]
+    fn the_overview_names_every_command_once_and_no_other() {
+        let mut named: Vec<&str> = help::GROUPS
+            .iter()
+            .flat_map(|(_, rows)| rows.iter())
+            .flat_map(|(name, _, beside)| std::iter::once(*name).chain(*beside))
+            .collect();
+        named.sort_unstable();
+        let mut commands: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        commands.sort();
+        assert_eq!(named, commands);
     }
 }

@@ -38,10 +38,11 @@ pub fn unshelved(done: &UnshelfOutcome, title: &str) -> String {
         escape(&done.label, false)
     );
     if done.carried > 0 {
-        text += &format!(
-            "\n    Your other unsaved changes in {} stayed as they are.\n",
+        let stayed = format!(
+            "Your other unsaved changes in {} stayed as they are.",
             output::files(done.carried)
         );
+        text += &format!("\n{}\n", style::out().detail(None, &stayed));
     }
     text
 }

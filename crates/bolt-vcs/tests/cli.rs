@@ -2990,3 +2990,57 @@ fn help_lists_only_options_the_command_takes() {
         }
     }
 }
+
+/// `help` is no command of Bolt's to have a page: asking for its help shows the overview.
+#[test]
+fn help_on_help_shows_the_overview() {
+    let overview = bolt_says(&["help"]);
+    assert_eq!(bolt_says(&["help", "help"]), overview);
+}
+
+/// One page whole, so that a change in how the command line's reader lays out its parts shows.
+#[test]
+fn the_undo_page_is_exactly_this() {
+    assert_eq!(
+        help_of("undo"),
+        "bolt undo: take back the last step, or the last N, one at a time: the lines, where you \
+         are and what the step did to your files go back as they were\n\
+         \n\
+         Examples\n\
+         bolt undo                Take back your last step\n\
+         bolt undo 3              Take back the last three steps\n\
+         bolt undo --shelve       Set unsaved changes in the way aside first\n\
+         bolt undo --list         List the steps you can take back or bring back\n\
+         bolt undo --to 3f9a2c7e  Make things as they were after this entry\n\
+         \n\
+         Usage\n\
+         bolt undo [OPTIONS] [N]\n\
+         \n\
+         Arguments\n\
+         [N]  How many steps [default: 1]\n\
+         \n\
+         Options\n    \
+         --json        Print machine-readable JSON instead of text\n    \
+         --shelve      Set your unsaved changes in the way aside on a new shelf, as part of the \
+         same step\n    \
+         --list        List the steps redo can bring back and undo can take, numbered for N\n    \
+         --all         With --list: every entry of the diary, undos and redos included\n    \
+         --to <ENTRY>  Make things as they were right after this diary entry, named by at least \
+         8 hex digits of its ID, as bolt undo --list shows them\n\
+         -h, --help        Print help\n"
+    );
+}
+
+#[test]
+fn dash_h_dash_dash_help_and_help_print_the_same_page() {
+    for (command, _) in COMMANDS {
+        let page = help_of(command);
+        for args in [[command, "-h"], [command, "--help"]] {
+            assert_eq!(
+                bolt_says(&args),
+                (Some(0), page.clone(), String::new()),
+                "{args:?}"
+            );
+        }
+    }
+}

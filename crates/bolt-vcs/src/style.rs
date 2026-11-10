@@ -196,9 +196,42 @@ impl Sym {
 }
 
 /// Columns `text` takes, counted one per character: Bolt's own words and symbols are one column
-/// each, and a wide character in a project's name only makes its row run a little long.
+/// each, and a wide character in a project's name only makes its row run a little long. Colour
+/// codes and the marks [`whole`] puts in take none.
 pub(crate) fn columns(text: &str) -> usize {
-    text.chars().count()
+    let mut n = 0;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            OPEN | CLOSE => {}
+            _ => n += 1,
+        }
+    }
+    n
+}
+
+/// Marks around a project's text while a line is wrapped, and what stands for its spaces:
+/// control characters, which `text::escape` never lets through, so a project can't write them.
+const OPEN: char = '\u{2}';
+const CLOSE: char = '\u{3}';
+const SPACE: char = '\u{1}';
+
+/// `text` from a project, escaped and maybe painted, marked so that wrapping never breaks it and
+/// never starts a line under a detail's text with it. Only for text given to [`Screen::detail`].
+pub fn whole(text: &str) -> String {
+    format!("{OPEN}{}{CLOSE}", text.replace(' ', &SPACE.to_string()))
+}
+
+/// `line` as printed: the marks [`whole`] put in taken out.
+fn unmarked(line: &str) -> String {
+    line.replace([OPEN, CLOSE], "").replace(SPACE, " ")
 }
 
 impl Screen {
@@ -242,18 +275,31 @@ impl Screen {
     }
 
     /// `text` with each of its lines `indent` columns in. On a terminal each line is wrapped at
-    /// the smaller of the width and 100, the lines it breaks into starting as far in.
+    /// the smaller of the width and 100, the lines it breaks into starting as far in; a
+    /// project's text marked by [`whole`] that can't go on with the words before it gets a row
+    /// of its own, 4 further in.
     pub fn indented(self, indent: usize, text: &str) -> String {
         let mut lines = Vec::new();
         for line in text.split('\n') {
             match self.width {
                 Some(width) => wrap(line, width.min(100).saturating_sub(indent), &mut lines),
-                None => lines.push(line.to_owned()),
+                None => lines.push((0, line.to_owned())),
             }
         }
-        let pad = " ".repeat(indent);
-        let lines: Vec<String> = lines.into_iter().map(|l| format!("{pad}{l}")).collect();
+        let lines: Vec<String> = lines
+            .into_iter()
+            .map(|(extra, l)| format!("{}{}", " ".repeat(indent + extra), unmarked(&l)))
+            .collect();
         lines.join("\n")
+    }
+
+    /// A detail sentence, 4 columns in, after `mark` (a bullet or a check) and a space when it
+    /// has one. On a terminal it wraps under its text, after the mark.
+    pub fn detail(self, mark: Option<&str>, text: &str) -> String {
+        let head = mark.map_or(String::new(), |m| format!("{m} "));
+        let indent = 4 + columns(&head);
+        let body = self.indented(indent, text);
+        format!("    {head}{}", &body[indent..])
     }
 
     /// `path` cut from its middle to fit `room` columns, or whole when it can't be or this is no
@@ -316,23 +362,30 @@ fn escape_len(rest: &[char]) -> usize {
     }
 }
 
-/// `line` broken at spaces into lines of at most `room` columns. A word longer than that is
-/// left long.
-fn wrap(line: &str, room: usize, lines: &mut Vec<String>) {
+/// `line` broken at spaces into lines of at most `room` columns, each with how much further in
+/// it starts. A word longer than that is left long. A project's text that would start a line
+/// after a break goes on a row of its own, 4 further in, so it never passes for Bolt's words.
+fn wrap(line: &str, room: usize, lines: &mut Vec<(usize, String)>) {
     let mut current: Option<String> = None;
+    let mut broken = false;
     for word in line.split(' ') {
-        match &mut current {
-            Some(c) if columns(c) + 1 + columns(word) > room && !c.trim().is_empty() => {
-                lines.push(std::mem::replace(c, word.to_owned()));
-            }
-            Some(c) => {
+        if let Some(c) = &mut current {
+            if columns(c) + 1 + columns(word) <= room || c.trim().is_empty() {
                 c.push(' ');
                 c.push_str(word);
+                continue;
             }
-            None => current = Some(word.to_owned()),
+            lines.push((0, std::mem::take(c)));
+            current = None;
+            broken = true;
+        }
+        if broken && word.starts_with(OPEN) {
+            lines.push((4, word.to_owned()));
+        } else {
+            current = Some(word.to_owned());
         }
     }
-    lines.extend(current);
+    lines.extend(current.map(|c| (0, c)));
 }
 
 /// Whether lines meant only for people go on stderr.

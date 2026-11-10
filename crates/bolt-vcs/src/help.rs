@@ -7,10 +7,10 @@ use clap::Command;
 use crate::style::{self, Role};
 
 /// A command in the overview: its name, what it does, and the command named beside it.
-type Row = (&'static str, &'static str, Option<&'static str>);
+pub type Row = (&'static str, &'static str, Option<&'static str>);
 
 /// The overview's groups, each a title and its rows.
-const GROUPS: [(&str, &[Row]); 3] = [
+pub const GROUPS: [(&str, &[Row]); 3] = [
     (
         "Every day",
         &[
@@ -199,8 +199,12 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
 }
 
 /// The help page of the command `name`: what it does, its examples, its usage, then what it
-/// takes. `None` when Bolt has no such command.
+/// takes. `None` when Bolt has no such command, as for the command-line reader's own `help`.
 pub fn page(root: &mut Command, name: &str) -> Option<String> {
+    let examples = examples(name);
+    if examples.is_empty() {
+        return None;
+    }
     root.build();
     let command = root.find_subcommand(name)?;
     let s = style::out();
@@ -214,7 +218,6 @@ pub fn page(root: &mut Command, name: &str) -> Option<String> {
         .map(|c| c.to_lowercase().chain(first).collect())
         .unwrap_or_default();
     let mut text = format!("bolt {name}: {about}\n");
-    let examples = examples(name);
     let wide = examples.iter().map(|(line, _)| style::columns(line)).max();
     text += &format!("\n{}\n", s.paint(Role::Bold, "Examples"));
     for (line, does) in examples {

@@ -25,16 +25,17 @@ fn and_the_rest(mut listed: Vec<String>, count: u64) -> Vec<String> {
 
 /// One detail, added to `text`: indented 4, and on a terminal wrapped there.
 fn detail(text: &mut String, line: &str) {
-    *text += &style::out().indented(4, line);
+    *text += &style::out().detail(None, line);
     text.push('\n');
 }
 
-/// `heading` and `items` after it, added to `text` as a detail: one on the same line, more on a
-/// line each under it. Names are never cut, so a long one runs long.
+/// `heading` and `items` after it, added to `text` as a detail: one on the same line when it
+/// fits there, more on a row each under it. An item is the repository's text, so it is never
+/// broken, and a long one runs long.
 fn list(text: &mut String, heading: &str, items: &[String]) {
     match items {
         [] => {}
-        [one] => detail(text, &format!("{heading}: {one}")),
+        [one] => detail(text, &format!("{heading}: {}", style::whole(one))),
         _ => {
             detail(text, &format!("{heading}:"));
             for item in items {

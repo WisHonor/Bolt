@@ -195,7 +195,7 @@ pub fn hint(word: &str) -> Option<&'static str> {
         "switch" => "in Bolt, switch is goto: bolt goto <line>",
         "stash" => {
             "in Bolt, stash is shelf, which takes new files too: bolt shelf\n\
-             A shelf keeps the number bolt shelf --list shows, counted from 1."
+             A shelf keeps the number `bolt shelf --list` shows, counted from 1."
         }
         "branch" => "in Bolt, branch is line: bolt line",
         "fsck" => "in Bolt, fsck is verify: bolt verify",
@@ -242,11 +242,20 @@ pub fn teach(word: &str) {
         return;
     }
     let e = style::err();
-    // The command ends the first line; a line after it says more.
+    // The command ends the first line; a line after it says more, its commands between
+    // backquotes, which are painted instead of printed.
     let (first, more) = hint.split_once('\n').unwrap_or((hint, ""));
     let (said, command) = first.split_once(": ").unwrap_or((first, ""));
     let mut message = format!("{said}: {}", e.paint(Role::Command, command));
     if !more.is_empty() {
+        let more: String = more
+            .split('`')
+            .enumerate()
+            .map(|(n, piece)| match n % 2 {
+                1 => e.paint(Role::Command, piece),
+                _ => piece.to_owned(),
+            })
+            .collect();
         message = format!("{message}\n{more}");
     }
     tell("");

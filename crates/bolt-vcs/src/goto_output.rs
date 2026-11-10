@@ -66,13 +66,15 @@ pub fn switched(
         details.push("Saving here asks for a new line's name.".to_owned());
         if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
             let line = escape(line, false);
-            let goto = s.paint(Role::Command, &format!("bolt goto {line}"));
+            let goto = style::whole(&s.paint(Role::Command, &format!("bolt goto {line}")));
+            let line = style::whole(&line);
             details.push(format!("To keep saving on {line}: {goto}"));
         }
     }
     text.push('\n');
     for detail in details {
-        text += &format!("    {detail}\n");
+        text += &s.detail(None, &detail);
+        text.push('\n');
     }
     text
 }

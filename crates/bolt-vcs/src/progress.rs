@@ -143,9 +143,11 @@ impl<W: Write> Bar<W> {
         }
     }
 
+    /// A new label is drawn at its next update, however soon: a quick pass still shows.
     pub fn set_label(&mut self, label: &str) {
         if self.label != label {
             label.clone_into(&mut self.label);
+            self.last = None;
         }
     }
 
@@ -405,6 +407,19 @@ mod tests {
         let said = String::from_utf8(out).unwrap();
         assert_eq!(said.matches('\r').count(), 2, "{said:?}");
         assert!(said.ends_with("  50%  2 / 4"), "{said:?}");
+    }
+
+    #[test]
+    fn a_new_label_is_drawn_at_once() {
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        let mut b = bar(&mut out, t0);
+        b.update_at(t0 + QUIET, 1, Some(4), false);
+        b.set_label("Checking Git LFS files");
+        b.update_at(t0 + QUIET + Duration::from_millis(1), 1, Some(4), false);
+        std::mem::forget(b);
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("\rChecking Git LFS files"), "{said:?}");
     }
 
     #[test]

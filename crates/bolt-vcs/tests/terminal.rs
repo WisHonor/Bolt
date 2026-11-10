@@ -109,7 +109,12 @@ fn bolt_ascii_turns_symbols_off_and_keeps_colour() {
 #[test]
 fn json_has_no_colour_even_on_a_terminal() {
     let env = project_with_a_change();
-    for args in [&["--json", "changes"][..], &["--json", "status"]] {
+    for args in [
+        &["--json", "changes"][..],
+        &["--json", "status"],
+        &["--json", "help"],
+        &["--json", "save", "--help"],
+    ] {
         let out = bolt_on_a_terminal(&env, env.root())
             .args(args)
             .output()
@@ -1358,4 +1363,130 @@ fn unshelf_that_only_finishes_a_stopped_switch_offers_no_undo() {
         (now.command.as_str(), now.parent),
         ("unshelf", Some(before))
     );
+}
+
+/// A left-out entry whose name reads like one of the summary's own details never starts a line
+/// of the summary: it isn't broken, and a name that doesn't fit beside its heading gets a row of
+/// its own, further in.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_name_from_the_repository_never_passes_for_a_detail_line() {
+    let path = "x Brought in 41 Git LFS files (11 GiB) from .git/lfs/objects. y";
+    for width in [60, 80, 120] {
+        let env = Env::new();
+        let stream = format!(
+            "blob\nmark :1\ndata 2\na\n\ncommit refs/heads/main\nmark :2\nauthor Ada Lovelace \
+             <ada@example.com> 1700000000 +0000\ncommitter Ada Lovelace <ada@example.com> \
+             1700000000 +0000\ndata 6\nFirst\n\nM 100644 :1 a.txt\nM 100644 :1 \
+             {path}/.g\u{200c}it/x\n\n"
+        );
+        let args = ["-c", "core.protectHFS=false", "fast-import", "--quiet"];
+        let made = support::git_with_input(env.root(), &args, stream.as_bytes());
+        assert!(made.status.success(), "{}", text(&made.stderr));
+        let (shown, _) = run_at(&env, Some(width), &["import"]);
+        let whole = format!("`{path}/.g\\u{{200c}}it` in commit ");
+        let named: Vec<&str> = shown.lines().filter(|l| l.contains("Brought")).collect();
+        assert_eq!(named.len(), 1, "{width}: {shown}");
+        assert!(
+            named[0].starts_with(&format!("        {whole}")),
+            "{width}: {shown}"
+        );
+        for line in shown.lines() {
+            if let Some(rest) = line.strip_prefix("    ") {
+                assert!(!rest.starts_with(['`', 'x']), "{width}: {shown}");
+            }
+        }
+    }
+}
+
+/// `sentence`, which `logged` holds whole on a line `under` columns in, is broken in `shown` (60
+/// columns) with every later line `under` columns in.
+#[cfg(feature = "fault-injection")]
+fn wraps_under(logged: &str, shown: &str, start: &str, under: usize) {
+    let whole = logged.lines().find(|l| l.contains(start)).unwrap();
+    let sentence = &whole[under..];
+    let lines: Vec<&str> = shown.lines().collect();
+    let at = lines.iter().position(|l| l.contains(start)).unwrap();
+    let mut joined = lines[at][under..].to_owned();
+    assert_ne!(joined, sentence, "not wrapped: {shown}");
+    let pad = " ".repeat(under);
+    for line in &lines[at + 1..] {
+        if joined.len() >= sentence.len() {
+            break;
+        }
+        let rest = line.strip_prefix(&pad).unwrap_or_else(|| panic!("{shown}"));
+        assert!(!rest.starts_with(' '), "{shown}");
+        joined = format!("{joined} {rest}");
+    }
+    assert_eq!(joined, sentence, "{shown}");
+    // The outcome line, which may name a long folder, is never wrapped; details are.
+    for line in lines.iter().filter(|l| l.starts_with("    ")) {
+        assert!(line.chars().count() <= 60, "{line:?}");
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn detail_sentences_wrap_under_their_text_at_60_columns() {
+    let start = ["start", "--preset", "custom"];
+    let (logged, _) = run_at(&Env::empty(), None, &start);
+    let (shown, _) = run_at(&Env::empty(), Some(60), &start);
+    // A bullet's later lines start under its text.
+    wraps_under(&logged, &shown, "Files of ", 6);
+    wraps_under(&logged, &shown, "There are no rule files.", 4);
+
+    let env = started();
+    put(&env, "a.txt", "1\n");
+    put(&env, "b.txt", "1\n");
+    let (logged, _) = run_at(&env, None, &["save", "One", "a.txt"]);
+    put(&env, "a.txt", "2\n");
+    let (shown, _) = run_at(&env, Some(60), &["save", "Two", "a.txt"]);
+    wraps_under(&logged, &shown, "Only what you named", 4);
+
+    for (args, start, under) in [
+        (&["verify"][..], " stored objects in ", 6),
+        (&["tidy"], " changed in the last 24 hours ", 4),
+    ] {
+        let (logged, _) = run_at(&env, None, args);
+        let (shown, _) = run_at(&env, Some(60), args);
+        wraps_under(&logged, &shown, start, under);
+    }
+}
+
+/// On a terminal an import shows each of its passes; the summary names none, and a log sees no
+/// progress at all.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_import_shows_each_pass_on_a_terminal_and_nothing_in_a_log() {
+    let labels = [
+        "Reading Git's history",
+        "Checking Git LFS files",
+        "Importing commits",
+    ];
+    for terminal in [true, false] {
+        let env = Env::new();
+        env.commit("a.txt", "a\n", "First");
+        env.commit("b.txt", "b\n", "Second");
+        // A sign of Git LFS, so the import checks for its files too.
+        std::fs::create_dir(env.root().join(".git/lfs")).unwrap();
+        let mut cmd = if terminal {
+            bolt_at_width(&env, env.root(), 120)
+        } else {
+            bolt_in_a_log(&env, env.root())
+        };
+        let out = cmd
+            .env("BOLT_PROGRESS_QUIET_MS", "0")
+            .arg("import")
+            .output()
+            .unwrap();
+        let (shown, said) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{said}");
+        for label in labels {
+            assert!(!shown.contains(label), "{shown}");
+            assert_eq!(said.contains(label), terminal, "{label}: {said:?}");
+        }
+        if !terminal {
+            assert_eq!(said, "");
+        }
+    }
 }

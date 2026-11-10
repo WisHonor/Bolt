@@ -1016,15 +1016,16 @@ pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
     };
     // A deleted file put back loses nothing, so it needs no copy.
     let copies = match done.safety_copies {
-        0 => String::new(),
-        k if k == n && n == 1 => "\n    A safety copy of it was kept.\n".into(),
-        k if k == n => "\n    A safety copy of each was kept.\n".into(),
-        1 => "\n    A safety copy of the 1 that held unsaved work was kept.\n".into(),
-        k => format!(
-            "\n    Safety copies of the {} that held unsaved work were kept.\n",
+        0 => None,
+        k if k == n && n == 1 => Some("A safety copy of it was kept.".to_owned()),
+        k if k == n => Some("A safety copy of each was kept.".to_owned()),
+        1 => Some("A safety copy of the 1 that held unsaved work was kept.".to_owned()),
+        k => Some(format!(
+            "Safety copies of the {} that held unsaved work were kept.",
             thousands(k as u64)
-        ),
+        )),
     };
+    let copies = copies.map_or(String::new(), |c| format!("\n{}\n", s.detail(None, &c)));
     let nothing = n == 0 && done.folders == 0;
     // The warning that follows names what stayed and says why.
     let said = match (nothing, everywhere) {
@@ -1059,8 +1060,7 @@ pub fn tidied(report: &TidyReport) -> String {
     let s = style::out();
     let freed = report.bytes_before.saturating_sub(report.bytes_after);
     let held = bytes(report.bytes_after);
-    let mut text = if report.to_free == 0 && report.packs_removed == 0 && report.packs_written == 0
-    {
+    let text = if report.to_free == 0 && report.packs_removed == 0 && report.packs_written == 0 {
         format!("Nothing to free: storage holds {held}.\n")
     } else if report.packs_removed == 0 {
         // The warnings that follow say why each pack stayed.
@@ -1075,21 +1075,18 @@ pub fn tidied(report: &TidyReport) -> String {
             s.paint(Role::Dim, &packs)
         )
     };
-    match report.packs_young {
-        0 => {}
-        1 => {
-            text += "\n    Left 1 pack changed in the last 24 hours as it is: a later bolt tidy \
-                     frees what it holds that nothing needs.\n";
-        }
-        n => {
-            text += &format!(
-                "\n    Left {} changed in the last 24 hours as they are: a later bolt tidy \
-                 frees what they hold that nothing needs.\n",
-                counted(n as u64, "pack", "packs")
-            );
-        }
-    }
-    text
+    let left = match report.packs_young {
+        0 => return text,
+        1 => "Left 1 pack changed in the last 24 hours as it is: a later bolt tidy frees what it \
+              holds that nothing needs."
+            .to_owned(),
+        n => format!(
+            "Left {} changed in the last 24 hours as they are: a later bolt tidy frees what they \
+             hold that nothing needs.",
+            counted(n as u64, "pack", "packs")
+        ),
+    };
+    text + "\n" + &s.detail(None, &left) + "\n"
 }
 
 /// How many problems of a kind `bolt verify` lists on screen.
@@ -1167,15 +1164,16 @@ pub fn verified(v: &Verified, project: &str) -> String {
     );
     let objects = counted(v.objects, "stored object", "stored objects");
     if let Some(why) = &v.unlisted {
-        let _ = writeln!(text, "    {cross} {why}");
+        let _ = writeln!(text, "{}", s.detail(Some(&cross), why));
     } else if v.objects_failed == 0 && (packs.1 == 0 && unread.1 == 0 || v.objects > 0) {
-        let _ = writeln!(text, "    {check} {objects} in {stored}");
-    } else if matched > 0 {
         let _ = writeln!(
             text,
-            "    {check} {} of {objects} in {stored}",
-            thousands(matched)
+            "{}",
+            s.detail(Some(&check), &format!("{objects} in {stored}"))
         );
+    } else if matched > 0 {
+        let line = format!("{} of {objects} in {stored}", thousands(matched));
+        let _ = writeln!(text, "{}", s.detail(Some(&check), &line));
     }
     let mut unshown = group(
         &mut text,
@@ -1192,13 +1190,13 @@ pub fn verified(v: &Verified, project: &str) -> String {
     if v.needs_checked {
         let missing = rows(ProblemKind::ObjectMissing);
         if missing.1 == 0 {
-            let _ = writeln!(
-                text,
-                "    {check} {}, {} and {} point to objects that exist",
+            let line = format!(
+                "{}, {} and {} point to objects that exist",
                 counted(v.saves, "save", "saves"),
                 counted(v.lines, "line", "lines"),
                 counted(v.shelves, "shelf", "shelves")
             );
+            let _ = writeln!(text, "{}", s.detail(Some(&check), &line));
         }
         let needed = (
             "object the project needs is missing:",
@@ -1206,7 +1204,14 @@ pub fn verified(v: &Verified, project: &str) -> String {
         );
         unshown |= group(&mut text, s, &missing, needed);
         let entries = counted(v.entries, "entry", "entries");
-        let _ = writeln!(text, "    {check} the undo diary ({entries}) is intact");
+        let _ = writeln!(
+            text,
+            "{}",
+            s.detail(
+                Some(&check),
+                &format!("the undo diary ({entries}) is intact")
+            )
+        );
     } else {
         let why = v
             .needs_failure
@@ -1214,7 +1219,7 @@ pub fn verified(v: &Verified, project: &str) -> String {
             .map_or("What the project needs couldn't be checked.", |(_, why)| {
                 why.as_str()
             });
-        let _ = writeln!(text, "    {cross} {why}");
+        let _ = writeln!(text, "{}", s.detail(Some(&cross), why));
     }
     if unshown {
         let json = s.paint(Role::Command, "bolt verify --json");
@@ -1223,7 +1228,11 @@ pub fn verified(v: &Verified, project: &str) -> String {
         } else {
             format!("the first {}", thousands(PROBLEMS_KEPT as u64))
         };
-        let _ = writeln!(text, "    {json} lists {which}.");
+        let _ = writeln!(
+            text,
+            "{}",
+            s.detail(None, &format!("{json} lists {which}."))
+        );
     }
     text
 }
@@ -1241,7 +1250,11 @@ fn group(
         return false;
     }
     let cross = s.paint(Role::Error, s.sym(Sym::Cross));
-    let _ = writeln!(text, "    {cross} {}", counted(n, header.0, header.1));
+    let _ = writeln!(
+        text,
+        "{}",
+        s.detail(Some(&cross), &counted(n, header.0, header.1))
+    );
     let shown = rows.len().min(PROBLEMS_SHOWN);
     for p in &rows[..shown] {
         let _ = writeln!(text, "        {}", problem_row(s, p));

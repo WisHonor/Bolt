@@ -182,18 +182,20 @@ pub fn started(
         ));
     }
     for line in said {
-        text += &format!("    {bullet} {line}\n");
+        text += &s.detail(Some(bullet), &line);
+        text.push('\n');
     }
     let setup = s.paint(Role::Command, "bolt setup");
-    text += &match preset {
-        None => format!("\n    See them any time with: {setup}\n"),
+    let see = match preset {
+        None => format!("See them any time with: {setup}"),
         Some(Preset::Custom) => {
-            format!("\n    There are no rule files. See the rules any time with: {setup}\n")
+            format!("There are no rule files. See the rules any time with: {setup}")
         }
-        Some(_) => format!(
-            "\n    The rules are in bolt.toml and .boltignore. See them any time with: {setup}\n"
-        ),
+        Some(_) => {
+            format!("The rules are in bolt.toml and .boltignore. See them any time with: {setup}")
+        }
     };
+    text += &format!("\n{}\n", s.detail(None, &see));
     if let Some(short) = short {
         text += &format!(
             "\nYour first save is {} on line {}.\n",

@@ -437,6 +437,30 @@ fn stash_says_a_shelfs_number_is_the_one_shelf_list_shows() {
     );
 }
 
+/// Both of the stash hint's commands are painted as commands.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn the_stash_hints_commands_are_both_coloured() {
+    let env = project();
+    write(&env, "a.txt", "changed\n");
+    let out = env
+        .bolt()
+        .env("BOLT_FAKE_TERMINAL", "80")
+        .env("BOLT_PROGRESS_QUIET_MS", "600000")
+        .env_remove("NO_COLOR")
+        .arg("stash")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let said = text(&out.stderr);
+    for command in ["bolt shelf", "bolt shelf --list"] {
+        assert!(
+            said.contains(&format!("\x1b[36m{command}\x1b[0m")),
+            "{command}: {said:?}"
+        );
+    }
+}
+
 #[test]
 fn the_diary_names_bolts_command() {
     let env = project();
