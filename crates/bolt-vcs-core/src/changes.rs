@@ -205,8 +205,8 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     let (_, entry) = repo.current().map_err(SaveError::from)?;
     let tip = tip_of(&entry).map_err(SaveError::from)?;
     let save = store.save(&tip, repo.signatures_allowed())?;
-    let now =
-        read_folder(repo, save.root, false, git_excludes).map_err(|e| e.in_save(tip, true))?;
+    let now = read_folder(repo, save.root, false, git_excludes, None)
+        .map_err(|e| e.in_save(tip, true))?;
     for w in now
         .warnings
         .into_iter()

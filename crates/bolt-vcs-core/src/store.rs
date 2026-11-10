@@ -11,7 +11,7 @@ use crate::pack::{HashingWriter, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::save::Save;
 use crate::text::escape;
 use crate::warning::{self, Warning};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::ops::ControlFlow;
@@ -89,6 +89,87 @@ struct Copy {
 impl Copy {
     fn at(&self) -> At {
         (self.n, self.entry.id)
+    }
+}
+
+/// A folder listing a second handle on the store read: its length as stored, and the pack and
+/// index line it was read from.
+#[derive(Debug)]
+pub(crate) struct Peeked {
+    listing: Listing,
+    size: usize,
+    pack: PathBuf,
+    entry: IndexEntry,
+}
+
+impl Peeked {
+    pub(crate) fn listing(&self) -> &Listing {
+        &self.listing
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
+}
+
+#[cfg(test)]
+impl Peeked {
+    /// One that names no pack, for tests of what holds them.
+    pub(crate) fn of(listing: Listing, size: usize) -> Peeked {
+        let id = listing.id();
+        Peeked {
+            listing,
+            size,
+            pack: PathBuf::new(),
+            entry: IndexEntry {
+                id,
+                kind: ObjectKind::FolderListing,
+                offset: 0,
+                uncompressed_size: 0,
+                stored_size: 0,
+            },
+        }
+    }
+}
+
+/// What `listing_after` came to: the listing read ahead, or the bytes of a copy it read itself.
+enum Got {
+    Ready(Listing),
+    Bytes(Vec<u8>),
+}
+
+/// How many index lookups and record reads this thread's stores made, to show what
+/// `listing_after` is spared.
+#[cfg(test)]
+pub(crate) mod counted {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FINDS: Cell<usize> = const { Cell::new(0) };
+        static RECORDS: Cell<usize> = const { Cell::new(0) };
+        static LISTINGS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn listing() {
+        LISTINGS.set(LISTINGS.get() + 1);
+    }
+
+    /// The listings this thread's stores were asked for, read ahead or not.
+    pub(crate) fn listings() -> usize {
+        LISTINGS.get()
+    }
+
+    pub(super) fn find() {
+        FINDS.set(FINDS.get() + 1);
+    }
+
+    pub(super) fn record() {
+        RECORDS.set(RECORDS.get() + 1);
+    }
+
+    /// The lookups and record reads so far.
+    pub(crate) fn now() -> (usize, usize) {
+        (FINDS.get(), RECORDS.get())
     }
 }
 
@@ -216,6 +297,68 @@ impl Tries {
             },
             (None, None) => StoreError::Missing(*id),
         }
+    }
+}
+
+/// The most memory the chunks kept while one file is written may take.
+const KEPT: usize = 8 << 20;
+/// What keeping a chunk costs besides its bytes: its key, its map and queue slots, its allocation.
+const PER_KEPT: usize = 128;
+
+/// Chunks already read and checked while one file is written, so a list naming one again doesn't
+/// read it again. The first read goes first when they would take more than `KEPT`.
+#[derive(Default)]
+struct Kept {
+    chunks: HashMap<Id, Vec<u8>>,
+    order: VecDeque<Id>,
+    total: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The most memory charged, and the most chunks kept, at once.
+    static KEPT_MOST: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn charge(bytes: &Vec<u8>) -> usize {
+    bytes.capacity().saturating_add(PER_KEPT)
+}
+
+impl Kept {
+    /// The chunk `id`, if it is kept and of `size` bytes.
+    fn get(&self, id: &Id, size: u64) -> Option<&[u8]> {
+        self.chunks
+            .get(id)
+            .filter(|bytes| bytes.len() as u64 == size)
+            .map(Vec::as_slice)
+    }
+
+    /// Keeps `bytes` as the chunk `id` if there is room, letting the oldest go to make it. Only a
+    /// shortcut: with no memory to spare, the chunk is just not kept.
+    fn keep(&mut self, id: Id, bytes: Vec<u8>) {
+        let cost = charge(&bytes);
+        if cost > KEPT || self.chunks.contains_key(&id) {
+            return;
+        }
+        while self.total.saturating_add(cost) > KEPT {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.chunks.remove(&oldest) {
+                self.total = self.total.saturating_sub(charge(&gone));
+            }
+        }
+        if self.chunks.try_reserve(1).is_err() || self.order.try_reserve(1).is_err() {
+            return;
+        }
+        self.total = self.total.saturating_add(cost);
+        self.order.push_back(id);
+        self.chunks.insert(id, bytes);
+        #[cfg(test)]
+        KEPT_MOST.set({
+            let (total, count) = KEPT_MOST.get();
+            (total.max(self.total), count.max(self.chunks.len()))
+        });
     }
 }
 
@@ -571,8 +714,23 @@ impl Store {
             inner: out,
             hasher: ContentHasher::new(),
         };
+        let mut kept = Kept::default();
         for chunk in &list.chunks {
-            match self.copy(&chunk.id, Wanted::Chunk(chunk.size), &mut hashing) {
+            let copied = match kept.get(&chunk.id, chunk.size) {
+                Some(bytes) => hashing
+                    .write_all(bytes)
+                    .map_err(|e| PackError::from(e).into()),
+                None if chunk.size <= NEAR => {
+                    self.read_chunk(&chunk.id, chunk.size).and_then(|bytes| {
+                        hashing.write_all(&bytes).map_err(PackError::from)?;
+                        kept.keep(chunk.id, bytes);
+                        Ok(())
+                    })
+                }
+                // Bolt cuts no chunk this big; one a list names anyway is streamed, never held.
+                None => self.copy(&chunk.id, Wanted::Chunk(chunk.size), &mut hashing),
+            };
+            match copied {
                 Ok(()) => {}
                 // Damage in the chunk's own pack is noted there; memory and I/O aren't damage.
                 Err(StoreError::Pack(e)) => return Err(e),
@@ -593,10 +751,121 @@ impl Store {
         Ok(())
     }
 
+    /// A chunk of `size` bytes, read whole and checked. Nothing has gone out yet, so a copy that
+    /// fails can still give way to another.
+    fn read_chunk(&self, id: &Id, size: u64) -> Result<Vec<u8>, StoreError> {
+        let first = self.first_copy(id)?;
+        let wanted = Wanted::Chunk(size);
+        self.first_good_from(first, Tries::default(), id, wanted, false, |pack, entry| {
+            pack.read_content(entry)
+        })
+        .map(|(bytes, _)| bytes)
+    }
+
     pub fn listing(&self, id: &Id) -> Result<Listing, StoreError> {
+        #[cfg(test)]
+        counted::listing();
         Ok(Listing::decode(
             &self.read_record(id, ObjectKind::FolderListing)?,
         )?)
+    }
+
+    /// `listing`, given what a second handle read of `id`: the same read through the same steps,
+    /// so this store notes what `listing` would. It is spared only the lookup in the pack asked
+    /// first when that is the pack `peeked` came from, and the read of `peeked`'s own copy.
+    pub(crate) fn listing_after(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
+        #[cfg(test)]
+        counted::listing();
+        let Peeked {
+            listing,
+            pack: at,
+            entry: seen,
+            ..
+        } = peeked;
+        // A pack is named by its index's checksum and never changes once named, so the pack of
+        // that name holds the same lines and bytes through any handle.
+        let first = match self.last_is(&at).filter(|_| seen.id == *id) {
+            Some(n) => Some(Copy { n, entry: seen }),
+            None => self.first_copy(id)?,
+        };
+        let mut ready = Some(listing);
+        let wanted = Wanted::Kind(ObjectKind::FolderListing);
+        let (got, _) =
+            self.first_good_from(first, Tries::default(), id, wanted, false, |pack, entry| {
+                if pack.path() == at
+                    && *entry == seen
+                    && let Some(listing) = ready.take()
+                {
+                    return Ok(Got::Ready(listing));
+                }
+                #[cfg(test)]
+                counted::record();
+                pack.read_record(entry).map(Got::Bytes)
+            })?;
+        match got {
+            Got::Ready(listing) => Ok(listing),
+            Got::Bytes(bytes) => Ok(Listing::decode(&bytes)?),
+        }
+    }
+
+    /// The pack `packs.last`, if `first_copy` would ask it first (it is listed and open) and it is
+    /// the pack at `path`. Changes nothing: reading the copy moves the pack up the open list.
+    fn last_is(&self, path: &Path) -> Option<usize> {
+        let packs = self.packs();
+        let n = packs.last;
+        let (_, open) = packs.open.iter().find(|(m, _)| *m == n)?;
+        (packs.by_name.contains(&n) && open.path() == path).then_some(n)
+    }
+
+    /// A second handle on this store's packs, sharing only the folder: its own list of packs,
+    /// copied from this one, its own open packs and notes. Reads through it leave this store
+    /// exactly as it was.
+    pub(crate) fn second(&self) -> Store {
+        let names: Vec<OsString> = self.packs().names.iter().flatten().cloned().collect();
+        let mut packs = Packs::default();
+        packs.list(names, false);
+        Store {
+            dir: Arc::clone(&self.dir),
+            path: self.path.clone(),
+            packs: Mutex::new(packs),
+            checked: Mutex::default(),
+            #[cfg(test)]
+            saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            counted: Arc::default(),
+        }
+    }
+
+    /// `listing` as it reads a good first copy, with the copy's length and where it is, or `None`
+    /// on any failure. It tries that one copy only and notes nothing about copies or packs, so a
+    /// `listing` after it tells of them as it would have.
+    pub(crate) fn peek_listing(&self, id: &Id) -> Option<Peeked> {
+        let mut quiet = Vec::new();
+        let found = self.each_pack_in(&mut quiet, true, |n, pack| {
+            let copy = match pack.find(id) {
+                Ok(Some(entry)) => Some((n, Arc::clone(pack), entry)),
+                Ok(None) => return Ok::<_, StoreError>(ControlFlow::Continue(())),
+                Err(_) => None,
+            };
+            Ok(ControlFlow::Break(copy))
+        });
+        let Ok(Some(Some((n, pack, entry)))) = found else {
+            return None;
+        };
+        // Only a copy `first_good_from` reads first, so one that passes is the one it returns.
+        if entry.kind != ObjectKind::FolderListing
+            || entry.uncompressed_size > NEAR
+            || self.checked().bad.contains_key(&(n, entry.id))
+        {
+            return None;
+        }
+        let bytes = pack.read_record(&entry).ok()?;
+        Some(Peeked {
+            listing: Listing::decode(&bytes).ok()?,
+            size: bytes.len(),
+            pack: pack.path().to_owned(),
+            entry,
+        })
     }
 
     pub fn save(&self, id: &Id, signatures_allowed: bool) -> Result<Save, StoreError> {
@@ -768,6 +1037,8 @@ impl Store {
     ) -> Result<Option<T>, StoreError> {
         let mut unsearched = Vec::new();
         let found = self.each_pack(skipped, |n, pack| {
+            #[cfg(test)]
+            counted::find();
             let entry = match pack.find(id) {
                 Ok(Some(entry)) => entry,
                 Ok(None) => return Ok(ControlFlow::Continue(())),
@@ -817,9 +1088,37 @@ impl Store {
     fn each_pack<T, E: From<StoreError>>(
         &self,
         skipped: &mut Vec<PackError>,
+        f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
+    ) -> Result<Option<T>, E> {
+        self.each_pack_in(skipped, false, f)
+    }
+
+    /// `each_pack`, or, when `quiet`, one that ends at the first pack it can't open, noting
+    /// nothing and listing nothing again.
+    fn each_pack_in<T, E: From<StoreError>>(
+        &self,
+        skipped: &mut Vec<PackError>,
+        quiet: bool,
         mut f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
     ) -> Result<Option<T>, E> {
         let mut done = HashSet::new();
+        // The pack that held the last object, if open, is asked before the order is built: it
+        // goes first in that order, and most lookups end there.
+        let last = {
+            let mut packs = self.packs();
+            let n = packs.last;
+            if packs.by_name.contains(&n) {
+                packs.take_open(n).map(|pack| (n, pack))
+            } else {
+                None
+            }
+        };
+        if let Some((n, pack)) = last {
+            if let ControlFlow::Break(value) = f(n, &pack)? {
+                return Ok(Some(value));
+            }
+            done.insert(n);
+        }
         let mut listed_again = false;
         loop {
             let order: Vec<usize> = {
@@ -840,6 +1139,7 @@ impl Store {
                 }
                 let pack = match self.pack(n) {
                     Ok(pack) => pack,
+                    Err(_) if quiet => return Ok(None),
                     Err(PackError::Io(e))
                         if e.kind() == io::ErrorKind::NotFound && !listed_again =>
                     {
@@ -924,6 +1224,29 @@ impl Store {
     #[cfg(test)]
     fn open_count(&self) -> usize {
         self.packs().open.len()
+    }
+
+    /// Everything this store remembers about its packs and copies, packs by name, in a fixed
+    /// order.
+    #[cfg(test)]
+    pub(crate) fn remembered(&self) -> String {
+        let packs = self.packs();
+        let names = packs.names.clone();
+        let name = |n: &usize| names.get(*n).cloned().flatten();
+        let open: Vec<_> = packs.open.iter().map(|(n, _)| name(n)).collect();
+        let failed: BTreeMap<_, _> = (packs.failed.iter())
+            .map(|(n, e)| (name(n), e.to_string()))
+            .collect();
+        let last = name(&packs.last);
+        drop(packs);
+        let c = self.checked();
+        let at = |(n, id): &At| (name(n), *id);
+        let good: std::collections::BTreeSet<_> = c.good.iter().map(at).collect();
+        let bad: BTreeMap<_, _> = c.bad.iter().map(|(a, why)| (at(a), why)).collect();
+        format!(
+            "last {last:?}\nopen {open:?}\nfailed {failed:?}\ngood {good:?}\nbad {bad:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+            c.damaged, c.unreadable, c.unreadable_packs, c.notes
+        )
     }
 
     /// Marks a copy bad and its pack damaged, and returns the problem found.
@@ -1883,6 +2206,223 @@ mod tests {
         }
     }
 
+    /// A list naming one 100-byte chunk `times` times.
+    fn repeated(times: usize) -> (Vec<u8>, ChunkList, Vec<Vec<u8>>) {
+        let bytes: Vec<u8> = (0..100u8).cycle().take(100 * times).collect();
+        let (list, chunks) = chunked(&bytes, 100);
+        (bytes, list, chunks)
+    }
+
+    #[test]
+    fn a_chunk_named_twice_is_read_once() {
+        // The reads a list naming its chunk `times` times takes, the list's own included.
+        let reads = |times| {
+            let (_root, tmp, packs) = dirs();
+            let (bytes, list, chunks) = repeated(times);
+            pack_with(&tmp, &packs, None, &[&chunks[0]], &[&list]);
+            let store = Store::open(&packs).unwrap();
+            let before = open_files::reads();
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert!(out == bytes);
+            open_files::reads() - before
+        };
+        // Without the kept chunks, each naming took 3 reads.
+        let (once, often) = (reads(1), reads(1001));
+        assert!(
+            often < once + 20,
+            "{often} reads for 1,001 namings, {once} for one"
+        );
+    }
+
+    #[test]
+    fn a_repeated_chunk_with_no_good_copy_is_damage() {
+        let (_root, tmp, packs) = dirs();
+        let (_, list, chunks) = repeated(1000);
+        plant_damaged_copies(&packs, &[(ObjectKind::Content, &chunks[0])]);
+        pack_with(&tmp, &packs, None, &[], &[&list]);
+        let store = Store::open(&packs).unwrap();
+        for _ in 0..2 {
+            let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+            damage_in(e, &packs.join("00.pack"));
+        }
+    }
+
+    #[test]
+    fn the_kept_chunks_stay_within_their_budget() {
+        let (_root, tmp, packs) = dirs();
+        let mut bytes = vec![0u8; 200 << 18];
+        blake3::Hasher::new()
+            .update(b"budget")
+            .finalize_xof()
+            .fill(&mut bytes);
+        let (list, chunks) = chunked(&bytes, 256 << 10);
+        pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+        let store = Store::open(&packs).unwrap();
+        KEPT_MOST.set((0, 0));
+        let mut out = Vec::new();
+        store.copy_content(&list.file, &mut out).unwrap();
+        assert!(out == bytes);
+        let (most, _) = KEPT_MOST.get();
+        assert!(most <= 8 << 20 && most > 7 << 20, "{most} bytes charged");
+    }
+
+    #[test]
+    fn many_tiny_chunks_stay_within_the_budget() {
+        let (_root, tmp, packs) = dirs();
+        // 100,000 different chunks of 1 to 3 bytes.
+        let chunks: Vec<Vec<u8>> = (0u32..100_000)
+            .map(|i| {
+                let len = if i < 1 << 8 {
+                    1
+                } else if i < 1 << 16 {
+                    2
+                } else {
+                    3
+                };
+                i.to_le_bytes()[..len].to_vec()
+            })
+            .collect();
+        let bytes = chunks.concat();
+        let list = ChunkList {
+            file: hash_content(&bytes),
+            size: bytes.len() as u64,
+            chunks: chunks
+                .iter()
+                .map(|c| Chunk {
+                    id: hash_content(c),
+                    size: c.len() as u64,
+                })
+                .collect(),
+        };
+        pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+        let store = Store::open(&packs).unwrap();
+        KEPT_MOST.set((0, 0));
+        let mut out = Vec::new();
+        store.copy_content(&list.file, &mut out).unwrap();
+        assert!(out == bytes);
+        let (most, count) = KEPT_MOST.get();
+        assert!(most <= 8 << 20, "{most} bytes charged");
+        assert!(count <= (8 << 20) / 129, "{count} chunks kept");
+    }
+
+    #[test]
+    fn a_kept_chunk_named_with_another_size_is_damage() {
+        let (_root, tmp, packs) = dirs();
+        let chunk = b"a chunk".to_vec();
+        let id = hash_content(&chunk);
+        let list = ChunkList {
+            file: hash_content(b"a file"),
+            size: 15,
+            chunks: vec![Chunk { id, size: 7 }, Chunk { id, size: 8 }],
+        };
+        let at = pack_with(&tmp, &packs, None, &[&chunk], &[&list]);
+        let store = Store::open(&packs).unwrap();
+        let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+        let shown = e.to_string();
+        assert!(
+            shown.contains("8 bytes, which isn't in the store"),
+            "{shown}"
+        );
+        damage_in(e, &at);
+    }
+
+    /// Writes into memory, and flips the first stored byte of `entry` in the pack at `pack` once
+    /// `after` bytes have come.
+    struct DamagingAfter {
+        data: Vec<u8>,
+        after: usize,
+        pack: PathBuf,
+        entry: IndexEntry,
+    }
+
+    impl Write for DamagingAfter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let was = self.data.len();
+            self.data.extend_from_slice(buf);
+            if was < self.after && self.data.len() >= self.after {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.pack)?;
+                let at = SeekFrom::Start(self.entry.offset + crate::pack::ENTRY_HEADER_LEN);
+                let mut byte = [0u8];
+                f.seek(at)?;
+                f.read_exact(&mut byte)?;
+                f.seek(at)?;
+                f.write_all(&[byte[0] ^ 1])?;
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_chunk_dropped_from_the_kept_ones_is_read_and_checked_again() {
+        let (_root, tmp, packs) = dirs();
+        // 33 chunks of 256 KiB take more than the 8 MiB, so the first is let go by the last.
+        let mut bytes = vec![0u8; 33 << 18];
+        blake3::Hasher::new()
+            .update(b"dropped")
+            .finalize_xof()
+            .fill(&mut bytes);
+        let (_, chunks) = chunked(&bytes, 256 << 10);
+        let ending = |last: usize| {
+            let mut file = bytes.clone();
+            file.extend_from_slice(&chunks[last]);
+            let (list, _) = chunked(&file, 256 << 10);
+            (file, list)
+        };
+        let (kept_file, kept_list) = ending(32);
+        let (dropped_file, dropped_list) = ending(0);
+        let pack = pack_with(
+            &tmp,
+            &packs,
+            None,
+            &pieces(&chunks),
+            &[&kept_list, &dropped_list],
+        );
+        let reads = |list: &ChunkList, file: &[u8]| {
+            let store = Store::open(&packs).unwrap();
+            let before = open_files::reads();
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert!(out == file);
+            open_files::reads() - before
+        };
+        // Lists of the same length: the dropped chunk is read again, the kept one isn't.
+        let (kept, dropped) = (
+            reads(&kept_list, &kept_file),
+            reads(&dropped_list, &dropped_file),
+        );
+        assert!(
+            dropped > kept,
+            "{dropped} reads when dropped, {kept} when kept"
+        );
+
+        // Damaged once it was first written out, it is damage when read again.
+        let entry = PackReader::open(&pack)
+            .unwrap()
+            .find(&hash_content(&chunks[0]))
+            .unwrap()
+            .unwrap();
+        let store = Store::open(&packs).unwrap();
+        let mut out = DamagingAfter {
+            data: Vec::new(),
+            after: 256 << 10,
+            pack: pack.clone(),
+            entry,
+        };
+        let e = store
+            .copy_content(&dropped_list.file, &mut out)
+            .unwrap_err();
+        damage_in(e, &pack);
+    }
+
     /// A list whose chunk has no good copy fails once and is passed over from then on, so the read
     /// goes on to a good whole copy, though the list is found first and, when small, read first.
     #[test]
@@ -2155,6 +2695,214 @@ mod tests {
             store.copy_content(&id, &mut Vec::new()),
             Err(StoreError::Missing(m)) if m == id
         ));
+    }
+
+    /// A listing of one file, `name`.
+    fn one_file(name: &str) -> Listing {
+        use crate::listing::{Entry, EntryKind};
+        let entry = Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id: hash_content(name.as_bytes()),
+            size: name.len() as u64,
+        };
+        Listing::new(vec![entry]).unwrap()
+    }
+
+    /// Writes a pack of `objects` into `packs` as `name`.
+    fn pack_as(packs: &Path, name: &str, objects: &[(ObjectKind, &[u8])]) {
+        let made = tempfile::tempdir().unwrap();
+        let mut w = PackWriter::create(made.path()).unwrap();
+        for (kind, bytes) in objects {
+            match kind {
+                ObjectKind::Content => w.add_content(bytes),
+                _ => w.add_record(*kind, bytes),
+            }
+            .unwrap();
+        }
+        let path = w.finish(made.path()).unwrap().unwrap();
+        std::fs::rename(path, packs.join(name)).unwrap();
+    }
+
+    /// Writes a pack of bad copies of `objects` into `packs` as `name`.
+    fn damaged_as(packs: &Path, name: &str, objects: &[(ObjectKind, &[u8])]) {
+        plant_damaged_copies(packs, objects);
+        std::fs::rename(packs.join("00.pack"), packs.join(name)).unwrap();
+    }
+
+    #[test]
+    fn a_second_handle_leaves_the_first_store_as_it_was() {
+        let (_root, _tmp, packs) = dirs();
+        let (first, second, twice) = (one_file("a"), one_file("b"), one_file("c"));
+        let (first_bytes, second_bytes) = (first.encode(), second.encode());
+        let twice_bytes = twice.encode();
+        let listing = ObjectKind::FolderListing;
+        pack_as(
+            &packs,
+            "a.pack",
+            &[(listing, &first_bytes), (ObjectKind::Content, b"data")],
+        );
+        pack_as(&packs, "b.pack", &[(listing, &second_bytes)]);
+        damaged_as(&packs, "c.pack", &[(listing, &twice_bytes)]);
+        pack_as(&packs, "d.pack", &[(listing, &twice_bytes)]);
+        std::fs::write(packs.join("zz.pack"), b"not a pack").unwrap();
+
+        let store = Store::open(&packs).unwrap();
+        store
+            .copy_content(&hash_content(b"data"), &mut Vec::new())
+            .unwrap();
+        store.listing(&second.id()).unwrap();
+        let (before, open) = (store.remembered(), store.open_count());
+        assert!(open > 0 && before.contains("a.pack"), "{before}");
+
+        let other = store.second();
+        let peeked = other.peek_listing(&first.id()).unwrap();
+        assert_eq!(peeked.listing, first);
+        assert_eq!(peeked.size, first_bytes.len());
+        assert!(other.peek_listing(&second.id()).is_some());
+        assert!(other.peek_listing(&twice.id()).is_none());
+        assert!(other.peek_listing(&hash_content(b"nowhere")).is_none());
+        assert!(other.warnings().is_empty());
+        assert_eq!(store.remembered(), before);
+        assert_eq!(store.open_count(), open);
+        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+    }
+
+    /// What a read of `id` brought: the lookups, record reads and reads of pack files made.
+    type Spent = (usize, usize, usize);
+
+    /// Opens two stores on `packs` and brings both to one state with `prepare`; then one reads
+    /// `id` with `listing`, the other with `listing_after`, given what a second handle peeked.
+    /// Both must end alike: the same answer, the same memory of packs and copies.
+    fn alike(packs: &Path, id: Id, prepare: impl Fn(&Store)) -> Spent {
+        let (one, two) = (Store::open(packs).unwrap(), Store::open(packs).unwrap());
+        prepare(&one);
+        prepare(&two);
+        assert_eq!(one.remembered(), two.remembered());
+        let peeked = two.second().peek_listing(&id).unwrap();
+        let plain = format!("{:?}", one.listing(&id));
+        let ((finds, records), reads) = (counted::now(), open_files::reads());
+        let after = format!("{:?}", two.listing_after(&id, peeked));
+        let spent = (
+            counted::now().0 - finds,
+            counted::now().1 - records,
+            open_files::reads() - reads,
+        );
+        assert_eq!(after, plain);
+        assert_eq!(two.remembered(), one.remembered());
+        assert_eq!(two.warnings(), one.warnings());
+        spent
+    }
+
+    #[test]
+    fn listing_after_leaves_the_store_as_listing_does() {
+        let listing = one_file("a");
+        let bytes = listing.encode();
+        let kind = ObjectKind::FolderListing;
+        let data = (ObjectKind::Content, &b"data"[..]);
+        let read_data = |s: &Store| {
+            s.copy_content(&hash_content(b"data"), &mut Vec::new())
+                .unwrap();
+        };
+        // Opens every pack, the last first in the list of open ones.
+        let open_all = |s: &Store| {
+            s.listing(&hash_content(b"nowhere")).unwrap_err();
+        };
+
+        // One copy, in the pack asked first: nothing is looked up or read again.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[(kind, &bytes), data]);
+        assert_eq!(alike(&packs, listing.id(), read_data), (0, 0, 0));
+
+        // One copy, in another pack than the one asked first: the store's own search runs.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[(kind, &bytes)]);
+        pack_as(&packs, "b.pack", &[data]);
+        let (finds, records, _) = alike(&packs, listing.id(), read_data);
+        assert!(finds > 0);
+        assert_eq!(records, 0);
+
+        // Two copies, the store's first damaged and the second's the good one.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[data]);
+        pack_as(&packs, "g.pack", &[(kind, &bytes)]);
+        damaged_as(&packs, "z.pack", &[(kind, &bytes)]);
+        alike(&packs, listing.id(), open_all);
+        let store = Store::open(&packs).unwrap();
+        open_all(&store);
+        store.listing(&listing.id()).unwrap();
+        assert!(!store.warnings().is_empty());
+
+        // The second's copy is the store's first, which it knows to be bad.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "g.pack", &[(kind, &bytes)]);
+        pack_as(&packs, "h.pack", &[(kind, &bytes)]);
+        let known_bad = |s: &Store| {
+            let reason = (packs.join("g.pack"), "planted".to_owned());
+            s.checked().bad.insert((0, listing.id()), reason);
+        };
+        let (_, records, _) = alike(&packs, listing.id(), known_bad);
+        assert_eq!(records, 1);
+
+        // The same, with that copy's pack the last one read, so the shortcut meets the check.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "g.pack", &[(kind, &bytes), data]);
+        pack_as(&packs, "h.pack", &[(kind, &bytes)]);
+        let read_then_bad = |s: &Store| {
+            read_data(s);
+            let reason = (packs.join("g.pack"), "planted".to_owned());
+            s.checked().bad.insert((0, listing.id()), reason);
+        };
+        let (_, records, _) = alike(&packs, listing.id(), read_then_bad);
+        assert_eq!(records, 1);
+
+        // The store's first copy isn't a folder listing.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[data]);
+        pack_as(&packs, "g.pack", &[(kind, &bytes)]);
+        plant_lying(&packs, "z.pack", ObjectKind::Content, &listing.id(), &bytes);
+        alike(&packs, listing.id(), open_all);
+    }
+
+    #[test]
+    fn a_peeked_copy_that_isnt_the_stores_is_never_used() {
+        let (_root, _tmp, packs) = dirs();
+        let listing = one_file("a");
+        let bytes = listing.encode();
+        pack_as(&packs, "a.pack", &[(ObjectKind::FolderListing, &bytes)]);
+        pack_as(&packs, "b.pack", &[(ObjectKind::FolderListing, &bytes)]);
+        let peek = || {
+            let mut peeked = Store::open(&packs)
+                .unwrap()
+                .second()
+                .peek_listing(&listing.id())
+                .unwrap();
+            peeked.listing = Listing::empty();
+            peeked
+        };
+        let in_another_pack = || Peeked {
+            pack: packs.join("b.pack"),
+            ..peek()
+        };
+        let moved = || {
+            let mut peeked = peek();
+            peeked.entry.offset += 1;
+            peeked
+        };
+        // A store that has read from `a.pack` asks it first, and takes a line of its index
+        // unlooked-up only from a peek of that pack, which only `peek_listing` makes.
+        let warm = Store::open(&packs).unwrap();
+        warm.listing(&listing.id()).unwrap();
+        let cold = || Store::open(&packs).unwrap();
+        for (store, peeked) in [
+            (cold(), in_another_pack()),
+            (warm, in_another_pack()),
+            (cold(), moved()),
+        ] {
+            let records = counted::now().1;
+            assert_eq!(store.listing_after(&listing.id(), peeked).unwrap(), listing);
+            assert_eq!(counted::now().1, records + 1);
+        }
     }
 
     #[test]

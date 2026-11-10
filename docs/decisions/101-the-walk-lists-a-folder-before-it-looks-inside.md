@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning, speed and space)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 046](046-nested-projects-left-out.md) (how the walk finds a folder that holds a repository or project of its own) and [decision 038](038-gitignore-and-saved-files.md) (when a folder's ignore files are opened)
+- **Refined by:** [decision 106](106-on-linux-and-macos-a-folder-is-still-asked-for-git-and-bolt-by-name.md) (on Linux and macOS every folder is still asked for `.git` and `.bolt` by name: a FAT or NTFS drive there answers to a short name its listing doesn't show)
 
 ## Context
 

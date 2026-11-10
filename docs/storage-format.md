@@ -257,7 +257,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
 | `state/tidied` | The start of the undo window the last `bolt tidy` used, so a longer window later doesn't ask for what it freed (§11): a whole number of milliseconds since 1970-01-01 UTC in decimal digits, then an LF. Read with a cap of 32 bytes; a file that is anything else, or names a time later than now, counts as absent. Written whole through `tmp/` and a rename. A reader that ignores it only stops a `tidy` that could have gone on | No |
-| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), and `change-ids`, each line's change IDs (below) | No |
+| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), `change-ids`, each line's saves in order with their change IDs (below), and `other-lines`, what the check before an amend read of the other lines (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
@@ -328,21 +328,40 @@ bytes[32] seal
 
 An entry is trusted only if it isn't racy, the file's kind, size, modified time, change time and both numbers are the ones recorded ([decision 069](decisions/069-the-file-cache-matches-the-change-time.md): a file written over in place keeps its number but not its change time), and the file's number isn't 0, which some network and FUSE drives give every file ([decision 067](decisions/067-the-file-cache-matches-file-identity.md)): a file moved or copied onto the path is another file, so it is read. At the start of a scan Bolt writes a file in `tmp/`, takes its modified time as "now" and removes it, so the drive's own clock and resolution count. When the cache is written, an entry whose modified time isn't at least 2 seconds older than that "now" (FAT's resolution) is marked racy, and stays racy until the file is read again ([decision 053](decisions/053-file-state-cache.md)). The file is replaced whole, through `tmp/` and a rename, and only when what a scan would write differs from what it read: an entry added, dropped or changed, or one that becomes racy or stops being racy against the scan's "now". Neither the file nor `cache/` is flushed to the disk: a cache a crash left empty, cut short or mixed fails its seal and is rebuilt, and an older one that survived whole is still only trusted file by file ([decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md)). The file that gives "now" is still flushed before its time is read, and the throwaway file that tests how the drive treats names is renamed without a flush.
 
-**`cache/change-ids`** (not normative) lists the change IDs of each line's saves, so that a save and `history` can shorten change IDs (§5) without reading the line. Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
+**`cache/change-ids`** (not normative) lists each line's saves in order, each with its change ID, so that Bolt can shorten a change ID (§5) and list what `undo` can take back without reading the line from the store, and can find a save by the start of its change ID or by its whole ID by reading only the saves from the line's newest down to it, which it checks link by link against the list ([decisions 105](decisions/105-the-change-id-cache-keeps-each-lines-saves-in-order.md), [109](decisions/109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md) and [111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md)). Sealed as above; at most 256 MiB with the seal: when the lists would pass that, the position's own list is written, then the other lines' in order of name while they fit, and nothing if the position's own doesn't fit.
 
 ```text
 bytes[8] "BOLTCHID"
-u8       version = 1
+u8       version = 2 (a cache of another version is ignored and rebuilt)
 varint   line count (at most 100,000)
-lines, sorted by name in byte order, no name twice:
+lines, sorted by name in byte order, no name twice; the empty name is the project's own position when it is at a save rather than on a line:
   string   name (at most 255 bytes)
-  id       the line's newest save when its IDs were read
-  varint   change-ID count (refused if more than the bytes left hold)
-  change-id × count   the change IDs of the saves from that save back along first parents, sorted, repeats kept
+  varint   save count (at least 1; refused if more than the bytes left hold at 48 bytes each)
+  save × count, from the newest back along first parents:
+    id         the save
+    change-id  its change ID
 bytes[32] seal
 ```
 
-A line's IDs are used only for a line whose newest save is the one recorded, or one whose first parents lead back to it: Bolt reads the saves from the newest back to the recorded one and adds their IDs. If the walk reaches the line's first save without meeting it (an undo moved the line back, say), the IDs read replace the line's. Lines the current diary entry doesn't have are dropped when the file is next written. Commands write it through `tmp/` and a rename, without the lock and without a flush, like `cache/files`; a write that fails is just skipped.
+A line's list is used when its first save is the line's newest save. If the line has moved forward, Bolt reads the saves from the newest back to the list's first and puts them in front. If it has moved back to a save the list holds (an undo, say), the saves in front of that one are dropped, with no read. Otherwise, if another line's list holds the line's newest save, that list from there on is the line's, and nothing is read; if none does, the line is read once and its list replaced. The saves back from a save the project is at are the tail of any list that holds that save; only when none does are they read and kept under the empty name. A list is a fact about saves, which never change, so one that starts at the right save can't be stale; it never stands in for a save's contents, which are read, and checked, whenever a command goes to a save. Lines the current diary entry doesn't have are dropped when the file is next written. Commands write it through `tmp/` and a rename, without the lock and without a flush, like `cache/files`; a write that fails is just skipped.
+
+**`cache/other-lines`** (not normative) keeps what the check before an amend read of the lines the project isn't on, so that the next amend doesn't read them again ([decision 112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)). Sealed as above; at most 64 MiB with the seal.
+
+```text
+bytes[8] "BOLTLINE"
+u8       version = 1 (a cache of another version is ignored and rebuilt)
+varint   run count (at most 100,000)
+runs, sorted by their first save's ID in byte order, no first save twice:
+  varint   save count (at least 1; refused if more than the bytes left hold at 48 bytes each)
+  save × count, from a line's newest save back along first parents:
+    id         the save
+    change-id  its change ID
+  u8       1 if the last save listed has a first parent, 0 if it has none (any other value is refused)
+  id       that first parent (only after a 1)
+bytes[32] seal
+```
+
+A run is used for a line whose newest save is the run's first. It says which saves follow one another from there, and which save comes next; it doesn't say where the line ends. Like a list, it is a fact about saves, which never change, so one that starts at the right save can't be stale. The check before an amend ([decision 074](decisions/074-save-amend.md)) looks for the change ID in the run, then goes on from the save that comes next: if that save is on the amended line's own list, nothing is read; otherwise the saves it reads are added to the run. Only that check reads this file. Runs whose first save is no line's newest are dropped when the file is next written; when the runs would pass 64 MiB, what was read last isn't kept. It is written like `cache/files`: through `tmp/` and a rename, without the lock and without a flush, and a write that fails is just skipped.
 
 ## 11. Pack files
 
@@ -673,7 +692,9 @@ Vectors are added milestone by milestone, for the records each milestone builds;
 - **Milestone 6** (written from §12's text before the code, [decisions 113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) and [114](decisions/114-bolt-toml-keys-and-how-bolt-reads-it.md)):
   - `rules.json`: `bolt.toml` texts and what a reader must make of each: the four settings in bytes and files, the rules it keeps (`null` where a rule doesn't give a setting), the names it passes over in `rules_ignored`'s order, and `skipped` for a text that isn't TOML. It covers both families of units, the limits of `chunk-files-over` on both sides, sizes that don't fit, each wrong type, unknown keys, a `preset` measured in bytes, rules with and without a usable `files`, the order names are given in, and an inline table written over several lines, which TOML 1.1 allows and 1.0 didn't.
   - `presets.json`: under `presets`, the `bolt.toml` and the `.boltignore` block each preset writes, byte for byte, for nothing found, one thing found and everything found; under `boltignore_edits`, a `.boltignore` before, the block written (`null` when switching to Custom) and the file after (`null` when it is removed), for a new file, lines of the user's own, a block replaced in place, marks ending in CR LF, a start mark with no end, an end mark with no LF after it, two blocks, a file that starts with a byte order mark, and each way a removal ends.
+  - `change_ids.json`: a second vector, `version-2`, a sealed `cache/change-ids` of version 2 (§10, [decision 105](decisions/105-the-change-id-cache-keeps-each-lines-saves-in-order.md)): the project at a save, under the empty name, and two lines, one of two saves. The first vector, `two-lines`, keeps its bytes; it is version 1, which a reader must refuse, so that such a cache is ignored and rebuilt.
   - Change IDs keep their bytes; only their letters change ([decision 122](decisions/122-change-ids-in-jujutsus-letters.md)), which no vector pins.
+  - `other_lines.json`, written from §10's text before the code ([decision 112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)): a sealed `cache/other-lines` with two runs, one of two saves that stops at a third, and one of a single save that has no first parent; its key, its body and the sealed bytes.
 
 ## 14. Open points
 

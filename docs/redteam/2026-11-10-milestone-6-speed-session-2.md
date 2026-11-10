@@ -1,0 +1,71 @@
+# Red-team report: milestone 6, speed and space, second session (RT13, decision 024, 2026-11-10)
+
+Code attacked: a copy of `milestone-6-speed` at eaf55ee (the code RT12 attacked, with the fixes of RT12-1, RT12-2 and RT12-3), compared throughout with `main` at 73a1a0d (the copy's `_main/`), both built in release mode in the no-network sandbox.
+RT12's proof tests, first: `cargo test -j 2 -p bolt-vcs --features fault-injection --test redteam12 -- --test-threads=2` in the sandbox ended `test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.24s` (`rt12_1_an_amend_among_many_lines_stays_within_memory`, `rt12_2_a_scattered_small_read_costs_a_small_read`, `rt12_3_goto_of_a_full_id_no_save_has_says_no_save_matches`: all ok).
+Proof tests: `crates/bolt-vcs/tests/redteam13.rs`. 2 tests, each marked `#[ignore = "RT13-n: …"]` and each asserting the SAFE behaviour. Both run on Linux only (they read `/proc/<pid>/io`; on other systems they compile away, so lint the file on Windows too before merging). Both were run in the sandbox and fail as claimed. There is no Windows or macOS file: no finding needed one.
+Run them: `cargo test -p bolt-vcs --features fault-injection --test redteam13 -- --ignored` (or `redteam/attacks12/run.sh proofs`, which runs it in the sandbox). In the sandbox, on the code attacked, it ended `test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 55.89s`. Without `--ignored` the file passes (2 ignored). The file is formatted with `rustfmt --edition 2024` and passes `cargo clippy -p bolt-vcs --tests --all-features -- -D warnings` in the sandbox.
+Attack code: `redteam/attacks12/`: a crash sweep through a `goto` writing a 40 MiB file, a differential fuzz of lines, amends and gotos by every kind of ID with `cache/change-ids` removed and put back stale, amends over side histories, tiny chunks stored in pairs, many saves over a deep chain under 256 open files, and the widest save the limits allow. `redteam/attacks12/run.sh explore <name>` copies an exploration test (`rt13_*.rs`) into the suite and runs it in the sandbox; `run.sh script <file>` runs a script there. They compare `/work/target/release/bolt` with `/work/_main/target/release/bolt`, so build both first.
+
+Counts: Critical 0, High 0, Medium 0, Low 2.
+
+What held: RT12-3's fix holds: a full ID is now shown to be on a line link by link before it is believed, and 150 random runs of lines, amends, undo and redo, with `goto` by full ID, 8 hex digits, whole change ID and short change ID, and `cache/change-ids` removed or put back from an older state between commands, gave main's exit code, output and files at every step. RT12-1's fix holds for memory, and its answers (who else shows the save being amended) agreed with main's in the same runs. A `goto` stopped at each of its 17 fault points while writing a 40 MiB file, then finished by the next command, never left `status` saying "nothing changed" over files that weren't the save's, and `goto main` afterwards always gave back the folder exactly. Both findings are costs the fixes moved rather than removed: RT12-2's fix is beaten by reads that come in pairs (RT13-1), and RT12-1's fix stopped keeping what the amend's walk learns, so every amend now walks again what main walked once (RT13-2). No change was missed, no wrong tree or bytes reached the store or the folder, and no repository was swallowed.
+
+## Findings
+
+- **RT13-1 Low (a project built to be slow: RT12-2's fix beaten by reads in pairs; T11, T32; the store's block window in `pack.rs`).**
+  - **What.** After RT12-2's fix, a 64 KiB block of a pack is read at the second read in a row that misses the block held and falls in the same block. A file whose tiny chunks are stored two by two, each pair in another block than the pair before it, makes every pair read a whole block: about 36 KB read for each 8-byte chunk, where main reads about 400 bytes. RT12-2's own shape (chunks scrambled one by one) now costs 3.4 KB a chunk, so the fix closed its proof's input, not the pattern. Time is not worse than main's here (the blocks come from the page cache): 100,000 chunks took 1.95 to 2.10 s against main's 1.84 to 2.36 s, and 400,000 took 9.7 to 10.5 s against 10.7 to 11.9 s; what grows is the bytes read, 3.6 GB against 36 MB, and 14.4 GB against 170 MB. On a drive whose pages aren't cached (a network drive, a cold disk) that is the time.
+  - **Who is hit.** It takes a planted `.bolt` (Bolt's own cutter makes chunks of 16 KiB or more, stored in file order), so a hostile project; then `goto`, `discard` and `undo` of one file read about 100 times what main reads.
+  - **Proof (test).** `rt13_1_small_reads_in_pairs_cost_small_reads`: 20,000 distinct 8-byte chunks stored in one pack in pairs, columns of pairs over 64 KiB each so that pair k+1 is a block away from pair k, a save of the file they make, `bolt discard`, and the bytes the process read (`rchar`):
+    ```
+    read 727452242 bytes to write 160000 bytes: 36372 a chunk
+    ```
+    `rt13_pair_reads.rs`, both builds:
+    ```
+    100000 chunks shuffled pairs: new 2.10 s, read 3605 MB (36051 B a chunk)
+    100000 chunks shuffled pairs: main 2.36 s, read 36 MB (363 B a chunk)
+    100000 chunks shuffled shuffled: new 2.19 s, read 336 MB (3368 B a chunk)
+    100000 chunks shuffled shuffled: main 2.89 s, read 36 MB (363 B a chunk)
+    400000 chunks shuffled pairs: new 9.74 s, read 14409 MB (36022 B a chunk)
+    400000 chunks shuffled pairs: main 11.94 s, read 170 MB (426 B a chunk)
+    ```
+  - **Fix idea.** Read a block only when reads show a run, not two hits: for example only after the last N small reads fell in it, or when the next read starts where the last one ended; or count the bytes blocks brought in against the bytes asked for and stop reading blocks for the pack (or the command) once the ratio passes a bound. Smaller blocks (4 to 8 KiB) bound the loss whatever the pattern.
+
+- **RT13-2 Low (a new path slower than the old one on honest projects: RT12-1's fix walks again what main kept; T11, decision 105).**
+  - **What.** Before an amend, Bolt asks every other line whether it reaches the save being amended (`shown_elsewhere`). RT12-1's fix stopped making a list for each other line and walks it instead, from its newest save until it meets the amended line's list (`lines_reaching`), with a memo that lasts one command. Nothing the walk learns is kept. A line that branched off long ago and has a long run of saves of its own is therefore read from the store whole on every amend. Main kept such lines' lists in `cache/change-ids` (version 1), so only its first amend read them. With 300 branches of 2,000 commits each off the first commit (600,000 saves), every amend takes this build 19 to 21 s, every time; main's first took 34 s and each after it 0.3 s. Memory is the same on both (236 MB). An amend that changes a file in a project with old release branches is the everyday case this hits.
+  - **Who is hit.** Anyone who amends in a project with long-lived lines that split from theirs long ago (release or maintenance branches of an imported Git history, a fork's lines): each amend pays the sum of those lines' own saves, about 30 microseconds a save here. No hostile input is needed. Nothing is wrong, only slow.
+  - **Proof (test).** `rt13_2_a_second_amend_does_not_walk_the_other_lines_again`: a Git history of 40 branches of 500 commits each off the first commit, imported, then two amends of `main`, each after a change to a file, with the bytes each read (`rchar`); the test asks that the second read at most a quarter of what the first read:
+    ```
+    the first amend read 89813332 bytes, the second 89748333
+    ```
+    `amend_side_histories.py 300 2000`, both builds (the sandbox also ran a fuzz alongside, so times are noisy, not the ratio):
+    ```
+    new amend 1 {'secs': 20.85, 'exit': 0, 'peak_mb': 236, 'said': 'Amended ynrm  "m0"  (1 file)'}
+    new amend 2 {'secs': 20.57, 'exit': 0, 'peak_mb': 236, 'said': 'Amended ynrm  "m1"  (1 file)'}
+    new amend 3 {'secs': 18.8, 'exit': 0, 'peak_mb': 236, 'said': 'Amended ynrm  "m2"  (1 file)'}
+    new change-ids bytes 144
+    main amend 1 {'secs': 33.61, 'exit': 0, 'peak_mb': 236, 'said': 'Amended ynrm  "m0"  (1 file)'}
+    main amend 2 {'secs': 0.39, 'exit': 0, 'peak_mb': 236, 'said': 'Amended ynrm  "m1"  (1 file)'}
+    main amend 3 {'secs': 0.32, 'exit': 0, 'peak_mb': 236, 'said': 'Amended ynrm  "m2"  (1 file)'}
+    main change-ids bytes 9617213
+    ```
+  - **Fix idea.** Keep what the walk learns, compactly: for each other line, the save where it meets another list (or its root) and whether its own run holds the change ID, or the run itself while the file's cap allows (the size check RT12-1's fix added already decides what fits). A line's own saves are then read once, as on main, without a copy of the shared history per line.
+
+## Not proven
+
+Everything here was attacked and held, or only measured. The code for each is in `redteam/attacks12/`.
+
+- **RT12-3's fix through other shapes.** `lines_fuzz.py 150 100 50`: 150 random runs of 50 steps (file edits; `save`; `save --amend`; `save --line`; `goto` of a line; `goto` by full ID, 8 hex digits, whole change ID and short change ID of any save seen so far, on its line or not; `undo`, `redo`, `undo --list`, `history`, `status`), with `cache/change-ids` removed, or saved and put back later (a sealed list of an older tip), between commands: every exit code, normalised output and the folder after every switch agreed with main (`rounds 150 agreed 150`). Read only: `links_hold` reads the ID itself as a save, so a list holding a listing, content or nothing fails the check and the walk answers; a list from another line, a list that skips a save or holds a wrong change ID breaks a link; the cost is at most one read per save from the line's tip to the ID, which main's walk paid anyway.
+- **RT12-1's fix, correctness.** The same fuzz covers the amend refused because another line shows the save (lines made with `save --line` on the save, then amended, with the cache removed or stale). Read only: the memo marks a passed save with the walk's answer only after the walk ends, and only saves on the walked first-parent chain, so it can't lend one line's answer to a save that answers differently; `last` is the furthest place the change ID is on the amended line's list, so meeting the list at or before it is the right answer. `sealed` works out the size before it encodes, keeps the position's list first, and stops at the first line that doesn't fit; the cap test in `changeids.rs` pins it.
+- **RT12-2's fix, other patterns.** Besides pairs (RT13-1): the index's short range and its line are read through the index's block but always alternate between the IDs' block and the lines' block on a big pack, so they never make a run; `stored()` reads a header then data in one block (a block read) only for content over 1 MiB uncompressed or a chunk list, where 64 KiB is small beside what is decoded. `rt13_pair_reads.rs` measured RT12-2's shuffled shape at 3.4 KB a chunk, under its proof's 4 KiB bound.
+- **A `goto` stopped half way and finished by the next command.** `goto_crash_sweep.sh`: a 40 MiB file changed in two places with its size kept, files changed, removed and added in a folder, the file cache written by an earlier `status`; `goto` of the first save stopped at each of its 17 fault points (`write:before-rename`, `pack:before-rename`, `pack:after-rename`, `switch:written`, `switch:changed`, `head:renamed`, `journal:removing`, `journal:removed`), then `status`, `changes` and `goto main`. `status` warned of the stopped switch and listed exactly the files not yet back; it said "Nothing changed" only where the folder was the save's byte for byte; `goto main` always gave the second save's folder back exactly; nothing was left in `.bolt/tmp`. On Linux the file cache can't vouch for a file a switch wrote (a new file number), so planting it adds nothing here.
+- **Many saves over a deep chain, with read-ahead.** `many_packs_deep.sh 3000 300`: 3,000 saves, each changing a file at another level of a 300-level chain, then `status`, `changes`, `save`, `goto` of the first save and back, under `ulimit -n 256`: all succeeded, as fast as main or faster (`status` 0.16 to 0.30 s against 0.32 to 0.79 s, `goto` 4.1 and 4.5 s against 4.4 and 4.7 s). Saves don't leave a pack each: the store held 26 packs, so 10,000 small packs need planting (not reached, below).
+- **The widest save the limits allow.** `rt13_wide_memory.rs`: 9 folders sharing one listing of 1,000,000 files, none on disk; `status` twice, `changes`, `goto` of the first save and back, `save --yes`, peak memory and time on both builds. The same peaks on both: `status` 1,607 MB (43 s), `changes` 363 against 362 MB (69 s against 166 s), `goto` of the first save (removing nothing on disk) 2,929 MB (74 s against 82 s). `goto main`, which writes the 9 million files, was killed by the sandbox's 4 GB limit on both builds alike (exit -9 at 3,987 and 3,995 MB): the follow-ups' known bound of 1.5 to 4 GB for the widest saves, not a change this milestone made.
+- **Not reached (for a later session).** A planted cache of 10,000 small packs (saves don't make them, see above); the walk's act points (`walk:sending`, `walk:looking`) with `.git` made or an ignore file changed after a folder was listed, which are races main had too; `fault::early_flush` beyond `early_flush.rs`; a pack removed while a command runs (known limit for a pack replaced).
+
+## Held up
+
+No finding needs another system. What wasn't run, and what would run it:
+
+- **Windows and macOS:** both proof tests read `/proc` and compile away there; RT12's Windows and macOS items (short names, trailing dots, APFS name forms, the 256-file default) are still unrun. A Windows and a macOS runner on a `redteam/*` branch.
+- **Power loss:** whether an unflushed `cache/files` or `cache/change-ids` (now written whole, capped, after RT12-1's fix) can be torn and trusted: the seal says no, but only a replay of writes (`dm-log-writes` in a VM) shows it.
+- **A cold page cache:** RT13-1's cost in time shows only when the pack's pages aren't cached (a network drive, or `echo 3 > /proc/sys/vm/drop_caches`, which the sandbox can't do without privileges).

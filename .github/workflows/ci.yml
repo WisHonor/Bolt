@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # A gate branch only measures a commit CI has already tested on its own branch.
+    branches-ignore: ["gate/**"]
   pull_request:
 
 permissions:

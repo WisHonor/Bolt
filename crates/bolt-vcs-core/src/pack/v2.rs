@@ -2,7 +2,9 @@
 //! so an object is found by reading a few IDs by position (docs/storage-format.md section 11).
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use super::{ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PACK_HEADER_LEN, PackError, Section};
+use super::{
+    ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PACK_HEADER_LEN, PackError, Section, Window,
+};
 use crate::encoding::{Reader, Writer};
 use crate::id::Id;
 use std::cmp::Ordering;
@@ -15,6 +17,8 @@ const HEAD_LEN: u64 = 1032;
 const ID_LEN: u64 = 32;
 /// Kind, offset, uncompressed size, stored size.
 const LINE_LEN: u64 = 25;
+/// The most bytes of IDs a lookup reads in one go: 128 IDs.
+const SHORT_RANGE: u64 = 4096;
 
 /// How many bytes the index of `count` objects takes.
 pub(super) fn index_len(count: u64) -> u64 {
@@ -75,10 +79,15 @@ fn corrupt(path: &Path, reason: impl Into<String>) -> PackError {
 }
 
 /// `N` bytes at `pos`.
-fn read_at<const N: usize>(file: &File, pos: u64) -> Result<[u8; N], PackError> {
+fn read_at<const N: usize>(
+    file: &File,
+    window: Option<&Window>,
+    pos: u64,
+) -> Result<[u8; N], PackError> {
     let mut out = [0u8; N];
     Section {
         file,
+        window,
         pos,
         end: pos.saturating_add(N as u64),
     }
@@ -102,7 +111,7 @@ impl Index {
                 format!("its {len} bytes can't hold a fan-out"),
             ));
         }
-        let head: [u8; HEAD_LEN as usize] = read_at(file, start)?;
+        let head: [u8; HEAD_LEN as usize] = read_at(file, None, start)?;
         let mut r = Reader::new(&head);
         let count = r.u64().map_err(|e| corrupt(path, e.to_string()))?;
         if count > max_objects {
@@ -156,22 +165,51 @@ impl Index {
         (b.checked_sub(1).map_or(0, at), at(b))
     }
 
-    /// The line of `id`, by a binary search of the IDs in its fan-out range.
+    /// The line of `id`, by a binary search of the IDs in its fan-out range. Once the range left
+    /// is short it is read in one go, and the search goes on in memory, probing the same IDs.
     pub(super) fn find(
         &self,
         file: &File,
+        window: Option<&Window>,
         path: &Path,
         id: &Id,
     ) -> Result<Option<IndexEntry>, PackError> {
         let (mut lo, mut hi) = self.range(id.0[0]);
+        let mut short = [0u8; SHORT_RANGE as usize];
+        let mut short_from = None;
         while lo < hi {
+            if short_from.is_none() && hi.saturating_sub(lo) <= SHORT_RANGE / ID_LEN {
+                let len = hi.saturating_sub(lo).saturating_mul(ID_LEN);
+                if let Some(ids) = short.get_mut(..len as usize) {
+                    let (pos, end) = (self.id_pos(lo), self.id_pos(hi));
+                    Section {
+                        file,
+                        window,
+                        pos,
+                        end,
+                    }
+                    .read_exact(ids)?;
+                    short_from = Some(lo);
+                }
+            }
             let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
-            let at = Id(read_at(file, self.id_pos(mid))?);
+            let held = short_from.and_then(|from| {
+                let at = mid.saturating_sub(from).saturating_mul(ID_LEN) as usize;
+                short
+                    .get(at..at.saturating_add(ID_LEN as usize))?
+                    .try_into()
+                    .ok()
+            });
+            let at = Id(match held {
+                Some(at) => at,
+                // Not through the window: a search's probes falling in one block aren't a run.
+                None => read_at(file, None, self.id_pos(mid))?,
+            });
             match at.cmp(id) {
                 Ordering::Less => lo = mid.saturating_add(1),
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => {
-                    let line = read_at(file, self.line_pos(mid))?;
+                    let line = read_at(file, window, self.line_pos(mid))?;
                     return self.entry(path, *id, &line).map(Some);
                 }
             }
@@ -224,7 +262,14 @@ impl Index {
     /// Every line in order, each checked as `find` checks it, and also that the IDs ascend and
     /// sit in their fan-out ranges.
     pub(super) fn lines<'a>(&'a self, file: &'a File, path: &'a Path) -> Lines<'a> {
-        let section = |pos, end| BufReader::new(Section { file, pos, end });
+        let section = |pos, end| {
+            BufReader::new(Section {
+                file,
+                window: None,
+                pos,
+                end,
+            })
+        };
         Lines {
             index: self,
             path,
@@ -241,6 +286,7 @@ impl Index {
         let mut hasher = blake3::Hasher::new();
         let mut index = Section {
             file,
+            window: None,
             pos: self.start,
             end: self.end,
         };
@@ -293,5 +339,60 @@ impl Iterator for Lines<'_> {
         let read = self.read_next();
         self.failed = read.is_err();
         Some(read)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+    use super::super::{PackReader, PackWriter, open_files};
+
+    #[test]
+    fn a_lookup_reads_a_short_range_once() {
+        let root = tempfile::tempdir().unwrap();
+        let (tmp, packs) = (root.path().join("tmp"), root.path().join("packs"));
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::create_dir(&packs).unwrap();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let ids: Vec<_> = (0u32..5000)
+            .map(|i| w.add_content(&i.to_le_bytes()).unwrap())
+            .collect();
+        let pack = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
+        for id in &ids {
+            let before = open_files::reads();
+            assert_eq!(pack.find(id).unwrap().unwrap().id, *id);
+            let reads = open_files::reads() - before;
+            assert!(reads <= 3, "{id} took {reads} reads");
+        }
+        let mut absent = ids[0];
+        absent.0[31] ^= 1;
+        assert!(pack.find(&absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_long_range_is_narrowed_before_it_is_read() {
+        let root = tempfile::tempdir().unwrap();
+        let (tmp, packs) = (root.path().join("tmp"), root.path().join("packs"));
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::create_dir(&packs).unwrap();
+        // 300 IDs that all start with the same byte: more than one read's worth.
+        let contents: Vec<[u8; 4]> = (0u32..)
+            .map(u32::to_le_bytes)
+            .filter(|c| crate::id::hash_content(c).0[0] == 0)
+            .take(300)
+            .collect();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let ids: Vec<_> = contents.iter().map(|c| w.add_content(c).unwrap()).collect();
+        let pack = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
+        for id in &ids {
+            let before = open_files::reads();
+            assert_eq!(pack.find(id).unwrap().unwrap().id, *id);
+            let reads = open_files::reads() - before;
+            assert!(reads <= 4, "{id} took {reads} reads");
+        }
     }
 }

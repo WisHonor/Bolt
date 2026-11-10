@@ -30,8 +30,8 @@ use crate::safe_fs;
 pub const MAX_IN_MEMORY_OBJECT: u64 = 512 << 20;
 /// The most deltas one object may be built through; Git's own cap is 4,095.
 pub const MAX_DELTA_DEPTH: u32 = 4096;
-/// The most the bases kept for later deltas may hold.
-pub const DELTA_BASE_CACHE: u64 = 256 << 20;
+/// The most the bases kept for later deltas may hold: Git's own default.
+pub const DELTA_BASE_CACHE: u64 = 96 << 20;
 /// Bytes an import may inflate and build to rebuild objects through deltas: at least this...
 const MIN_DELTA_WORK: u64 = 4 << 30;
 /// ...or this many for each compressed byte of the pack entries it has inflated, each counted

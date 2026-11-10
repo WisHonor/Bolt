@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning, speed and space)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 053](053-file-state-cache.md) (how and when the file-state cache is written) and [decision 011](011-status-and-write-out.md) (how Bolt's own files in `.bolt` are replaced)
+- **Refined by:** [decision 112](112-rulings-after-the-second-red-team-session-on-the-speed-work.md) (a third cache, `cache/other-lines`, written the same way)
 
 ## Context
 

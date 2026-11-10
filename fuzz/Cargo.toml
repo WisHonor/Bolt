@@ -129,6 +129,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "other_lines"
+path = "fuzz_targets/other_lines.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "file_cache"
 path = "fuzz_targets/file_cache.rs"
 test = false

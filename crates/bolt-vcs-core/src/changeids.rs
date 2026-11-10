@@ -1,13 +1,14 @@
-//! The change-ID cache, `.bolt/cache/change-ids` (storage-format.md section 10): the change IDs
-//! of each line's saves, sorted, so that shortening one needn't read the line. Only ever a hint:
-//! one that is missing, sealed by another key, edited or unreadable is rebuilt from the store.
+//! The change-ID cache, `.bolt/cache/change-ids` (storage-format.md section 10): each line's
+//! saves in order, each with its change ID, so that shortening a change ID or finding a save
+//! needn't read the line. Only ever a hint: one that is missing, sealed by another key, edited or
+//! unreadable is rebuilt from the store.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 
-use crate::diary::State;
-use crate::encoding::{DecodeError, Reader, Writer};
+use crate::diary::{Position, State};
+use crate::encoding::{DecodeError, Reader, Writer, varint_len};
 use crate::fsio;
 use crate::id::{ChangeId, Id};
 use crate::keyed;
@@ -15,51 +16,54 @@ use crate::repo::{RepoError, Repository};
 use crate::safe_fs;
 
 const MAGIC: &[u8; 8] = b"BOLTCHID";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const FILE: &str = "change-ids";
 /// The most the file may hold, seal included; a cache that would be bigger isn't written.
 pub const MAX_BYTES: u64 = 256 << 20;
 /// As many lines as a diary entry may have.
 const MAX_LINES: u64 = 100_000;
 const MAX_LINE_NAME: usize = 255;
+/// A save's ID and its change ID.
+const SAVE_BYTES: usize = size_of::<Id>() + size_of::<ChangeId>();
+/// The list kept for the project's position when it is at a save; no line has this name.
+const AT_SAVE: &str = "";
 
-/// The sorted change IDs of the saves on each line, from its newest save back along first
-/// parents, and which save was newest when they were read.
+/// For each line, its saves from the newest back along first parents, each with its change ID.
 #[derive(Debug, Default, Clone)]
 pub struct ChangeIds {
-    lines: BTreeMap<String, Line>,
+    lines: BTreeMap<String, Vec<(Id, ChangeId)>>,
     /// Whether it differs from the file it was read from.
     changed: bool,
-}
-
-#[derive(Debug, Clone)]
-struct Line {
-    tip: Id,
-    ids: Vec<ChangeId>,
+    /// The fingerprint of the file this handle last wrote.
+    written: Option<blake3::Hash>,
 }
 
 impl ChangeIds {
     /// The cache's body, without its seal.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
+        self.encode_kept(Writer::new(), |_| true)
+    }
+
+    fn encode_kept(&self, mut w: Writer, keep: impl Fn(&str) -> bool) -> Vec<u8> {
         for b in MAGIC {
             w.u8(*b);
         }
         w.u8(VERSION);
-        w.varint(self.lines.len() as u64);
-        for (name, line) in &self.lines {
+        let kept = || self.lines.iter().filter(|(name, _)| keep(name));
+        w.varint(kept().count() as u64);
+        for (name, saves) in kept() {
             w.string(name);
-            w.id(&line.tip);
-            w.varint(line.ids.len() as u64);
-            for id in &line.ids {
-                w.change_id(id);
+            w.varint(saves.len() as u64);
+            for (id, change_id) in saves {
+                w.id(id);
+                w.change_id(change_id);
             }
         }
         w.into_bytes()
     }
 
-    /// Reads a body `encode` wrote. Lines must be in order of name and each line's IDs sorted.
+    /// Reads a body `encode` wrote. Lines must be in order of name and none empty.
     pub fn decode(body: &[u8]) -> Result<ChangeIds, DecodeError> {
         let rest = body
             .strip_prefix(MAGIC.as_slice())
@@ -77,36 +81,41 @@ impl ChangeIds {
                 return Err(DecodeError::Invalid("lines out of order"));
             }
             last = Some(name);
-            let tip = r.id()?;
-            // Each ID takes 16 bytes, so a count past what is left is refused before allocating.
-            let fits = r
-                .remaining()
-                .checked_div(size_of::<ChangeId>())
-                .unwrap_or(0);
+            // A count past what is left is refused before allocating.
+            let fits = r.remaining().checked_div(SAVE_BYTES).unwrap_or(0);
             let n = usize::try_from(r.varint()?)
                 .ok()
                 .filter(|&n| n <= fits)
                 .ok_or(DecodeError::UnexpectedEnd)?;
-            let mut ids = Vec::with_capacity(n);
+            if n == 0 {
+                return Err(DecodeError::Invalid("a line with no saves"));
+            }
+            let mut saves = Vec::with_capacity(n);
             for _ in 0..n {
-                ids.push(r.change_id()?);
+                saves.push((r.id()?, r.change_id()?));
             }
-            if !ids.is_sorted() {
-                return Err(DecodeError::Invalid("change IDs out of order"));
-            }
-            lines.insert(name.to_owned(), Line { tip, ids });
+            lines.insert(name.to_owned(), saves);
         }
         r.finish()?;
         Ok(ChangeIds {
             lines,
             changed: false,
+            written: None,
         })
     }
 
-    /// The newest save of `line` when its IDs were read, and the IDs.
+    /// A cache with no lists, which `store` writes over the file it replaces.
+    pub(crate) fn dropped() -> ChangeIds {
+        ChangeIds {
+            changed: true,
+            ..ChangeIds::default()
+        }
+    }
+
+    /// The saves the cache holds for `line`, newest first.
     #[must_use]
-    pub fn get(&self, line: &str) -> Option<(Id, &[ChangeId])> {
-        self.lines.get(line).map(|l| (l.tip, l.ids.as_slice()))
+    pub fn get(&self, line: &str) -> Option<&[(Id, ChangeId)]> {
+        self.lines.get(line).map(Vec::as_slice)
     }
 
     /// The cache in `repo`, or an empty one if it can't be read or the handle's key didn't seal
@@ -124,83 +133,227 @@ impl ChangeIds {
     }
 
     /// Writes the cache back, sealed with the handle's key, if it changed, keeping only the lines
-    /// `state` has; nothing when the handle has no key. A cache that can't be written is just not
-    /// there next time, so a failure is ignored.
+    /// `state` has and, at a save, the position's list; nothing when the handle has no key. A
+    /// cache that can't be written is just not there next time, so a failure is ignored.
     pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
+        self.store_within(repo, state, MAX_BYTES);
+    }
+
+    fn store_within(&mut self, repo: &Repository, state: &State, cap: u64) {
         let Some(key) = repo.cache_key() else {
             return;
         };
-        let before = self.lines.len();
-        self.lines.retain(|name, _| state.lines.contains_key(name));
-        if !self.changed && self.lines.len() == before {
+        let keep = kept(state);
+        if !self.changed && self.lines.keys().all(|name| keep(name)) {
             return;
         }
-        let sealed = keyed::seal(key, &self.encode());
-        if sealed.len() as u64 > MAX_BYTES {
+        let Some(sealed) = self.sealed(key, state, cap) else {
+            return;
+        };
+        let fingerprint = blake3::hash(&sealed);
+        if self.written == Some(fingerprint) {
             return;
         }
         // Readers don't hold the lock, so another command may clear `tmp/` under this write; it
         // then fails, which is fine.
         let _ = fsio::write_cache(repo.tmp_folder(), repo.cache_folder(), FILE, &sealed);
         self.changed = false;
+        self.written = Some(fingerprint);
     }
 
-    /// The sorted change IDs of the saves on the line `name`, whose newest save is `tip`. The store
-    /// is read from `tip` back to the newest save the cache knows on that line, or to the line's
-    /// first save if the cache knows none of them (an undo moved the line back, say).
-    pub(crate) fn line(
+    /// The file to write for `state`, sealed with `key`, of at most `cap` bytes: the position's
+    /// list first, then the other lists `state` keeps, in order of name, while they fit; the rest
+    /// stay in memory only. `None` if the position's list alone doesn't fit, or the memory for
+    /// the file can't be had: the size is worked out before anything is built.
+    fn sealed(&self, key: &[u8; keyed::KEY_LEN], state: &State, cap: u64) -> Option<Vec<u8>> {
+        let keep = kept(state);
+        let position = match &state.position {
+            Position::OnLine(name) => name.as_str(),
+            Position::AtSave(_) => AT_SAVE,
+        };
+        // The magic, the version and the seal.
+        let fixed = (MAGIC.len() as u64)
+            .saturating_add(1)
+            .saturating_add(keyed::KEY_LEN as u64);
+        let line_bytes = |name: &str, saves: &[(Id, ChangeId)]| {
+            let (name_len, count) = (name.len() as u64, saves.len() as u64);
+            varint_len(name_len)
+                .saturating_add(name_len)
+                .saturating_add(varint_len(count))
+                .saturating_add(count.saturating_mul(SAVE_BYTES as u64))
+        };
+        let (mut count, mut bytes) = (0u64, 0u64);
+        let mut fits = |name: &str, saves: &[(Id, ChangeId)]| {
+            let more = bytes.saturating_add(line_bytes(name, saves));
+            let total = fixed
+                .saturating_add(varint_len(count.saturating_add(1)))
+                .saturating_add(more);
+            let fit = total <= cap;
+            if fit {
+                count = count.saturating_add(1);
+                bytes = more;
+            }
+            fit
+        };
+        let own = self.lines.get(position).filter(|_| keep(position));
+        if let Some(saves) = own
+            && !fits(position, saves)
+        {
+            return None;
+        }
+        let mut last: Option<&str> = None;
+        for (name, saves) in &self.lines {
+            if name == position || !keep(name) {
+                continue;
+            }
+            if !fits(name, saves) {
+                break;
+            }
+            last = Some(name);
+        }
+        let total = fixed
+            .saturating_add(varint_len(count))
+            .saturating_add(bytes);
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(usize::try_from(total).ok()?).ok()?;
+        let within =
+            |name: &str| keep(name) && (name == position || last.is_some_and(|last| name <= last));
+        let mut buf = self.encode_kept(Writer::from_vec(buf), within);
+        keyed::seal_in_place(key, &mut buf);
+        Some(buf)
+    }
+
+    /// The saves from `tip` back along first parents, newest first, each with its change ID.
+    /// `line` is the line whose newest save `tip` is, or `None` for a save the project is at.
+    /// The store is read only for saves no list here holds in front of the ones it does.
+    pub(crate) fn chain(
         &mut self,
         repo: &Repository,
-        name: &str,
+        line: Option<&str>,
         tip: Id,
-    ) -> Result<&[ChangeId], RepoError> {
-        let known = self.lines.get(name).map(|l| l.tip);
-        if known != Some(tip) {
-            let mut found = Vec::new();
-            let mut next = Some(tip);
-            while let Some(id) = next {
-                if known == Some(id) {
-                    found.extend(self.lines.remove(name).map(|l| l.ids).unwrap_or_default());
-                    break;
+    ) -> Result<&[(Id, ChangeId)], RepoError> {
+        let name = line.unwrap_or(AT_SAVE);
+        let own = self.lines.get(name).and_then(|saves| at(saves, &tip));
+        match own {
+            Some(0) => {}
+            // Moved back: what was in front is no longer on it.
+            Some(n) => {
+                if let Some(saves) = self.lines.get_mut(name) {
+                    saves.drain(..n);
                 }
-                let save = repo.store().save(&id, repo.signatures_allowed())?;
-                found.push(save.change_id);
-                next = save.parents.first().copied();
+                self.changed = true;
             }
-            self.set(name, tip, found);
+            None => {
+                let held = self
+                    .lines
+                    .iter()
+                    .find_map(|(other, saves)| Some((other.clone(), at(saves, &tip)?)));
+                match (line, held) {
+                    // What a line holds behind a save is what any line holds behind it.
+                    (None, Some((other, n))) => {
+                        return Ok(self.tail(&other, n));
+                    }
+                    (Some(_), Some((other, n))) => {
+                        let tail = self.tail(&other, n).to_vec();
+                        self.lines.insert(name.to_owned(), tail);
+                        self.changed = true;
+                    }
+                    (_, None) => self.read(repo, name, tip)?,
+                }
+            }
         }
-        Ok(self.get(name).map_or(&[], |(_, ids)| ids))
+        Ok(self.tail(name, 0))
     }
 
-    /// Records that `ids` are the change IDs of the line `name` whose newest save is `tip`.
-    pub(crate) fn set(&mut self, name: &str, tip: Id, mut ids: Vec<ChangeId>) {
-        ids.sort_unstable();
-        self.lines.insert(name.to_owned(), Line { tip, ids });
+    fn tail(&self, name: &str, from: usize) -> &[(Id, ChangeId)] {
+        self.lines
+            .get(name)
+            .and_then(|saves| saves.get(from..))
+            .unwrap_or_default()
+    }
+
+    /// Reads the saves from `tip` back until the first one `name`'s list holds, and puts them in
+    /// front of it; the whole line if they never meet it.
+    fn read(&mut self, repo: &Repository, name: &str, tip: Id) -> Result<(), RepoError> {
+        let first = self
+            .lines
+            .get(name)
+            .and_then(|saves| saves.first())
+            .map(|(id, _)| *id);
+        let mut found = Vec::new();
+        let mut next = Some(tip);
+        while let Some(id) = next {
+            if first == Some(id) {
+                found.extend(self.lines.remove(name).unwrap_or_default());
+                break;
+            }
+            let save = repo.store().save(&id, repo.signatures_allowed())?;
+            found.push((id, save.change_id));
+            next = save.parents.first().copied();
+        }
+        self.lines.insert(name.to_owned(), found);
         self.changed = true;
+        Ok(())
+    }
+
+    /// A list of a line of `state` that starts at the line's newest save and holds `id`, and
+    /// where it holds it. `None` says nothing: the cache may not know the line.
+    pub(crate) fn reaches(&self, state: &State, id: &Id) -> Option<(&[(Id, ChangeId)], usize)> {
+        state.lines.iter().find_map(|(name, tip)| {
+            let saves = self.lines.get(name)?;
+            if saves.first().is_some_and(|(first, _)| first == tip) {
+                Some((saves.as_slice(), at(saves, id)?))
+            } else {
+                None
+            }
+        })
     }
 
     /// Records the save `tip`, with `change_id`, made on `parent`, the newest save of `name`.
     /// Nothing changes unless the cache knows the line at `parent`.
     pub(crate) fn add(&mut self, name: &str, parent: Id, tip: Id, change_id: ChangeId) {
-        let Some(line) = self.lines.get_mut(name).filter(|l| l.tip == parent) else {
+        let Some(saves) = self.known_at(name, parent) else {
             return;
         };
-        let at = line.ids.partition_point(|c| *c < change_id);
-        line.ids.insert(at, change_id);
-        line.tip = tip;
+        saves.insert(0, (tip, change_id));
         self.changed = true;
     }
 
     /// Records that `tip`, which has the change ID and parents of `old`, took the place of `old`
-    /// as the newest save of `name`, so the line's change IDs stay as they are. Nothing changes
-    /// unless the cache knows the line at `old`.
+    /// as the newest save of `name`. Nothing changes unless the cache knows the line at `old`.
     pub(crate) fn replace(&mut self, name: &str, old: Id, tip: Id) {
-        let Some(line) = self.lines.get_mut(name).filter(|l| l.tip == old) else {
+        let Some(first) = self.known_at(name, old).and_then(|saves| saves.first_mut()) else {
             return;
         };
-        line.tip = tip;
+        first.0 = tip;
         self.changed = true;
     }
+
+    #[cfg(test)]
+    pub(crate) fn set(&mut self, name: &str, saves: Vec<(Id, ChangeId)>) {
+        self.lines.insert(name.to_owned(), saves);
+        self.changed = true;
+    }
+
+    /// `name`'s list, if its newest save is `tip`.
+    fn known_at(&mut self, name: &str, tip: Id) -> Option<&mut Vec<(Id, ChangeId)>> {
+        self.lines
+            .get_mut(name)
+            .filter(|saves| saves.first().is_some_and(|(id, _)| *id == tip))
+    }
+}
+
+/// Which lists are written for `state`: its lines and, at a save, the position's, unless that
+/// would take the file past the number of lines a reader accepts.
+fn kept(state: &State) -> impl Fn(&str) -> bool + '_ {
+    let at_save =
+        matches!(state.position, Position::AtSave(_)) && (state.lines.len() as u64) < MAX_LINES;
+    move |name| state.lines.contains_key(name) || (at_save && name == AT_SAVE)
+}
+
+/// Where `id` is in `saves`.
+fn at(saves: &[(Id, ChangeId)], id: &Id) -> Option<usize> {
+    saves.iter().position(|(s, _)| s == id)
 }
 
 #[cfg(test)]
@@ -214,15 +367,24 @@ mod tests {
     )]
     use super::*;
 
-    fn sample() -> ChangeIds {
+    fn save(n: u8) -> (Id, ChangeId) {
+        (Id([n; 32]), ChangeId([n; 16]))
+    }
+
+    fn with(lines: &[(&str, Vec<(Id, ChangeId)>)]) -> ChangeIds {
         let mut ids = ChangeIds::default();
-        ids.set(
-            "main",
-            Id([1; 32]),
-            vec![ChangeId([9; 16]), ChangeId([3; 16]), ChangeId([3; 16])],
-        );
-        ids.set("side", Id([2; 32]), vec![]);
+        for (name, saves) in lines {
+            ids.set(name, saves.clone());
+        }
         ids
+    }
+
+    fn sample() -> ChangeIds {
+        with(&[
+            ("", vec![save(2)]),
+            ("main", vec![save(3), save(2), save(1)]),
+            ("side", vec![save(4)]),
+        ])
     }
 
     #[test]
@@ -230,12 +392,8 @@ mod tests {
         let body = sample().encode();
         let back = ChangeIds::decode(&body).unwrap();
         assert_eq!(back.encode(), body);
-        let (tip, ids) = back.get("main").unwrap();
-        assert_eq!(tip, Id([1; 32]));
-        assert_eq!(
-            ids,
-            [ChangeId([3; 16]), ChangeId([3; 16]), ChangeId([9; 16])]
-        );
+        assert_eq!(back.get("main").unwrap(), [save(3), save(2), save(1)]);
+        assert_eq!(back.get("").unwrap(), [save(2)]);
         assert!(back.get("other").is_none());
     }
 
@@ -249,50 +407,150 @@ mod tests {
         let mut longer = body.clone();
         longer.push(0);
         assert!(ChangeIds::decode(&longer).is_err());
-        // `main` is first: magic, version, line count, then "main" and its tip.
-        let count_at = 8 + 1 + 1 + 5 + 32;
+        // The empty name is first: magic, version, line count, the name, then its save count.
+        let count_at = 8 + 1 + 1 + 1;
+        assert_eq!(body[count_at], 1);
         let mut huge = body[..count_at].to_vec();
         huge.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
         assert!(ChangeIds::decode(&huge).is_err());
-        let mut unsorted = body.clone();
-        unsorted[count_at + 1] = 0xff;
-        assert!(ChangeIds::decode(&unsorted).is_err());
-        let mut swapped = ChangeIds::default().encode();
-        swapped[9] = 2;
-        for name in ["b", "a"] {
-            swapped.push(1);
-            swapped.extend_from_slice(name.as_bytes());
-            swapped.extend_from_slice(&[0; 33]);
+        // One save more than the bytes left hold.
+        let mut past = body.clone();
+        past[count_at] = u8::try_from((body.len() - count_at - 1) / SAVE_BYTES + 1).unwrap();
+        assert!(ChangeIds::decode(&past).is_err());
+        let empty = with(&[("main", vec![])]).encode();
+        assert!(ChangeIds::decode(&empty).is_err());
+        for names in [["b", "a"], ["a", "a"]] {
+            let mut bad = ChangeIds::default().encode();
+            bad[9] = 2;
+            for name in names {
+                bad.push(1);
+                bad.extend_from_slice(name.as_bytes());
+                bad.push(1);
+                bad.extend_from_slice(&[0; SAVE_BYTES]);
+            }
+            assert!(ChangeIds::decode(&bad).is_err(), "{names:?}");
         }
-        assert!(ChangeIds::decode(&swapped).is_err());
         let mut version = body;
-        version[8] = 2;
+        version[8] = 1;
         assert!(ChangeIds::decode(&version).is_err());
+    }
+
+    #[test]
+    fn the_position_s_list_is_left_out_rather_than_pass_the_line_limit() {
+        let at = |lines: u32| State {
+            lines: (0..lines).map(|n| (format!("l{n}"), Id([1; 32]))).collect(),
+            tags: None,
+            position: Position::AtSave(Id([1; 32])),
+            shelves: vec![],
+            server_lines: None,
+        };
+        assert!(kept(&at(1))(AT_SAVE));
+        assert!(kept(&at(99_999))(AT_SAVE));
+        let full = at(100_000);
+        assert!(!kept(&full)(AT_SAVE));
+        assert!(kept(&full)("l7"));
+        let mut on_line = at(1);
+        on_line.position = Position::OnLine("l0".into());
+        assert!(!kept(&on_line)(AT_SAVE));
+    }
+
+    #[test]
+    fn what_was_written_isn_t_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let person = crate::save::Person {
+            name: "Ada".into(),
+            email: "a@example.com".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let mut repo = Repository::init(dir.path(), &person).unwrap();
+        repo.set_cache_key([7; 32]);
+        let state = repo.current().unwrap().1.state;
+        // A list the state has no line for is left out of the file, but stays in memory.
+        let mut ids = with(&[("gone", vec![save(1)]), ("main", vec![save(2)])]);
+        let file = dir.path().join(".bolt/cache/change-ids");
+        ids.store(&repo, &state);
+        assert!(file.exists());
+        std::fs::remove_file(&file).unwrap();
+        ids.store(&repo, &state);
+        assert!(!file.exists());
+        ids.add("main", Id([2; 32]), Id([3; 32]), ChangeId([3; 16]));
+        ids.store(&repo, &state);
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn a_cache_past_its_cap_keeps_the_position_s_list_then_others_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let person = crate::save::Person {
+            name: "Ada".into(),
+            email: "a@example.com".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let mut repo = Repository::init(dir.path(), &person).unwrap();
+        repo.set_cache_key([7; 32]);
+        let names = ["a", "b", "c", "d"];
+        let state = State {
+            lines: names
+                .iter()
+                .map(|n| ((*n).to_owned(), Id([1; 32])))
+                .collect(),
+            tags: None,
+            position: Position::OnLine("c".into()),
+            shelves: vec![],
+            server_lines: None,
+        };
+        let file = dir.path().join(".bolt/cache/change-ids");
+        let fill = || with(&names.map(|n| (n, vec![save(1)])));
+        // The magic, version, count and seal, then 51 bytes a line of one save.
+        let (fixed, line) = (8 + 1 + 1 + 32, 1 + 1 + 1 + SAVE_BYTES as u64);
+        assert_eq!(fill().encode().len() as u64 + 32, fixed + 4 * line);
+        // Room for three lines: `c`, then `a` and `b`.
+        let cap = fixed + 3 * line;
+        let mut ids = fill();
+        ids.store_within(&repo, &state, cap);
+        let written = std::fs::read(&file).unwrap();
+        assert!(written.len() as u64 <= cap);
+        let back = ChangeIds::load(&repo);
+        assert_eq!(back.lines.keys().collect::<Vec<_>>(), ["a", "b", "c"]);
+        // The line left out stays in memory.
+        assert!(ids.get("d").is_some());
+        // Room for less than `c`'s list: nothing written, nothing fails.
+        std::fs::remove_file(&file).unwrap();
+        fill().store_within(&repo, &state, fixed + line - 1);
+        assert!(!file.exists());
+        // Room for `c` alone.
+        fill().store_within(&repo, &state, fixed + line);
+        assert_eq!(
+            ChangeIds::load(&repo).lines.keys().collect::<Vec<_>>(),
+            ["c"]
+        );
     }
 
     #[test]
     fn a_save_is_added_only_on_top_of_what_the_cache_knows() {
         let mut ids = sample();
         ids.add("main", Id([7; 32]), Id([8; 32]), ChangeId([5; 16]));
-        assert_eq!(ids.get("main").unwrap().0, Id([1; 32]));
-        ids.add("main", Id([1; 32]), Id([8; 32]), ChangeId([5; 16]));
-        let (tip, got) = ids.get("main").unwrap();
-        assert_eq!(tip, Id([8; 32]));
-        assert_eq!(got.iter().map(|c| c.0[0]).collect::<Vec<_>>(), [3, 3, 5, 9]);
-        ids.add("new", Id([1; 32]), Id([8; 32]), ChangeId([5; 16]));
+        assert_eq!(ids.get("main").unwrap().len(), 3);
+        ids.add("main", Id([3; 32]), Id([8; 32]), ChangeId([5; 16]));
+        let got = ids.get("main").unwrap();
+        assert_eq!(got[0], (Id([8; 32]), ChangeId([5; 16])));
+        assert_eq!(&got[1..], [save(3), save(2), save(1)]);
+        ids.add("new", Id([3; 32]), Id([8; 32]), ChangeId([5; 16]));
         assert!(ids.get("new").is_none());
     }
 
     #[test]
-    fn a_replaced_save_keeps_the_line_s_ids() {
+    fn a_replaced_save_keeps_the_line_s_change_ids() {
         let mut ids = sample();
         ids.replace("main", Id([7; 32]), Id([8; 32]));
-        assert_eq!(ids.get("main").unwrap().0, Id([1; 32]));
-        ids.replace("main", Id([1; 32]), Id([8; 32]));
-        let (tip, got) = ids.get("main").unwrap();
-        assert_eq!(tip, Id([8; 32]));
-        assert_eq!(got.iter().map(|c| c.0[0]).collect::<Vec<_>>(), [3, 3, 9]);
-        ids.replace("new", Id([1; 32]), Id([8; 32]));
+        assert_eq!(ids.get("main").unwrap()[0], save(3));
+        ids.replace("main", Id([3; 32]), Id([8; 32]));
+        let got = ids.get("main").unwrap();
+        assert_eq!(got[0], (Id([8; 32]), ChangeId([3; 16])));
+        assert_eq!(&got[1..], [save(2), save(1)]);
+        ids.replace("new", Id([3; 32]), Id([8; 32]));
         assert!(ids.get("new").is_none());
     }
 }

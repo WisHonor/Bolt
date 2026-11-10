@@ -273,38 +273,40 @@ Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-wi
 - `status`, a small save and `goto` timed from the inside on Git's source and on Godot's demos, on GitHub's Linux and Windows runners and on the laptop; the big-file steps Git or Git LFS wins; where Godot's space goes.
 - *Done when:* [benchmarks.md](benchmarks.md) §7 says where the time and the space go.
 
-**1. The gate against Git**
+**1. The gate against Git** ✅ (2026-11-10)
 - `bench/run.sh gate` and the `speed-gate` job ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)).
-- *Done when:* the job runs on both systems and fails, as it must before the work below.
+- *Done when:* the job runs on both systems and fails, as it must before the work below. It compares medians since [decision 108](decisions/108-the-third-gate-compares-medians.md).
 
-**2. Caches and flushes**
+**2. Caches and flushes** ✅ (2026-11-10)
 - The file cache is loaded without a copy of each path, asked once for each file, written only when it changed and never flushed; `state/lock-info` and the drive test lose their flush ([decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md)).
 - *Done when:* an unchanged `status` leaves `cache/files` untouched, and a torn cache is ignored and rebuilt.
 
-**3. The walk**
+**3. The walk** ✅ (2026-11-10)
 - Ignore lines that are plain names are found by lookup, not by trying each; a folder is listed before it is asked for `.git`, `.bolt` and ignore files ([decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)); each name is handled without building its path three times.
 - *Done when:* the matcher agrees with Git and with its old self on random rules, and every walk test passes unchanged.
 
-**4. The store and the listings**
+**4. The store and the listings** ✅ (2026-11-10)
 - A record is found and read in fewer reads; a folder whose entries all match the last save's takes that save's listing instead of building its own.
 - *Done when:* every object is still checked against its fingerprint on every read, and a save writes the same packs as before.
 
-**5. The commands' own work**
+**5. The commands' own work** ✅ (2026-11-10)
 - A command tests the drive once, loads each cache once, reads the diary entry once and lists the packs once; a switch plans from one scan.
 - *Done when:* the first measurement of the gate after these steps is published, and what is still over is named.
 
-**6. Big files**
+**6. Big files** ✅ (2026-11-10)
 - A big file is flushed while it is written ([decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)); a switch reads each chunk whole and keeps the chunks it has checked while it writes a file.
 - *Done when:* the first save of big files that don't compress and going back to an old version of a big file are measured again, beside Git and Git LFS.
 
-**7. Follow-ups**
+**7. Follow-ups** ✅ (2026-11-10)
 - The rows of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) about speed, memory or space: each is done, or moved past v0.1 in a decision record that says why.
-- *Done when:* each has a test, a measurement or a ruling.
+- Also built here: `cache/change-ids` keeps each line's saves in order, so commands on a long history don't read the line ([decision 105](decisions/105-the-change-id-cache-keeps-each-lines-saves-in-order.md)); the last save's listings are read ahead of the walk ([decision 110](decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md)); folders deeper than the walk holds open no longer cost the square of their depth.
+- *Done when:* each has a test, a measurement or a ruling ([decision 109](decisions/109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md)).
 
-**8. Proof**
+**8. Proof** ✅ (2026-11-10)
 - Tests for what speed puts at risk: a torn, stale or planted cache; files changed during a walk or within the cache's 2 seconds; folders swapped mid-walk; a flush that fails halfway through a big file.
 - *Done when:* each passes on all three systems, and the model test passes with the cache on.
 
-**9. Docs, red team, review, benchmarks and merge**
+**9. Docs, red team, review, benchmarks and merge** ✅ (2026-11-10)
 - The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, the whole benchmark and all three gates run again, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and [benchmarks.md](benchmarks.md) gives the numbers before and after, losses included.
+- **The third gate is not met yet.** `status` and the small save pass; going back on Linux is at twice Git's time or over, where it was 4.5 times, and missed in five runs of seven ([benchmarks.md](benchmarks.md) §8). What would settle it is the owner's call: the first row of this session's section of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).

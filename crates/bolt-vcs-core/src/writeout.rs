@@ -131,7 +131,7 @@ fn planned(
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
-    let now = read_folder(repo, from_root, false, git_excludes)
+    let now = read_folder(repo, from_root, false, git_excludes, Some(drive))
         .map_err(|e| e.in_save(from, is_current(repo, from)))?;
     let mut unsaved = BTreeSet::new();
     for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
@@ -149,10 +149,11 @@ fn planned(
         unsaved.retain(|p| unlike_target.contains(p));
     }
     let carried = unsaved.len();
-    let stored = HashMap::new();
+    // Looked up only by ID, and each was read or built under the ID it is kept by.
+    let stored = &now.listings;
     // Where the target differs from `from`, and, of those, where it holds an entry to write.
     let (mut switched, mut written) = (BTreeSet::new(), BTreeSet::new());
-    for_each_entry_change_in(store, &stored, Some(from_root), to_root, |path, _, t| {
+    for_each_entry_change_in(store, stored, Some(from_root), to_root, |path, _, t| {
         switched.insert(path.to_owned());
         if t.is_some() {
             written.insert(path.to_owned());
@@ -162,7 +163,7 @@ fn planned(
 
     // Compared as the drive compares names, so a path given in another case still matches.
     let only = only.map(|o| Scope::paths(o, drive));
-    let mut target = Tree::new(store, &stored, to_root, drive);
+    let mut target = Tree::new(store, stored, to_root, drive);
     let mut folder = Tree::new(store, &now.listings, now.root, drive);
     let mut refused = BTreeSet::new();
     let mut plan = Plan {
@@ -1192,15 +1193,21 @@ impl Run<'_> {
     ) -> Result<Outcome, RepoError> {
         let tmp = self.repo.tmp_folder();
         let temp = bolt_platform::temp_name();
-        let mut file = tmp.create_new(&temp, executable)?;
+        let file = tmp.create_new(&temp, executable)?;
         let written = (|| -> Result<(), RepoError> {
-            self.repo.store().copy_content(&c.id, &mut file)?;
+            let mut early = fsio::EarlyFlush::new();
+            let mut out = Counted {
+                file: &file,
+                early: &mut early,
+            };
+            self.repo.store().copy_content(&c.id, &mut out)?;
             if file.metadata()?.len() != c.size {
                 return Err(damaged(format!(
                     "the content {} isn't the size the switch expects",
                     c.id.to_hex()
                 )));
             }
+            early.finish()?;
             file.sync_all()?;
             fsio::fault_point("switch:written")?;
             fsio::act_point("switch:written");
@@ -2098,6 +2105,24 @@ pub(crate) fn changed_warning(paths: &[String]) -> Warning {
             first(paths)
         ),
     )
+}
+
+/// A file being written, its bytes counted so a big one is flushed along the way.
+struct Counted<'a> {
+    file: &'a File,
+    early: &'a mut fsio::EarlyFlush,
+}
+
+impl Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.early.wrote(self.file, n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
 }
 
 #[cfg(test)]

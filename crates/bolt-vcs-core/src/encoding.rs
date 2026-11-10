@@ -46,6 +46,12 @@ impl Writer {
         }
     }
 
+    /// A writer that appends to `buf`, using any room already reserved in it.
+    #[must_use]
+    pub(crate) fn from_vec(buf: Vec<u8>) -> Writer {
+        Writer { buf }
+    }
+
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }
@@ -246,6 +252,15 @@ mod tests {
             enc(u64::MAX),
             [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]
         );
+    }
+
+    #[test]
+    fn a_writer_from_a_vector_appends_after_what_it_held() {
+        let mut held = Vec::with_capacity(16);
+        held.extend_from_slice(b"ab");
+        let mut w = Writer::from_vec(held);
+        w.varint(300);
+        assert_eq!(w.into_bytes(), [b'a', b'b', 0xac, 0x02]);
     }
 
     #[test]

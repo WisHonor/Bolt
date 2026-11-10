@@ -25,6 +25,7 @@ pub mod link;
 pub mod listing;
 pub mod merge;
 pub mod names;
+pub mod otherlines;
 pub mod pack;
 pub mod repo;
 pub mod safe_fs;
