@@ -188,12 +188,18 @@ fn write_step(
     let current = tip_of(&entry)?;
     let top = Dir::open_top(repo.root()).map_err(RepoError::from)?;
     let mut packs = repo.new_packs()?;
+    // Both names, so a link or a folder that appeared at the one left alone refuses too.
+    for path in RULE_FILES {
+        let now = read_rule_file(&top, path)?;
+        // What a person confirmed must be what is applied.
+        if let Some(change) = plan.changes.iter().find(|c| c.path == path)
+            && now != change.before
+        {
+            return Err(SetupError::ChangedSincePlan { path });
+        }
+    }
     let (mut before, mut after) = (BTreeMap::new(), BTreeMap::new());
     for change in plan.changes.iter().filter(|c| RULE_FILES.contains(&c.path)) {
-        // What a person confirmed must be what is applied.
-        if read_rule_file(&top, change.path)? != change.before {
-            return Err(SetupError::ChangedSincePlan { path: change.path });
-        }
         // An executable file stays one, so the folder matches the "from" save.
         let kind = match top.metadata(OsStr::new(change.path)) {
             Ok(m) if m.executable == Some(true) => EntryKind::Executable,

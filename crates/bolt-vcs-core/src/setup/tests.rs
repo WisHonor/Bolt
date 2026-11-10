@@ -333,6 +333,37 @@ fn a_file_edited_after_the_plan_refuses() {
 }
 
 #[test]
+fn a_link_that_appears_at_the_other_rule_file_refuses() {
+    let (dir, mut repo) = saved(&[("a.txt", b"a")]);
+    fs::write(dir.path().join(".boltignore"), code_block()).unwrap();
+    let plan = plan_setup(dir.path(), Preset::Code).unwrap();
+    // The plan leaves `.boltignore` alone.
+    assert_eq!(plan.changes.len(), 1);
+    let (head, _) = head_entry(&repo);
+    let ignore = dir.path().join(".boltignore");
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("rules");
+    fs::write(&target, code_block()).unwrap();
+    fs::remove_file(&ignore).unwrap();
+    // A folder where there's no right to make links.
+    if !symlink(&target, &ignore) {
+        fs::create_dir(&ignore).unwrap();
+    }
+    let e = apply(&mut repo, &plan).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            SetupError::NotAFile {
+                path: ".boltignore"
+            }
+        ),
+        "{e:?}"
+    );
+    assert_eq!(head_entry(&repo).0, head);
+    assert!(!dir.path().join("bolt.toml").exists());
+}
+
+#[test]
 fn a_name_in_another_letter_case_is_the_rule_file_where_the_drive_ignores_case() {
     let (dir, mut repo) = saved(&[("a.txt", b"a")]);
     if !repo.drive().unwrap().ignores_case {
