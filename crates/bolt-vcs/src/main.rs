@@ -525,7 +525,8 @@ fn start(
         return output::ended(Some(in_document), String::new, &warnings, None);
     }
     if let Some(failure) = unwritten {
-        return Err(failure);
+        // The warnings it found, then the failure.
+        return output::ended(Some(failure), String::new, &warnings, None);
     }
     // The folder's name came from outside Bolt, like any name in a project.
     let shown = escape(&root.display().to_string(), false);

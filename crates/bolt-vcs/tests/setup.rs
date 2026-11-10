@@ -253,7 +253,7 @@ fn a_start_whose_rule_files_cant_be_written_says_how_to_write_them() {
         };
         let (code, out, err) = run(&env, args);
         assert_eq!(code, Some(1), "{err}");
-        // The project is there, as a Custom one.
+        // The project is there, with no rule files yet.
         assert!(is_project(env.root()));
         assert!(!env.root().join("bolt.toml").exists());
         assert_eq!(command_of_head(&env), "start");
@@ -381,6 +381,29 @@ fn setup_shows_what_in_the_rules_file_was_passed_over() {
     let (_, doc) = json(&env, &["setup"]);
     assert_eq!(doc["rules_file"], false);
     assert_eq!(doc["warnings"][0]["kind"], "rules_file_skipped");
+    let said = ok(&env, &["setup"]);
+    assert!(
+        said.starts_with("bolt.toml couldn't be used, so Bolt's own values apply:"),
+        "{said}"
+    );
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_start_without_its_rule_files_tells_its_warnings_before_the_error() {
+    let env = Env::empty();
+    fs::create_dir(env.root().join(".boltignore")).unwrap();
+    let out = env
+        .bolt()
+        .env("BOLT_FAULT_FAIL", "start:read-back")
+        .args(["start", "--preset", "code"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    let warned = err.find("warning: The project was made, but Bolt couldn't read its first save");
+    let failed = err.find("error: The project was started, but its rule files weren't written");
+    assert!(warned.is_some() && warned < failed, "{err}");
 }
 
 #[test]

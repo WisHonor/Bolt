@@ -143,10 +143,10 @@ Filled in while milestone 6 restyles each command: its outcome line in each stat
 | Started with Code or Game | `Started a Bolt project in <folder>` | `Using Game settings (Unity):` then bullets: chunked size, what the preset's lines leave out, the large-save numbers, and for Game what is lockable; then `The rules are in bolt.toml and .boltignore. See them any time with: bolt setup`; then `Your first save is <id> on line main.` | `Next: change some files, then run: bolt save "describe your change"` |
 | Started with Custom | the same | `Using Custom settings: Bolt's plain defaults, with no rule files:` then the chunked size and the large-save numbers; `There are no rule files. See the rules any time with: bolt setup` | the same |
 | The folder has a `bolt.toml` | the same | `Using the rules in this folder's bolt.toml, which stay as they are:` then its chunked size and large-save numbers; `See them any time with: bolt setup` | the same |
-| No terminal or `--json`, no `--preset` | `error: Nothing was started: Bolt can't ask what kind of project this is without a terminal.` | `hint:` names `--preset code`, `--preset game`, `--preset custom`, and the suggestion with what the look found, in fixed words | |
+| No terminal or `--json`, no `--preset` | `error: Nothing was started: Bolt can't ask what kind of project this is without a terminal.` With `--json`, the document's `error` says it instead, ending `… this is with --json.` | `hint:` names `--preset code`, `--preset game`, `--preset custom`, and the suggestion with what the look found, in fixed words | |
 | A wrong answer three times, or the input ended | `error: Nothing was started: no kind of project was chosen.` | the same hint | |
 | `--preset` where a `bolt.toml` is | `error: Nothing was started: this folder already has a bolt.toml…` | `hint:` start without `--preset`, then `bolt setup --preset <name>` | |
-| Made, rule files not written | `error: The project was started, but its rule files weren't written: …` | `hint: Run bolt setup --preset <name> to write them.` | |
+| Made, rule files not written | the warnings found so far, then `error: The project was started, but its rule files weren't written: …` | `hint: Run bolt setup --preset <name> to write them.` | |
 
 A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.` and asks again, three times in all. Sizes of settings are as `bolt.toml` writes them (§9); the folder's size is measured.
 
@@ -156,10 +156,11 @@ A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.
 |---|---|---|---|
 | No flag, with a `bolt.toml` | `Using <label> settings, from bolt.toml:` (`Using the rules in bolt.toml:` without a label) | rows: `Files stored in chunks`, `A save asks first`, `Lockable`, `No conflict markers`, `Left out by the preset` (`N lines in .boltignore`); `none` where there are none | `Next: edit bolt.toml or .boltignore to change a rule, or switch presets with: bolt setup --preset <name>` |
 | No flag, no `bolt.toml` | `No bolt.toml here, so Bolt's own values apply:` | the same rows | the same |
+| No flag, a `bolt.toml` Bolt can't use (not TOML, a folder, over 1 MiB) | `bolt.toml couldn't be used, so Bolt's own values apply:`, and a `warning:` says why | the same rows | the same |
 | `--preset`, nothing to change | `Nothing to change: the rule files already are what the Code preset writes.` | | |
 | `--preset`, a preview | `Switching to Code settings changes these files:` | each file's change as `bolt changes` shows it, one empty line between files; then `Apply these changes? [y/N]` on stderr | |
 | Answered no | `Nothing was changed.` | | |
 | Applied | `Switched to Code settings: made bolt.toml, changed .boltignore.` | | `Changed your mind? bolt undo` |
-| No terminal or `--json`, no `--yes` | the preview, then `error: Nothing was changed: Bolt can't ask whether to apply these changes without a terminal.` | `hint: If they are what you want, run: bolt setup --preset <name> --yes` | |
+| No terminal or `--json`, no `--yes` | the preview, then `error: Nothing was changed: Bolt can't ask whether to apply these changes without a terminal.` With `--json`, there is no preview, and the document's `error` says it instead, ending `… these changes with --json.` | `hint: If they are what you want, run: bolt setup --preset <name> --yes` | |
 
 Problems in `bolt.toml` come as `warning:` lines after the list. The engine's refusals (a rule file that is a link or a folder, one over 1 MiB, one changed since the preview) are errors with their own hints.

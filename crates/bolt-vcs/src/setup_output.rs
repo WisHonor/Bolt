@@ -220,6 +220,9 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
     let s = style::out();
     let rules = &read.rules;
     let mut text = match (&read.rules.preset, read.file) {
+        _ if read.skipped.is_some() => {
+            "bolt.toml couldn't be used, so Bolt's own values apply:".to_owned()
+        }
         (_, false) => "No bolt.toml here, so Bolt's own values apply:".to_owned(),
         (Some(label), true) => format!(
             "Using {} settings, from bolt.toml:",
