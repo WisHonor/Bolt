@@ -9,6 +9,7 @@
 //! The limits on names and paths are here too (decision 051).
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
@@ -166,6 +167,49 @@ pub fn own_folder(name: &str, drive: Drive) -> bool {
     [".bolt", ".git"]
         .iter()
         .any(|own| name == *own || (drive.ignores_case && name.eq_ignore_ascii_case(own)))
+}
+
+/// Which of `.git`, `.bolt`, `.gitignore` and `.boltignore` a folder could hold, judged from its
+/// listing. False only where no drive could find the name there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub git: bool,
+    pub bolt: bool,
+    pub gitignore: bool,
+    pub boltignore: bool,
+}
+
+impl Listed {
+    /// Each could be there: ask the drive for all four.
+    pub const ALL: Listed = Listed {
+        git: true,
+        bolt: true,
+        gitignore: true,
+        boltignore: true,
+    };
+}
+
+/// What a folder could hold, from each entry's name and Windows short name. A drive matches an
+/// all-ASCII name by ASCII letter case at most; any name outside ASCII and Bolt can't tell, so all
+/// four could be there.
+pub fn listed_hints<'a>(names: impl Iterator<Item = (&'a OsStr, Option<&'a OsStr>)>) -> Listed {
+    let mut hints = Listed {
+        git: false,
+        bolt: false,
+        gitignore: false,
+        boltignore: false,
+    };
+    for name in names.flat_map(|(name, short)| std::iter::once(name).chain(short)) {
+        let name = name.as_encoded_bytes();
+        if !name.is_ascii() {
+            return Listed::ALL;
+        }
+        hints.git |= name.eq_ignore_ascii_case(b".git");
+        hints.bolt |= name.eq_ignore_ascii_case(b".bolt");
+        hints.gitignore |= name.eq_ignore_ascii_case(b".gitignore");
+        hints.boltignore |= name.eq_ignore_ascii_case(b".boltignore");
+    }
+    hints
 }
 
 fn is_ntfs_dotgit(name: &str) -> bool {
@@ -543,6 +587,45 @@ pub fn project_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listing_rules_out_only_names_no_drive_could_find() {
+        let hints = |names: &[(&str, Option<&str>)]| {
+            listed_hints(
+                names
+                    .iter()
+                    .map(|(n, s)| (OsStr::new(n), s.map(OsStr::new))),
+            )
+        };
+        let only = |git, bolt, gitignore, boltignore| Listed {
+            git,
+            bolt,
+            gitignore,
+            boltignore,
+        };
+        let none = only(false, false, false, false);
+        assert_eq!(hints(&[]), none);
+        assert_eq!(hints(&[("a.txt", None), ("sub", None)]), none);
+        assert_eq!(hints(&[(".git", None)]), only(true, false, false, false));
+        assert_eq!(hints(&[(".bolt", None)]), only(false, true, false, false));
+        assert_eq!(
+            hints(&[(".gitignore", None), (".boltignore", None)]),
+            only(false, false, true, true)
+        );
+        assert_eq!(
+            hints(&[(".GiT", None), (".BOLT", None), (".GITignore", None)]),
+            only(true, true, true, false)
+        );
+        assert_eq!(hints(&[(".gitx", None), ("x.git", None)]), none);
+        assert_eq!(hints(&[("a.txt", None), ("é.txt", None)]), Listed::ALL);
+        // `GIT~1` is a short name `.git` can have, but a lookup of `.git` doesn't find it by that.
+        assert_eq!(hints(&[("git-stuff", Some("GIT~1"))]), none);
+        assert_eq!(
+            hints(&[("long", Some(".GIT"))]),
+            only(true, false, false, false)
+        );
+        assert_eq!(hints(&[("long", Some("É"))]), Listed::ALL);
+    }
 
     #[test]
     fn given_paths_become_project_paths() {

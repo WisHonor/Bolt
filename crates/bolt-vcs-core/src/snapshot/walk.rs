@@ -19,7 +19,9 @@ use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
-use crate::names::{holdable_here, is_bolt_alias, is_git_alias, own_folder, validate_name};
+use crate::names::{
+    Listed, holdable_here, is_bolt_alias, is_git_alias, listed_hints, own_folder, validate_name,
+};
 use crate::repo::RepoError;
 use crate::store::{Store, StoreError};
 use crate::text::{escape, escape_all};
@@ -42,6 +44,37 @@ pub(super) fn holds_own_repository(dir: &Dir) -> bool {
         || dir
             .metadata(OsStr::new(".bolt"))
             .is_ok_and(|m| m.kind == EntryType::Dir)
+}
+
+/// How often a walk asked the drive about a folder, by the folder's full path: the times it
+/// looked for a repository of its own there, and the ignore files it tried to open.
+#[cfg(test)]
+mod asked {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static ASKED: Mutex<BTreeMap<PathBuf, (usize, usize)>> = Mutex::new(BTreeMap::new());
+
+    fn note(folder: PathBuf, lookups: usize, opens: usize) {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let n = asked.entry(folder).or_default();
+        *n = (n.0 + lookups, n.1 + opens);
+    }
+
+    pub(super) fn lookup(folder: PathBuf) {
+        note(folder, 1, 0);
+    }
+
+    pub(super) fn open(folder: PathBuf) {
+        note(folder, 0, 1);
+    }
+
+    /// The lookups and opens made at `folder` so far.
+    pub(super) fn at(folder: &Path) -> (usize, usize) {
+        let asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        asked.get(folder).copied().unwrap_or_default()
+    }
 }
 
 /// The most folders a save holds open at once (half macOS's default limit of 256 open files, which
@@ -338,6 +371,9 @@ struct WalkState {
     /// The base save's entries the walk leaves untouched, by project path: the new save keeps
     /// them as they were, whatever the folder holds there.
     untouched: HashMap<String, Child>,
+    /// The folder last opened to go into, by project path, with the handle that listed it and
+    /// what it holds: the walk goes on from this listing.
+    listed: Option<(String, Arc<Dir>, Vec<DirEntry>)>,
 }
 
 impl WalkState {
@@ -373,11 +409,12 @@ impl WalkState {
             gitignored: HashSet::new(),
             drive,
             untouched: HashMap::new(),
+            listed: None,
         };
         rules.drop_saved("", dropped);
         rules.note_untouched("", &top);
         rules.old.insert(String::new(), Some(top));
-        rules.enter(Path::new(""), own_list)?;
+        rules.enter(Path::new(""), own_list, Listed::ALL)?;
         Ok(rules)
     }
 
@@ -451,8 +488,13 @@ impl WalkState {
     /// Puts the rules of the ignore files in the folder `rel` in force: its `.gitignore`, then its
     /// `.boltignore`, whose lines come later so they can add to Git's rules or undo them. At the
     /// top, Git's personal lists come first, as in Git: the user's own `own_list`, then
-    /// `.git/info/exclude` (decision 047).
-    fn enter(&mut self, rel: &Path, own_list: Option<&Path>) -> Result<(), SaveError> {
+    /// `.git/info/exclude` (decision 047). An ignore file `hints` rules out isn't looked for.
+    fn enter(
+        &mut self,
+        rel: &Path,
+        own_list: Option<&Path>,
+        hints: Listed,
+    ) -> Result<(), SaveError> {
         let folder = shown(rel);
         let mut in_force = self.matcher.in_force_bytes();
         let mut rules = Vec::new();
@@ -465,7 +507,11 @@ impl WalkState {
             rules.extend(self.top_list_rules(&exclude, why, &mut in_force)?);
         }
         let gitignore_why = "Git skips a linked .gitignore too";
-        for (name, why) in [(".gitignore", Some(gitignore_why)), (".boltignore", None)] {
+        let files = [
+            (".gitignore", Some(gitignore_why), hints.gitignore),
+            (".boltignore", None, hints.boltignore),
+        ];
+        for (name, why, _) in files.into_iter().filter(|(_, _, there)| *there) {
             let name = OsStr::new(name);
             rules.extend(self.file_rules(rel, name, &folder, why, &mut in_force)?);
         }
@@ -605,6 +651,14 @@ impl WalkState {
             source,
         };
         let max = safe_fs::MAX_IGNORE_FILE_BYTES;
+        #[cfg(test)]
+        asked::open(
+            self.root
+                .join(rel)
+                .parent()
+                .unwrap_or(&self.root)
+                .to_owned(),
+        );
         let bytes = match safe_fs::read_capped_in(dir, name, Path::new(rel), max) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -730,10 +784,34 @@ impl WalkState {
             return false;
         }
         // After the rules, so an ignored one stays out without a word. Only now is the folder
-        // opened: an ignored one may be one Bolt can't read.
+        // opened and listed: an ignored one may be one Bolt can't read. The drive is asked for a
+        // name only where the listing could hold it, and the walk then uses that same listing.
+        self.listed = None;
+        let mut hints = Listed::ALL;
         let nested = opens
-            && match self.handles.dir(rel) {
-                Ok(dir) => holds_own_repository(dir),
+            && match self.handles.held(rel).map(Arc::clone) {
+                Ok(dir) => match dir.entries() {
+                    Ok(entries) => {
+                        hints = listed_hints(
+                            entries
+                                .iter()
+                                .map(|e| (e.name.as_os_str(), e.short_name.as_deref())),
+                        );
+                        #[cfg(test)]
+                        if hints.git || hints.bolt {
+                            asked::lookup(self.root.join(rel));
+                        }
+                        let nested = (hints.git || hints.bolt) && holds_own_repository(&dir);
+                        self.listed = Some((shown(rel), dir, entries));
+                        nested
+                    }
+                    // A repository Bolt may search but not list is left out, as before.
+                    Err(_) if holds_own_repository(&dir) => true,
+                    Err(e) => {
+                        self.problem.get_or_insert(folder_problem(&shown(rel), e));
+                        return false;
+                    }
+                },
                 Err(e) => {
                     self.problem.get_or_insert(folder_problem(&shown(rel), e));
                     return false;
@@ -743,12 +821,16 @@ impl WalkState {
             let kept_rel = shown(rel);
             self.nested.add(kept_rel.clone());
             let kept = self.saved_before(&folder, rel, is_dir);
+            // One kept for what the last save holds there is walked from the same listing.
             if kept {
                 self.nested_held.insert(kept_rel);
+            } else {
+                self.listed = None;
             }
             return kept;
         }
-        if opens && let Err(problem) = self.enter(rel, None) {
+        if opens && let Err(problem) = self.enter(rel, None, hints) {
+            self.listed = None;
             self.problem.get_or_insert(problem);
             return false;
         }
@@ -825,13 +907,25 @@ struct InFolder {
 impl InFolder {
     /// The folder `rel`, `depth` levels down, with what it holds. Its files and links come before
     /// its folders, so a folder past those held is opened again only to go into its next folder.
-    fn listed(handles: &mut Handles, rel: String, depth: usize) -> Result<InFolder, SaveError> {
-        let dir = Arc::clone(
-            handles
-                .held(Path::new(&rel))
-                .map_err(|e| folder_problem(&rel, e))?,
-        );
-        let mut left = dir.entries().map_err(|e| folder_problem(&rel, e))?;
+    /// `ready` is a listing already made, used if it is this folder's.
+    fn listed(
+        handles: &mut Handles,
+        ready: Option<(String, Arc<Dir>, Vec<DirEntry>)>,
+        rel: String,
+        depth: usize,
+    ) -> Result<InFolder, SaveError> {
+        let (dir, mut left) = match ready {
+            Some((at, dir, entries)) if at == rel => (dir, entries),
+            _ => {
+                let dir = Arc::clone(
+                    handles
+                        .held(Path::new(&rel))
+                        .map_err(|e| folder_problem(&rel, e))?,
+                );
+                let entries = dir.entries().map_err(|e| folder_problem(&rel, e))?;
+                (dir, entries)
+            }
+        };
         // Backwards, as they are taken from the end.
         left.sort_by(|a, b| {
             (b.kind == EntryType::Dir, &b.name).cmp(&(a.kind == EntryType::Dir, &a.name))
@@ -1134,7 +1228,7 @@ fn walk_folders(
     // Limits are checked during the scan, so a tree too deep or too big is refused before it is all
     // read.
     let mut folders = Folders::from([(String::new(), Vec::new())]);
-    let top = InFolder::listed(&mut rules.handles, String::new(), 0);
+    let top = InFolder::listed(&mut rules.handles, None, String::new(), 0);
     let mut path = vec![top.map_err(|problem| (String::new(), problem))?];
     let mut job = None;
     let mut first: Option<Problem> = None;
@@ -1245,7 +1339,8 @@ fn walk_folders(
             if kind != Kind::Folder {
                 return Ok(None);
             }
-            InFolder::listed(&mut rules.handles, rel.clone(), depth).map(Some)
+            let ready = rules.listed.take();
+            InFolder::listed(&mut rules.handles, ready, rel.clone(), depth).map(Some)
         })();
         match visited {
             Ok(Some(inner)) => path.push(inner),
@@ -1961,6 +2056,166 @@ mod tests {
         let saved = save_now(&mut repo).unwrap();
         assert!(warnings_of(&saved).is_empty(), "{saved:?}");
         assert_eq!(saved_paths(&repo, saved), [".gitignore"]);
+    }
+
+    /// Whether the drive finds `name` in the folder `rel` of `root`, asked as the walk asks it.
+    fn drive_finds(root: &Path, rel: &str, name: &str) -> bool {
+        let dir = Dir::open_top(&root.join(rel)).unwrap();
+        dir.metadata(OsStr::new(name)).is_ok()
+    }
+
+    #[test]
+    fn a_folder_of_plain_names_is_not_asked_for_git_bolt_or_ignore_files() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/a.txt", b"x");
+        write(root, "sub/B.c", b"x");
+        write(root, "sub/sub/x.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(
+            saved_paths(&repo, saved),
+            ["sub", "sub/B.c", "sub/a.txt", "sub/sub", "sub/sub/x.txt"]
+        );
+        assert_eq!(asked::at(&repo.root().join("sub")), (0, 0));
+        assert_eq!(asked::at(&repo.root().join("sub/sub")), (0, 0));
+    }
+
+    #[test]
+    fn a_nested_repository_is_found_from_the_listing() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, "wt/.git", b"gitdir: /elsewhere\n");
+        write(root, "wt/a.txt", b"x");
+        write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
+        write(root, "game/.bolt/format", b"bolt-repository 1\n");
+        let saved = save_now(&mut repo).unwrap();
+        let warnings = warnings_of(&saved).to_vec();
+        assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["nested_projects_left_out"]);
+        assert!(
+            warnings[0].message.contains(":\n  clone\n  game\n  wt\n"),
+            "{warnings:?}"
+        );
+        for folder in ["wt", "clone", "game"] {
+            assert!(asked::at(&repo.root().join(folder)).0 > 0, "{folder}");
+        }
+    }
+
+    /// A repository Bolt may search but not list is still found, and left out.
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_repository_that_cannot_be_listed_is_left_out() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, "wt/.git", b"gitdir: /elsewhere\n");
+        let wt = root.join("wt");
+        fs::set_permissions(&wt, fs::Permissions::from_mode(0o311)).unwrap();
+        // root reads everything, so there is nothing to test.
+        let root_user = fs::read_dir(&wt).is_ok();
+        let saved = save_now(&mut repo);
+        fs::set_permissions(&wt, fs::Permissions::from_mode(0o755)).unwrap();
+        if root_user {
+            return;
+        }
+        let saved = saved.unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["nested_projects_left_out"]);
+        assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+    }
+
+    #[test]
+    fn git_in_another_letter_case_is_judged_as_the_drive_judges_it() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "keep.txt", b"x");
+        write(root, "sub/.GIT/HEAD", b"ref: refs/heads/main\n");
+        write(root, "sub/x.txt", b"x");
+        let nested = drive_finds(root, "sub", ".git");
+        let saved = save_now(&mut repo).unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        if nested {
+            assert_eq!(kinds, ["nested_projects_left_out"]);
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
+        } else {
+            assert_eq!(kinds, ["git_names_left_out"]);
+            assert_eq!(saved_paths(&repo, saved), ["keep.txt", "sub", "sub/x.txt"]);
+        }
+        assert!(asked::at(&repo.root().join("sub")).0 > 0);
+    }
+
+    #[test]
+    fn a_name_outside_ascii_makes_the_walk_ask() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/\u{e9}.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert!(warnings_of(&saved).is_empty(), "{saved:?}");
+        assert_eq!(saved_paths(&repo, saved).len(), 2);
+        let (lookups, opens) = asked::at(&repo.root().join("sub"));
+        assert!(lookups > 0 && opens == 2, "{lookups} {opens}");
+    }
+
+    #[test]
+    fn a_bolt_file_is_not_a_project() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/.bolt", b"x");
+        write(root, "sub/x.txt", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, ["git_names_left_out"]);
+        assert_eq!(saved_paths(&repo, saved), ["sub", "sub/x.txt"]);
+        assert!(asked::at(&repo.root().join("sub")).0 > 0);
+    }
+
+    #[test]
+    fn an_ignore_file_is_read_when_the_listing_shows_it() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/.gitignore", b"*.log\n");
+        write(root, "sub/.boltignore", b"*.tmp\n");
+        write(root, "sub/a.log", b"x");
+        write(root, "sub/b.tmp", b"x");
+        write(root, "sub/c.txt", b"x");
+        write(root, "only/.boltignore", b"*.tmp\n");
+        write(root, "only/b.tmp", b"x");
+        let saved = save_now(&mut repo).unwrap();
+        assert_eq!(
+            saved_paths(&repo, saved),
+            [
+                "only",
+                "only/.boltignore",
+                "sub",
+                "sub/.boltignore",
+                "sub/.gitignore",
+                "sub/c.txt"
+            ]
+        );
+        assert_eq!(asked::at(&repo.root().join("sub")), (0, 2));
+        assert_eq!(asked::at(&repo.root().join("only")), (0, 1));
+    }
+
+    #[test]
+    fn an_ignore_file_in_another_letter_case_is_read_where_the_drive_would_open_it() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "sub/.GITIGNORE", b"*.log\n");
+        write(root, "sub/a.log", b"x");
+        write(root, "sub/b.txt", b"x");
+        let read = drive_finds(root, "sub", ".gitignore");
+        let saved = save_now(&mut repo).unwrap();
+        let paths = saved_paths(&repo, saved);
+        if read {
+            assert_eq!(paths, ["sub", "sub/.GITIGNORE", "sub/b.txt"]);
+        } else {
+            assert_eq!(paths, ["sub", "sub/.GITIGNORE", "sub/a.log", "sub/b.txt"]);
+        }
+        assert_eq!(asked::at(&repo.root().join("sub")), (0, 1));
     }
 
     /// The user's own list, then `.git/info/exclude`, then the project's own rules, as in Git: the
