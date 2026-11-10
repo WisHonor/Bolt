@@ -50,6 +50,6 @@ expression: doc
       "tz_offset_min": "[redacted]"
     }
   },
-  "unfinished_switch": null,
+  "unfinished_switch": false,
   "warnings": []
 }

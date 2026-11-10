@@ -159,7 +159,7 @@ Saving gives one of two documents, told apart by `result`.
 | `save` | save | The save the folder was compared with: the line's newest, or the one the project is at. |
 | `changes` | list of change | Each file that differs from that save, as in `show` (a change, below), in the order of the paths. `[]` when nothing changed. |
 | `not_written` | list of string | The paths of the save's entries this computer can't hold as they are (project links, names this system can't create, names that are one file on this drive, links Git wrote as files holding their targets). Saves keep them as they were, so they are never changes. A kept folder is named once, not each entry in it. `[]` if none. |
-| `unfinished_switch` | string or `null` | `null` unless a switch between saves (`goto`, `discard`) was stopped before it was done, or just after it was done with its journal, `.bolt/state/journal`, left behind, or its journal can't be used. Then it is the message of the `switch_unfinished` warning (§4), which the document also lists. The folder is compared with the save the project is on: the one it was on before the switch, unless the switch was done. |
+| `unfinished_switch` | boolean | `true` when a switch between saves (`goto`, `discard`) was stopped before it was done, or just after it was done with its journal, `.bolt/state/journal`, left behind, or its journal can't be used; the `switch_unfinished` warning (§4) in `warnings` then says which. `false` otherwise. The folder is compared with the save the project is on: the one it was on before the switch, unless the switch was done. |
 | `warnings` | list | See §4. |
 
 ### `bolt changes --json`

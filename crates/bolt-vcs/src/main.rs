@@ -1070,7 +1070,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                     "save": output::save_json(id, save, &short),
                     "changes": changes,
                     "not_written": found.not_written_here,
-                    "unfinished_switch": found.unfinished_switch,
+                    "unfinished_switch": found.unfinished_switch.is_some(),
                     "warnings": output::warnings_json(&warnings),
                 })
             );

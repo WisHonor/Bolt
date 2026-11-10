@@ -92,7 +92,7 @@ fn read_only_commands_say_a_switch_is_unfinished() {
         );
     }
     let (_, doc) = warning_kinds(&env, &["status"]);
-    assert!(doc["unfinished_switch"].is_string(), "{doc}");
+    assert_eq!(doc["unfinished_switch"], true, "{doc}");
 
     // The next command that changes the project finishes it, and says so.
     let (kinds, doc) = warning_kinds(&env, &["save", "B"]);
@@ -100,7 +100,7 @@ fn read_only_commands_say_a_switch_is_unfinished() {
     assert_eq!(kinds, ["switch_finished"]);
     let (kinds, doc) = warning_kinds(&env, &["status"]);
     assert!(kinds.is_empty(), "{doc}");
-    assert!(doc["unfinished_switch"].is_null());
+    assert_eq!(doc["unfinished_switch"], false, "{doc}");
     assert!(!env.root().join(".bolt/state/journal").exists());
 }
 

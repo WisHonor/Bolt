@@ -415,7 +415,15 @@ fn status_and_history_say_when_a_stopped_switch_left_only_its_journal() {
         assert!(said.contains(pending), "{args:?}: {said}");
     }
     let status = json(&env, &["status"]);
-    let message = status["unfinished_switch"].as_str().unwrap();
+    assert_eq!(status["unfinished_switch"], true, "{status}");
+    let message = status["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["kind"] == "switch_unfinished")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap();
     assert!(
         message.starts_with("A switch between saves was stopped just after"),
         "{status}"
