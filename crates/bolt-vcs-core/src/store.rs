@@ -11,7 +11,7 @@ use crate::pack::{HashingWriter, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::save::Save;
 use crate::text::escape;
 use crate::warning::{self, Warning};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::ops::ControlFlow;
@@ -216,6 +216,59 @@ impl Tries {
             },
             (None, None) => StoreError::Missing(*id),
         }
+    }
+}
+
+/// The most bytes of chunks kept while one file is written.
+const KEPT: usize = 8 << 20;
+
+/// Chunks already read and checked while one file is written, so a list naming one again doesn't
+/// read it again. The first read goes first when they would hold more than `KEPT`.
+#[derive(Default)]
+struct Kept {
+    chunks: HashMap<Id, Vec<u8>>,
+    order: VecDeque<Id>,
+    total: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static KEPT_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Kept {
+    /// The chunk `id`, if it is kept and of `size` bytes.
+    fn get(&self, id: &Id, size: u64) -> Option<&[u8]> {
+        self.chunks
+            .get(id)
+            .filter(|bytes| bytes.len() as u64 == size)
+            .map(Vec::as_slice)
+    }
+
+    fn keep(&mut self, id: Id, bytes: Vec<u8>) -> Result<(), PackError> {
+        if bytes.len() > KEPT || self.chunks.contains_key(&id) {
+            return Ok(());
+        }
+        while self.total.saturating_add(bytes.len()) > KEPT {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.chunks.remove(&oldest) {
+                self.total = self.total.saturating_sub(gone.len());
+            }
+        }
+        self.chunks
+            .try_reserve(1)
+            .map_err(|_| PackError::OutOfMemory)?;
+        self.order
+            .try_reserve(1)
+            .map_err(|_| PackError::OutOfMemory)?;
+        self.total = self.total.saturating_add(bytes.len());
+        self.order.push_back(id);
+        self.chunks.insert(id, bytes);
+        #[cfg(test)]
+        KEPT_MOST.set(KEPT_MOST.get().max(self.total));
+        Ok(())
     }
 }
 
@@ -571,8 +624,22 @@ impl Store {
             inner: out,
             hasher: ContentHasher::new(),
         };
+        let mut kept = Kept::default();
         for chunk in &list.chunks {
-            match self.copy(&chunk.id, Wanted::Chunk(chunk.size), &mut hashing) {
+            let copied = match kept.get(&chunk.id, chunk.size) {
+                Some(bytes) => hashing
+                    .write_all(bytes)
+                    .map_err(|e| PackError::from(e).into()),
+                None if chunk.size <= NEAR => {
+                    self.read_chunk(&chunk.id, chunk.size).and_then(|bytes| {
+                        hashing.write_all(&bytes).map_err(PackError::from)?;
+                        Ok(kept.keep(chunk.id, bytes)?)
+                    })
+                }
+                // Bolt cuts no chunk this big; one a list names anyway is streamed, never held.
+                None => self.copy(&chunk.id, Wanted::Chunk(chunk.size), &mut hashing),
+            };
+            match copied {
                 Ok(()) => {}
                 // Damage in the chunk's own pack is noted there; memory and I/O aren't damage.
                 Err(StoreError::Pack(e)) => return Err(e),
@@ -591,6 +658,17 @@ impl Store {
             )));
         }
         Ok(())
+    }
+
+    /// A chunk of `size` bytes, read whole and checked. Nothing has gone out yet, so a copy that
+    /// fails can still give way to another.
+    fn read_chunk(&self, id: &Id, size: u64) -> Result<Vec<u8>, StoreError> {
+        let first = self.first_copy(id)?;
+        let wanted = Wanted::Chunk(size);
+        self.first_good_from(first, Tries::default(), id, wanted, false, |pack, entry| {
+            pack.read_content(entry)
+        })
+        .map(|(bytes, _)| bytes)
     }
 
     pub fn listing(&self, id: &Id) -> Result<Listing, StoreError> {
@@ -1898,6 +1976,68 @@ mod tests {
             assert_eq!(damaged.len(), 1, "{damaged:?}");
             assert!(damaged[0].to_string().contains("00.pack"), "{damaged:?}");
         }
+    }
+
+    /// A list naming one 100-byte chunk `times` times.
+    fn repeated(times: usize) -> (Vec<u8>, ChunkList, Vec<Vec<u8>>) {
+        let bytes: Vec<u8> = (0..100u8).cycle().take(100 * times).collect();
+        let (list, chunks) = chunked(&bytes, 100);
+        (bytes, list, chunks)
+    }
+
+    #[test]
+    fn a_chunk_named_twice_is_read_once() {
+        // The reads a list naming its chunk `times` times takes, the list's own included.
+        let reads = |times| {
+            let (_root, tmp, packs) = dirs();
+            let (bytes, list, chunks) = repeated(times);
+            pack_with(&tmp, &packs, None, &[&chunks[0]], &[&list]);
+            let store = Store::open(&packs).unwrap();
+            let before = open_files::reads();
+            let mut out = Vec::new();
+            store.copy_content(&list.file, &mut out).unwrap();
+            assert!(out == bytes);
+            open_files::reads() - before
+        };
+        // Lists of nearly the same length, so only the chunks' reads could differ.
+        let (fewer, more) = (reads(999), reads(1000));
+        assert_eq!(
+            more, fewer,
+            "{more} reads for 1,000 namings, {fewer} for 999"
+        );
+        assert!(more < 20, "{more} reads");
+    }
+
+    #[test]
+    fn a_repeated_chunk_is_still_checked_the_first_time() {
+        let (_root, tmp, packs) = dirs();
+        let (_, list, chunks) = repeated(1000);
+        plant_damaged_copies(&packs, &[(ObjectKind::Content, &chunks[0])]);
+        pack_with(&tmp, &packs, None, &[], &[&list]);
+        let store = Store::open(&packs).unwrap();
+        for _ in 0..2 {
+            let e = store.copy_content(&list.file, &mut Vec::new()).unwrap_err();
+            damage_in(e, &packs.join("00.pack"));
+        }
+    }
+
+    #[test]
+    fn the_kept_chunks_stay_within_their_budget() {
+        let (_root, tmp, packs) = dirs();
+        let mut bytes = vec![0u8; 200 << 18];
+        blake3::Hasher::new()
+            .update(b"budget")
+            .finalize_xof()
+            .fill(&mut bytes);
+        let (list, chunks) = chunked(&bytes, 256 << 10);
+        pack_with(&tmp, &packs, None, &pieces(&chunks), &[&list]);
+        let store = Store::open(&packs).unwrap();
+        KEPT_MOST.set(0);
+        let mut out = Vec::new();
+        store.copy_content(&list.file, &mut out).unwrap();
+        assert!(out == bytes);
+        let most = KEPT_MOST.get();
+        assert!(most <= 8 << 20 && most > 7 << 20, "{most} bytes kept");
     }
 
     /// A list whose chunk has no good copy fails once and is passed over from then on, so the read

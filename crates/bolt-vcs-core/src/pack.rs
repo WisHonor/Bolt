@@ -921,6 +921,26 @@ impl PackReader {
         Ok(())
     }
 
+    /// Content read whole and checked, for an entry small enough to hold.
+    pub(crate) fn read_content(&self, entry: &IndexEntry) -> Result<Vec<u8>, PackError> {
+        if entry.kind == ObjectKind::Content
+            && entry.uncompressed_size <= ONE_READ
+            && let Some(bytes) = self.read_small(entry)?
+        {
+            if hash_content(&bytes) != entry.id {
+                return Err(PackError::FingerprintMismatch { id: entry.id });
+            }
+            return Ok(bytes);
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(
+            usize::try_from(entry.uncompressed_size).map_err(|_| PackError::TooLarge)?,
+        )
+        .map_err(|_| PackError::OutOfMemory)?;
+        self.copy_content(entry, &mut out)?;
+        Ok(out)
+    }
+
     /// Reads a chunk list and checks it by its structure: stored as it is, decoding by
     /// storage-format.md section 6's rules, and naming its entry's file and size. Neither its
     /// chunks nor the file they build are checked here.
