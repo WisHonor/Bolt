@@ -99,6 +99,26 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     assert_eq!(told, "");
 }
 
+/// A second tidy a day later rewrites the small pack the first wrote, which frees nothing: that is
+/// nothing to free, not something it couldn't free.
+#[test]
+fn a_routine_tidy_with_nothing_to_free_says_so() {
+    let env = with_garbage();
+    age(&env, 48);
+    ok(&env, &["tidy"]);
+    age(&env, 48);
+    let (said, told) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert_eq!(told, "");
+    let doc: Value =
+        serde_json::from_slice(&env.bolt().args(["tidy", "--json"]).output().unwrap().stdout)
+            .unwrap();
+    assert_eq!(doc["to_free"], 0, "{doc}");
+}
+
 #[test]
 fn tidy_says_freed_and_how_many_packs() {
     let env = with_garbage();

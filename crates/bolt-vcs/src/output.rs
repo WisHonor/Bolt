@@ -1060,7 +1060,8 @@ pub fn tidied(report: &TidyReport) -> String {
     let s = style::out();
     let freed = report.bytes_before.saturating_sub(report.bytes_after);
     let held = bytes(report.bytes_after);
-    let text = if report.to_free == 0 && report.packs_removed == 0 && report.packs_written == 0 {
+    // A routine tidy rewrites small packs it keeps whole, which frees nothing.
+    let text = if report.to_free == 0 && freed == 0 {
         format!("Nothing to free: storage holds {held}.\n")
     } else if report.packs_removed == 0 {
         // The warnings that follow say why each pack stayed.
@@ -1662,13 +1663,26 @@ mod tests {
             tidied(&nothing),
             "Nothing to free: storage holds 2.0 KiB.\n"
         );
-        // Packs merged with nothing freed still count as tidied.
-        let merged = TidyReport {
+        // Small packs rewritten whole free nothing: nothing to free, whatever was rewritten.
+        let rewritten = TidyReport {
             packs_removed: 2,
             packs_written: 1,
             ..nothing
         };
-        assert_eq!(tidied(&merged), "Freed 0 B  (2 packs removed, 1 written)\n");
+        assert_eq!(
+            tidied(&rewritten),
+            "Nothing to free: storage holds 2.0 KiB.\n"
+        );
+        // Merged packs that do free something say so.
+        let merged = TidyReport {
+            to_free: 100,
+            bytes_before: 2148,
+            ..rewritten
+        };
+        assert_eq!(
+            tidied(&merged),
+            "Freed 100 B  (2 packs removed, 1 written)\n"
+        );
         // Something to free, but no pack could be removed.
         let stuck = TidyReport {
             to_free: 1024,
