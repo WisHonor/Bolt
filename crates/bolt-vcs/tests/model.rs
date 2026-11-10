@@ -12,8 +12,10 @@ use bolt_core::diff::ChangeKind;
 use bolt_core::id::Id;
 use bolt_core::lines::Target;
 use bolt_core::listing::EntryKind;
+use bolt_core::presets::{self, Found, Preset};
 use bolt_core::repo::Repository;
 use bolt_core::save::Person;
+use bolt_core::setup::{apply_setup, plan_setup};
 use bolt_core::shelf::{Shelved, shelf, unshelf};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::status;
@@ -38,6 +40,8 @@ const LENGTHS: [usize; 3] = [1, 2, 5];
 const BIG: usize = 1 << 20;
 /// The shelf numbers `unshelf` asks for.
 const LABELS: [&str; 3] = ["1", "2", "3"];
+/// The presets `bolt setup` switches between.
+const PRESETS: [Preset; 3] = [Preset::Code, Preset::Game, Preset::Custom];
 /// How many of the steps undo can take `bolt undo --list` shows.
 const LISTED: usize = 20;
 
@@ -107,6 +111,8 @@ enum Act {
     Unshelf(Option<&'static str>),
     /// Status reading every file, not trusting the file cache.
     FullStatus,
+    /// Switches the rule files to a preset's, as `bolt setup --preset` does.
+    Setup(Preset),
 }
 
 /// What a goto does with unsaved work first.
@@ -158,6 +164,7 @@ fn act() -> impl Strategy<Value = Act> {
         2 => Just(Act::Shelf),
         3 => label.prop_map(Act::Unshelf),
         1 => Just(Act::FullStatus),
+        1 => prop::sample::select(&PRESETS[..]).prop_map(Act::Setup),
     ]
 }
 
@@ -538,6 +545,24 @@ fn run(acts: &[Act]) {
     // Without a key, as without the user's own, the file cache is never read or written.
     repo.set_cache_key([7; 32]);
     let mut m = Model::new(&repo);
+    // A setup is followed by an undo and a redo of it, or of what stopped them.
+    let acts: Vec<Act> = acts
+        .iter()
+        .flat_map(|a| match a {
+            Act::Setup(_) => vec![
+                a.clone(),
+                Act::Undo {
+                    n: 1,
+                    shelve: false,
+                },
+                Act::Redo {
+                    n: 1,
+                    shelve: false,
+                },
+            ],
+            _ => vec![a.clone()],
+        })
+        .collect();
     for (n, a) in acts.iter().enumerate() {
         let missable = apply(&mut repo, &mut m, root, a);
         check(
@@ -737,6 +762,10 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             None
         }
         Act::FullStatus => None,
+        Act::Setup(preset) => {
+            set_up(repo, m, root, preset);
+            None
+        }
     };
     let wrote = matches!(
         a,
@@ -747,6 +776,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             | Act::UndoTo { .. }
             | Act::Shelf
             | Act::Unshelf(_)
+            | Act::Setup(_)
     );
     if wrote {
         // Files Bolt wrote or removed have times of their own now.
@@ -825,6 +855,32 @@ fn flip(m: &mut Model, root: &Path, path: &str) {
 
 #[cfg(not(unix))]
 fn flip(_: &mut Model, _: &Path, _: &str) {}
+
+/// `setup --preset`: the preset's `bolt.toml` and `.boltignore` block written as one step that
+/// moves no line, or nothing when the files already are those. The model's names are no
+/// language's or engine's, and only this writes `.boltignore`, so it only ever holds a block.
+fn set_up(repo: &mut Repository, m: &mut Model, root: &Path, preset: Preset) {
+    let plan = plan_setup(root, preset).unwrap();
+    let done = apply_setup(repo, &plan, &who(), None, &mut |_| {}).unwrap();
+    let found = Found::default();
+    let mut after = m.folder.clone();
+    for (path, text) in [
+        ("bolt.toml", presets::bolt_toml(preset, &found)),
+        (".boltignore", presets::boltignore_block(preset, &found)),
+    ] {
+        match text {
+            Some(text) => {
+                let exec = m.folder.files.get(path).is_some_and(|f| f.exec);
+                let bytes = text.into_bytes().into();
+                after.put(path, File { bytes, exec });
+            }
+            None => drop(after.files.remove(path)),
+        }
+    }
+    assert_eq!(done.written.is_empty(), after == m.folder, "{preset:?}");
+    let (was, held) = (m.state.clone(), std::mem::replace(&mut m.folder, after));
+    stepped(repo, m, "setup", was, held);
+}
 
 fn save(repo: &mut Repository, m: &mut Model) {
     let who = who();
