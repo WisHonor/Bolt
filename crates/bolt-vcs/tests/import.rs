@@ -1037,3 +1037,41 @@ fn a_sparse_checkout_in_the_users_git_settings_stops_an_import() {
     env.git(&["config", "core.sparseCheckout", "false"]);
     env.import();
 }
+
+/// What the environment gives through `GIT_CONFIG_COUNT` comes last, as in Git: it can turn a
+/// sparse checkout on, and off over the user's own setting.
+#[test]
+fn a_sparse_checkout_given_through_git_config_count_counts_last() {
+    let given = |on: &str| {
+        [
+            ("GIT_CONFIG_COUNT", "1".to_owned()),
+            ("GIT_CONFIG_KEY_0", "core.sparseCheckout".to_owned()),
+            ("GIT_CONFIG_VALUE_0", on.to_owned()),
+        ]
+    };
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let out = env
+        .bolt()
+        .arg("import")
+        .envs(given("true"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("(a sparse checkout)"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!env.root().join(".bolt").exists());
+
+    let sparse = "[core]\n\tsparseCheckout = true\n";
+    std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
+    let out = env
+        .bolt()
+        .arg("import")
+        .envs(given("false"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}

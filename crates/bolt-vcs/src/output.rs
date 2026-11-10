@@ -1383,6 +1383,16 @@ mod tests {
             assert_eq!(document["changed_again"], changed_again);
             assert_eq!(document["written"], 0);
         }
+        let made = Shelved::Made(bolt_core::shelf::ShelfOutcome {
+            label: "1".into(),
+            save: Id([7; 32]),
+            files: 2,
+            applied: Default::default(),
+            links_left: vec![],
+        });
+        let document = shelved_json(&made, &[]);
+        assert_eq!(document["shelf"]["label"], "1");
+        assert_eq!(document["changed_again"], false);
     }
 
     #[test]

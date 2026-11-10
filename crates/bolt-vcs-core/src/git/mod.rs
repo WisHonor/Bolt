@@ -1105,6 +1105,30 @@ mod tests {
     }
 
     /// Running out of memory says so and how to free some, not that the file may be locked.
+    /// A `.git` refused although safe-folders lists the folder through a link names the `.git` and
+    /// the entry passed over, and keeps the trust hint.
+    #[test]
+    fn a_git_refusal_names_a_safe_folders_entry_it_passed_over() {
+        let e = GitError::NotYours {
+            git: "work/.git".into(),
+            refusal: RepoError::SafeFolderPassedOver {
+                entry: "trusted".into(),
+                why: "it is a link",
+                refusal: Box::new(RepoError::NotYours {
+                    path: "work".into(),
+                }),
+            },
+        };
+        let said = e.to_string();
+        assert!(
+            said.starts_with("The Git repository at work")
+                && said.contains("belongs to another user account. Its safe-folders entry trusted")
+                && said.contains("doesn't count: it is a link"),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("safe-folders"), "{e:?}");
+    }
+
     #[test]
     fn running_out_of_memory_says_so() {
         let path = Path::new("objects/pack/pack-1.pack");
@@ -1166,6 +1190,14 @@ mod tests {
                 refusal: RepoError::OwnerLookupFailed {
                     path: "x".into(),
                     source: io::Error::other(HOSTILE),
+                },
+            },
+            GitError::NotYours {
+                git: "x".into(),
+                refusal: RepoError::SafeFolderPassedOver {
+                    entry: HOSTILE.into(),
+                    why: "it is a link",
+                    refusal: Box::new(RepoError::NotYours { path: "x".into() }),
                 },
             },
             GitError::Changed {
