@@ -267,7 +267,7 @@ impl Screen {
     pub fn prefixed(self, prefix_role: Role, prefix: &str, message: &str) -> String {
         let head = self.paint(prefix_role, prefix);
         if self.width.is_none() {
-            return format!("{head} {message}");
+            return format!("{head} {}", unmarked(message));
         }
         let indent = columns(prefix) + 1;
         let body = self.indented(indent, message);
@@ -291,6 +291,13 @@ impl Screen {
             .map(|(extra, l)| format!("{}{}", " ".repeat(indent + extra), unmarked(&l)))
             .collect();
         lines.join("\n")
+    }
+
+    /// `text`, a command to type, in the command colour and kept whole when its line wraps.
+    /// Only for text given to [`Screen::detail`] or [`Screen::prefixed`].
+    pub fn command(self, text: &str) -> String {
+        self.paint(Role::Command, text)
+            .replace(' ', &SPACE.to_string())
     }
 
     /// A detail sentence, 4 columns in, after `mark` (a bullet or a check) and a space when it
@@ -375,9 +382,13 @@ fn wrap(line: &str, room: usize, lines: &mut Vec<(usize, String)>) {
                 c.push_str(word);
                 continue;
             }
-            lines.push((0, std::mem::take(c)));
+            // The spaces at a break go with it, so no line starts further in than its own.
+            lines.push((0, c.trim_end_matches(' ').to_owned()));
             current = None;
             broken = true;
+        }
+        if current.is_none() && broken && word.is_empty() {
+            continue;
         }
         if broken && word.starts_with(OPEN) {
             lines.push((4, word.to_owned()));
@@ -668,5 +679,102 @@ mod tests {
         assert!(symbols_wanted(Some("yes"), true));
         assert!(!symbols_wanted(Some("yes"), false));
         assert!(!symbols_wanted(None, false));
+    }
+
+    /// A terminal `width` columns wide, without colour or symbols.
+    fn at(width: usize) -> Screen {
+        screen(false, false, Some(width))
+    }
+
+    #[test]
+    fn a_break_drops_the_whole_run_of_spaces_there() {
+        for run in [2, 5] {
+            let text = format!("aaaa{}bbbb", " ".repeat(run));
+            assert_eq!(at(8).indented(0, &text), "aaaa\nbbbb", "{run}");
+            let error = at(14).prefixed(Role::Error, "error:", &text);
+            assert_eq!(error, "error: aaaa\n       bbbb", "{run}");
+        }
+        // Inside a line a run stays as it is, and so does a line of nothing but spaces.
+        assert_eq!(at(80).indented(0, "a  b     c"), "a  b     c");
+        let spaces = " ".repeat(10);
+        assert_eq!(at(4).indented(0, &spaces), spaces);
+    }
+
+    #[test]
+    fn a_command_is_never_broken() {
+        // At 39 columns the break used to fall between `bolt` and `status`.
+        let s = screen(true, false, Some(39));
+        let line = format!(
+            "Only what you named was saved: {} lists the changes left out.",
+            s.command("bolt status")
+        );
+        let shown = s.detail(None, &line);
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(lines[0], "    Only what you named was saved:", "{shown:?}");
+        assert!(
+            lines[1].starts_with("    \x1b[36mbolt status\x1b[0m lists"),
+            "{shown:?}"
+        );
+        let plain = screen(false, false, None)
+            .detail(None, &line.replace("\x1b[36m", "").replace("\x1b[0m", ""));
+        assert_eq!(
+            plain,
+            "    Only what you named was saved: bolt status lists the changes left out."
+        );
+    }
+
+    #[test]
+    fn marked_text_keeps_its_colour_on_a_row_of_its_own() {
+        let s = screen(true, false, Some(30));
+        let name = whole(&s.paint(Role::Line, "a-long-line-name-here"));
+        let shown = s.detail(None, &format!("To keep saving on {name}: done"));
+        assert_eq!(
+            shown,
+            "    To keep saving on\n        \x1b[34ma-long-line-name-here\x1b[0m:\n    done"
+        );
+    }
+
+    #[test]
+    fn two_marked_pieces_each_get_a_row_when_they_must() {
+        let (a, b) = ("first-name-of-twenty", "a-second-name-of-twenty-four");
+        let shown = at(30).detail(None, &format!("Renamed {} to {}.", whole(a), whole(b)));
+        assert_eq!(
+            shown,
+            format!("    Renamed\n        {a}\n    to\n        {b}.")
+        );
+    }
+
+    #[test]
+    fn marked_text_that_fits_stays_on_its_line() {
+        let shown = at(80).detail(None, &format!("Left out: {}, kept", whole("two words")));
+        assert_eq!(shown, "    Left out: two words, kept");
+    }
+
+    #[test]
+    fn marked_text_longer_than_the_room_runs_long_on_its_row() {
+        let long = "x".repeat(40);
+        let shown = at(30).detail(None, &format!("Left out: {}", whole(&long)));
+        assert_eq!(shown, format!("    Left out:\n        {long}"));
+    }
+
+    #[test]
+    fn without_a_terminal_marks_are_taken_out_and_nothing_else_changes() {
+        let s = screen(false, false, None);
+        let line = format!("x {} y {}.", whole("a  b"), s.command("bolt setup"));
+        assert_eq!(s.detail(None, &line), "    x a  b y bolt setup.");
+        assert_eq!(
+            s.prefixed(Role::Hint, "Next:", &line),
+            "Next: x a  b y bolt setup."
+        );
+    }
+
+    #[test]
+    fn marked_text_followed_by_a_full_stop_keeps_it() {
+        let name = "a-line-name-of-thirty-columns!";
+        let shown = at(40).detail(None, &format!("You're on the new line {}.", whole(name)));
+        assert_eq!(
+            shown,
+            format!("    You're on the new line\n        {name}.")
+        );
     }
 }

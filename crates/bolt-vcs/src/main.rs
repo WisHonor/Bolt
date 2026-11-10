@@ -557,7 +557,7 @@ fn start(
         let e = style::err();
         style::next(&format!(
             "change some files, then run: {}",
-            e.paint(style::Role::Command, "bolt save \"describe your change\"")
+            e.command("bolt save \"describe your change\"")
         ));
     }
     Ok(())
@@ -587,7 +587,7 @@ fn setup_command(
         let e = style::err();
         style::next(&format!(
             "edit bolt.toml or .boltignore to change a rule, or switch presets with: {}",
-            e.paint(style::Role::Command, "bolt setup --preset <name>")
+            e.command("bolt setup --preset <name>")
         ));
         return Ok(());
     };
@@ -748,7 +748,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     output::print_done(&text, &warnings)?;
     style::next(&format!(
         "look around with: {}",
-        style::err().paint(style::Role::Command, "bolt status")
+        style::err().command("bolt status")
     ));
     Ok(())
 }
@@ -920,7 +920,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 if only.is_some() {
                     details.push(format!(
                         "Only what you named was saved: {} lists the changes left out.",
-                        s.paint(style::Role::Command, "bolt status")
+                        s.command("bolt status")
                     ));
                 }
                 if !details.is_empty() {
@@ -1126,7 +1126,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     if !json && !found.changes.is_empty() {
         style::next(&format!(
             "save them with: {}",
-            style::err().paint(style::Role::Command, "bolt save \"describe your change\"")
+            style::err().command("bolt save \"describe your change\"")
         ));
     }
     Ok(())
@@ -1436,10 +1436,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     if !json && count > 0 {
         style::next(&format!(
             "see its lines with: {}",
-            style::err().paint(
-                style::Role::Command,
-                &format!("bolt changes --save {shown_as}")
-            )
+            style::err().command(&format!("bolt changes --save {shown_as}"))
         ));
     }
     Ok(())
@@ -1805,11 +1802,11 @@ fn undo_command(
                 0 => {}
                 1 => style::next(&format!(
                     "bring your changes back with: {}",
-                    e.paint(style::Role::Command, "bolt unshelf")
+                    e.command("bolt unshelf")
                 )),
                 _ => style::next(&format!(
                     "see the shelves with: {}",
-                    e.paint(style::Role::Command, "bolt shelf --list")
+                    e.command("bolt shelf --list")
                 )),
             }
             Ok(())
@@ -1881,7 +1878,7 @@ fn shelf_command(
     output::print_done(&text, &warnings)?;
     // The new shelf is the newest, which `bolt unshelf` brings back.
     if !json && made.is_some() {
-        let unshelf = style::err().paint(style::Role::Command, "bolt unshelf");
+        let unshelf = style::err().command("bolt unshelf");
         style::next(&format!("bring them back with: {unshelf}"));
     }
     Ok(())

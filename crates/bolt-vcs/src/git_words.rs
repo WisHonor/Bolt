@@ -208,25 +208,16 @@ pub fn hint(word: &str) -> Option<&'static str> {
 /// command colour.
 pub fn explain(text: &str) {
     let e = style::err();
-    // Commands are between backquotes: every second piece. One a line break cut is painted on
-    // each line.
-    let painted: Vec<String> = e
-        .indented(0, text)
+    // Commands are between backquotes: every second piece, each kept whole by the wrap.
+    let painted: String = text
         .split('`')
         .enumerate()
-        .map(|(n, piece)| {
-            if n % 2 == 1 {
-                let lines: Vec<String> = piece
-                    .split('\n')
-                    .map(|p| e.paint(Role::Command, p))
-                    .collect();
-                format!("`{}`", lines.join("\n"))
-            } else {
-                piece.to_owned()
-            }
+        .map(|(n, piece)| match n % 2 {
+            1 => format!("`{}`", e.command(piece)),
+            _ => piece.to_owned(),
         })
         .collect();
-    tell(&painted.concat());
+    tell(&e.indented(0, &painted));
 }
 
 /// After a shortcut ran: its hint, once per person, only when lines for people are printed.
@@ -246,13 +237,13 @@ pub fn teach(word: &str) {
     // backquotes, which are painted instead of printed.
     let (first, more) = hint.split_once('\n').unwrap_or((hint, ""));
     let (said, command) = first.split_once(": ").unwrap_or((first, ""));
-    let mut message = format!("{said}: {}", e.paint(Role::Command, command));
+    let mut message = format!("{said}: {}", e.command(command));
     if !more.is_empty() {
         let more: String = more
             .split('`')
             .enumerate()
             .map(|(n, piece)| match n % 2 {
-                1 => e.paint(Role::Command, piece),
+                1 => e.command(piece),
                 _ => piece.to_owned(),
             })
             .collect();

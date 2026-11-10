@@ -1515,3 +1515,151 @@ fn an_import_shows_each_pass_on_a_terminal_and_nothing_in_a_log() {
         }
     }
 }
+
+/// The first 12 hex digits of the newest save on `line`.
+fn tip_of(env: &Env, line: &str) -> String {
+    let repo = bolt_core::repo::Repository::open(env.root()).unwrap();
+    repo.current().unwrap().1.state.lines[line].to_hex()[..12].to_owned()
+}
+
+/// A line name long enough that no narrow terminal holds it beside the words before it.
+const LONG_LINE: &str = "a-line-name-long-enough-to-pass-the-edge";
+
+/// The marks that keep text whole while a line is wrapped never reach the screen, a log or a
+/// `--json` document, whatever the command.
+#[test]
+fn nothing_printed_ever_holds_a_wrapping_mark() {
+    let mut ways = vec![(None, false), (None, true)];
+    if cfg!(feature = "fault-injection") {
+        ways.push((Some(60), false));
+    }
+    for (width, json) in ways {
+        let run = |env: &Env, args: &[&str]| {
+            let mut all = if json { vec!["--json"] } else { vec![] };
+            all.extend(args);
+            let (_, shown, said) = output_at(env, width, &all);
+            let marks = ['\u{1}', '\u{2}', '\u{3}'];
+            assert!(
+                !shown.contains(marks) && !said.contains(marks),
+                "{all:?} at {width:?}: {shown:?} {said:?}"
+            );
+        };
+        let git = Env::new();
+        git.commit("a.txt", "a\n", "First");
+        run(&git, &["import"]);
+        let env = Env::empty();
+        run(&env, &["start", "--preset", "game"]);
+        put(&env, "a.txt", "a\n");
+        put(&env, "b.txt", "b\n");
+        run(&env, &["save", "First"]);
+        put(&env, "a.txt", "A\n");
+        run(&env, &["save", "Part", "a.txt"]);
+        let first = support::main_tip(&env).to_hex();
+        run(&env, &["goto", &first[..12]]);
+        put(&env, "c.txt", "c\n");
+        run(&env, &["save", "--line", LONG_LINE, "Away"]);
+        run(&env, &["goto", &tip_of(&env, LONG_LINE)]);
+        run(&env, &["goto", LONG_LINE]);
+        put(&env, "a.txt", "shelved\n");
+        run(&env, &["shelf"]);
+        put(&env, "b.txt", "other\n");
+        run(&env, &["unshelf"]);
+        run(&env, &["discard"]);
+        for args in [
+            &["status"][..],
+            &["show"],
+            &["history"],
+            &["line"],
+            &["undo"],
+            &["redo"],
+            &["undo", "--list"],
+            &["tidy"],
+            &["verify"],
+            &["help"],
+            &["help", "save"],
+            &["add", "x"],
+            &["goto", "nowhere"],
+        ] {
+            run(&env, args);
+        }
+        put(&env, "a.txt", "stashed\n");
+        run(&env, &["stash"]);
+    }
+}
+
+/// Runs `setup` in a project just started, then `args`, in a log and on a terminal 60 columns
+/// wide: what each printed on stdout.
+#[cfg(feature = "fault-injection")]
+fn in_a_log_and_at_60(setup: impl Fn(&Env), args: &[&str]) -> (String, String) {
+    let mut shown = Vec::new();
+    for width in [None, Some(60)] {
+        let env = started();
+        setup(&env);
+        shown.push(run_at(&env, width, args).0);
+    }
+    (shown.remove(0), shown.remove(0))
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn unshelf_and_discard_details_wrap_under_their_text_at_60_columns() {
+    let (logged, shown) = in_a_log_and_at_60(
+        |env| {
+            for file in ["a.txt", "b.txt", "c.txt"] {
+                put(env, file, "1\n");
+            }
+            run_at(env, None, &["save", "Three"]);
+            put(env, "a.txt", "2\n");
+            run_at(env, None, &["shelf"]);
+            put(env, "b.txt", "2\n");
+            put(env, "c.txt", "2\n");
+        },
+        &["unshelf"],
+    );
+    wraps_under(&logged, &shown, "Your other unsaved changes in 2 files", 4);
+    let (logged, shown) = in_a_log_and_at_60(
+        |env| {
+            for n in 0..11 {
+                put(env, &format!("f{n}.txt"), "1\n");
+            }
+            run_at(env, None, &["save", "Eleven"]);
+            for n in 0..10 {
+                put(env, &format!("f{n}.txt"), "2\n");
+            }
+            std::fs::remove_file(env.root().join("f10.txt")).unwrap();
+        },
+        &["discard"],
+    );
+    wraps_under(&logged, &shown, "Safety copies of the 10", 4);
+}
+
+/// A line name in `save`'s and `goto`'s details is never broken and never starts a line under
+/// the details' text: it gets a row of its own, and so does the command that names it.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_long_line_name_in_a_detail_is_kept_whole_on_a_row_of_its_own() {
+    for width in [None, Some(60)] {
+        let env = started();
+        put(&env, "a.txt", "1\n");
+        run_at(&env, None, &["save", "First"]);
+        let first = support::main_tip(&env).to_hex();
+        run_at(&env, None, &["goto", &first[..12]]);
+        put(&env, "b.txt", "1\n");
+        let (saved, _) = run_at(&env, width, &["save", "--line", LONG_LINE, "Away"]);
+        let (went, _) = run_at(&env, width, &["goto", &tip_of(&env, LONG_LINE)]);
+        let (new_line, keep_saving) = match width {
+            None => (
+                format!("\n    You're on the new line {LONG_LINE}.\n"),
+                format!("\n    To keep saving on {LONG_LINE}: bolt goto {LONG_LINE}\n"),
+            ),
+            Some(_) => (
+                format!("\n    You're on the new line\n        {LONG_LINE}.\n"),
+                format!(
+                    "\n    To keep saving on\n        {LONG_LINE}:\n        bolt goto {LONG_LINE}\n"
+                ),
+            ),
+        };
+        assert!(saved.ends_with(&new_line), "{width:?}: {saved}");
+        assert!(went.contains(&keep_saving), "{width:?}: {went}");
+    }
+}

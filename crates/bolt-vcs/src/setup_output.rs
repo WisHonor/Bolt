@@ -185,7 +185,7 @@ pub fn started(
         text += &s.detail(Some(bullet), &line);
         text.push('\n');
     }
-    let setup = s.paint(Role::Command, "bolt setup");
+    let setup = s.command("bolt setup");
     let see = match preset {
         None => format!("See them any time with: {setup}"),
         Some(Preset::Custom) => {

@@ -1223,7 +1223,7 @@ pub fn verified(v: &Verified, project: &str) -> String {
         let _ = writeln!(text, "{}", s.detail(Some(&cross), why));
     }
     if unshown {
-        let json = s.paint(Role::Command, "bolt verify --json");
+        let json = s.command("bolt verify --json");
         let which = if v.problems_total <= PROBLEMS_KEPT as u64 {
             "them all".to_owned()
         } else {
