@@ -564,8 +564,9 @@ mod tests {
         saved_root(save_now(&mut repo).unwrap());
         let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
         let seen = scan.folders[""].iter().find(|c| c.name == "f.psd");
-        let mut trusted = FileCache::default();
-        trusted.record("f.psd", &seen.unwrap().meta.unwrap(), hash_content(b"kept"));
+        let mut recorded = FileCache::default();
+        recorded.record("f.psd", &seen.unwrap().meta.unwrap(), hash_content(b"kept"));
+        let trusted = FileCache::decode(&recorded.encode()).unwrap();
         crate::fsio::fault::unreadable(Some("f.psd"));
         let mut check_with = |trusted: &FileCache| {
             pointers(

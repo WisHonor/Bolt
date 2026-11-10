@@ -209,7 +209,7 @@ pub fn own_folder(name: &str, drive: Drive) -> bool {
 /// Which of `.git`, `.bolt`, `.gitignore` and `.boltignore` a folder could hold, judged from its
 /// listing. False only where no drive could find the name there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Listed {
+pub(crate) struct Listed {
     pub git: bool,
     pub bolt: bool,
     pub gitignore: bool,
@@ -218,7 +218,7 @@ pub struct Listed {
 
 impl Listed {
     /// Each could be there: ask the drive for all four.
-    pub const ALL: Listed = Listed {
+    pub(crate) const ALL: Listed = Listed {
         git: true,
         bolt: true,
         gitignore: true,
@@ -229,7 +229,9 @@ impl Listed {
 /// What a folder could hold, from each entry's name and Windows short name. A drive matches an
 /// all-ASCII name by ASCII letter case at most; any name outside ASCII and Bolt can't tell, so all
 /// four could be there.
-pub fn listed_hints<'a>(names: impl Iterator<Item = (&'a OsStr, Option<&'a OsStr>)>) -> Listed {
+pub(crate) fn listed_hints<'a>(
+    names: impl Iterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Listed {
     // Elsewhere a FAT or NTFS drive answers to a short name (`.GIT`) its listing doesn't show.
     let unlisted_short_names = cfg!(not(windows));
     let mut hints = Listed {
@@ -628,7 +630,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// `is_bolt_alias` as it was first written, copying the name twice.
+    /// The plain `is_bolt_alias`, which copies the name twice.
     fn bolt_alias_by_copying(name: &str) -> bool {
         let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
         let base = ntfs_base(&kept).to_ascii_lowercase();
@@ -642,6 +644,8 @@ mod tests {
             Just(".bolt"),
             Just(".git"),
             Just("bolt~1"),
+            Just("bolt~2"),
+            Just("bolt~3"),
             Just("bolt~5"),
             Just("git~1"),
             Just("."),
@@ -673,12 +677,12 @@ mod tests {
 
     proptest! {
         #[test]
-        fn bolt_aliases_are_found_as_they_were(name in near_alias()) {
+        fn bolt_aliases_match_the_plain_check(name in near_alias()) {
             prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
         }
 
         #[test]
-        fn bolt_aliases_are_found_as_they_were_in_any_string(name in any::<String>()) {
+        fn bolt_aliases_match_the_plain_check_in_any_string(name in any::<String>()) {
             prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
         }
     }
@@ -727,6 +731,8 @@ mod tests {
             Just("GIT~1"),
             Just("git~2"),
             Just(".bolt"),
+            Just("bolt~2"),
+            Just("Bolt~3"),
             Just("BOLT~4"),
             Just("bolt~5"),
             Just("."),
@@ -778,7 +784,8 @@ mod tests {
         }
         // The empty core keeps every string of up to 4 bytes in the run.
         let cores = [
-            "", ".git", ".GIT", "git~1", "GIT~1", ".bolt", ".BOLT", "bolt~1", "bolt~4",
+            "", ".git", ".GIT", "git~1", "GIT~1", ".bolt", ".BOLT", "bolt~1", "bolt~2", "bolt~3",
+            "bolt~4",
         ];
         let (mut git, mut bolt) = (0, 0);
         for core in cores {

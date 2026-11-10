@@ -1189,12 +1189,9 @@ impl WalkState {
     }
 
     /// Whether the walk keeps `met`, in a folder that is as `within` says, taking it for a folder
-    /// when `is_dir` and opening it only when `opens`: never what it leaves untouched, and what
-    /// the ignore rules keep out stays out, unless the base save has it. A name Git treats as
-    /// `.git` or Bolt as `.bolt` stays out too, noted for the warning. What it keeps that Git's
-    /// rules alone would leave out is noted too.
-    /// After a problem, such as an ignore file that fails, the problem is kept and nothing more
-    /// is: the save will stop anyway.
+    /// when `is_dir` and opening it only when `opens`. Ignored entries stay out unless the base
+    /// save has them; names Git or Bolt reserve stay out. Those names, and what is kept that Git's
+    /// rules alone would leave out, are noted. After a problem nothing more is kept.
     fn judged(&mut self, met: &Met, within: Within, is_dir: bool, opens: bool) -> bool {
         // A listing never outlives the folder it was made for.
         self.listed = None;

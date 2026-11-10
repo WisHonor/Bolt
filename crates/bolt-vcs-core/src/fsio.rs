@@ -145,6 +145,7 @@ struct State {
     /// A flush is asked for; one at most is ever pending.
     wanted: bool,
     done: bool,
+    #[cfg(feature = "fault-injection")]
     made: u64,
     error: Option<io::Error>,
 }
@@ -259,7 +260,10 @@ fn flush_loop(file: &File, shared: &Shared) {
         let Ok(mut state) = shared.state.lock() else {
             return;
         };
-        state.made = state.made.saturating_add(1);
+        #[cfg(feature = "fault-injection")]
+        {
+            state.made = state.made.saturating_add(1);
+        }
         if let Err(e) = flushed {
             state.error = Some(e);
             return;

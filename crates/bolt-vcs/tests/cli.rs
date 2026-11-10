@@ -1813,8 +1813,8 @@ const LONG_FOLDERS: usize = 250;
 const LONG_FILES: usize = 250;
 
 /// The address space `bolt` gets: well under all the long paths together, and under 64 MiB, so the
-/// C library can't reserve a whole arena for a thread and starve the rest (at 90 MB the save below
-/// failed half its runs for that alone). `save` needs under 40 MB.
+/// C library can't reserve a whole arena for a thread and starve the rest. `save` needs under
+/// 40 MB.
 #[cfg(unix)]
 const CAP_KB: u32 = 64_000;
 

@@ -296,16 +296,13 @@ impl FileCache {
         self.trusted(path, meta).map(|(_, s)| s)
     }
 
-    /// `matches`, with the slot the entry came from, if not from what this scan recorded.
-    fn trusted(&self, path: &str, meta: &EntryMeta) -> Option<(Option<usize>, &FileState)> {
+    /// `matches`, with the slot the entry came from. Only an entry read from the file is trusted:
+    /// one this scan recorded hasn't been through the two-second rule yet.
+    fn trusted(&self, path: &str, meta: &EntryMeta) -> Option<(usize, &FileState)> {
         let slot = self
             .find(path)
-            .filter(|&i| self.slots.get(i).is_some_and(|s| !s.gone));
-        let entry = slot
-            .and_then(|i| self.slots.get(i))
-            .map(|s| &s.entry)
-            .or_else(|| self.added.get(path))
-            .filter(|e| !e.racy)?;
+            .filter(|&i| self.slots.get(i).is_some_and(|s| !s.gone))?;
+        let entry = self.slots.get(slot).map(|s| &s.entry).filter(|e| !e.racy)?;
         let s = &entry.state;
         (Some(s.kind) == kind_of(meta)
             && s.size == meta.size
@@ -317,12 +314,12 @@ impl FileCache {
     }
 
     /// `matches`, and keeps the entry for the next write.
-    pub fn vouch(&mut self, path: &str, meta: &EntryMeta) -> Option<FileState> {
+    pub(crate) fn vouch(&mut self, path: &str, meta: &EntryMeta) -> Option<FileState> {
         self.vouch_if(path, meta, |_| true)
     }
 
     /// `vouch`, if `keep` takes what the cache knows.
-    pub fn vouch_if(
+    pub(crate) fn vouch_if(
         &mut self,
         path: &str,
         meta: &EntryMeta,
@@ -332,7 +329,7 @@ impl FileCache {
             .trusted(path, meta)
             .map(|(slot, s)| (slot, *s))
             .filter(|(_, s)| keep(s))?;
-        if let Some(slot) = slot.and_then(|i| self.slots.get_mut(i)) {
+        if let Some(slot) = self.slots.get_mut(slot) {
             slot.kept = true;
         }
         Some(state)
@@ -626,8 +623,9 @@ mod tests {
     #[test]
     fn size_or_time_or_kind_or_identity_changes_miss() {
         let (_dir, repo) = project();
-        let mut cache = FileCache::load(&repo);
-        cache.record("a", &file(3, THEN), Id([1; 32]));
+        let mut recorded = FileCache::load(&repo);
+        recorded.record("a", &file(3, THEN), Id([1; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches("a", &file(3, THEN)).is_some());
         assert!(cache.matches("a", &file(4, THEN)).is_none());
         assert!(cache.matches("a", &file(3, THEN + 1)).is_none());
@@ -656,7 +654,8 @@ mod tests {
             file_id: (1, 0),
             ..file(3, THEN)
         };
-        cache.record("n", &unnumbered, Id([5; 32]));
+        recorded.record("n", &unnumbered, Id([5; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches("n", &unnumbered).is_none());
         let executable = EntryMeta {
             executable: Some(true),
@@ -668,7 +667,8 @@ mod tests {
             ..file(3, THEN)
         };
         assert!(cache.matches("a", &link).is_none());
-        cache.record("x", &executable, Id([2; 32]));
+        recorded.record("x", &executable, Id([2; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert_eq!(
             cache.matches("x", &executable).unwrap().kind,
             EntryKind::Executable
@@ -679,11 +679,13 @@ mod tests {
             kind: EntryType::Dir,
             ..file(0, THEN)
         };
-        cache.record("d", &folder, Id([3; 32]));
+        recorded.record("d", &folder, Id([3; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches("d", &folder).is_none());
         // Nor a path the file couldn't read back, which would spoil the whole cache.
         let long = "a".repeat(MAX_PATH + 1);
-        cache.record(&long, &file(3, THEN), Id([4; 32]));
+        recorded.record(&long, &file(3, THEN), Id([4; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches(&long, &file(3, THEN)).is_none());
         assert!(FileCache::decode(&cache.encode()).is_ok());
     }
@@ -810,7 +812,8 @@ mod tests {
         cache.vouch("a", &file(1, THEN)).unwrap();
         assert!(cache.vouch("b", &file(5, THEN)).is_none());
         cache.record("b", &file(5, THEN), Id([5; 32]));
-        assert_eq!(cache.matches("b", &file(5, THEN)).unwrap().id, Id([5; 32]));
+        // What this scan recorded isn't trusted until it is read back from the file.
+        assert!(cache.matches("b", &file(5, THEN)).is_none());
         cache.store(&repo, later).unwrap();
         assert_ne!(on_disk(&dir), before);
         let back = FileCache::load(&repo);
@@ -965,6 +968,8 @@ mod tests {
                     Ask::Record(p) => {
                         hinted.record(&p, &meta, Id([2; 32]));
                         plain.record(&p, &meta, Id([2; 32]));
+                        // Not trusted until it is read back from the file.
+                        prop_assert!(hinted.matches(&p, &meta).is_none());
                     }
                 }
             }

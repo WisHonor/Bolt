@@ -9,7 +9,7 @@ use support::{Env, text};
 
 /// A Git repository whose `main` holds `commits` commits in a row, with `branches` more branches
 /// all at the commit before `main`'s newest, imported into Bolt: a line for each branch.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn imported_with_branches(commits: usize, branches: usize) -> Env {
     let env = Env::new();
     let mut stream = Vec::new();
@@ -45,8 +45,8 @@ fn imported_with_branches(commits: usize, branches: usize) -> Env {
 /// then holds each line's whole list of saves, a copy per line, and encodes and seals all of it
 /// before its 256 MiB cap is checked. 10,000 branches over 1,000 commits (10 million pairs) take
 /// an amend to 1.4 GB; main's took 0.47 GB. Under the 1.5 GB cap `cli.rs` uses, it aborts, after
-/// the amend is committed.
-#[cfg(unix)]
+/// the amend is committed. Linux only: macOS doesn't enforce the address-space cap.
+#[cfg(target_os = "linux")]
 #[test]
 fn rt12_1_an_amend_among_many_lines_stays_within_memory() {
     let env = imported_with_branches(1_000, 10_000);

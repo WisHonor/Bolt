@@ -809,7 +809,7 @@ impl Store {
     }
 
     /// The pack `packs.last`, if `first_copy` would ask it first (it is listed and open) and it is
-    /// the pack at `path`. Changes nothing: reading the copy moves the pack up as before.
+    /// the pack at `path`. Changes nothing: reading the copy moves the pack up the open list.
     fn last_is(&self, path: &Path) -> Option<usize> {
         let packs = self.packs();
         let n = packs.last;

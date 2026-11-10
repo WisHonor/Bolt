@@ -2867,7 +2867,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_shorter_than_its_index_says_fails_as_before() {
+    fn a_pack_shorter_than_its_index_says_is_corrupt_or_cut_short() {
         let (_root, tmp, packs) = dirs();
         let (path, contents) = random_pack(&packs, &tmp, &[1000, 1000, 1000]);
         let last = hash_content(&contents[2]);

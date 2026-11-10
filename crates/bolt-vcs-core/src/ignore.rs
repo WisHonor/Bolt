@@ -656,14 +656,14 @@ pub struct Matcher {
 /// The rules a `Matcher` had in force at one moment, kept to be asked later: the same rules,
 /// shared, so they give the verdicts it gave then.
 #[derive(Clone)]
-pub struct InForce {
+pub(crate) struct InForce {
     drive: Drive,
     levels: Vec<Arc<[Rules]>>,
 }
 
 impl InForce {
     /// What these rules say about `path`, as `Matcher::verdict` said it then.
-    pub fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
+    pub(crate) fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
         let levels = self.levels.iter().map(|rules| &**rules);
         verdict_in(self.drive, levels, path.as_ref(), is_dir)
     }
@@ -693,7 +693,7 @@ impl Matcher {
     }
 
     /// The rules in force now, to be asked later.
-    pub fn in_force(&self) -> InForce {
+    pub(crate) fn in_force(&self) -> InForce {
         InForce {
             drive: self.drive,
             levels: self.levels.iter().map(|(_, r)| Arc::clone(r)).collect(),
@@ -1120,8 +1120,8 @@ mod tests {
             let line = pieces.concat();
             prop_assume!(!line.contains(&b'/'));
             let p = Pattern::parse(&line);
-            // `match_basename` as it was before a line could be matched by its two ends.
-            let before = if p.literal == p.text.len() {
+            // The plain matcher: the whole name, a literal tail, or wildmatch.
+            let plain = if p.literal == p.text.len() {
                 same(&p.text, &name, casefold)
             } else if p.ends_with {
                 let tail = &p.text[1..];
@@ -1131,7 +1131,7 @@ mod tests {
             };
             prop_assert_eq!(
                 match_basename(&name, &p, casefold),
-                before,
+                plain,
                 "{:?} {:?}", shown(&line), shown(&name)
             );
         }
@@ -1628,7 +1628,7 @@ mod tests {
         }
     }
 
-    /// `Rules::last_match` as it was: every line tried, the last first.
+    /// The plain `Rules::last_match`: every line tried, the last first.
     fn last_match_by_scan<'r>(
         rules: &'r Rules,
         path: &[u8],
