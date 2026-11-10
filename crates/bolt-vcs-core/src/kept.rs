@@ -477,7 +477,7 @@ fn changed(
 }
 
 /// Stores a kept save of the tree `root`, made as `from` says.
-fn kept_save(root: Id, from: &KeptFrom, packs: &mut PackSet) -> Result<Id, SaveError> {
+pub(crate) fn kept_save(root: Id, from: &KeptFrom, packs: &mut PackSet) -> Result<Id, SaveError> {
     let save = Save {
         root,
         parents: vec![from.base],

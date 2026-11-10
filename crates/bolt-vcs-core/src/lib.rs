@@ -32,6 +32,7 @@ pub mod rules;
 pub mod safe_fs;
 pub mod save;
 pub(crate) mod scope;
+pub mod setup;
 pub mod shelf;
 pub mod snapshot;
 pub mod status;
