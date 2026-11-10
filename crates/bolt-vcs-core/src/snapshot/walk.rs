@@ -125,11 +125,13 @@ pub(super) mod ahead_seen {
     static SEEN: Mutex<BTreeMap<PathBuf, Seen>> = Mutex::new(BTreeMap::new());
     static OFF: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
-    #[derive(Clone, Copy, Debug, Default)]
+    #[derive(Clone, Debug, Default)]
     pub(in crate::snapshot) struct Seen {
         /// Listings the walk took from those read ahead, and those it read itself.
         pub(in crate::snapshot) taken: usize,
         pub(in crate::snapshot) read: usize,
+        /// The listings the walk took from those read ahead, in the order it took them.
+        pub(in crate::snapshot) handed: Vec<crate::id::Id>,
         /// Whether a helper was started, and had ended when the walk returned.
         pub(in crate::snapshot) started: bool,
         pub(in crate::snapshot) ended: bool,
@@ -142,7 +144,7 @@ pub(super) mod ahead_seen {
 
     pub(in crate::snapshot) fn at(root: &Path) -> Seen {
         let all = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-        all.get(root).copied().unwrap_or_default()
+        all.get(root).cloned().unwrap_or_default()
     }
 
     pub(in crate::snapshot) fn turn_off(root: &Path, off: bool) {
@@ -156,6 +158,24 @@ pub(super) mod ahead_seen {
 
     pub(in crate::snapshot) fn is_off(root: &Path) -> bool {
         let set = OFF.lock().unwrap_or_else(|e| e.into_inner());
+        set.contains(root)
+    }
+
+    static HELD: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+    /// Has the scan of the project at `root` wait until its helper has ended, a few seconds at
+    /// most.
+    pub(in crate::snapshot) fn hold(root: &Path, held: bool) {
+        let mut set = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        if held {
+            set.insert(root.to_owned());
+        } else {
+            set.remove(root);
+        }
+    }
+
+    pub(in crate::snapshot) fn is_held(root: &Path) -> bool {
+        let set = HELD.lock().unwrap_or_else(|e| e.into_inner());
         set.contains(root)
     }
 }
@@ -513,6 +533,8 @@ pub(super) struct Ahead {
     #[cfg(test)]
     read: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
+    handed: Mutex<Vec<Id>>,
+    #[cfg(test)]
     ended: std::sync::atomic::AtomicBool,
 }
 
@@ -553,6 +575,10 @@ impl Ahead {
                 &self.read
             };
             counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if taken.is_some() {
+                let mut handed = self.handed.lock().unwrap_or_else(|e| e.into_inner());
+                handed.push(*id);
+            }
         }
         taken
     }
@@ -1412,6 +1438,17 @@ pub(super) fn walk(
             .flatten();
         if helper.is_some() {
             base.ahead = Some(&ahead);
+            // A test can have the scan wait for the helper, so where it starts late the scan
+            // still finds the listings ready.
+            #[cfg(test)]
+            if ahead_seen::is_held(root) {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !ahead.ended.load(std::sync::atomic::Ordering::SeqCst)
+                    && std::time::Instant::now() < until
+                {
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
         }
         let scanned = thread::Builder::new()
             .stack_size(WALK_STACK_BYTES)
@@ -1437,6 +1474,9 @@ pub(super) fn walk(
             ahead_seen::Seen {
                 taken: ahead.taken.load(std::sync::atomic::Ordering::Relaxed),
                 read: ahead.read.load(std::sync::atomic::Ordering::Relaxed),
+                handed: std::mem::take(
+                    &mut *ahead.handed.lock().unwrap_or_else(|e| e.into_inner()),
+                ),
                 started,
                 ended: ahead.ended.load(std::sync::atomic::Ordering::Relaxed),
             },
@@ -5039,11 +5079,14 @@ mod tests {
         }
         save_now(&mut repo).unwrap();
         write(root, "d3/e4/f.txt", b"changed");
+        // Held until the helper ends, so who is first can't change the counts.
+        let held = repo.root().to_owned();
+        ahead_seen::hold(&held, true);
         let seen = same_either_way(root, MAX_SAVE_ENTRIES);
+        ahead_seen::hold(&held, false);
         assert!(seen.started && seen.ended, "{seen:?}");
-        // 61 listings: the top's, 6 and 54 more.
-        assert_eq!(seen.taken + seen.read, 61, "{seen:?}");
-        assert!(seen.taken > seen.read, "{seen:?}");
+        // 61 listings: the top's, 6 and 54 more, all ready before the scan began.
+        assert_eq!((seen.taken, seen.read), (61, 0), "{seen:?}");
     }
 
     #[test]
@@ -5240,22 +5283,26 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::write(packs.join("zz.pack"), bytes).unwrap();
         let first = hash_content(only_here);
+        // The scan waits for the helper, so it takes `b`'s listing from it however late it starts.
+        let held = Repository::open(root).unwrap().root().to_owned();
+        ahead_seen::hold(&held, true);
         for _ in 0..3 {
             let (off, off_warned, off_remembered, _) =
                 scanned_after(root, false, MAX_SAVE_ENTRIES, Some(&first));
             let (on, on_warned, on_remembered, seen) =
                 scanned_after(root, true, MAX_SAVE_ENTRIES, Some(&first));
+            assert!(seen.handed.contains(&b), "{seen:?}");
             assert_eq!(on, off);
             assert_eq!(on_warned, off_warned);
             assert_eq!(on_remembered, off_remembered);
-            // The walk met the bad copy, and the helper had read past it.
+            // The walk's store met the bad copy.
             let bad = on_remembered
                 .lines()
                 .find(|l| l.starts_with("bad "))
                 .unwrap();
             assert!(bad.contains("zz.pack"), "{on_remembered}");
-            assert!(seen.taken >= 3, "{seen:?}");
         }
+        ahead_seen::hold(&held, false);
     }
 
     /// A change to a project: what it does, to which folder of those on disk.

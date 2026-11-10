@@ -145,7 +145,10 @@ impl Copies {
     /// Takes the first copy's cache away and puts the plant back in the second, so each command
     /// meets the plant itself, not a cache an earlier command wrote.
     fn reset(&self) {
-        let _ = fs::remove_file(change_ids_cache(self.without.path()));
+        match fs::remove_file(change_ids_cache(self.without.path())) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("{e}"),
+            _ => {}
+        }
         fs::write(change_ids_cache(self.with.path()), &self.planted).unwrap();
     }
 }
@@ -351,7 +354,11 @@ fn status_after_goto_reads_what_goto_wrote() {
         .success();
     // A status at once leaves a cache that doesn't vouch for what the switch just wrote.
     assert!(changed(&env).is_empty());
-    let within = started.elapsed() < Duration::from_secs(2);
+    let took = started.elapsed();
+    let within = took < Duration::from_secs(2);
+    if !within {
+        eprintln!("note: cache check skipped, goto and status took {took:?}");
+    }
     let sealed = fs::read(cache_of(&env)).unwrap();
     let body = keyed::open_sealed(&user_key(&env), &sealed).unwrap();
     let cache = FileCache::decode(body).unwrap();
