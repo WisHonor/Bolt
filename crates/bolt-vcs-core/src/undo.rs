@@ -11,6 +11,7 @@ use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
 use crate::drive::Drive;
 use crate::history::tip_of;
 use crate::id::{Id, is_hex_start};
+use crate::journal::Journal;
 use crate::kept;
 use crate::pack::ObjectKind;
 use crate::repo::{ChangeLock, RepoError, Repository, entry_in};
@@ -19,7 +20,7 @@ use crate::shelf::{free_label, within_limit};
 use crate::store::{Store, StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
-use crate::warning::Warning;
+use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
 /// What one step taken did.
@@ -338,6 +339,19 @@ fn pick_up(
         let read = repo.store().save(save, repo.signatures_allowed());
         read.map_err(|e| unusable(e.to_string()))?;
     }
+    // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.
+    // Dropped before the new entry, so a crash between them never leaves it to refuse every command.
+    let mut applied = Applied::default();
+    if !matches!(Journal::read_front(repo), Ok(None)) {
+        Journal::remove_before_head(repo, lock)?;
+        applied.warnings.push(Warning::new(
+            warning::SWITCH_DROPPED,
+            "A switch between saves was stopped, and the project's head was lost before it was \
+             finished, so no command could finish it: Bolt dropped it, writing no file. The files \
+             it had already written show as unsaved changes, and what it would have written over \
+             is kept in that switch's own saves.",
+        ));
+    }
     let made = DiaryEntry {
         parent: Some(to),
         action: Action::Command,
@@ -356,7 +370,7 @@ fn pick_up(
         before: entry.state.clone(),
         after: entry.state.clone(),
         effects: Vec::new(),
-        applied: Applied::default(),
+        applied,
         entry,
     })
 }

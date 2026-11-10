@@ -68,6 +68,8 @@ pub const LINKS_LEFT: &str = "links_left";
 pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 /// A command finished a switch between saves that was stopped, before doing its own work.
 pub const SWITCH_FINISHED: &str = "switch_finished";
+/// Picking up a lost `head` dropped a stopped switch that no command could finish any more.
+pub const SWITCH_DROPPED: &str = "switch_dropped";
 /// A file's diff ran out of time, so its changes show in bigger pieces than they could.
 pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 /// The project's `bolt.toml` couldn't be used at all, so Bolt's own values apply.

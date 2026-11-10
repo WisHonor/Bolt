@@ -190,7 +190,6 @@ fn stopped_at(template: &Env, args: &[&str], label: &str) -> Env {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-#[ignore = "RT6-3: picking up a lost head during a stopped switch leaves every command refused"]
 fn rt6_3_picking_up_a_lost_head_after_a_stopped_switch_lets_the_project_go_on() {
     let template = project();
     fs::write(template.root().join("a.txt"), "one\n").unwrap();
@@ -208,7 +207,17 @@ fn rt6_3_picking_up_a_lost_head_after_a_stopped_switch_lets_the_project_go_on() 
     assert_eq!(ends.len(), 1, "{ends:?}");
     assert_eq!(ends[0]["command"], "discard");
     let pick = ends[0]["entry"].as_str().unwrap().to_owned();
-    let picked = ok(&env, &["undo", "--to", &pick]);
+    let picked = ok(&env, &["--json", "undo", "--to", &pick]);
+    // The pick-up drops the switch no command could finish, and says so.
+    let document: serde_json::Value = serde_json::from_str(&picked).unwrap();
+    let kinds: Vec<&str> = document["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"switch_dropped"), "{picked}");
+    assert!(!env.root().join(".bolt/state/journal").exists());
     let next = env.bolt().args(["discard"]).output().unwrap();
     let undo = env.bolt().args(["undo"]).output().unwrap();
     assert!(
@@ -219,4 +228,5 @@ fn rt6_3_picking_up_a_lost_head_after_a_stopped_switch_lets_the_project_go_on() 
         undo.status.code(),
         text(&undo.stderr)
     );
+    ok(&env, &["save", "Go on"]);
 }

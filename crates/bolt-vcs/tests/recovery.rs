@@ -579,7 +579,7 @@ fn undo_list_with_a_lost_head_passes_over_a_pack_it_cannot_read() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-fn a_stopped_switch_from_a_lost_head_is_left_alone() {
+fn a_stopped_switch_from_a_lost_head_is_dropped_without_writing_a_file() {
     let (env, [_, one, two]) = project();
     let save = entry(&env, one).state.lines["main"];
     // A goto stopped after its first change; then the entry it was made from is lost.
@@ -594,19 +594,14 @@ fn a_stopped_switch_from_a_lost_head_is_left_alone() {
     assert!(journal.exists());
     remove_pack_holding(&env, two);
     let folder = read(&env, "a.txt");
-    // Nothing is judged against the lost head: the pick-up finishes no switch.
+    // Nothing is judged against the lost head: the pick-up drops the switch and writes no file.
     ok(&env, &["undo", "--to", &one.to_hex()[..8]]);
     assert_eq!(head(&env).1.parent, Some(one));
     assert_eq!(read(&env, "a.txt"), folder);
-    assert!(journal.exists());
-    // The journal now belongs to no switch of this project, and status says so.
+    assert!(!journal.exists());
     let out = env.bolt().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let said = text(&out.stderr);
-    assert!(
-        said.contains("was made for another save than the one the project is on"),
-        "{said}"
-    );
+    assert_eq!(text(&out.stderr), "");
 }
 
 #[cfg(feature = "fault-injection")]
