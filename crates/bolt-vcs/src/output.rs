@@ -10,7 +10,7 @@ use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{ChangeKind, FileChange};
 use bolt_core::id::Id;
 use bolt_core::save::{Person, Save};
-use bolt_core::shelf::ShelfInfo;
+use bolt_core::shelf::{ShelfInfo, Shelved};
 use bolt_core::switch::DiscardOutcome;
 use bolt_core::text::{bytes, escape, thousands};
 use bolt_core::tidy::TidyReport;
@@ -346,6 +346,27 @@ pub fn shelf_json(s: &ShelfInfo) -> Value {
         "line": s.line,
         "saver": person_json(&s.saver),
         "files": s.files,
+    })
+}
+
+/// `bolt shelf --json`'s document for what `shelf` did.
+pub fn shelved_json(done: &Shelved, warnings: &[Warning]) -> Value {
+    let made = match done {
+        Shelved::Made(made) => Some(made),
+        Shelved::Nothing { .. } => None,
+    };
+    let applied = made.map(|d| d.applied.clone()).unwrap_or_default();
+    let shelf = made.map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
+    json!({
+        "bolt_json": BOLT_JSON,
+        "shelf": shelf,
+        "changed_again": matches!(done, Shelved::Nothing { changed_again: true, .. }),
+        "written": applied.written,
+        "removed": applied.removed,
+        "not_written": applied.not_written,
+        "placeholders": applied.placeholders,
+        "files_in_use": applied.in_use,
+        "warnings": warnings_json(warnings),
     })
 }
 
@@ -1347,6 +1368,20 @@ mod tests {
             object: None,
             needed_by: None,
             message: message.into(),
+        }
+    }
+
+    #[test]
+    fn shelf_json_tells_its_own_race_from_nothing_to_shelve() {
+        for changed_again in [true, false] {
+            let done = Shelved::Nothing {
+                changed_again,
+                links_left: vec![],
+            };
+            let document = shelved_json(&done, &[]);
+            assert_eq!(document["shelf"], Value::Null);
+            assert_eq!(document["changed_again"], changed_again);
+            assert_eq!(document["written"], 0);
         }
     }
 

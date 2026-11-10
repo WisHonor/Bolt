@@ -1840,23 +1840,10 @@ fn shelf_command(
         Shelved::Made(made) => Some(made),
         Shelved::Nothing { .. } => None,
     };
-    let applied = made.map(|d| d.applied.clone()).unwrap_or_default();
-    let mut warnings = applied.warnings.clone();
+    let mut warnings = made.map(|d| d.applied.warnings.clone()).unwrap_or_default();
     warnings.extend(repo.store().warnings());
     let text = if json {
-        let shelf =
-            made.map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
-        let document = json!({
-            "bolt_json": BOLT_JSON,
-            "shelf": shelf,
-            "written": applied.written,
-            "removed": applied.removed,
-            "not_written": applied.not_written,
-            "placeholders": applied.placeholders,
-            "files_in_use": applied.in_use,
-            "warnings": output::warnings_json(&warnings),
-        });
-        format!("{document}\n")
+        format!("{}\n", output::shelved_json(&done, &warnings))
     } else {
         match &done {
             Shelved::Made(d) => shelf_output::shelved(d),
