@@ -9,6 +9,7 @@ use bolt_core::id::{ChangeId, Id, hash_content};
 use bolt_core::link::ProjectLink;
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
+use bolt_core::rules::{self, Rule, Rules};
 use bolt_core::save::{MoveNote, Person, Save};
 use bolt_core::store::Store;
 use serde::Deserialize;
@@ -1069,5 +1070,61 @@ fn chunk_lists_that_break_a_rule_are_refused() {
     for vector in &v.invalid {
         let refused = ChunkList::decode(&unhex(&vector.hex));
         assert!(refused.is_err(), "{}: {refused:?}", vector.name);
+    }
+}
+
+#[derive(Deserialize)]
+struct RulesVector {
+    name: String,
+    toml: String,
+    skipped: bool,
+    preset: Option<String>,
+    chunk_files_over: u64,
+    ask_before_saving_over: u64,
+    ask_before_saving_files_over: u64,
+    rules: Vec<RuleVector>,
+    ignored: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RuleVector {
+    files: Vec<String>,
+    lockable: Option<bool>,
+    conflict_markers: Option<bool>,
+}
+
+#[test]
+fn every_vector_reads_as_it_says() {
+    let path = format!("{}/tests/vectors/rules.json", env!("CARGO_MANIFEST_DIR"));
+    let vectors: Vec<RulesVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors.len(), 50);
+    for v in &vectors {
+        let parsed = rules::parse(v.toml.as_bytes());
+        let (read, ignored) = match parsed {
+            Ok(_) if v.skipped => panic!("{}: read, though it isn't TOML", v.name),
+            Err(why) if !v.skipped => panic!("{}: passed over: {why}", v.name),
+            Ok((read, ignored)) => (read, ignored),
+            Err(_) => (Rules::default(), vec![]),
+        };
+        let expected = Rules {
+            preset: v.preset.clone(),
+            chunk_files_over: v.chunk_files_over,
+            ask_over_bytes: v.ask_before_saving_over,
+            ask_over_files: v.ask_before_saving_files_over,
+            rules: v
+                .rules
+                .iter()
+                .map(|r| Rule {
+                    files: r.files.clone(),
+                    lockable: r.lockable,
+                    conflict_markers: r.conflict_markers,
+                })
+                .collect(),
+        };
+        assert_eq!(read, expected, "{}", v.name);
+        let names: Vec<&str> = ignored.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, v.ignored, "{}", v.name);
+        assert!(ignored.iter().all(|(_, why)| !why.is_empty()), "{}", v.name);
     }
 }

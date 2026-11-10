@@ -767,6 +767,58 @@ fn save_then_nothing_to_save() {
     assert!(stdout.ends_with("  \"Change a\"  (1 file)\n"), "{stdout:?}");
 }
 
+/// What `bolt.toml` Bolt can't use is told by `bolt save`, in words and in `--json`, and by no
+/// command that isn't a save.
+#[test]
+fn only_save_shows_the_rules_warnings() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    let rules = env.root().join("bolt.toml");
+    std::fs::write(&rules, "zebra = 1\n").unwrap();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let out = env.bolt().args(["save", "First"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(
+        err.starts_with("warning: Bolt passed over these parts of bolt.toml")
+            && err.contains("\n  zebra: Bolt doesn't know this key"),
+        "{err}"
+    );
+    let first = text(&out.stdout)[6..10].to_owned();
+    std::fs::write(&rules, "this is not = = toml\n").unwrap();
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = env.bolt().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let doc = json(&["save", "--json", "Second"]);
+    assert_eq!(warning_kinds(&doc), ["rules_file_skipped"], "{doc}");
+    let quiet = |args: &[&str]| {
+        let out = env.bolt().args(args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(text(&out.stderr), "", "{args:?}");
+    };
+    quiet(&["goto", &first]);
+    quiet(&["goto", "main"]);
+    std::fs::write(env.root().join("a.txt"), "changed").unwrap();
+    quiet(&["status"]);
+    quiet(&["discard", "a.txt"]);
+    for args in [
+        &["status", "--json"][..],
+        &["goto", &first, "--json"],
+        &["goto", "main", "--json"],
+    ] {
+        let doc = json(args);
+        let warnings = doc["warnings"].as_array().map_or(0, Vec::len);
+        assert_eq!(warnings, 0, "{args:?}: {doc}");
+    }
+}
+
 /// A started project holding a new file of 100,000,001 zeros, made without writing them.
 fn project_adding_100_mb() -> Env {
     let env = Env::new();

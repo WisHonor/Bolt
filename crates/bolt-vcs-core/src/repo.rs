@@ -22,6 +22,7 @@ use crate::keyed::KEY_LEN;
 use crate::listing::Listing;
 use crate::names::NameError;
 use crate::pack::{ObjectKind, PackError, PackSet};
+use crate::rules::{self, RulesRead};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError, is_damage};
@@ -738,6 +739,8 @@ pub struct Repository {
     head: Option<Id>,
     /// The user's own key, which seals the caches; without it none is read or written.
     cache_key: Option<[u8; KEY_LEN]>,
+    /// The project's `bolt.toml`, as the change lock last read it.
+    rules: RulesRead,
 }
 
 /// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
@@ -1076,6 +1079,7 @@ impl Repository {
             format: parse_format(FORMAT_TEXT)?,
             head: None,
             cache_key: None,
+            rules: RulesRead::default(),
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
         // `start` too.
@@ -1202,6 +1206,7 @@ impl Repository {
             store,
             head,
             cache_key: None,
+            rules: RulesRead::default(),
         };
         repo.clean_tmp()?;
         Ok(repo)
@@ -1331,6 +1336,27 @@ impl Repository {
 
     pub(crate) fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    /// The project's rules as the last `lock_for_change` read them; Bolt's own before that.
+    #[must_use]
+    pub fn rules(&self) -> &RulesRead {
+        &self.rules
+    }
+
+    /// Reads the project's `bolt.toml` now, for a command that takes no lock.
+    #[must_use]
+    pub fn read_rules(&self) -> RulesRead {
+        match Dir::open_top(&self.root) {
+            Ok(top) => rules::read(&top),
+            Err(e) => RulesRead {
+                skipped: Some(format!(
+                    "Bolt couldn't open the project folder to read it: {}",
+                    escape(&e.to_string(), false)
+                )),
+                ..RulesRead::default()
+            },
+        }
     }
 
     /// `store/packs`, held open.
@@ -1464,6 +1490,9 @@ impl Repository {
         // the command at `current`, unless it is the `undo --to` that picks one up.
         self.head = read_head(&self.held.state, &self.bolt)?.id();
         self.store.refresh()?;
+        // Once per command, under the lock, before anything is stored.
+        self.rules = self.read_rules();
+        self.store.set_chunk_from(self.rules.rules.chunk_files_over);
         Ok(lock)
     }
 

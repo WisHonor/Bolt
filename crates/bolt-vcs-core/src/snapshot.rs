@@ -27,6 +27,7 @@ use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
+use crate::rules::Rules;
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, Person, Save};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
@@ -87,11 +88,6 @@ pub enum SaveOutcome {
         warnings: Vec<Warning>,
     },
 }
-
-/// A save asks first when it adds more than this many bytes or files that the save it builds on
-/// doesn't hold (decision 056).
-const ASK_OVER_BYTES: u64 = 100_000_000;
-const ASK_OVER_FILES: u64 = 10_000;
 
 /// What a save adds that the save it builds on doesn't hold, when that is unusually much.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,6 +500,7 @@ pub fn save_folder(
         req.git_excludes,
     )?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
+    warnings.extend(repo.rules().warnings());
     let imported = parent.extra.contains_key(EXTRA_GIT_COMMIT);
     // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
     // it is by the next save, which doesn't look. Told after the save's own checks.
@@ -525,7 +522,7 @@ pub fn save_folder(
     if imported && !req.accept_crlf {
         endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
     }
-    if let Some(large) = large_save(repo.store(), drive, &folders, &old)? {
+    if let Some(large) = large_save(repo.store(), &repo.rules().rules, drive, &folders, &old)? {
         // New files mean something to save, so a missing line name is asked for now: the
         // question comes after it, and what is stored is stored once.
         if line.is_none() {
@@ -784,9 +781,10 @@ fn each_file_with_saved<'f>(
 /// What the save would add, from the walk's sizes, if it is more than a save adds without asking.
 /// A file is new where the base save holds no file under a name `drive` takes as its own, so a
 /// changed file, or one renamed only in letter case on a drive that ignores case, doesn't count.
-/// Only listings are read.
+/// Only listings are read. The project's rules say how much is more.
 fn large_save(
     store: &Store,
+    rules: &Rules,
     drive: Drive,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
@@ -804,7 +802,7 @@ fn large_save(
         }
         Ok(())
     })?;
-    if new_bytes <= ASK_OVER_BYTES && new_files <= ASK_OVER_FILES {
+    if new_bytes <= rules.ask_over_bytes && new_files <= rules.ask_over_files {
         return Ok(None);
     }
     let mut biggest: Vec<(String, u64)> = by_top
@@ -1237,7 +1235,7 @@ impl Job {
 struct Jobs<'a> {
     handles: &'a mut Handles,
     todo: std::vec::IntoIter<(&'a str, &'a Child)>,
-    storing: bool,
+    storing: Option<&'a Store>,
 }
 
 impl Iterator for Jobs<'_> {
@@ -1260,7 +1258,12 @@ impl Iterator for Jobs<'_> {
         };
         Some(match c.kind {
             Kind::Symlink => Job::Link(at),
-            _ if self.storing && c.meta.is_some_and(|m| !ingest::is_small(m.size)) => Job::Big(at),
+            _ if self
+                .storing
+                .is_some_and(|s| c.meta.is_some_and(|m| !s.is_small(m.size))) =>
+            {
+                Job::Big(at)
+            }
             // One the walk has no details of fails as it is opened, as any file does.
             _ => Job::File(at),
         })
@@ -1346,7 +1349,7 @@ fn build_reading(
         let jobs = Jobs {
             handles: &mut *handles,
             todo: todo.into_iter(),
-            storing,
+            storing: store,
         };
         let built = workers.results(
             jobs,

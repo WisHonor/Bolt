@@ -27,6 +27,7 @@ pub mod merge;
 pub mod names;
 pub mod pack;
 pub mod repo;
+pub mod rules;
 pub mod safe_fs;
 pub mod save;
 pub(crate) mod scope;

@@ -137,11 +137,12 @@ Measured again on 2026-11-09, by the `Bench` workflow's `import-git` job rather 
 
 Git before 2.52 reads a `**` right after the literal start of a pattern with a `/` differently, and Bolt follows 2.52 and later; with an older Git such lines are left out of the random rules. The CI runners' Git is new enough that nothing is left out.
 
-**Fuzz targets.** Twenty-one cover the decoders and parsers of data from outside Bolt:
+**Fuzz targets.** Twenty-two cover the decoders and parsers of data from outside Bolt:
 - Bolt's records: `decode_listing` (folder listings), `decode_save`, `decode_diary` (diary entries), `decode_tag_list`, `decode_server_lines` and `decode_project_link` (project links, [storage-format.md](storage-format.md) §7; what decodes must encode back to the same bytes).
 - Big files (milestone 5): `decode_chunk_list` (chunk lists, [storage-format.md](storage-format.md) §6; what decodes must encode back to the same bytes) and `cut_chunks` (the cutter: every chunk at most 256 KiB, every one but the last longer than 16 KiB, the sizes adding up to the file's, and the same cuts when the file is handed over a few bytes at a time).
 - Bolt's files: `open_pack` (a pack of either version, with its index, trailer and every entry, each also looked up by its ID and read as a record, as a chunk list and as content), `format_file` (`.bolt/format`), `change_ids` (`cache/change-ids` and its seal), `file_cache` (`cache/files`), `decode_journal` (`state/journal`) and `name_rules` (a list of names given to `validate_name`, `is_git_alias` and `folder_problems`: the always-on name rules, the `.git` spellings and the clashes among one folder's names).
 - `ignore_rules`: ignore files, the matcher and wildmatch, on drives that do and don't ignore letter case or compose Unicode.
+- `parse_rules`: `bolt.toml` ([storage-format.md](storage-format.md) §12): nothing panics, what is kept keeps to its limits, a size Bolt writes reads back the same, and no warning about the file holds an escape character.
 - The Git reader: `git_loose` (loose objects, as they are and compressed, to get past zlib), `git_pack` (a pack and its index, given the checksums no fuzzer finds by chance), `git_delta`, `git_objects` (commits, trees, tags, people, and the tests for Git LFS pointers: a pointer Git LFS's parser reads, written in the exact form Git LFS writes, must read back the same and count as exact), `git_refs` (`packed-refs` and `HEAD`, then the renaming of branch and tag names) and `git_config`.
 
 The decoders for conflict records and `bolt.toml` get theirs in the milestones that build them.

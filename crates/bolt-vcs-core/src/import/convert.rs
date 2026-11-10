@@ -13,7 +13,7 @@ use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest as _, Sha256};
 
 use super::{ImportError, LfsElsewhere};
-use crate::chunks::{is_cut, is_too_long_to_cut};
+use crate::chunks::is_too_long_to_cut;
 use crate::diary::{
     self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
 };
@@ -988,7 +988,7 @@ impl<'r> Converter<'r> {
         // The header only picks how to read it: the bytes are checked against the ID. A big file
         // Git stored as a delta brings its whole family in.
         let (kind, size) = self.git.header(id).map_err(|e| at(e, place))?;
-        if kind == ObjectType::Blob && is_cut(size) {
+        if kind == ObjectType::Blob && self.store.is_cut(size) {
             self.family(id, &place)?;
             if let Some(done) = self.met(id, file, commit, path) {
                 return Ok(done);
@@ -1052,7 +1052,7 @@ impl<'r> Converter<'r> {
         let lookalikes = &mut self.lookalike_members;
         let mut each = |member: &GitId, data: &[u8]| -> Result<(), ImportError> {
             // Each one stored has cost a MiB of the work allowed, which bounds how many there are.
-            if !is_cut(data.len() as u64) || blobs.contains_key(&(*member, true)) {
+            if !store.is_cut(data.len() as u64) || blobs.contains_key(&(*member, true)) {
                 return Ok(());
             }
             let stored = ingest::store_held(packs, store, data);

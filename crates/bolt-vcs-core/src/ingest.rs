@@ -4,7 +4,7 @@
 
 use std::io::{self, Read};
 
-use crate::chunks::{Chunk, ChunkList, Cutter, is_cut, is_too_long_to_cut};
+use crate::chunks::{Chunk, ChunkList, Cutter, is_too_long_to_cut};
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::pack::{self, ObjectKind, PackError, PackSet, Prepared};
 use crate::store::{Store, StoreError};
@@ -41,7 +41,7 @@ pub(crate) fn store_bytes(
     reader: &mut dyn Read,
     size: u64,
 ) -> Result<Id, IngestError> {
-    if is_cut(size) {
+    if store.is_cut(size) {
         return cut(packs, store, reader, size);
     }
     if is_too_long_to_cut(size) {
@@ -58,7 +58,7 @@ pub(crate) fn store_held(
     bytes: &[u8],
 ) -> Result<Id, IngestError> {
     let size = bytes.len() as u64;
-    if is_cut(size) {
+    if store.is_cut(size) {
         return cut(packs, store, &mut &*bytes, size);
     }
     store_whole(packs, store, bytes)
@@ -92,11 +92,6 @@ fn store_whole(packs: &mut PackSet, store: &Store, bytes: &[u8]) -> Result<Id, I
         return Ok(id);
     }
     add_ready(packs, &ready_new(id, bytes)?)
-}
-
-/// Whether a file of `size` bytes is read whole: neither cut nor too long to cut.
-pub(crate) fn is_small(size: u64) -> bool {
-    !is_cut(size) && !is_too_long_to_cut(size)
 }
 
 /// The `size` bytes `reader` gives, read whole. Fewer or more is `Changed`.
@@ -239,7 +234,7 @@ fn cut(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::chunks::{MAX_CHUNK, set_test_cut_sizes};
+    use crate::chunks::{MAX_CHUNK, is_cut, set_test_cut_sizes};
     use crate::pack::{IndexEntry, PackReader, WRITER_PACK_OBJECTS};
     use crate::test_support::noise;
     use bolt_platform::dir::Dir;

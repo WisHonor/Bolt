@@ -70,6 +70,10 @@ pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 pub const SWITCH_FINISHED: &str = "switch_finished";
 /// A file's diff ran out of time, so its changes show in bigger pieces than they could.
 pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
+/// The project's `bolt.toml` couldn't be used at all, so Bolt's own values apply.
+pub const RULES_FILE_SKIPPED: &str = "rules_file_skipped";
+/// Parts of `bolt.toml` couldn't be used and were passed over; the rest of it counts.
+pub const RULES_IGNORED: &str = "rules_ignored";
 
 /// Whether people see a warning of `kind` when the command then fails: it tells of files
 /// already written, by a switch the command finished first or by the command itself before it

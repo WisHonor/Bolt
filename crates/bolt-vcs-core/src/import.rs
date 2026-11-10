@@ -2245,4 +2245,75 @@ mod tests {
             .collect();
         assert_eq!(checking, [(1, Some(2)), (2, Some(2))]);
     }
+
+    /// The `bolt.toml` of the Git checkout an import runs in decides which files it cuts, and so
+    /// does a project's for the safety copies of a discard.
+    #[test]
+    fn safety_copies_and_imports_use_the_threshold_too() {
+        use crate::journal::{Action, Change, Expected};
+        use crate::listing::EntryKind;
+        use crate::pack::{ObjectKind, PackReader};
+        use crate::test_support::noise;
+
+        let big = noise(9, 2 << 20);
+        let mine = noise(10, 2 << 20);
+        for (rules, cut) in [
+            (Some("chunk-files-over = \"4 MiB\"\n"), false),
+            (None, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Craft::new(dir.path(), HashKind::Sha1);
+            let blob = git.object(ObjectType::Blob, &big);
+            let tree = git.tree(&[(b"100644", b"big", blob)]);
+            let raw = format!(
+                "tree {}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 \
+                 +0000\n\nOne\n",
+                tree.to_hex()
+            );
+            let commit = git.commit(raw.as_bytes());
+            git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
+            if let Some(rules) = rules {
+                std::fs::write(dir.path().join("bolt.toml"), rules).unwrap();
+            }
+            import(dir.path()).unwrap();
+            let packs = std::fs::read_dir(dir.path().join(".bolt/store/packs")).unwrap();
+            let lists: usize = packs
+                .map(|p| p.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|e| e == "pack"))
+                .map(|p| {
+                    let pack = PackReader::open(&p).unwrap();
+                    let entries = pack.entries().map(|e| e.unwrap());
+                    entries.filter(|e| e.kind == ObjectKind::ChunkList).count()
+                })
+                .sum();
+            assert_eq!(lists, usize::from(cut), "{rules:?}");
+
+            let mut repo = Repository::open(dir.path()).unwrap();
+            std::fs::write(dir.path().join("mine"), &mine).unwrap();
+            let id = crate::id::hash_content(&mine);
+            let actions = vec![Action {
+                path: "mine".into(),
+                change: Change::RemoveFile,
+                expected: Some(Expected {
+                    kind: EntryKind::File,
+                    id,
+                    size: mine.len() as u64,
+                }),
+            }];
+            let from = crate::history::current_save(&repo).unwrap();
+            let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+            let drive = crate::drive::probe(repo.tmp_folder()).unwrap();
+            let mut packs = repo.new_packs().unwrap();
+            let copies =
+                crate::writeout::keep_safety_copies(&repo, &actions, from, drive, &mut packs)
+                    .unwrap();
+            assert_eq!(copies.len(), 1);
+            let kind = if cut {
+                ObjectKind::ChunkList
+            } else {
+                ObjectKind::Content
+            };
+            assert_eq!(packs.kind_of(&id), Some(kind), "{rules:?}");
+        }
+    }
 }

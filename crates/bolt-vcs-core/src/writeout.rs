@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
-use crate::chunks::{is_cut, is_too_long_to_cut};
+use crate::chunks::is_too_long_to_cut;
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
@@ -400,7 +400,7 @@ pub fn keep_safety_copies(
         }
     });
     // A small file is read on the workers; a link, and a file too big to read whole, here.
-    let on_worker = |e: Expected| e.kind != EntryKind::Symlink && ingest::is_small(e.size);
+    let on_worker = |e: Expected| e.kind != EntryKind::Symlink && store.is_small(e.size);
     let cost = |&(_, e): &(&str, Expected)| match e.kind {
         _ if on_worker(e) => ingest::cost(e.size),
         EntryKind::Symlink => 0,
@@ -437,7 +437,8 @@ pub fn keep_safety_copies(
                 } else {
                     // A big file is relied on as held only once it is cut again, which `copy_in`
                     // does.
-                    (!is_cut(e.size) && store.has_good_copy(&e.id, ObjectKind::Content, e.size)?)
+                    (!store.is_cut(e.size)
+                        && store.has_good_copy(&e.id, ObjectKind::Content, e.size)?)
                         || copy_in(&mut disk, path, e, store, packs)?
                 };
                 if kept {

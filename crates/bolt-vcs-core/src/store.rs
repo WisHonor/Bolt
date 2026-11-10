@@ -3,7 +3,7 @@
 //! being read.
 use bolt_platform::dir::Dir;
 
-use crate::chunks::ChunkList;
+use crate::chunks::{self, CHUNK_FROM, ChunkList};
 use crate::encoding::DecodeError;
 use crate::id::{ContentHasher, Id};
 use crate::listing::Listing;
@@ -16,6 +16,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Packs kept open between lookups, the last ones used: with the folders a walk holds, few enough
@@ -97,6 +98,8 @@ pub struct Store {
     path: PathBuf,
     packs: Mutex<Packs>,
     checked: Mutex<Checked>,
+    /// The smallest file stored in chunks, as the project's rules say.
+    chunk_from: AtomicU64,
     #[cfg(test)]
     saves_read: std::sync::atomic::AtomicUsize,
     /// This store's packs while they are open.
@@ -233,6 +236,7 @@ impl Store {
             path: packs_dir.to_owned(),
             packs: Mutex::default(),
             checked: Mutex::default(),
+            chunk_from: AtomicU64::new(CHUNK_FROM),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -246,6 +250,21 @@ impl Store {
     /// opened.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
         self.list()
+    }
+
+    /// Makes files of `bytes` or more (up to the most that is cut) stored in chunks from now on.
+    pub(crate) fn set_chunk_from(&self, bytes: u64) {
+        self.chunk_from.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Whether a file of `size` bytes is stored in chunks.
+    pub(crate) fn is_cut(&self, size: u64) -> bool {
+        chunks::is_cut_from(self.chunk_from.load(Ordering::Relaxed), size)
+    }
+
+    /// Whether a file of `size` bytes is read whole: neither cut nor too long to cut.
+    pub(crate) fn is_small(&self, size: u64) -> bool {
+        !self.is_cut(size) && !chunks::is_too_long_to_cut(size)
     }
 
     /// Adds the pack at `pack_path`, which this process has just moved into the store. An object
