@@ -122,6 +122,8 @@ const EARLY_FLUSH_STEP: u64 = 16 << 20;
 pub(crate) struct EarlyFlush {
     /// Bytes written since the helper was last woken.
     since: u64,
+    /// Whether a helper was started, or failed to start: one try per file.
+    tried: bool,
     helper: Option<Helper>,
 }
 
@@ -134,6 +136,8 @@ struct Helper {
 struct Shared {
     state: Mutex<State>,
     wake: Condvar,
+    #[cfg(feature = "fault-injection")]
+    fails: bool,
 }
 
 #[derive(Default)]
@@ -149,6 +153,7 @@ impl EarlyFlush {
     pub(crate) fn new() -> EarlyFlush {
         EarlyFlush {
             since: 0,
+            tried: false,
             helper: None,
         }
     }
@@ -161,7 +166,8 @@ impl EarlyFlush {
             return;
         }
         self.since = 0;
-        if self.helper.is_none() {
+        if !self.tried {
+            self.tried = true;
             self.helper = Helper::start(file);
         }
         if let Some(helper) = &self.helper
@@ -209,14 +215,16 @@ impl Helper {
             fault::Early::Off => return None,
             how => how == fault::Early::Fails,
         };
-        #[cfg(not(feature = "fault-injection"))]
-        let fails = false;
         let own = file.try_clone().ok()?;
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            #[cfg(feature = "fault-injection")]
+            fails,
+            ..Shared::default()
+        });
         let theirs = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("bolt-flush".into())
-            .spawn(move || flush_loop(&own, &theirs, fails))
+            .spawn(move || flush_loop(&own, &theirs))
             .ok()?;
         Some(Helper { shared, thread })
     }
@@ -224,7 +232,7 @@ impl Helper {
 
 /// Flushes `file` each time it is asked to, until told to stop or a flush fails. A flush asked
 /// for before the stop is still made.
-fn flush_loop(file: &File, shared: &Shared, fails: bool) {
+fn flush_loop(file: &File, shared: &Shared) {
     loop {
         let Ok(mut state) = shared.state.lock() else {
             return;
@@ -240,11 +248,14 @@ fn flush_loop(file: &File, shared: &Shared, fails: bool) {
         }
         state.wanted = false;
         drop(state);
-        let flushed = if fails {
+        #[cfg(feature = "fault-injection")]
+        let flushed = if shared.fails {
             Err(io::Error::other("injected fault at flush:early"))
         } else {
             file.sync_data()
         };
+        #[cfg(not(feature = "fault-injection"))]
+        let flushed = file.sync_data();
         let Ok(mut state) = shared.state.lock() else {
             return;
         };
@@ -745,15 +756,31 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_early_flush_lets_its_file_go() {
+    fn no_helper_outlives_its_file() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("big");
-        let file = File::create(&path).unwrap();
+        let file = File::create(root.path().join("big")).unwrap();
+        for dropped in [false, true] {
+            let mut early = EarlyFlush::new();
+            early.wrote(&file, 16 << 20);
+            // The helper's thread holds the other half of this, with its own handle.
+            let shared = Arc::downgrade(&early.helper.as_ref().unwrap().shared);
+            if dropped {
+                drop(early);
+            } else {
+                early.finish().unwrap();
+            }
+            assert!(shared.upgrade().is_none(), "dropped: {dropped}");
+        }
+    }
+
+    #[test]
+    fn a_helper_is_started_once_at_most() {
+        let root = tempfile::tempdir().unwrap();
+        let file = File::create(root.path().join("big")).unwrap();
         let mut early = EarlyFlush::new();
-        early.wrote(&file, 16 << 20);
-        drop(early);
-        drop(file);
-        // On Windows a handle the helper kept would stop this.
-        fs::remove_file(&path).unwrap();
+        // As if it couldn't start.
+        early.tried = true;
+        early.wrote(&file, 40 << 20);
+        assert!(early.helper.is_none());
     }
 }

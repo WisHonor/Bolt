@@ -10,13 +10,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use bolt_core::fsio::fault::{self, Early};
 use bolt_core::id::Id;
 use bolt_core::lines::Target;
+use bolt_core::pack::ObjectKind;
 use bolt_core::repo::Repository;
 use bolt_core::snapshot::SaveOutcome;
 use bolt_core::switch::goto;
 use tempfile::TempDir;
 
 mod support;
-use support::{ada, id_of, packs_in, save_here, write_noise};
+use support::{ada, entries_with_bytes, id_of, save_here, write_noise};
 
 /// Memory and disk are short: one 40 MiB project at a time.
 fn one_at_a_time() -> MutexGuard<'static, ()> {
@@ -91,6 +92,32 @@ fn an_early_flush_that_fails_stops_a_goto() {
     assert!(!dir.path().join(".bolt/state/journal").exists());
 }
 
+/// One pack as stored: each entry's ID, kind, offset, stored size and a fingerprint of its
+/// bytes, then every entry's offset, in order of offset.
+type PackAsStored = (Vec<(Id, ObjectKind, u64, u64, Id)>, Vec<u64>);
+
+/// The packs in the store of the project at `root`, as stored.
+fn packs_as_stored(root: &Path) -> Vec<PackAsStored> {
+    let mut packs: Vec<PackAsStored> = std::fs::read_dir(root.join(".bolt/store/packs"))
+        .unwrap()
+        .map(|pack| {
+            let entries = entries_with_bytes(&pack.unwrap().path());
+            // In order of offset: a save's random ID sorts it anywhere in the index.
+            let mut offsets: Vec<u64> = entries.iter().map(|(e, _)| e.offset).collect();
+            offsets.sort_unstable();
+            // A save record and a diary entry hold a random change ID and the time: not compared.
+            let kept = entries
+                .into_iter()
+                .filter(|(e, _)| !matches!(e.kind, ObjectKind::Save | ObjectKind::DiaryEntry))
+                .map(|(e, bytes)| (e.id, e.kind, e.offset, e.stored_size, bytes))
+                .collect();
+            (kept, offsets)
+        })
+        .collect();
+    packs.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    packs
+}
+
 #[test]
 fn a_save_writes_the_same_packs_with_and_without_the_helper() {
     let _one = one_at_a_time();
@@ -101,7 +128,7 @@ fn a_save_writes_the_same_packs_with_and_without_the_helper() {
         save_here(dir.path(), "Big").unwrap();
         fault::early_flush(Early::On);
         let flushed = fault::early_flushes() - before;
-        (packs_in(&dir.path().join(".bolt/store/packs")), flushed)
+        (packs_as_stored(dir.path()), flushed)
     };
     let (with, flushed) = saved(Early::On);
     let (without, none) = saved(Early::Off);
