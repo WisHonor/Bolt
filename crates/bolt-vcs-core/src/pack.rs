@@ -1506,10 +1506,13 @@ impl Read for Section<'_> {
 const BLOCK: u64 = 65_536;
 /// The largest read answered from a block; bigger ones go to the file.
 const SMALL_READ: u64 = 4_096;
+/// The most a slot may read as blocks for each byte asked of it.
+const BLOCK_BYTES_PER_BYTE_ASKED: u64 = 4;
 
 /// The last block read of a pack's entries, and of its index, so the many small reads of records
 /// and index lines that sit side by side cost one read of the file. A block is read only at the
-/// second read in a row that falls in it, so reads scattered over the pack each cost a small read.
+/// second read in a row that falls in it, and only if the blocks a slot has read stay within four
+/// times the bytes asked of it, so reads scattered over the pack, or in pairs, cost small reads.
 /// A pack never changes once it is named, so a block is only ever a copy of what the file holds.
 struct Window {
     /// The file's length when it was opened.
@@ -1525,6 +1528,10 @@ struct Block {
     bytes: Vec<u8>,
     /// Where the block of the last read that missed starts.
     missed: Option<u64>,
+    /// The bytes of the small reads asked of this slot.
+    asked: u64,
+    /// The bytes read as blocks.
+    read: u64,
 }
 
 impl Window {
@@ -1538,8 +1545,9 @@ impl Window {
 
     /// Fills `buf` with the bytes at `pos` from a block, reading the block first if it isn't the
     /// one held and the last read that missed fell in it too. False if the read is too big,
-    /// crosses a block's end, is the first in a row to fall in its block, or the block can't be
-    /// read whole: the caller then reads the file itself, and reports what goes wrong.
+    /// crosses a block's end, is the first in a row to fall in its block, would take the blocks
+    /// read past their share of the bytes asked, or the block can't be read whole: the caller
+    /// then reads the file itself, and reports what goes wrong.
     fn read(&self, file: &File, pos: u64, buf: &mut [u8]) -> bool {
         let start = pos - pos % BLOCK;
         let end = start.saturating_add(BLOCK).min(self.len);
@@ -1551,11 +1559,13 @@ impl Window {
             return false;
         };
         let (at, len) = ((pos - start) as usize, buf.len());
+        let size = end - start;
         // The lock is never held across a read of the file.
         let mut bytes = {
             let Ok(mut held) = slot.lock() else {
                 return false;
             };
+            held.asked = held.asked.saturating_add(want);
             if held.start == start
                 && let Some(from) = held.bytes.get(at..at + len)
             {
@@ -1565,9 +1575,14 @@ impl Window {
             if held.missed.replace(start) != Some(start) {
                 return false;
             }
+            let read = held.read.saturating_add(size);
+            if read > held.asked.saturating_mul(BLOCK_BYTES_PER_BYTE_ASKED) {
+                return false;
+            }
+            held.read = read;
             std::mem::take(&mut held.bytes)
         };
-        let size = (end - start) as usize;
+        let size = size as usize;
         bytes.clear();
         if bytes.try_reserve_exact(size).is_err() {
             return false;
@@ -1591,6 +1606,13 @@ impl Window {
     fn held(&self) -> Vec<(u64, usize)> {
         let held = |b: &Mutex<Block>| b.lock().map(|b| (b.start, b.bytes.len())).unwrap();
         self.blocks.iter().map(held).collect()
+    }
+
+    /// The bytes asked of each slot, and the bytes it read as blocks.
+    #[cfg(test)]
+    fn counts(&self) -> Vec<(u64, u64)> {
+        let counts = |b: &Mutex<Block>| b.lock().map(|b| (b.asked, b.read)).unwrap();
+        self.blocks.iter().map(counts).collect()
     }
 }
 
@@ -2628,15 +2650,19 @@ mod tests {
         let (_root, tmp, packs) = dirs();
         let (path, contents) = random_pack(&packs, &tmp, &[100; 100]);
         let r = PackReader::open(&path).unwrap();
-        let before = open_files::reads();
-        for c in &contents {
-            let e = r.find(&hash_content(c)).unwrap().unwrap();
-            assert!(read_any(&r, &e).unwrap() == *c);
-        }
-        // One block of entries and one of the index, each read at the second read that falls in
-        // it, after one small read.
-        let reads = open_files::reads() - before;
-        assert!(reads <= 4, "{reads} reads");
+        let read_all = || {
+            let before = open_files::reads();
+            for c in &contents {
+                let e = r.find(&hash_content(c)).unwrap().unwrap();
+                assert!(read_any(&r, &e).unwrap() == *c);
+            }
+            open_files::reads() - before
+        };
+        // Small reads until enough is asked of each slot, then one block each.
+        read_all();
+        assert!(r.window.held().iter().all(|&(_, len)| len > 0));
+        // Then every read is answered from memory.
+        assert_eq!(read_all(), 0);
     }
 
     /// The reads of the file that 8 bytes at `pos`, read through the window, take.
@@ -2673,9 +2699,27 @@ mod tests {
         assert_eq!(r.window.held(), [(0, 0), (0, 0)]);
     }
 
+    /// Asks `reads` small reads of 4 KiB of the entries' slot, never two in a row in one block.
+    fn ask(r: &PackReader, reads: u64) {
+        for i in 0..reads {
+            let pos = (i % 2) * 4 * BLOCK;
+            let mut got = vec![0u8; SMALL_READ as usize];
+            let mut section = Section {
+                file: &r.file,
+                window: Some(&r.window),
+                pos,
+                end: pos + SMALL_READ,
+            };
+            section.read_exact(&mut got).unwrap();
+        }
+        assert_eq!(r.window.counts()[0], (reads * SMALL_READ, 0));
+    }
+
     #[test]
     fn a_block_is_read_at_the_second_read_in_a_row_in_it() {
         let (_root, r) = big_pack();
+        // Enough asked for two blocks.
+        ask(&r, 8);
         // A small read, then the block, then nothing.
         let run: Vec<_> = [100, 200, 300].map(|d| reads_for(&r, BLOCK + d)).into();
         assert_eq!(run, [1, 1, 0]);
@@ -2689,6 +2733,37 @@ mod tests {
             .into();
         assert_eq!(steps, [1, 0, 1, 1]);
         assert_eq!(r.window.held()[0], (far, BLOCK as usize));
+    }
+
+    #[test]
+    fn reads_in_pairs_read_blocks_only_within_their_share() {
+        let (_root, r) = big_pack();
+        let mut asked = 0;
+        for round in 0..4000u64 {
+            let start = (round % 5) * BLOCK;
+            for d in [100, 200] {
+                reads_for(&r, start + d);
+                asked += 8;
+            }
+        }
+        let (got_asked, read) = r.window.counts()[0];
+        assert_eq!(got_asked, asked);
+        assert!(read <= 4 * asked, "{read} read for {asked} asked");
+        // The share was spent, not refused outright.
+        assert!(read > 0);
+    }
+
+    #[test]
+    fn side_by_side_reads_use_one_block_once_16_kib_is_asked() {
+        let (_root, r) = big_pack();
+        // 2,048 reads of 8 bytes ask 16 KiB: the last of them reads the block.
+        let costs: Vec<usize> = (0..2048).map(|i| reads_for(&r, BLOCK + 8 * i)).collect();
+        assert!(costs.iter().all(|&c| c == 1), "{costs:?}");
+        assert_eq!(r.window.held()[0], (BLOCK, BLOCK as usize));
+        assert_eq!(r.window.counts()[0], (16_384, BLOCK));
+        for i in 2048..4096 {
+            assert_eq!(reads_for(&r, BLOCK + 8 * i), 0, "read {i}");
+        }
     }
 
     #[test]
@@ -2720,8 +2795,8 @@ mod tests {
         let r = PackReader::open(&path).unwrap();
         let find = |c: &[u8]| r.find(&hash_content(c)).unwrap().unwrap();
         let (small, big) = (find(&contents[0]), find(&contents[1]));
-        // Twice, so that its block is held.
-        for _ in 0..2 {
+        // Enough times that its block is held.
+        for _ in 0..50 {
             assert!(read_any(&r, &small).unwrap() == contents[0]);
         }
         let held = r.window.held();
