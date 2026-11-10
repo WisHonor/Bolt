@@ -390,7 +390,7 @@ fn plant_links(root: &Path) {
 }
 
 #[test]
-fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
+fn entries_this_computer_cant_hold_are_listed_as_not_written() {
     let env = Env::empty();
     env.bolt()
         .args(["start", "--preset", "custom"])
@@ -405,10 +405,7 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
         [change("deps/x.txt", "removed", "file")],
         "{doc}"
     );
-    assert_eq!(
-        doc["not_written_here"],
-        serde_json::json!(["deps/lib", "lib"])
-    );
+    assert_eq!(doc["not_written"], serde_json::json!(["deps/lib", "lib"]));
     let said = text(&env.bolt().arg("status").output().unwrap().stdout);
     assert!(
         said.ends_with(
@@ -421,10 +418,7 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
     write_old(&env.root().join("deps/x.txt"), b"a");
     let doc = status_json(&env, &[]);
     assert!(changes(&doc).is_empty(), "{doc}");
-    assert_eq!(
-        doc["not_written_here"],
-        serde_json::json!(["deps/lib", "lib"])
-    );
+    assert_eq!(doc["not_written"], serde_json::json!(["deps/lib", "lib"]));
     let said = text(&env.bolt().arg("status").output().unwrap().stdout);
     assert!(said.contains("Nothing changed since "), "{said}");
 }

@@ -27,7 +27,7 @@ expression: doc
       "path": "c.txt"
     }
   ],
-  "not_written_here": [],
+  "not_written": [],
   "position": {
     "line": "main"
   },
