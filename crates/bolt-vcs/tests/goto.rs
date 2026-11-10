@@ -214,14 +214,17 @@ fn goto_json(env: &Env, target: &str) -> serde_json::Value {
 fn goto_a_line_and_back_restores_every_file_byte_for_byte() {
     let env = two_lines();
     let said = goto(&env, "feature");
-    assert!(said.contains("You're on line feature."), "{said}");
+    assert!(
+        said.starts_with("Switched to line feature at save "),
+        "{said}"
+    );
     assert_eq!(files(env.root()), holding(FEATURE));
     assert!(!env.root().join("dir").exists());
     assert_eq!(env.state().1.position, Position::OnLine("feature".into()));
     assert!(changed(&env).is_empty());
 
     let said = goto(&env, "main");
-    assert!(said.contains("You're on line main."), "{said}");
+    assert!(said.starts_with("Switched to line main at save "), "{said}");
     assert_eq!(files(env.root()), holding(MAIN));
     assert!(!env.root().join("new").exists());
     assert!(changed(&env).is_empty());
@@ -234,7 +237,10 @@ fn goto_carries_unsaved_changes_that_dont_collide() {
     env.overwrite("a.txt", "mine\n");
     env.overwrite("n.txt", "new\n");
     let said = goto(&env, "feature");
-    assert!(said.contains("You're on line feature."), "{said}");
+    assert!(
+        said.starts_with("Switched to line feature at save "),
+        "{said}"
+    );
     assert!(said.contains("2 files"), "{said}");
     let mut wanted = holding(FEATURE);
     wanted.insert("a.txt".into(), b"mine\n".to_vec());
@@ -498,7 +504,7 @@ fn goto_where_the_project_is_carries_nothing_along() {
     );
     let before = env.standing();
     let said = goto(&env, "main");
-    assert!(said.contains("You're on line main."), "{said}");
+    assert!(said.starts_with("Switched to line main at save "), "{said}");
     assert!(!said.contains("came along"), "{said}");
     assert_eq!(env.standing(), before);
 }
@@ -524,7 +530,7 @@ fn a_goto_with_a_file_in_use_fails_and_the_next_one_finishes() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let said = text(&out.stderr);
     assert!(said.contains("error:") && said.contains("b.txt"), "{said}");
-    assert!(!text(&out.stdout).contains("You're on line"));
+    assert!(text(&out.stdout).is_empty());
     let out = env
         .bolt()
         .args(["goto", "feature", "--json"])

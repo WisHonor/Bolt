@@ -338,7 +338,9 @@ fn undo_three_takes_three_steps_one_entry_each() {
         saves.push(head(&env).0);
     }
     let said = ok(&env, &["undo", "3"]);
-    assert_eq!(said.matches("Undid save").count(), 3, "{said}");
+    // Counted, then each listed.
+    assert!(said.starts_with("Undid 3 steps:\n\n"), "{said}");
+    assert_eq!(said.matches("\n    save ").count(), 3, "{said}");
     // The newest step was undone first, so walking back meets its undo last.
     let mut at = head(&env).0;
     for step in &saves {
@@ -349,7 +351,9 @@ fn undo_three_takes_three_steps_one_entry_each() {
     assert_eq!(at, saves[2]);
     // Only the project's first entry is left, and that can't be undone.
     assert!(ok(&env, &["undo"]).contains("Nothing to undo"));
-    assert_eq!(ok(&env, &["redo", "3"]).matches("Redid save").count(), 3);
+    let said = ok(&env, &["redo", "3"]);
+    assert!(said.starts_with("Redid 3 steps:\n\n"), "{said}");
+    assert_eq!(said.matches("\n    save ").count(), 3, "{said}");
 }
 
 #[test]
@@ -359,8 +363,10 @@ fn undo_two_stops_at_the_first_it_cannot_take_and_says_how_many_were_taken() {
     ok(&env, &["discard"]);
     write(&env, "a.txt", "mine\n");
     let (out, said) = refused(&env, &["undo", "2"]);
-    assert!(out.contains("Undid discard"), "{out}");
-    assert!(out.contains("Undid 1 of the 2 steps"), "{out}");
+    assert!(
+        out.starts_with("Undid 1 of the 2 steps asked for:\n\n    discard: "),
+        "{out}"
+    );
     assert!(said.contains("a.txt"), "{said}");
     assert!(said.contains("so that step changed nothing"), "{said}");
     assert_eq!(fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
@@ -385,7 +391,7 @@ fn an_undo_that_stops_part_way_says_why_and_what_it_took_when_stdout_fails() {
         let said = text(&out.stderr);
         // Why it stopped, then the step it took, then that its output was lost.
         let why = said.find("so that step changed nothing").expect(&said);
-        let took = said.find("Undid 1 of the 2 steps asked for.").expect(&said);
+        let took = said.find("Undid 1 of the 2 steps asked for:").expect(&said);
         let lost = said
             .find("error: Bolt couldn't write its output: ")
             .expect(&said);
@@ -393,7 +399,7 @@ fn an_undo_that_stops_part_way_says_why_and_what_it_took_when_stdout_fails() {
             said.starts_with("error: ") && why < took && took < lost,
             "{said}"
         );
-        assert!(said.contains("Undid discard"), "{said}");
+        assert!(said.contains("\n    discard: "), "{said}");
     }
 }
 
@@ -698,15 +704,17 @@ fn the_list_shows_redo_steps_then_undo_steps_numbered_from_now() {
     ok(&env, &["undo", "2"]);
     let said = ok(&env, &["undo", "--list"]);
     let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(lines.len(), 5, "{said}");
-    // Newest first: the steps undone, numbered for redo N, then those undo can take.
+    // A heading and an empty line, then the steps.
+    assert_eq!(lines.len(), 8, "{said}");
+    // Newest first: the steps undone, numbered for redo N, where you are, then those undo can
+    // take.
     let shown = [
-        ("undone 2", 4, "\"Add d\""),
-        ("undone 1", 3, "\"Add c\""),
-        ("1", 2, "\"Add b\""),
-        ("2", 1, "\"Files\""),
+        (lines[2], "redo 2", 4, "\"Add d\""),
+        (lines[3], "redo 1", 3, "\"Add c\""),
+        (lines[5], "undo 1", 2, "\"Add b\""),
+        (lines[6], "undo 2", 1, "\"Files\""),
     ];
-    for (line, (label, step, message)) in lines.iter().zip(shown) {
+    for (line, label, step, message) in shown {
         let rest = line.trim_start().strip_prefix(label).unwrap();
         assert!(
             rest.starts_with(&format!("  {}  ", steps[step].short_hex())),
@@ -715,14 +723,16 @@ fn the_list_shows_redo_steps_then_undo_steps_numbered_from_now() {
         assert!(rest.contains("  save: main moved to "), "{said}");
         assert!(rest.ends_with(message), "{said}");
     }
+    assert_eq!(lines[4], "> you are here", "{said}");
     // The diary's first entry has no number: undo can't take it.
-    let first = lines[4].trim_start();
+    let first = lines[7].trim_start();
     assert!(first.starts_with(&steps[0].short_hex()), "{said}");
     assert!(
         first.ends_with("  start: the diary's first entry, which can't be undone"),
         "{said}"
     );
-    // `bolt redo` brings back the step numbered undone 1, and `bolt undo` takes the one numbered 1.
+    // `bolt redo` brings back the step numbered redo 1, and `bolt undo` takes the one numbered
+    // undo 1.
     assert!(ok(&env, &["redo"]).contains("\"Add c\""));
     ok(&env, &["undo"]);
     assert!(ok(&env, &["undo"]).contains("\"Add b\""));
@@ -737,9 +747,10 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
         ok(&env, &["save", &format!("Save {i}")]);
     }
     let said = ok(&env, &["undo", "--list"]);
-    let lines: Vec<&str> = said.lines().collect();
+    // After the heading, an empty line and the place marker.
+    let lines: Vec<&str> = said.lines().skip(3).collect();
     assert_eq!(lines.len(), 20, "{said}");
-    assert!(lines[18].trim_start().starts_with("19  "), "{said}");
+    assert!(lines[18].starts_with("  undo 19  "), "{said}");
     assert!(lines[19].ends_with("can't be undone"), "{said}");
     assert!(!said.contains("and more"), "{said}");
     // One more: 20 steps undo can take, all shown, and past them only the first entry, which it
@@ -747,9 +758,9 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
     write(&env, "a.txt", "19\n");
     ok(&env, &["save", "Save 19"]);
     let said = ok(&env, &["undo", "--list"]);
-    let lines: Vec<&str> = said.lines().collect();
+    let lines: Vec<&str> = said.lines().skip(3).collect();
     assert_eq!(lines.len(), 20, "{said}");
-    assert!(lines[19].trim_start().starts_with("20  "), "{said}");
+    assert!(lines[19].starts_with("  undo 20  "), "{said}");
     assert!(!said.contains("can't be undone"), "{said}");
     assert!(!said.contains("and more"), "{said}");
     assert_eq!(json(&env, &["undo", "--list"])["more"], false);
@@ -757,12 +768,12 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
     write(&env, "a.txt", "20\n");
     ok(&env, &["save", "Save 20"]);
     let said = ok(&env, &["undo", "--list"]);
-    let lines: Vec<&str> = said.lines().collect();
+    let lines: Vec<&str> = said.lines().skip(3).collect();
     assert_eq!(lines.len(), 21, "{said}");
-    assert!(lines[19].trim_start().starts_with("20  "), "{said}");
+    assert!(lines[19].starts_with("  undo 20  "), "{said}");
     assert_eq!(
         lines[20],
-        "and more: bolt undo --list --all shows the whole diary"
+        "  and more: bolt undo --list --all shows the whole diary"
     );
     let doc = json(&env, &["undo", "--list"]);
     assert_eq!(doc["undo"].as_array().unwrap().len(), 20, "{doc}");
@@ -780,7 +791,8 @@ fn undo_to_a_step_on_the_list_undoes_one_at_a_time_and_redo_still_works() {
         steps.push(head(&env).0);
     }
     let said = ok(&env, &["undo", "--to", &start_of(files_step, 12)]);
-    assert_eq!(said.matches("Undid save").count(), 2, "{said}");
+    assert!(said.starts_with("Undid 2 steps:\n\n"), "{said}");
+    assert_eq!(said.matches("\n    save ").count(), 2, "{said}");
     assert_eq!(main_tip(&env), files_save);
     // An undo entry each, the newest step undone first.
     let (_, newest) = head(&env);
@@ -825,7 +837,10 @@ fn undo_to_a_cleared_step_is_one_new_step_that_undo_takes_back() {
     assert!(changed(&env).is_empty());
     // The list calls it what the step line does.
     let listed = ok(&env, &["undo", "--list"]);
-    let first = listed.lines().next().unwrap();
+    let first = listed
+        .lines()
+        .find(|l| l.starts_with("  undo 1  "))
+        .unwrap();
     assert!(
         first.contains(&format!("  {}  ", jump.short_hex())),
         "{listed}"
@@ -970,7 +985,8 @@ fn undo_list_all_shows_every_entry_with_undos_and_redos() {
     );
     // The list itself holds only the steps.
     let listed = ok(&env, &["undo", "--list"]);
-    assert_eq!(listed.lines().count(), 4, "{listed}");
+    // Its four steps, after the heading, an empty line and the place marker.
+    assert_eq!(listed.lines().count(), 7, "{listed}");
 }
 
 #[test]
@@ -1031,9 +1047,9 @@ fn undo_to_that_stops_on_the_way_says_how_far_it_got() {
     // The discard is undone; the goto before it would write over a.txt.
     let to = start_of(saved, 8);
     let (out, said) = refused(&env, &["undo", "--to", &to]);
-    assert!(out.contains("Undid discard"), "{out}");
-    let how_far = format!("Undid 1 step on the way to entry {to} before one stopped.");
-    assert!(out.contains(&how_far), "{out}");
+    let how_far = format!("Undid 1 step on the way to entry {to} before one stopped:\n\n");
+    assert!(out.starts_with(&how_far), "{out}");
+    assert!(out.contains("\n    discard: "), "{out}");
     assert!(said.contains("a.txt"), "{said}");
     assert!(
         said.contains(&format!("bolt undo --to {to} --shelve")),

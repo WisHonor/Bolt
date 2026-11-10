@@ -207,7 +207,11 @@ fn line_lists_lines_and_server_lines() {
     env.import();
     let out = env.bolt().arg("line").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "  b\n* main\n  zz\n  x@origin\n");
+    let name = env.root().file_name().unwrap().to_string_lossy();
+    assert_eq!(
+        text(&out.stdout),
+        format!("Lines in {name}:\n\n  b\n> main\n  zz\n\nOn the server (origin):\n  x@origin\n")
+    );
     let out = env.bolt().args(["line", "--json"]).output().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["current"], "main");
@@ -220,7 +224,14 @@ fn line_lists_lines_and_server_lines() {
         .assert()
         .success();
     let out = env.bolt().arg("line").output().unwrap();
-    assert_eq!(text(&out.stdout), "  b\n  main\n  zz\n  x@origin\n");
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "Lines in {name}. You are at save {}, not on a line.\n\n  b\n  main\n  zz\n\nOn the \
+             server (origin):\n  x@origin\n",
+            &first.to_hex()[..12]
+        )
+    );
     let out = env.bolt().args(["line", "--json"]).output().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["current"], serde_json::Value::Null);

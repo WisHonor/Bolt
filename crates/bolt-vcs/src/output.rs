@@ -115,7 +115,8 @@ fn effect_json(e: &Effect) -> Value {
     }
 }
 
-/// What a step taken did, in one line for people: undone, redone, or gone to by `undo --to`.
+/// What a step taken did, in one line for people: undone, redone, or gone to by `undo --to`. The
+/// verb (`Undid`, `Redid`, `Went`) comes apart from the rest, so a list of steps can leave it out.
 /// `went` is the entry `undo --to` went to, when the step's command was one. `named` gives a
 /// save's short change ID, and its message's first line if it can be read. The shelves `--shelve`
 /// made (`shelved`) are told on lines of their own.
@@ -124,7 +125,7 @@ pub fn step_line(
     went: Option<&Id>,
     shelved: &[(String, Id)],
     named: &mut dyn FnMut(&Id) -> (String, Option<String>),
-) -> String {
+) -> (&'static str, String) {
     let mut command = escape(&t.entry.command, false);
     if let Some(went) = went {
         let _ = write!(command, " --to {}", went.short_hex());
@@ -133,10 +134,13 @@ pub fn step_line(
         matches!(t.action, Action::Redo(_)),
         t.action == Action::Command,
     );
-    let mut line = match t.action {
-        Action::Undo(_) => format!("Undid {command}"),
-        Action::Redo(_) => format!("Redid {command}"),
-        Action::Command => format!("Went back to entry {} ({command})", t.step.short_hex()),
+    let (verb, mut line) = match t.action {
+        Action::Undo(_) => ("Undid", command),
+        Action::Redo(_) => ("Redid", command),
+        Action::Command => (
+            "Went",
+            format!("back to entry {} ({command})", t.step.short_hex()),
+        ),
     };
     // The save a step made is the one a line moved to. `undo --to`, recorded as `undo`, makes
     // none: it moves lines to saves that were there.
@@ -230,7 +234,7 @@ pub fn step_line(
         line.push_str("; its changes show as unsaved");
     }
     line.push('.');
-    line
+    (verb, line)
 }
 
 /// What `undo --to` did for a lost `head`, in one line for people: the entry it made current, and
@@ -244,8 +248,9 @@ pub fn picked_up_line(t: &Taken, named: &mut dyn FnMut(&Id) -> (String, Option<S
         Position::AtSave(save) => format!("at save {}", titled(named, save)),
     };
     format!(
-        "Made entry {} ({}) the current one: {at}. No file was changed: bolt status shows how \
+        "{} entry {} ({}) the current one: {at}. No file was changed: bolt status shows how \
          your files differ from that save.",
+        style::out().paint(Role::Ok, "Made"),
         t.step.short_hex(),
         escape(&t.entry.command, false)
     )
@@ -342,24 +347,6 @@ pub fn shelf_json(s: &ShelfInfo) -> Value {
         "saver": person_json(&s.saver),
         "files": s.files,
     })
-}
-
-/// A shelf as `bolt shelf --list` shows it: its number, right-aligned to `width`, when it was
-/// made, on which line, how many files it changes, and its message's first line.
-pub fn shelf_line(s: &ShelfInfo, width: usize, now_ms: i64) -> String {
-    let label = escape(&s.label, false);
-    let when = relative_time(s.saver.time_ms, s.saver.tz_offset_min, now_ms);
-    let at = match &s.line {
-        Some(line) => format!("on {}", escape(line, false)),
-        None => "at a save".to_owned(),
-    };
-    let files = match s.files {
-        0 => "only folders".to_owned(),
-        1 => "1 file".to_owned(),
-        n => format!("{n} files"),
-    };
-    let title = escape(s.message.lines().next().unwrap_or_default(), false);
-    format!("{label:>width$}  {when}  {at}  {files}  \"{title}\"")
 }
 
 /// A save named, then its message's first line in quotes if it can be read.
@@ -1012,24 +999,24 @@ fn zoned(time_ms: i64, tz_offset_min: i16, format: &str) -> String {
 
 /// What `bolt discard` did, for people; `everywhere` when it was given no paths.
 pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
+    let s = style::out();
     let n = done.restored.len() + done.removed.len();
-    let count = |n: usize, one: &str| match n {
-        1 => format!("1 {one}"),
-        n => format!("{n} {one}s"),
-    };
-    // Folders count only where no file does.
-    let what = if n == 0 {
-        count(done.folders, "folder")
-    } else {
-        count(n, "file")
+    // One file is named; folders count only where no file does.
+    let what = match (n, done.restored.iter().chain(&done.removed).next()) {
+        (1, Some(path)) => s.paint(Role::Path, &escape(path, false)),
+        (0, _) => counted(done.folders as u64, "folder", "folders"),
+        _ => files(n),
     };
     // A deleted file put back loses nothing, so it needs no copy.
     let copies = match done.safety_copies {
         0 => String::new(),
-        k if k == n && n == 1 => " (a safety copy of it was kept)".into(),
-        k if k == n => " (a safety copy of each was kept)".into(),
-        1 => " (a safety copy of the 1 that held unsaved work was kept)".into(),
-        k => format!(" (safety copies of the {k} that held unsaved work were kept)"),
+        k if k == n && n == 1 => "\n    A safety copy of it was kept.\n".into(),
+        k if k == n => "\n    A safety copy of each was kept.\n".into(),
+        1 => "\n    A safety copy of the 1 that held unsaved work was kept.\n".into(),
+        k => format!(
+            "\n    Safety copies of the {} that held unsaved work were kept.\n",
+            thousands(k as u64)
+        ),
     };
     let nothing = n == 0 && done.folders == 0;
     // The warning that follows names what stayed and says why.
@@ -1052,33 +1039,44 @@ pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
         }
         (true, true) => "Nothing to discard: your files match your last save.".to_owned(),
         (true, false) => "Nothing to discard there: it matches your last save.".to_owned(),
-        _ => format!("Threw away your unsaved changes in {what}{copies}."),
+        _ => {
+            let threw = s.paint(Role::Ok, "Threw away");
+            return format!("{threw} your unsaved changes to {what}.\n{copies}");
+        }
     };
     said + "\n"
 }
 
-/// What `bolt tidy` did, for people.
+/// What `bolt tidy` did, for people: what it freed, then the packs it left young.
 pub fn tidied(report: &TidyReport) -> String {
+    let s = style::out();
     let freed = report.bytes_before.saturating_sub(report.bytes_after);
-    let removed = match report.packs_removed {
-        1 => "1 pack".to_owned(),
-        n => format!("{n} packs"),
+    let mut text = if report.packs_removed == 0 && report.packs_written == 0 {
+        format!(
+            "Nothing to free: storage holds {}.\n",
+            bytes(report.bytes_after)
+        )
+    } else {
+        let packs = counted(report.packs_removed as u64, "pack", "packs");
+        let packs = format!("({packs} removed, {} written)", report.packs_written);
+        format!(
+            "{} {}  {}\n",
+            s.paint(Role::Ok, "Freed"),
+            bytes(freed),
+            s.paint(Role::Dim, &packs)
+        )
     };
-    let mut text = format!(
-        "Freed {} ({removed} removed, {} written).\n",
-        bytes(freed),
-        report.packs_written
-    );
     match report.packs_young {
         0 => {}
         1 => {
-            text += "Left 1 pack changed in the last 24 hours as it is: a later bolt tidy frees \
-                     what it holds that nothing needs.\n";
+            text += "\n    Left 1 pack changed in the last 24 hours as it is: a later bolt tidy \
+                     frees what it holds that nothing needs.\n";
         }
         n => {
             text += &format!(
-                "Left {n} packs changed in the last 24 hours as they are: a later bolt tidy \
-                 frees what they hold that nothing needs.\n"
+                "\n    Left {} changed in the last 24 hours as they are: a later bolt tidy \
+                 frees what they hold that nothing needs.\n",
+                counted(n as u64, "pack", "packs")
             );
         }
     }
@@ -1449,16 +1447,19 @@ mod tests {
         let (old, new) = (old.short_hex(), new.short_hex());
         assert_eq!(
             step_line(&undone("undo"), Some(&went), &[], &mut named),
-            format!(
-                "Undid undo --to {}: main is back at {old}.",
-                went.short_hex()
+            (
+                "Undid",
+                format!("undo --to {}: main is back at {old}.", went.short_hex())
             )
         );
         // A save undone leaves its changes unsaved, and says so.
         assert_eq!(
             step_line(&undone("save"), None, &[], &mut named),
-            format!(
-                "Undid save {new} \"Add b\": main is back at {old}; its changes show as unsaved."
+            (
+                "Undid",
+                format!(
+                    "save {new} \"Add b\": main is back at {old}; its changes show as unsaved."
+                )
             )
         );
     }
@@ -1627,14 +1628,25 @@ mod tests {
         };
         assert_eq!(
             tidied(&report),
-            "Freed 2.9 KiB (1 pack removed, 1 written).\nLeft 1 pack changed in the last 24 hours \
-             as it is: a later bolt tidy frees what it holds that nothing needs.\n"
+            "Freed 2.9 KiB  (1 pack removed, 1 written)\n\n    Left 1 pack changed in the last 24 \
+             hours as it is: a later bolt tidy frees what it holds that nothing needs.\n"
         );
-        let nothing = TidyReport::default();
+        let nothing = TidyReport {
+            bytes_before: 2048,
+            bytes_after: 2048,
+            ..TidyReport::default()
+        };
         assert_eq!(
             tidied(&nothing),
-            "Freed 0 B (0 packs removed, 0 written).\n"
+            "Nothing to free: storage holds 2.0 KiB.\n"
         );
+        // Packs merged with nothing freed still count as tidied.
+        let merged = TidyReport {
+            packs_removed: 2,
+            packs_written: 1,
+            ..nothing
+        };
+        assert_eq!(tidied(&merged), "Freed 0 B  (2 packs removed, 1 written)\n");
     }
 
     #[test]

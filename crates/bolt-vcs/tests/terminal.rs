@@ -328,8 +328,9 @@ fn started() -> Env {
     env
 }
 
-/// What `args` print on stdout and stderr, in a log or on a terminal `width` columns wide.
-fn run_at(env: &Env, width: Option<usize>, args: &[&str]) -> (String, String) {
+/// `bolt <args>` run in a log or on a terminal `width` columns wide: its exit code, then what it
+/// printed on stdout and stderr.
+fn output_at(env: &Env, width: Option<usize>, args: &[&str]) -> (Option<i32>, String, String) {
     let mut cmd = match width {
         None => bolt_in_a_log(env, env.root()),
         #[cfg(feature = "fault-injection")]
@@ -338,9 +339,53 @@ fn run_at(env: &Env, width: Option<usize>, args: &[&str]) -> (String, String) {
         Some(_) => unreachable!("a terminal is faked only with fault injection"),
     };
     let out = cmd.args(args).output().unwrap();
-    let said = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
-    (text(&out.stdout), said)
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+/// What `args` print on stdout and stderr, in a log or on a terminal `width` columns wide.
+fn run_at(env: &Env, width: Option<usize>, args: &[&str]) -> (String, String) {
+    let (code, shown, said) = output_at(env, width, args);
+    assert_eq!(code, Some(0), "{args:?}: {said}");
+    (shown, said)
+}
+
+/// [`run_at`], for a command that must fail.
+fn failing_at(env: &Env, width: Option<usize>, args: &[&str]) -> (String, String) {
+    let (code, shown, said) = output_at(env, width, args);
+    assert_eq!(code, Some(1), "{args:?}: {shown}{said}");
+    (shown, said)
+}
+
+/// The name of the project's folder, as `line` and `undo --list` give it.
+fn folder_name(env: &Env) -> String {
+    env.root()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Writes `contents` to the project's `path`.
+fn put(env: &Env, path: &str, contents: &str) {
+    std::fs::write(env.root().join(path), contents).unwrap();
+}
+
+/// A project with `a.txt` saved as "First", then `a.txt` changed and `b.txt` added as "Second":
+/// the two saves' change IDs.
+fn two_saves() -> (Env, String, String) {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    let (first, _) = run_at(&env, None, &["save", "First"]);
+    put(&env, "a.txt", "A\n");
+    put(&env, "b.txt", "b\n");
+    let (second, _) = run_at(&env, None, &["save", "Second"]);
+    let (first, second) = (saved_id(&first).to_owned(), saved_id(&second).to_owned());
+    (env, first, second)
+}
+
+/// Whether "Changed your mind? bolt undo" ends what was said, as it does on a terminal only.
+fn offers_undo(said: &str) -> bool {
+    said.ends_with("\nChanged your mind? bolt undo\n")
 }
 
 /// The widths a command is tried at: none, then 60, 80 and 120 columns where a terminal can be
@@ -625,6 +670,40 @@ fn each_of_these_commands_prints_no_new_line_without_a_terminal() {
     std::fs::write(env.root().join("a.txt"), "b\n").unwrap();
     let (_, said) = run_at(&env, None, &["status"]);
     assert_eq!(said, "");
+    // The commands that end with "Changed your mind?" or a `Next:` on a terminal.
+    let first = support::main_tip(&env).to_hex();
+    run_at(&env, None, &["save", "Second"]);
+    put(&env, "a.txt", "c\n");
+    for args in [
+        &["discard"][..],
+        &["goto", &first[..12]],
+        &["line"],
+        &["goto", "main"],
+        &["undo"],
+        &["redo"],
+        &["undo", "--list"],
+        &["undo", "--list", "--all"],
+        &["tidy"],
+    ] {
+        let (shown, said) = run_at(&env, None, args);
+        assert_eq!(said, "", "{args:?}");
+        assert!(!shown.contains('\x1b'), "{args:?}: {shown}");
+        assert!(!shown.contains(SYMBOLS), "{args:?}: {shown}");
+        assert!(!shown.contains("Changed your mind"), "{args:?}: {shown}");
+    }
+    put(&env, "a.txt", "d\n");
+    for args in [&["shelf", "Work"][..], &["shelf", "--list"], &["unshelf"]] {
+        let (shown, said) = run_at(&env, None, args);
+        assert_eq!(said, "", "{args:?}");
+        assert!(!shown.contains("Next:"), "{args:?}: {shown}");
+        assert!(!shown.contains("Changed your mind"), "{args:?}: {shown}");
+    }
+    // A step `--shelve` sets work aside for: no `Next:` either.
+    run_at(&env, None, &["discard"]);
+    put(&env, "a.txt", "e\n");
+    let (shown, said) = run_at(&env, None, &["undo", "--shelve"]);
+    assert!(shown.starts_with("Shelved "), "{shown}");
+    assert_eq!(said, "");
 }
 
 /// `tidy` tells how much it is about to free only to a person, never beside `--json`.
@@ -642,4 +721,428 @@ fn tidy_tells_its_estimate_only_to_a_person() {
     };
     assert!(said(&["tidy"]).starts_with("Tidying: about "));
     assert_eq!(said(&["--json", "tidy"]), "");
+}
+
+#[test]
+fn goto_says_switched_to_and_how_many_files_it_wrote() {
+    let (env, first, second) = two_saves();
+    for width in widths() {
+        let (shown, said) = run_at(&env, width, &["goto", &first]);
+        let lines: Vec<&str> = shown.lines().collect();
+        assert!(lines[0].starts_with("Switched to save "), "{shown}");
+        assert!(
+            lines[0].ends_with(" \"First\". You are not on a line."),
+            "{shown}"
+        );
+        assert_eq!(
+            lines[1..],
+            [
+                "",
+                "    1 file written, 1 removed.",
+                "    Saving here asks for a new line's name."
+            ],
+            "{shown}"
+        );
+        assert_eq!(offers_undo(&said), width.is_some(), "{said:?}");
+        let (shown, said) = run_at(&env, width, &["goto", "main"]);
+        assert_eq!(
+            shown,
+            format!("Switched to line main at save {second} \"Second\".\n\n    2 files written.\n")
+        );
+        assert_eq!(offers_undo(&said), width.is_some(), "{said:?}");
+    }
+    // Unsaved work that doesn't collide comes along; at a line's newest save, the line is named.
+    put(&env, "c.txt", "mine\n");
+    let tip = support::main_tip(&env).to_hex();
+    run_at(&env, None, &["goto", &first]);
+    let (shown, _) = run_at(&env, None, &["goto", &tip[..12]]);
+    assert!(
+        shown.ends_with(
+            " \"Second\". You are not on a line.\n\n    2 files written.\n    Your unsaved changes \
+             in 1 file came along.\n    Saving here asks for a new line's name.\n    To keep \
+             saving on main: bolt goto main\n"
+        ),
+        "{shown}"
+    );
+}
+
+#[test]
+fn goto_stopped_by_unsaved_work_lists_the_files_and_changes_nothing() {
+    let (env, first, _) = two_saves();
+    put(&env, "b.txt", "mine\n");
+    for width in widths() {
+        let (shown, said) = failing_at(&env, width, &["goto", &first]);
+        assert_eq!(shown, "", "{width:?}");
+        assert!(
+            said.starts_with("error: Your unsaved changes, or files Bolt ignores,"),
+            "{said}"
+        );
+        assert!(said.lines().any(|l| l.trim() == "b.txt"), "{said}");
+        assert!(said.contains("\n\nhint: Save them first"), "{said}");
+        assert!(!said.contains("Changed your mind"), "{said}");
+        if let Some(w) = width {
+            assert!(said.lines().all(|l| l.len() <= w), "{said}");
+        }
+        let b = std::fs::read_to_string(env.root().join("b.txt")).unwrap();
+        assert_eq!(b, "mine\n");
+    }
+}
+
+#[test]
+fn discard_says_threw_away_and_that_undo_brings_it_back() {
+    let (env, _, _) = two_saves();
+    for (n, width) in widths().into_iter().enumerate() {
+        put(&env, "a.txt", &format!("mine {n}\n"));
+        let (shown, said) = run_at(&env, width, &["discard"]);
+        assert_eq!(
+            shown,
+            "Threw away your unsaved changes to a.txt.\n\n    A safety copy of it was kept.\n",
+            "{width:?}"
+        );
+        assert_eq!(offers_undo(&said), width.is_some(), "{said:?}");
+        let (shown, _) = run_at(&env, None, &["undo"]);
+        assert_eq!(shown, "Undid discard: 1 file back.\n");
+        let a = std::fs::read_to_string(env.root().join("a.txt")).unwrap();
+        assert_eq!(a, format!("mine {n}\n"));
+        run_at(&env, None, &["discard"]);
+    }
+    // Several files are counted.
+    put(&env, "a.txt", "mine\n");
+    put(&env, "n.txt", "new\n");
+    let (shown, _) = run_at(&env, None, &["discard"]);
+    assert_eq!(
+        shown,
+        "Threw away your unsaved changes to 2 files.\n\n    A safety copy of each was kept.\n"
+    );
+}
+
+#[test]
+fn line_marks_the_current_line_with_the_marker() {
+    let (env, first, _) = two_saves();
+    run_at(&env, None, &["goto", &first]);
+    put(&env, "c.txt", "c\n");
+    run_at(&env, None, &["save", "--line", "feature", "Feature"]);
+    let name = folder_name(&env);
+    for width in widths() {
+        let (shown, said) = run_at(&env, width, &["line"]);
+        assert_eq!(
+            shown,
+            format!("Lines in {name}:\n\n> feature\n  main\n"),
+            "{width:?}"
+        );
+        assert_eq!(said, "");
+    }
+    // At a save no line is marked, and the outcome says where you are.
+    let tip = support::main_tip(&env).to_hex();
+    run_at(&env, None, &["goto", &tip[..12]]);
+    let (shown, _) = run_at(&env, None, &["line"]);
+    assert_eq!(
+        shown,
+        format!(
+            "Lines in {name}. You are at save {}, not on a line.\n\n  feature\n  main\n",
+            &tip[..12]
+        )
+    );
+    #[cfg(feature = "fault-injection")]
+    {
+        run_at(&env, None, &["goto", "feature"]);
+        let out = bolt_on_a_terminal(&env, env.root())
+            .arg("line")
+            .output()
+            .unwrap();
+        let shown = text(&out.stdout);
+        assert!(
+            shown.contains("\n\x1b[1m▸\x1b[0m \x1b[34mfeature\x1b[0m\n  \x1b[34mmain\x1b[0m\n"),
+            "{shown:?}"
+        );
+    }
+}
+
+#[test]
+fn undo_and_redo_say_what_they_took_back_or_brought_back() {
+    let (env, _, _) = two_saves();
+    for width in widths() {
+        let (shown, said) = run_at(&env, width, &["undo"]);
+        assert!(shown.starts_with("Undid save "), "{shown}");
+        assert!(
+            shown.contains(" \"Second\": main is back at ")
+                && shown.ends_with("; its changes show as unsaved.\n"),
+            "{shown}"
+        );
+        assert_eq!(shown.lines().count(), 1, "{shown}");
+        assert_eq!(said, "");
+        let (shown, said) = run_at(&env, width, &["redo"]);
+        assert!(shown.starts_with("Redid save "), "{shown}");
+        assert!(shown.contains(" \"Second\": main is at "), "{shown}");
+        assert_eq!(said, "");
+    }
+    // Several steps are counted, then listed without their verb.
+    let (shown, _) = run_at(&env, None, &["undo", "2"]);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(lines[..2], ["Undid 2 steps:", ""], "{shown}");
+    assert!(
+        lines[2].starts_with("    save ") && lines[2].contains(" \"Second\": "),
+        "{shown}"
+    );
+    assert!(
+        lines[3].starts_with("    save ") && lines[3].contains(" \"First\": "),
+        "{shown}"
+    );
+    assert_eq!(lines.len(), 4, "{shown}");
+    // Fewer than asked for: all there were.
+    let (shown, _) = run_at(&env, None, &["redo", "5"]);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines[..2],
+        ["Redid 2 steps (all there were):", ""],
+        "{shown}"
+    );
+    assert_eq!(lines.len(), 4, "{shown}");
+    // Unsaved work in the way stops it; `--shelve` sets the work aside, and says so first.
+    put(&env, "a.txt", "mine\n");
+    run_at(&env, None, &["discard"]);
+    put(&env, "a.txt", "again\n");
+    let (shown, said) = failing_at(&env, None, &["undo"]);
+    assert_eq!(shown, "");
+    assert!(said.contains("bolt undo --shelve"), "{said}");
+    let width = *widths().last().unwrap();
+    let (shown, said) = run_at(&env, width, &["undo", "--shelve"]);
+    assert_eq!(
+        shown,
+        "Shelved your unsaved changes in the way on shelf 1.\nUndid discard: 1 file back.\n"
+    );
+    assert_eq!(
+        said.ends_with("\nNext: bring your changes back with: bolt unshelf\n"),
+        width.is_some(),
+        "{said:?}"
+    );
+}
+
+/// A row of a list as a log gets it (`whole`), and as a terminal `width` columns wide does
+/// (`shown`): the same, or cut at its end to the width.
+fn cut_to(whole: &str, shown: &str, width: usize) {
+    if whole.chars().count() <= width {
+        assert_eq!(shown, whole, "{width}");
+    } else {
+        assert_eq!(shown.chars().count(), width, "{whole}\n{shown}");
+        let kept = shown
+            .strip_suffix("...")
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(whole.starts_with(kept), "{whole}\n{shown}");
+    }
+}
+
+#[test]
+fn undo_list_numbers_the_steps_and_marks_where_you_are() {
+    let env = started();
+    for name in ["b", "c", "d"] {
+        put(&env, &format!("{name}.txt"), "x\n");
+        run_at(&env, None, &["save", &format!("Add {name}")]);
+    }
+    run_at(&env, None, &["undo", "2"]);
+    let (shown, said) = run_at(&env, None, &["undo", "--list"]);
+    assert_eq!(said, "");
+    let lines: Vec<&str> = shown.lines().collect();
+    let heading = format!(
+        "Undo diary for {}, newest first. Steps you can redo come first.",
+        folder_name(&env)
+    );
+    assert_eq!(lines[..2], [heading.as_str(), ""], "{shown}");
+    // Newest first: the steps redo can bring back, where you are, then those undo can take.
+    let numbered = [
+        (lines[2], "redo 2", "\"Add d\""),
+        (lines[3], "redo 1", "\"Add c\""),
+        (lines[5], "undo 1", "\"Add b\""),
+    ];
+    for (line, label, message) in numbered {
+        let rest = line.strip_prefix(&format!("  {label}  ")).unwrap();
+        let (entry, rest) = rest.split_once("  ").unwrap();
+        assert!(
+            entry.len() == 12 && entry.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{shown}"
+        );
+        assert!(
+            rest.starts_with("just now  save: main moved to "),
+            "{shown}"
+        );
+        assert!(rest.ends_with(message), "{shown}");
+    }
+    assert_eq!(lines[4], "> you are here", "{shown}");
+    // The diary's first entry has no number: undo can't take it.
+    assert!(
+        lines[6].starts_with(&format!("{}  ", " ".repeat(8))),
+        "{shown}"
+    );
+    assert!(
+        lines[6].ends_with("  start: the diary's first entry, which can't be undone"),
+        "{shown}"
+    );
+    assert_eq!(lines.len(), 7, "{shown}");
+    // On a terminal what a step did is cut at its end to fit; nothing else changes.
+    for width in widths().into_iter().flatten() {
+        let (cut, said) = run_at(&env, Some(width), &["undo", "--list"]);
+        assert_eq!(said, "");
+        let rows: Vec<&str> = cut.lines().collect();
+        assert_eq!(rows.len(), lines.len(), "{cut}");
+        for (whole, shown) in lines.iter().zip(rows).skip(2) {
+            cut_to(whole, shown, width);
+        }
+    }
+}
+
+#[test]
+fn shelf_and_unshelf_say_the_shelfs_number() {
+    let (env, _, _) = two_saves();
+    for width in widths() {
+        put(&env, "a.txt", "mine\n");
+        let (shown, said) = run_at(&env, width, &["shelf", "Work"]);
+        assert_eq!(
+            shown,
+            "Shelved your unsaved changes in 1 file on shelf 1.\n"
+        );
+        assert_eq!(
+            said.ends_with("\nNext: bring them back with: bolt unshelf\n"),
+            width.is_some(),
+            "{said:?}"
+        );
+        let (shown, said) = run_at(&env, width, &["unshelf"]);
+        assert_eq!(shown, "Unshelved shelf 1 \"Work\": 1 file written.\n");
+        assert_eq!(offers_undo(&said), width.is_some(), "{said:?}");
+        run_at(&env, None, &["discard"]);
+    }
+    // A new shelf takes the smallest free number, and the others keep theirs.
+    for n in ["1", "2", "3"] {
+        put(&env, "a.txt", n);
+        run_at(&env, None, &["shelf"]);
+    }
+    let (shown, _) = run_at(&env, None, &["unshelf", "2"]);
+    assert_eq!(shown, "Unshelved shelf 2 \"Shelved\": 1 file written.\n");
+    run_at(&env, None, &["discard"]);
+    put(&env, "a.txt", "4");
+    let (shown, _) = run_at(&env, None, &["shelf"]);
+    assert_eq!(
+        shown,
+        "Shelved your unsaved changes in 1 file on shelf 2.\n"
+    );
+}
+
+#[test]
+fn shelf_list_aligns_its_columns() {
+    let (env, _, _) = two_saves();
+    put(&env, "a.txt", "mine\n");
+    run_at(&env, None, &["shelf", "Work on login\nwith details"]);
+    put(&env, "a.txt", "x\n");
+    put(&env, "n.txt", "new\n");
+    run_at(&env, None, &["shelf"]);
+    let long = "word ".repeat(16);
+    let long = long.trim_end();
+    put(&env, "a.txt", "y\n");
+    run_at(&env, None, &["shelf", long]);
+    let (shown, said) = run_at(&env, None, &["shelf", "--list"]);
+    assert_eq!(said, "");
+    let row = |n: &str, message: &str, files: &str| {
+        let quoted = format!("\"{message}\"");
+        format!(
+            "    {n}  {quoted:<w$}  {files:<7}  just now  on main",
+            w = long.len() + 2
+        )
+    };
+    let rows = [
+        row("3", long, "1 file"),
+        row("2", "Shelved", "2 files"),
+        row("1", "Work on login", "1 file"),
+    ];
+    assert_eq!(
+        shown,
+        format!("3 shelves, newest first:\n\n{}\n", rows.join("\n"))
+    );
+    // On a terminal the message gives way, and the rows still line up.
+    for width in widths().into_iter().flatten() {
+        let (cut, _) = run_at(&env, Some(width), &["shelf", "--list"]);
+        let lines: Vec<&str> = cut.lines().skip(2).collect();
+        assert_eq!(lines.len(), 3, "{cut}");
+        for line in &lines {
+            assert!(line.len() <= width, "{width}: {cut}");
+            assert!(line.ends_with("  just now  on main"), "{cut}");
+        }
+        let facts: Vec<usize> = lines.iter().map(|l| l.len()).collect();
+        assert!(facts.iter().all(|&len| len == facts[0]), "{cut}");
+        assert_eq!(lines[0].contains("...\""), rows[0].len() > width, "{cut}");
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn changed_your_mind_shows_only_on_a_terminal() {
+    let (env, first, _) = two_saves();
+    let on_terminal = |args: &[&str]| {
+        let out = bolt_on_a_terminal(&env, env.root())
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        text(&out.stderr)
+    };
+    let offered = "\nChanged your mind? \x1b[36mbolt undo\x1b[0m\n";
+    put(&env, "a.txt", "mine\n");
+    assert!(on_terminal(&["discard"]).ends_with(offered));
+    assert!(on_terminal(&["goto", &first]).ends_with(offered));
+    assert!(on_terminal(&["goto", "main"]).ends_with(offered));
+    put(&env, "a.txt", "mine\n");
+    run_at(&env, None, &["shelf"]);
+    assert!(on_terminal(&["unshelf"]).ends_with(offered));
+    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
+    run_at(&env, None, &["discard"]);
+    assert_eq!(on_terminal(&["discard"]), "");
+    put(&env, "a.txt", "third\n");
+    for args in [&["save", "Third"][..], &["undo"], &["redo"], &["tidy"]] {
+        assert!(!on_terminal(args).contains("Changed your mind"), "{args:?}");
+    }
+    // Never beside --json, nor in a log.
+    put(&env, "a.txt", "mine\n");
+    assert_eq!(on_terminal(&["--json", "discard"]), "");
+    put(&env, "a.txt", "mine\n");
+    assert_eq!(run_at(&env, None, &["discard"]).1, "");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn each_of_these_commands_fits_60_80_and_120_columns() {
+    let env = started();
+    let deep = "Assets/Textures/Environment/Cliffs/Rocks/Cliff_Large_01_Albedo_4K.psd";
+    std::fs::create_dir_all(env.root().join("Assets/Textures/Environment/Cliffs/Rocks")).unwrap();
+    let long = "Add the large cliff textures for the second level, and the rocks around it";
+    put(&env, deep, "a");
+    run_at(&env, None, &["save", long]);
+    let first = support::main_tip(&env).to_hex();
+    put(&env, deep, "b");
+    run_at(&env, None, &["save", long]);
+    for width in [60, 80, 120] {
+        let run = |args: &[&str]| {
+            let (shown, said) = run_at(&env, Some(width), args);
+            for line in said.lines() {
+                assert!(line.len() <= width, "{args:?} at {width}: {said}");
+            }
+            // The rows of a list are cut to the width.
+            if args[1..].contains(&"--list") {
+                for row in shown.lines().skip(2) {
+                    assert!(row.len() <= width, "{args:?} at {width}: {shown}");
+                }
+            }
+        };
+        put(&env, deep, "mine");
+        run(&["discard"]);
+        run(&["goto", &first[..12]]);
+        run(&["line"]);
+        run(&["goto", "main"]);
+        run(&["undo"]);
+        run(&["redo"]);
+        run(&["undo", "--list"]);
+        put(&env, deep, "mine");
+        run(&["shelf", long]);
+        run(&["shelf", "--list"]);
+        run(&["unshelf"]);
+        run_at(&env, None, &["discard"]);
+        run(&["tidy"]);
+    }
 }

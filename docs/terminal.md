@@ -295,3 +295,123 @@ then, on a terminal, `Next: see its lines with: bolt changes --save <id>` when i
 - **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
 - **The changes** are rows as in `bolt status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
 - **Colour:** IDs magenta and bold, the line blue, the fingerprints blue, the rows as in `bolt status`, the times in brackets dim.
+
+### `bolt goto`
+
+While it writes, a terminal's stderr shows the turning mark `Writing files` (§8).
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| On a line | `Switched to line <line> at save <id> "<message>".` | what was written: `2 files written, 1 removed.` (`No file needed changing.` when nothing was); `Your unsaved changes in 2 files came along.` when some did | `Changed your mind? bolt undo` |
+| At a save | `Switched to save <id> "<message>". You are not on a line.` | the same, then `Saving here asks for a new line's name.`, and `To keep saving on <line>: bolt goto <line>` when the save is a line's newest | the same |
+| Unsaved work in the way | stdout gets nothing; `error: Your unsaved changes, or files Bolt ignores, are in the way, so nothing was changed:` with the paths under it, the first 5 and how many more | `hint:` save them, shelve them (`bolt shelf`) or discard them, then run `bolt goto` again | |
+| Files open in another program (Windows) | the rest is written; `error:` names the files, exit code 1; the switch stays unfinished and the next command that changes the project finishes it | | |
+
+- The save is named by its change ID, or by the first 12 hex digits of its fingerprint when it can't be read. Counts are of what the switch wrote and removed; it doesn't say how many were added or changed, nor list the unsaved changes that came along.
+- A switch a crash stopped is a `warning:` (`switch_unfinished`) until a command finishes it; there is no `--continue`.
+- **Colour:** `Switched` green and bold, the ID magenta and bold, the line blue, the `bolt goto` of the last detail cyan.
+
+### `bolt discard`
+
+While it writes, a terminal's stderr shows the turning mark `Writing files` (§8). With no paths it throws away every unsaved change; there is no `--all`.
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| One file | `Threw away your unsaved changes to <path>.` | `A safety copy of it was kept.` | `Changed your mind? bolt undo` |
+| Several | `Threw away your unsaved changes to 4 files.` (`to 1 folder` when only folders changed) | `A safety copy of each was kept.`, or `Safety copies of the 3 that held unsaved work were kept.` (a deleted file put back needs none) | the same |
+| Nothing | `Nothing to discard: your files match your last save.` (`Nothing to discard there: it matches your last save.` with paths) | | |
+| Nothing could be | `Nothing was discarded: …` (the files changed while Bolt worked, or only unsaved links were left), and a `warning:` says why | | |
+
+- **Colour:** `Threw away` green and bold, the path blue.
+
+### `bolt line`
+
+```text
+Lines in Skyrunner:
+
+▸ feature/double-jump
+  main
+
+On the server (origin):
+  main@origin
+```
+
+- **The outcome line:** `Lines in <project>:`; at a save, `Lines in <project>. You are at save <12 hex digits>, not on a line.`, and no row is marked. `<project>` is the name of the project's folder.
+- **A row** is the line's name, the place marker on the one you are on; the others start with two spaces. Each server's lines follow after an empty line, under `On the server (<server>):`, named `<line>@<server>` as `bolt goto` takes them. Rows show only names: a line's newest save, its time and message would mean reading every line.
+- **Colour:** the marker bold, line names blue, the server's name in brackets dim.
+
+### `bolt undo` and `bolt redo`
+
+While they write, a terminal's stderr shows the turning mark `Writing files` (§8).
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| One step | `Undid <step>: <what changed>.` (`Redid …`; `undo --to` a step neither reaches: `Went back to entry <entry> (<command>): …`) | | |
+| Several steps | `Undid 3 steps:` | each step, without its verb, a row | |
+| Fewer than asked for | `Undid 2 steps (all there were):` | the same | |
+| `--shelve` set work aside | `Shelved your unsaved changes in the way on shelf <n>.` first, then the step's line | | `Next: bring your changes back with: bolt unshelf` |
+| Stopped part-way | `Undid 1 of the 3 steps asked for:` (`Undid 1 step on the way to entry <entry> before one stopped:` for `--to`), then the rows, then the `error:` | | |
+| Stopped by unsaved work | stdout gets nothing; `error:` names the files | `hint:` names only `--shelve` (saving, shelving or discarding first would be the next step undo takes) | |
+| Finished a stopped switch | `Finished the <command> that was stopped, so nothing more was undone. Running bolt undo again takes one more step.` | | |
+| Nothing to take | `Nothing to undo.` (`Nothing to redo.`; `Nothing changed: things are already as they were right after entry <entry>.` for `--to`) | | |
+| `undo --to` with `head` lost | `Made entry <entry> (<command>) the current one: on <line> at <id> "<message>". No file was changed: …` | | |
+
+- A step is named as the diary has it: its command, the save it made with its message, then what changed (`main is back at <id>`, `2 files back`, `shelf 1 is gone`; `its changes show as unsaved` for a save undone, which changes no file).
+- `undo` and `redo` end with no "Changed your mind?" line: each is the other's way back.
+- **Colour:** `Undid`, `Redid`, `Went`, `Shelved`, `Finished` and `Made` green and bold.
+
+### `bolt undo --list`
+
+```text
+Undo diary for Skyrunner, newest first. Steps you can redo come first.
+
+  redo 2  3f9a2c7e01b4  3 min ago    discard: 1 file changed
+  redo 1  81c0de4a77f2  4 min ago    goto: on main at ptvz, 48 files changed
+▸ you are here
+  undo 1  c42a9b7e5510  2 h ago      save: main moved to ptvz "Add double jump"
+  undo 2  7d0e34fa19c8  3 days ago   save: main moved to kxqmz "First playable"
+          0a1b2c3d4e5f  3 days ago   start: the diary's first entry, which can't be undone
+  and more: bolt undo --list --all shows the whole diary
+```
+
+- **The heading:** `Undo diary for <project>, newest first.`, then `Steps you can redo come first.` when there are any.
+- **A row:** what to type to take the step (`redo N`, `undo N`; nothing for the diary's first entry, which can't be undone), the first 12 hex digits of its entry (`bolt undo --to` takes 8 or more), when it ran, and what it did. Every step redo can bring back is listed, then at most 20 undo can take, then `and more: …` when there are more. The place marker's row stands between them. On a terminal what a step did is cut at its end to fit.
+- **`--all`** lists every entry, newest first, as it reads them: the entry, when, what it did, with no heading, numbers or marker. **With `head` lost** the list names the entries where the diary may have stopped, then `Run bolt undo --to <entry> …`.
+- **Colour:** the marker bold, entries blue, times dim, `bolt undo --list --all` cyan.
+
+### `bolt shelf` and `bolt unshelf`
+
+While they write, a terminal's stderr shows the turning mark `Writing files` (§8).
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| Shelved | `Shelved your unsaved changes in 3 files on shelf <n>.` | | `Next: bring them back with: bolt unshelf` |
+| Nothing to shelve | `Nothing to shelve: your files match your last save.` (`Nothing was shelved: …` when files changed while Bolt read them, or only unsaved links were left) | | |
+| Unshelved | `Unshelved shelf <n> "<message>": 2 files written.` | `Your other unsaved changes in 1 file stayed as they are.` when some did | `Changed your mind? bolt undo` |
+| Finished a stopped switch | `Finished the <command> that was stopped, so no shelf was brought back this time.` and what running it again does | | |
+| Stopped where the folder differs | stdout gets nothing; `error:` names the paths, `hint:` its way out | | |
+
+- A new shelf takes the smallest free number and is the newest; numbers never shift. `bolt unshelf` brings back the newest, `bolt unshelf <n>` that one. Messages: yours, or `Shelved`, `Set aside by undo`, `Set aside by redo`.
+
+```text
+2 shelves, newest first:
+
+    2  "Half-done wall run"    3 files  2 h ago    on main
+    1  "Enemy aim experiment"  1 file   1 day ago  at a save
+```
+
+- **`bolt shelf --list`:** the number `bolt unshelf` takes, right-aligned; the message's first line in quotes; how many files; when; `on <line>` or `at a save`. On a terminal the message is cut at its end to fit. No shelves: `No shelves: bolt shelf sets your unsaved changes aside on one.`
+- **Colour:** `Shelved` and `Unshelved` green and bold; the list's last three columns dim.
+
+### `bolt tidy`
+
+While it works, a terminal's stderr shows the turning mark `Tidying`, and above it `Tidying: about <size> to free` once that is known (§8).
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| Freed | `Freed 1.2 GiB  (3 packs removed, 1 written)` | `Left 2 packs changed in the last 24 hours as they are: a later bolt tidy frees what they hold that nothing needs.` when it did | |
+| Nothing to free | `Nothing to free: storage holds 4.8 GiB.` | the same | |
+| A pack it can't read | stdout gets nothing; `error:` names the pack and why, `hint:` what to do with it; nothing was removed | | |
+
+- It keeps what lines, shelves, the diary and every step in the undo window need, and leaves packs changed in the last 24 hours as they are. It isn't a step, so undo doesn't take it back.
+- **Colour:** `Freed` green and bold, the bracket dim.

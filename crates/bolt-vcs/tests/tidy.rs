@@ -91,12 +91,63 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     age(&env, 48);
     let (said, told) = ok(&env, &["tidy"]);
     assert!(
-        said.starts_with("Freed ") && said.contains(" KiB ("),
+        said.starts_with("Freed ") && said.contains(" KiB  ("),
         "{said}"
     );
-    assert!(said.ends_with(" packs removed, 1 written).\n"), "{said}");
+    assert!(said.ends_with(" packs removed, 1 written)\n"), "{said}");
     assert_eq!(said.lines().count(), 1, "{said}");
     assert_eq!(told, "");
+}
+
+#[test]
+fn tidy_says_freed_and_how_many_packs() {
+    let env = with_garbage();
+    age(&env, 48);
+    let packs = env.standing().1.len();
+    let (said, _) = ok(&env, &["tidy"]);
+    let (freed, packed) = said
+        .strip_prefix("Freed ")
+        .unwrap()
+        .split_once("  ")
+        .unwrap();
+    assert!(freed.ends_with(" KiB"), "{said}");
+    assert_eq!(packed, format!("({packs} packs removed, 1 written)\n"));
+    // Run again at once, it has nothing to free, says how much is stored, and why the pack it
+    // just wrote stays as it is.
+    let (said, _) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert!(
+        said.contains(".\n\n    Left 1 pack changed in the last 24 hours as it is: "),
+        "{said}"
+    );
+}
+
+#[test]
+fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
+    let env = with_garbage();
+    fs::write(
+        env.root().join(".bolt/store/packs/zz.pack"),
+        vec![b'x'; 200],
+    )
+    .unwrap();
+    age(&env, 48);
+    let out = env.bolt().arg("tidy").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "");
+    let said = text(&out.stderr);
+    let (error, hint) = said.split_once("\n\n").unwrap();
+    assert!(
+        error.starts_with("error: ") && error.contains("zz.pack") && !error.contains('\n'),
+        "{said}"
+    );
+    assert!(
+        hint.starts_with("hint: ") && hint.contains(".bolt/store/packs"),
+        "{said}"
+    );
+    assert_eq!(hint.lines().count(), 1, "{said}");
 }
 
 #[test]
@@ -105,12 +156,16 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
     let before = env.standing();
     let (said, _) = ok(&env, &["tidy"]);
     let young = before.1.len();
-    assert_eq!(
-        said,
-        format!(
-            "Freed 0 B (0 packs removed, 0 written).\nLeft {young} packs changed in the last 24 \
-             hours as they are: a later bolt tidy frees what they hold that nothing needs.\n"
-        )
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(&format!(
+            " KiB.\n\n    Left {young} packs changed in the last 24 hours as they are: a later \
+             bolt tidy frees what they hold that nothing needs.\n"
+        )),
+        "{said}"
     );
     assert_eq!(env.standing(), before);
 }
@@ -186,5 +241,5 @@ fn a_bad_undo_window_stops_tidy_naming_the_settings_file() {
     }
     fs::write(&config, "undo-window-days = 1\n").unwrap();
     let (said, _) = ok(&env, &["tidy"]);
-    assert!(said.contains("written)."), "{said}");
+    assert!(said.contains("written)\n"), "{said}");
 }

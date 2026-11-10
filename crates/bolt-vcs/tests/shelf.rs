@@ -112,7 +112,7 @@ fn shelf_sets_every_unsaved_change_aside_and_cleans_the_folder() {
     let said = ok(&env, &["shelf"]);
     assert_eq!(
         said,
-        "Set your unsaved changes in 5 files aside on shelf 1: bolt unshelf brings them back.\n"
+        "Shelved your unsaved changes in 5 files on shelf 1.\n"
     );
     // The folder is the save again, but for what Bolt ignores.
     let clean = with(&holding(SAVED), &[("build.log", Some("log\n"))]);
@@ -169,7 +169,7 @@ fn unshelf_brings_the_newest_back_and_drops_it() {
     assert_eq!(labels(&env), ["2", "1"]);
     let first = state(&env).shelves[1].clone();
     let said = ok(&env, &["unshelf"]);
-    assert_eq!(said, "Brought back shelf 2 \"Second\": 1 file written.\n");
+    assert_eq!(said, "Unshelved shelf 2 \"Second\": 1 file written.\n");
     assert_eq!(
         files(env.root()),
         with(&holding(SAVED), &[("b.txt", Some("other\n"))])
@@ -721,8 +721,9 @@ fn shelf_list_shows_number_message_line_time_and_files() {
     let said = ok(&env, &["shelf", "--list"]);
     assert_eq!(
         said,
-        "2  just now  at a save  1 file  \"Shelved\"\n\
-         1  just now  on main  2 files  \"Work on login\"\n"
+        "2 shelves, newest first:\n\n    \
+         2  \"Shelved\"        1 file   just now  at a save\n    \
+         1  \"Work on login\"  2 files  just now  on main\n"
     );
     let doc = json(&env, &["shelf", "--list"]);
     assert_eq!(doc["bolt_json"], 1);

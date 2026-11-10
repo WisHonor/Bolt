@@ -6,8 +6,10 @@ mod import_output;
 mod output;
 mod progress;
 mod setup_output;
+mod shelf_output;
 mod show_output;
 mod style;
+mod undo_output;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -1443,19 +1445,46 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         });
         return output::print_quietly(&format!("{document}\n"), &warnings);
     }
-    let mut shown = String::new();
+    let s = style::out();
+    let project = escape(&project_name(repo), false);
+    let mut shown = match &entry.state.position {
+        Position::OnLine(_) => format!("Lines in {project}:\n"),
+        Position::AtSave(id) => format!(
+            "Lines in {project}. You are at save {}, not on a line.\n",
+            s.paint(style::Role::Fingerprint, &id.short_hex())
+        ),
+    };
+    if !entry.state.lines.is_empty() {
+        shown.push('\n');
+    }
     for line in entry.state.lines.keys() {
         let mark = if current == Some(line.as_str()) {
-            '*'
+            s.paint(style::Role::Bold, s.sym(style::Sym::Marker))
         } else {
-            ' '
+            " ".to_owned()
         };
-        shown += &format!("{mark} {}\n", escape(line, false));
+        let line = s.paint(style::Role::Line, &escape(line, false));
+        shown += &format!("{mark} {line}\n");
     }
-    for line in &server_lines {
-        shown += &format!("  {}\n", escape(line, false));
+    for (server, lines) in &servers.servers {
+        let server = escape(server, false);
+        let named = s.paint(style::Role::Dim, &format!("({server})"));
+        shown += &format!("\nOn the server {named}:\n");
+        for line in lines.keys() {
+            let line = format!("{}@{server}", escape(line, false));
+            shown += &format!("  {}\n", s.paint(style::Role::Line, &line));
+        }
     }
     output::print_quietly(&shown, &warnings)
+}
+
+/// The name of the project's folder, as the system writes it.
+fn project_name(repo: &Repository) -> String {
+    let root = repo.root();
+    root.file_name().map_or_else(
+        || root.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -1507,27 +1536,57 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         });
         format!("{document}\n")
     } else {
-        let mut text = match done.carried {
-            0 => String::new(),
-            1 => "Your unsaved changes in 1 file came along.\n".to_owned(),
-            n => format!("Your unsaved changes in {n} files came along.\n"),
+        let s = style::out();
+        let at = match &save {
+            Some(save) => format!(
+                "{} {}",
+                s.paint(style::Role::ChangeId, &short),
+                output::quoted_title(save)
+            ),
+            None => s.paint(style::Role::Fingerprint, &short),
         };
-        match &done.position {
-            Position::OnLine(line) => text += &format!("You're on line {}.\n", escape(line, false)),
-            Position::AtSave(id) => {
-                text += &format!(
-                    "You're at save {short}, not on a line. Saving here asks for a new line's \
-                     name.\n"
-                );
-                if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
-                    let line = escape(line, false);
-                    text += &format!("To keep saving on {line}: bolt goto {line}\n");
-                }
+        let switched = s.paint(style::Role::Ok, "Switched");
+        let mut text = match &done.position {
+            Position::OnLine(line) => {
+                let line = s.paint(style::Role::Line, &escape(line, false));
+                format!("{switched} to line {line} at save {at}.\n")
             }
+            Position::AtSave(_) => format!("{switched} to save {at}. You are not on a line.\n"),
+        };
+        let (written, removed) = (done.applied.written, done.applied.removed);
+        let mut details = vec![match (written, removed) {
+            (0, 0) => "No file needed changing.".to_owned(),
+            (0, removed) => format!("{} removed.", output::files(removed)),
+            (written, 0) => format!("{} written.", output::files(written)),
+            (written, removed) => format!(
+                "{} written, {} removed.",
+                output::files(written),
+                bolt_core::text::thousands(removed as u64)
+            ),
+        }];
+        if done.carried > 0 {
+            let carried = output::files(done.carried);
+            details.push(format!("Your unsaved changes in {carried} came along."));
+        }
+        if let Position::AtSave(id) = &done.position {
+            details.push("Saving here asks for a new line's name.".to_owned());
+            if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
+                let line = escape(line, false);
+                let goto = s.paint(style::Role::Command, &format!("bolt goto {line}"));
+                details.push(format!("To keep saving on {line}: {goto}"));
+            }
+        }
+        text.push('\n');
+        for detail in details {
+            text += &format!("    {detail}\n");
         }
         text
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    if !json {
+        style::changed_your_mind();
+    }
+    Ok(())
 }
 
 fn discard_command(
@@ -1573,7 +1632,11 @@ fn discard_command(
     } else {
         output::discarded(&done, paths.is_empty())
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    if !json && done.restored.len() + done.removed.len() + done.folders > 0 {
+        style::changed_your_mind();
+    }
+    Ok(())
 }
 
 /// `bolt undo`, `bolt redo`, and `bolt undo --to <entry>` (`to`).
@@ -1630,61 +1693,83 @@ fn undo_command(
     let to = to.map(|to| escape(to, false));
     // The text output; problems met naming its saves go to `into`.
     let text_of = |into: &mut Vec<Warning>| {
+        let s = style::out();
         let mut text = String::new();
+        // The shelves were made first, as part of the first step.
+        for (label, _) in &shelved {
+            text += &format!(
+                "{} your unsaved changes in the way on shelf {}.\n",
+                s.paint(style::Role::Ok, "Shelved"),
+                escape(label, false)
+            );
+        }
         let mut named = |id: &Id| named_save(repo, id, into);
+        let mut rows = Vec::new();
         for t in &taken {
             if head_lost {
                 text += &output::picked_up_line(t, &mut named);
+                text.push('\n');
             } else {
                 // A step `undo --to` took records only `undo`: say where it went.
                 let went = undo::went_to(repo, &t.entry).ok().flatten();
-                text += &output::step_line(t, went.as_ref(), &shelved, &mut named);
+                rows.push(output::step_line(t, went.as_ref(), &shelved, &mut named));
             }
-            text.push('\n');
         }
-        for (label, _) in &shelved {
-            let label = escape(label, false);
-            text += &format!("Set your unsaved changes in the way aside on shelf {label}.\n");
+        // On the way to an entry the steps are all undos, or all redos.
+        let verb = match (&to, taken.first().map(|t| &t.action)) {
+            (Some(_), Some(Action::Redo(_))) => "Redid",
+            (Some(_), _) => "Undid",
+            (None, _) => verb,
+        };
+        let k = rows.len();
+        let some = |k: usize| if k == 1 { "step" } else { "steps" };
+        // Several steps, or fewer than asked for, are counted first, then listed.
+        let counted = match (failed, &to) {
+            _ if k == 0 => None,
+            (true, Some(to)) => Some(format!(
+                "{k} {} on the way to entry {to} before one stopped:",
+                some(k)
+            )),
+            (true, None) => Some(format!("{k} of the {} steps asked for:", steps.n)),
+            (false, None) if k < req.n => Some(format!("{k} {} (all there were):", some(k))),
+            _ if k > 1 => Some(format!("{k} steps:")),
+            _ => None,
+        };
+        match counted {
+            Some(counted) => {
+                text += &format!("{} {counted}\n\n", s.paint(style::Role::Ok, verb));
+                for (_, row) in &rows {
+                    text += &format!("    {row}\n");
+                }
+            }
+            None => {
+                for (verb, row) in &rows {
+                    text += &format!("{} {row}\n", s.paint(style::Role::Ok, verb));
+                }
+            }
         }
         if finished {
             let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
+            let done = s.paint(style::Role::Ok, "Finished");
             text += &match &to {
                 Some(to) => format!(
-                    "Finished the {what} that was stopped, so nothing more was done. Running \
+                    "{done} the {what} that was stopped, so nothing more was done. Running \
                      bolt undo --to {to} again goes on from there.\n"
                 ),
                 None => format!(
-                    "Finished the {what} that was stopped, so nothing more was {list}. Running \
+                    "{done} the {what} that was stopped, so nothing more was {list}. Running \
                      bolt {command} again takes one more step.\n"
                 ),
             };
         }
-        match (failed, &to) {
-            (true, Some(to)) if !taken.is_empty() => {
-                // On the way to an entry the steps are all undos, or all redos.
-                let verb = match taken.first().map(|t| &t.action) {
-                    Some(Action::Redo(_)) => "Redid",
-                    _ => "Undid",
-                };
-                let k = taken.len();
-                let steps = if k == 1 { "step" } else { "steps" };
-                text +=
-                    &format!("{verb} {k} {steps} on the way to entry {to} before one stopped.\n");
-            }
-            (true, None) if !taken.is_empty() => {
-                let (k, n) = (taken.len(), steps.n);
-                text += &format!("{verb} {k} of the {n} steps asked for.\n");
-            }
-            (false, Some(to)) if !finished && taken.is_empty() => {
+        match &to {
+            _ if failed || finished || !taken.is_empty() => {}
+            Some(to) => {
                 text += &format!(
                     "Nothing changed: things are already as they were right after entry {to}.\n"
                 );
             }
-            (false, None) if !finished && taken.len() < req.n => {
-                let more = if taken.is_empty() { "" } else { " more" };
-                text += &format!("Nothing{more} to {command}.\n");
-            }
-            _ => {}
+            None => text += &format!("Nothing to {command}.\n"),
         }
         text
     };
@@ -1727,7 +1812,13 @@ fn undo_command(
     match failure {
         None => {
             warnings.extend(repo.store().warnings());
-            output::print_done(&text, &told_once(warnings))
+            output::print_done(&text, &told_once(warnings))?;
+            // The shelf `--shelve` made is the newest, which `bolt unshelf` brings back.
+            if !shelved.is_empty() {
+                let unshelf = style::err().paint(style::Role::Command, "bolt unshelf");
+                style::next(&format!("bring your changes back with: {unshelf}"));
+            }
+            Ok(())
         }
         Some(failure) => {
             output::print_out(&text);
@@ -1777,18 +1868,7 @@ fn shelf_command(
         format!("{document}\n")
     } else {
         match &done {
-            Shelved::Made(d) => {
-                let files = match d.files {
-                    0 => String::new(),
-                    1 => " in 1 file".to_owned(),
-                    n => format!(" in {n} files"),
-                };
-                let label = escape(&d.label, false);
-                format!(
-                    "Set your unsaved changes{files} aside on shelf {label}: bolt unshelf brings \
-                     them back.\n"
-                )
-            }
+            Shelved::Made(d) => shelf_output::shelved(d),
             // The warnings that follow name what stayed, and say why.
             Shelved::Nothing {
                 changed_again: true,
@@ -1804,7 +1884,13 @@ fn shelf_command(
             }
         }
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    // The new shelf is the newest, which `bolt unshelf` brings back.
+    if !json && made.is_some() {
+        let unshelf = style::err().paint(style::Role::Command, "bolt unshelf");
+        style::next(&format!("bring them back with: {unshelf}"));
+    }
+    Ok(())
 }
 
 /// `bolt shelf --list`.
@@ -1823,18 +1909,8 @@ fn shelf_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(),
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")
-    } else if list.is_empty() {
-        "No shelves: bolt shelf sets your unsaved changes aside on one.\n".to_owned()
     } else {
-        let now = now_ms();
-        let width = list
-            .iter()
-            .map(|s| escape(&s.label, false).chars().count())
-            .max()
-            .unwrap_or(0);
-        list.iter()
-            .map(|s| output::shelf_line(s, width, now) + "\n")
-            .collect()
+        shelf_output::listed(&list, now_ms())
     };
     output::print_quietly(&text, &warnings)
 }
@@ -1896,37 +1972,22 @@ fn unshelf_command(
             ),
         };
         format!(
-            "Finished the {what} that was stopped, so no shelf was brought back this time.{next}\n"
+            "{} the {what} that was stopped, so no shelf was brought back this time.{next}\n",
+            style::out().paint(style::Role::Ok, "Finished")
         )
     } else {
         let title = repo
             .store()
             .save(&done.save, repo.signatures_allowed())
-            .map(|s| {
-                let first = s.message.lines().next().unwrap_or_default().to_owned();
-                format!(" \"{}\"", escape(&first, false))
-            })
+            .map(|s| format!(" {}", output::quoted_title(&s)))
             .unwrap_or_default();
-        let count = |n: usize| match n {
-            1 => "1 file".to_owned(),
-            n => format!("{n} files"),
-        };
-        let what = match (done.applied.written, done.applied.removed) {
-            (0, 0) => "your files already held its changes".to_owned(),
-            (0, removed) => format!("{} removed", count(removed)),
-            (written, 0) => format!("{} written", count(written)),
-            (written, removed) => format!("{} written, {removed} removed", count(written)),
-        };
-        let label = escape(&done.label, false);
-        let mut text = format!("Brought back shelf {label}{title}: {what}.\n");
-        match done.carried {
-            0 => {}
-            1 => text += "Your other unsaved changes in 1 file stayed as they are.\n",
-            n => text += &format!("Your other unsaved changes in {n} files stayed as they are.\n"),
-        }
-        text
+        shelf_output::unshelved(&done, &title)
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    if !json && !done.finished {
+        style::changed_your_mind();
+    }
+    Ok(())
 }
 
 /// `bolt tidy`.
@@ -1977,12 +2038,7 @@ fn verify_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Fai
     bar.finish();
     let warnings = done.warnings.clone();
     // The folder's name came from outside Bolt, like any name in a project.
-    let root = repo.root();
-    let name = root.file_name().map_or_else(
-        || root.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let project = escape(&name, false);
+    let project = escape(&project_name(repo), false);
     let failure = (done.problems_total > 0).then(|| Failure {
         message: output::verify_outcome(&done, &project),
         hint: Some(output::verify_hint(&done)),
@@ -2060,34 +2116,28 @@ fn undo_list_to(
         writeln!(out, "{document}")?;
         return Ok(warnings);
     }
-    let redo = list.redo.iter().enumerate().rev();
-    let redo = redo.map(|(i, s)| (format!("undone {}", i + 1), s));
-    // Undo can't take the diary's first entry, so it gets no number.
-    let undo = list
-        .undo
-        .iter()
-        .enumerate()
-        .map(|(i, s)| match s.diary.parent {
-            Some(_) => ((i + 1).to_string(), s),
-            None => (String::new(), s),
-        });
-    let shown: Vec<(String, &StepInfo)> = redo.chain(undo).collect();
-    let width = shown.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let now = now_ms();
     let (mut named, unshortened) = names(repo);
     warnings.extend(unshortened);
     let files = &mut |from, to| files_between(repo, from, to);
-    for (n, s) in &shown {
-        let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
-        let (entry, when) = (s.entry.short_hex(), when(&s.diary, now));
-        writeln!(out, "{n:>width$}  {entry}  {when}  {what}")?;
-    }
-    if list.more {
-        writeln!(
-            out,
-            "and more: bolt undo --list --all shows the whole diary"
-        )?;
-    }
+    let mut step = |label: String, s: &StepInfo| undo_output::Step {
+        label,
+        entry: s.entry.short_hex(),
+        when: when(&s.diary, now),
+        what: output::entry_line(&s.diary, &s.effects, &mut named, files),
+    };
+    let redo: Vec<undo_output::Step> = (list.redo.iter().enumerate().rev())
+        .map(|(i, s)| step(format!("redo {}", i + 1), s))
+        .collect();
+    // Undo can't take the diary's first entry, so it gets no number.
+    let undo: Vec<undo_output::Step> = (list.undo.iter().enumerate())
+        .map(|(i, s)| match s.diary.parent {
+            Some(_) => step(format!("undo {}", i + 1), s),
+            None => step(String::new(), s),
+        })
+        .collect();
+    let project = escape(&project_name(repo), false);
+    undo_output::write_list(out, &project, &redo, &undo, list.more)?;
     warnings.extend(repo.store().warnings());
     Ok(told_once(warnings))
 }
@@ -2120,9 +2170,15 @@ fn whole_diary_to(
     let (mut named, unshortened) = names(repo);
     warnings.extend(unshortened);
     let files = &mut |from, to| files_between(repo, from, to);
+    let s = style::out();
     undo::whole_diary(repo, |id, entry, effects| {
         let what = output::entry_line(entry, effects, &mut named, files);
-        writeln!(out, "{}  {}  {what}", id.short_hex(), when(entry, now))?;
+        writeln!(
+            out,
+            "{}  {}  {what}",
+            s.paint(style::Role::Fingerprint, &id.short_hex()),
+            s.paint(style::Role::Dim, &when(entry, now))
+        )?;
         Ok::<(), Failure>(())
     })?;
     warnings.extend(repo.store().warnings());
@@ -2168,13 +2224,14 @@ fn stopped_at_to(
         // There is no current line to shorten change IDs against.
         let mut named = |id: &Id| named_by(repo, id, ChangeId::to_letters);
         let files = &mut |from, to| files_between(repo, from, to);
+        let screen = style::out();
         for s in &ends {
             let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
             writeln!(
                 out,
                 "{}  {}  {what}",
-                s.entry.short_hex(),
-                when(&s.diary, now)
+                screen.paint(style::Role::Fingerprint, &s.entry.short_hex()),
+                screen.paint(style::Role::Dim, &when(&s.diary, now))
             )?;
         }
         writeln!(

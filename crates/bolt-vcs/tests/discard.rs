@@ -79,8 +79,8 @@ fn discard_restores_changed_and_deleted_files_and_removes_new_ones() {
     // The deleted file lost nothing, so it needs no copy.
     assert!(
         said.contains(
-            "Threw away your unsaved changes in 4 files (safety copies of the 3 that held \
-             unsaved work were kept)."
+            "Threw away your unsaved changes to 4 files.\n\n    Safety copies of the 3 that held \
+             unsaved work were kept.\n"
         ),
         "{said}"
     );
@@ -122,7 +122,7 @@ fn discard_of_a_path_touches_nothing_else() {
     let said = discard(&env, &["dir"]);
     assert!(
         said.contains(
-            "Threw away your unsaved changes in 2 files (a safety copy of each was kept)."
+            "Threw away your unsaved changes to 2 files.\n\n    A safety copy of each was kept.\n"
         ),
         "{said}"
     );
@@ -139,7 +139,7 @@ fn discard_paths_are_relative_to_the_current_folder() {
     write(&env, "a.txt", b"mine\n");
     write(&env, "dir/c.txt", b"changed\n");
     let said = discard_in(&env, &env.root().join("dir"), &["c.txt"]);
-    assert!(said.contains("in 1 file "), "{said}");
+    assert!(said.contains("to dir/c.txt.\n"), "{said}");
     assert_eq!(changed(&env), ["a.txt"]);
     discard_in(&env, &env.root().join("dir"), &["../a.txt"]);
     assert!(changed(&env).is_empty());
@@ -366,7 +366,9 @@ fn a_file_where_a_saved_empty_folder_was_is_reported_removed() {
     write(&env, "e", b"mine");
     let said = discard(&env, &[]);
     assert!(
-        said.contains("Threw away your unsaved changes in 1 file (a safety copy of it was kept)."),
+        said.contains(
+            "Threw away your unsaved changes to e.\n\n    A safety copy of it was kept.\n"
+        ),
         "{said}"
     );
     assert!(env.root().join("e").is_dir());

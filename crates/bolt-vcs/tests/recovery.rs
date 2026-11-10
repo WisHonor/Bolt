@@ -456,7 +456,7 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
         "{said}"
     );
     assert!(
-        text(&out.stdout).contains("You're at save"),
+        text(&out.stdout).contains("You are not on a line."),
         "{}",
         text(&out.stdout)
     );
@@ -717,7 +717,7 @@ fn undo_two_over_a_step_that_changes_files_then_one_that_doesnt_leaves_no_stale_
     assert_eq!(out.status.code(), Some(1), "{said}");
     let shown = text(&out.stdout);
     assert!(
-        shown.contains("Undid 1 of the 2 steps asked for."),
+        shown.starts_with("Undid 1 of the 2 steps asked for:\n\n    goto: "),
         "{shown}"
     );
     assert_eq!(head(&env).1.action, Action::Undo(goto));
