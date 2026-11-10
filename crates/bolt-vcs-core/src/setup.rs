@@ -15,7 +15,7 @@ use crate::ingest::{self, IngestError};
 use crate::kept::{self, Put};
 use crate::listing::EntryKind;
 use crate::pack::PackSet;
-use crate::presets::{self, Found, Preset};
+use crate::presets::{self, Found, Looked, Preset};
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::rules::MAX_RULES_FILE_BYTES;
 use crate::safe_fs;
@@ -119,6 +119,26 @@ impl SetupError {
             SetupError::Repo(e) => e.hint(),
         }
     }
+}
+
+/// A look at the folder `root` before a start, and whether anything is named `bolt.toml` there: a
+/// file, a link or a folder, in any letter case the drive takes for that name.
+pub fn look_at(root: &Path) -> io::Result<(Looked, bool)> {
+    let top = Dir::open_top(root)?;
+    let looked = presets::look(&top)?;
+    let has_rules_file = match top.metadata(OsStr::new(RULE_FILES[0])) {
+        Ok(_) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => looked.has_rules_file,
+        Err(e) => return Err(e),
+    };
+    Ok((looked, has_rules_file))
+}
+
+/// How many lines the preset's block of the project's `.boltignore` holds; `None` when there is
+/// no file or no block.
+pub fn boltignore_block_lines(root: &Path) -> Result<Option<usize>, SetupError> {
+    let top = Dir::open_top(root).map_err(RepoError::from)?;
+    Ok(read_rule_file(&top, RULE_FILES[1])?.and_then(|bytes| presets::block_lines(&bytes)))
 }
 
 /// What switching to `preset` would do to the two rule files of the project at `root`. Changes

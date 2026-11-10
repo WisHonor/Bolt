@@ -3,11 +3,12 @@
 mod import_output;
 mod output;
 mod progress;
+mod setup_output;
 mod style;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -26,8 +27,10 @@ use bolt_core::id::{ChangeId, Id};
 use bolt_core::import::{ImportError, ImportPass, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
+use bolt_core::presets::{Looked, Preset, suggested};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
+use bolt_core::setup::{SetupError, apply_setup, look_at, plan_setup};
 use bolt_core::shelf::{self, Shelved};
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status, why_stopped};
@@ -59,7 +62,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Make this folder a Bolt project.
-    Start,
+    Start {
+        /// What kind of project: code, game, or custom (Bolt's plain defaults, no rule files).
+        #[arg(long, value_enum, value_name = "PRESET")]
+        preset: Option<PresetArg>,
+    },
+    /// Show the project's rules as Bolt reads them, or switch to a preset's.
+    Setup {
+        /// Show the line changes switching to this preset makes, then make them.
+        #[arg(long, value_enum, value_name = "PRESET")]
+        preset: Option<PresetArg>,
+        /// Make the changes without asking.
+        #[arg(long, requires = "preset")]
+        yes: bool,
+    },
     /// Bring the Git repository in this folder into Bolt, with all its history.
     Import,
     /// Save the current state of your files: all of them, or only these files, folders and
@@ -133,6 +149,23 @@ enum Command {
     /// Free the space nothing needs any more: saves no line, shelf or tag reaches, and what only
     /// steps older than the undo window (undo-window-days in your settings, 30 by default) needed.
     Tidy,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum PresetArg {
+    Code,
+    Game,
+    Custom,
+}
+
+impl From<PresetArg> for Preset {
+    fn from(p: PresetArg) -> Preset {
+        match p {
+            PresetArg::Code => Preset::Code,
+            PresetArg::Game => Preset::Game,
+            PresetArg::Custom => Preset::Custom,
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -239,6 +272,16 @@ impl From<std::io::Error> for Failure {
     }
 }
 
+impl From<SetupError> for Failure {
+    fn from(e: SetupError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
 impl From<ImportError> for Failure {
     fn from(e: ImportError) -> Failure {
         Failure {
@@ -281,11 +324,119 @@ fn with_users_key(mut repo: Repository) -> Repository {
     repo
 }
 
-fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+/// The preset `bolt start` begins with: `None` where the folder has a `bolt.toml` of its own,
+/// which stays. Asks when it may and `asked` is `None`; stops before anything is made otherwise.
+fn preset_to_start(
+    json: bool,
+    asked: Option<Preset>,
+    looked: &Looked,
+    has_rules_file: bool,
+) -> Result<Option<Preset>, Failure> {
+    if has_rules_file {
+        return match asked {
+            None => Ok(None),
+            Some(preset) => Err(Failure {
+                message: "Nothing was started: this folder already has a bolt.toml, and a start \
+                          keeps the rules it holds, so --preset can't be used here."
+                    .into(),
+                hint: Some(format!(
+                    "Run bolt start without --preset to keep them; to switch to the preset's \
+                     rules afterwards, run: bolt setup --preset {}",
+                    preset.name()
+                )),
+                printed: false,
+            }),
+        };
+    }
+    if let Some(preset) = asked {
+        return Ok(Some(preset));
+    }
+    let suggestion = suggested(&looked.found);
+    let stop = |message: &str| Failure {
+        message: message.to_owned(),
+        hint: Some(format!(
+            "Name the kind of project: bolt start --preset code, bolt start --preset game or bolt \
+             start --preset custom. Bolt would suggest --preset {}: it {}.",
+            suggestion.name(),
+            setup_output::found_words(looked)
+        )),
+        printed: false,
+    };
+    if !style::may_ask() {
+        let why = if json {
+            "Nothing was started: Bolt can't ask what kind of project this is with --json."
+        } else {
+            "Nothing was started: Bolt can't ask what kind of project this is without a terminal."
+        };
+        return Err(stop(why));
+    }
+    match ask_preset(looked, suggestion) {
+        Some(preset) => Ok(Some(preset)),
+        None => Err(stop("Nothing was started: no kind of project was chosen.")),
+    }
+}
+
+/// Asks in the terminal which preset to start with, at most three times; `None` if no answer
+/// named one, or the input ended.
+fn ask_preset(looked: &Looked, suggestion: Preset) -> Option<Preset> {
+    const CHOICES: [(Preset, &str); 3] = [
+        (Preset::Code, "apps, websites, libraries"),
+        (Preset::Game, "Unity, Unreal, Godot, big assets"),
+        (Preset::Custom, "Bolt's plain defaults, no rule files"),
+    ];
+    let e = style::err();
+    output::tell(&setup_output::look_line(looked));
+    output::tell("");
+    output::tell("What kind of project is this?");
+    output::tell("");
+    let mut default = 1;
+    for (n, (preset, gloss)) in (1..).zip(CHOICES) {
+        let mut line = format!("    {n}. {:<8} {gloss}", setup_output::title(preset));
+        if preset == suggestion {
+            default = n;
+            let mark = format!("{} suggested", e.sym(style::Sym::Back));
+            line += &format!("   {}", e.paint(style::Role::Dim, &mark));
+        }
+        output::tell(&line);
+    }
+    output::tell("");
+    for _ in 0..3 {
+        let _ = write!(std::io::stderr(), "Choice [{default}]: ");
+        let mut answer = String::new();
+        if !matches!(std::io::stdin().lock().read_line(&mut answer), Ok(1..)) {
+            return None;
+        }
+        let answer = answer.trim().to_ascii_lowercase();
+        let picked = match answer.as_str() {
+            "" => Some(suggestion),
+            "1" => Some(Preset::Code),
+            "2" => Some(Preset::Game),
+            "3" => Some(Preset::Custom),
+            name => Preset::from_name(name),
+        };
+        if picked.is_some() {
+            output::tell("");
+            return picked;
+        }
+        output::tell("Answer 1, 2 or 3, or a preset's name: code, game or custom.");
+    }
+    None
+}
+
+fn start(
+    json: bool,
+    asked: Option<Preset>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
-    // The user's own settings may name this folder, so the first save is theirs too.
+    // Before anything is asked: a folder that can't be a project is refused at once.
+    Repository::check_new(&root)?;
+    // The user's own settings may name this folder, so the first save is theirs too. Read before
+    // the question, so nobody answers it only to be refused.
     let who = now_person(&load_identity(Some(&root))?);
-    let repo: &Repository = opened.insert(with_users_key(Repository::init(&root, &who)?));
+    let (looked, has_rules_file) = look_at(&root)?;
+    let preset = preset_to_start(json, asked, &looked, has_rules_file)?;
+    let repo = opened.insert(with_users_key(Repository::init(&root, &who)?));
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
         .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
         .into_iter()
@@ -305,8 +456,47 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
             None
         }
     };
+    // The rule files are a second step, which `bolt undo` takes back.
+    let mut rules_written = Vec::new();
+    let mut unwritten = None;
+    if let Some(preset) = preset.filter(|p| *p != Preset::Custom) {
+        let wrote = git_excludes_file(&root)
+            .map_err(Failure::from)
+            .and_then(|excludes| {
+                let plan = plan_setup(&root, preset)?;
+                let _working = progress::Working::start("Writing rule files");
+                Ok(apply_setup(
+                    repo,
+                    &plan,
+                    &who,
+                    excludes.as_deref(),
+                    &mut waiting,
+                )?)
+            });
+        match wrote {
+            Ok(done) => {
+                rules_written = done.written;
+                warnings.extend(done.warnings);
+            }
+            Err(problem) => {
+                unwritten = Some(Failure {
+                    message: format!(
+                        "The project was started, but its rule files weren't written: {}",
+                        problem.message
+                    ),
+                    hint: Some(format!(
+                        "Run bolt setup --preset {} to write them.",
+                        preset.name()
+                    )),
+                    printed: false,
+                });
+            }
+        }
+    }
+    let rules = repo.read_rules();
+    warnings.extend(rules.warnings());
     warnings.extend(repo.store().warnings());
-    let text = if json {
+    if json {
         let save = first.as_ref().map_or(json!(null), |(id, save, short)| {
             output::save_json(id, save, short)
         });
@@ -315,20 +505,161 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
             "root": root.display().to_string(),
             "line": "main",
             "save": save,
+            "preset": preset.map(Preset::name),
+            "found": setup_output::found_json(&looked.found),
+            "rules_written": rules_written,
             "warnings": output::warnings_json(&warnings),
         });
+        let Some(failure) = unwritten else {
+            return output::print_done(&format!("{document}\n"), &warnings);
+        };
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        let in_document = Failure {
+            printed: true,
+            ..failure
+        };
+        return output::ended(Some(in_document), String::new, &warnings, None);
+    }
+    if let Some(failure) = unwritten {
+        return Err(failure);
+    }
+    // The folder's name came from outside Bolt, like any name in a project.
+    let shown = escape(&root.display().to_string(), false);
+    let short = first.as_ref().map(|(_, _, short)| short.as_str());
+    let text = setup_output::started(&shown, preset, &looked.found, &rules.rules, short);
+    output::print_done(&text, &warnings)?;
+    if short.is_some() {
+        let e = style::err();
+        style::next(&format!(
+            "change some files, then run: {}",
+            e.paint(style::Role::Command, "bolt save \"describe your change\"")
+        ));
+    }
+    Ok(())
+}
+
+fn setup_command(
+    json: bool,
+    preset: Option<Preset>,
+    yes: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let Some(preset) = preset else {
+        let read = repo.read_rules();
+        let block = bolt_core::setup::boltignore_block_lines(repo.root())?;
+        let mut warnings = read.warnings();
+        warnings.extend(repo.store().warnings());
+        if json {
+            let mut document = setup_output::rules_json(&read, block);
+            document["bolt_json"] = BOLT_JSON.into();
+            document["warnings"] = output::warnings_json(&warnings);
+            return output::print_quietly(&format!("{document}\n"), &warnings);
+        }
+        output::print_quietly(&setup_output::rules_shown(&read, block), &warnings)?;
+        let e = style::err();
+        style::next(&format!(
+            "edit bolt.toml or .boltignore to change a rule, or switch presets with: {}",
+            e.paint(style::Role::Command, "bolt setup --preset <name>")
+        ));
+        return Ok(());
+    };
+    let plan = plan_setup(repo.root(), preset)?;
+    let title = setup_output::title(preset);
+    let mut document = json!({
+        "bolt_json": BOLT_JSON,
+        "preset": preset.name(),
+        "found": setup_output::found_json(&plan.found),
+        "changes": setup_output::changes_json(&plan.changes),
+        "applied": false,
+    });
+    if plan.changes.is_empty() {
+        let warnings = repo.store().warnings();
+        let text = if json {
+            document["warnings"] = output::warnings_json(&warnings);
+            format!("{document}\n")
+        } else {
+            format!(
+                "Nothing to change: the rule files already are what the {title} preset writes.\n"
+            )
+        };
+        return output::print_quietly(&text, &warnings);
+    }
+    if !json {
+        let mut preview =
+            format!("Switching to {title} settings changes these files:\n\n").into_bytes();
+        setup_output::write_preview(&mut preview, &plan.changes)?;
+        output::print_out(&String::from_utf8_lossy(&preview));
+    }
+    if !yes && style::may_ask() && !ask_apply() {
+        return output::print_quietly("\nNothing was changed.\n", &repo.store().warnings());
+    }
+    if !yes && !style::may_ask() {
+        let failure = Failure {
+            message: if json {
+                "Nothing was changed: Bolt can't ask whether to apply these changes with --json."
+                    .into()
+            } else {
+                "Nothing was changed: Bolt can't ask whether to apply these changes without a \
+                 terminal."
+                    .into()
+            },
+            hint: Some(format!(
+                "If they are what you want, run: bolt setup --preset {} --yes",
+                preset.name()
+            )),
+            printed: false,
+        };
+        if !json {
+            return Err(failure);
+        }
+        let warnings = repo.store().warnings();
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        let in_document = Failure {
+            printed: true,
+            ..failure
+        };
+        return output::ended(Some(in_document), String::new, &warnings, None);
+    }
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let done = {
+        let _working = progress::Working::start("Writing rule files");
+        apply_setup(repo, &plan, &who, git_excludes.as_deref(), &mut waiting)
+    }?;
+    let mut warnings = done.warnings;
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        document["applied"] = true.into();
+        document["warnings"] = output::warnings_json(&warnings);
         format!("{document}\n")
     } else {
-        // The folder's name came from outside Bolt, like any name in a project.
-        let shown = escape(&root.display().to_string(), false);
-        let mut text = format!("Started a Bolt project in {shown}.\n");
-        if let Some((_, _, short)) = &first {
-            text += &format!("Your first save is {short}, on line main.\n");
-            text += "Next: change some files, then run: bolt save \"describe your change\"\n";
-        }
-        text
+        // After the preview.
+        let s = style::out();
+        format!(
+            "\n{} to {title} settings: {}.\n",
+            s.paint(style::Role::Ok, "Switched"),
+            setup_output::written_words(&plan.changes, &done.written)
+        )
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    style::changed_your_mind();
+    Ok(())
+}
+
+/// Asks in the terminal whether to apply a preset's changes. Only a yes is one.
+fn ask_apply() -> bool {
+    let _ = write!(std::io::stderr(), "Apply these changes? [y/N] ");
+    let mut answer = String::new();
+    if std::io::stdin().lock().read_line(&mut answer).is_err() {
+        return false;
+    }
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -387,7 +718,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
 /// Asks in the terminal for the new line's name, with `working` off the screen meanwhile; `None`
 /// if there is no terminal to ask in.
 fn ask_line_name(working: &progress::Working) -> Result<Option<String>, Failure> {
-    if !std::io::stdin().is_terminal() {
+    if !style::may_ask() {
         return Ok(None);
     }
     working.pause();
@@ -410,7 +741,7 @@ fn ask_line_name(working: &progress::Working) -> Result<Option<String>, Failure>
 /// Asks in the terminal whether to make a save that adds this much; `None` if there is no
 /// terminal to ask in. An answer that can't be read is a no.
 fn ask_large(large: &LargeSave) -> Option<bool> {
-    if !std::io::stdin().is_terminal() {
+    if !style::may_ask() {
         return None;
     }
     let _ = write!(std::io::stderr(), "{large} Save them? [y/N] ");
@@ -1819,7 +2150,10 @@ fn main() -> ExitCode {
     // what the project's store had noticed by then.
     let mut opened = None;
     let result = match cli.command {
-        Command::Start => start(cli.json, &mut opened),
+        Command::Start { preset } => start(cli.json, preset.map(Preset::from), &mut opened),
+        Command::Setup { preset, yes } => {
+            setup_command(cli.json, preset.map(Preset::from), yes, &mut opened)
+        }
         Command::Import => import(cli.json, &mut opened),
         Command::Save(args) => save(cli.json, args, &mut opened),
         Command::Line => line_command(cli.json, &mut opened),

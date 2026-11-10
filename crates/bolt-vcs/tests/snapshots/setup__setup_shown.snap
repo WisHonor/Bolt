@@ -1,0 +1,15 @@
+---
+source: crates/bolt-vcs/tests/setup.rs
+expression: shown
+---
+{
+  "ask_before_saving_files_over": 10000,
+  "ask_before_saving_over": 100000000,
+  "bolt_json": 1,
+  "chunk_files_over": 1048576,
+  "ignore_lines": 4,
+  "preset": "code",
+  "rules": [],
+  "rules_file": true,
+  "warnings": []
+}

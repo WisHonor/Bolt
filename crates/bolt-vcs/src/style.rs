@@ -313,6 +313,11 @@ pub(crate) fn for_people() -> bool {
         .is_some_and(|f| !f.json && f.err.width.is_some())
 }
 
+/// Whether Bolt may ask a question: stdin and stderr are terminals and `--json` wasn't given.
+pub fn may_ask() -> bool {
+    for_people() && (io::stdin().is_terminal() || fake_terminal().is_some())
+}
+
 /// "Next: …" on stderr, after an empty line, only when stderr is a terminal.
 pub fn next(line: &str) {
     if for_people() {

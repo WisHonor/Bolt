@@ -1,0 +1,22 @@
+---
+source: crates/bolt-vcs/tests/setup.rs
+expression: doc
+---
+{
+  "bolt_json": 1,
+  "found": {
+    "engines": [
+      "unity"
+    ],
+    "languages": []
+  },
+  "line": "main",
+  "preset": "game",
+  "root": "[redacted]",
+  "rules_written": [
+    "bolt.toml",
+    ".boltignore"
+  ],
+  "save": "[redacted]",
+  "warnings": []
+}
