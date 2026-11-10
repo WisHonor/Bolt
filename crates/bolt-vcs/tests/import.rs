@@ -1000,3 +1000,40 @@ fn a_file_git_wrote_with_crlf_is_found() {
         "{err}"
     );
 }
+
+/// Turned on in the user's own Git settings, a sparse checkout stops the import as one in the
+/// repository's own does, and the repository's own setting wins over it, as in Git.
+#[test]
+fn a_sparse_checkout_in_the_users_git_settings_stops_an_import() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let sparse = "[core]\n\tsparseCheckout = true\n";
+    std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
+    let err = env.refused_import();
+    assert!(
+        err.contains(
+            "error: Git leaves some files out of this folder on purpose (a sparse checkout)"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: Turn it off with `git sparse-checkout disable`"),
+        "{err}"
+    );
+    assert!(!env.root().join(".bolt").exists());
+
+    std::fs::write(
+        env.config().join(".gitconfig"),
+        "[core]\n\tsparseCheckout = maybe\n",
+    )
+    .unwrap();
+    let err = env.refused_import();
+    assert!(
+        err.contains("core.sparseCheckout isn't true or false"),
+        "{err}"
+    );
+
+    std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
+    env.git(&["config", "core.sparseCheckout", "false"]);
+    env.import();
+}

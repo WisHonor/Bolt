@@ -918,6 +918,7 @@ mod tests {
             hash: HashKind::Sha1,
             includes: false,
             lfs_storage: None,
+            sparse: None,
             objects: Default::default(),
         }
     }

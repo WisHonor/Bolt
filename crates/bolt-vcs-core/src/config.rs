@@ -258,7 +258,7 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
 }
 
 /// The `lfs.storage` the user's own Git settings set, for `bolt import` in `top`, which reads it
-/// only to tell whether Git LFS keeps its files elsewhere.
+/// only to tell whether Git LFS keeps its files elsewhere, and their `core.sparseCheckout`.
 pub fn git_lfs_storage(top: &Path) -> Result<UserLfsStorage, ConfigError> {
     git_lfs_storage_in(&UserGit::from_env(top))
 }
@@ -266,10 +266,13 @@ pub fn git_lfs_storage(top: &Path) -> Result<UserLfsStorage, ConfigError> {
 /// The last `lfs.storage` in the user's own Git settings files, which the repository's own
 /// setting overrides, and the last the environment gives through `GIT_CONFIG_COUNT`, which
 /// overrides that in turn, as in Git: each with where it is set, and empty for one with no value.
+/// The last `core.sparseCheckout` in each, which an import refuses, comes alike.
 #[derive(Debug, Default)]
 pub struct UserLfsStorage {
     pub files: Option<(Vec<u8>, String)>,
     pub variables: Option<(Vec<u8>, String)>,
+    pub sparse_files: Option<bool>,
+    pub sparse_variables: Option<bool>,
 }
 
 /// Where Git finds the user's own settings: the home folder and `XDG_CONFIG_HOME`'s folder, if
@@ -494,16 +497,36 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
 /// `git_lfs_storage` with the places given, so tests can choose them.
 fn git_lfs_storage_in(git: &UserGit) -> Result<UserLfsStorage, ConfigError> {
     let mut found = UserLfsStorage::default();
-    git.read_files(&mut |setting, place| last_lfs_storage(&mut found.files, setting, place))?;
-    let variables = &mut found.variables;
-    git.read_variables(&mut |setting, place| last_lfs_storage(variables, setting, place))?;
-    Ok(found)
+    let mut refused = None;
+    let (files, sparse) = (&mut found.files, &mut found.sparse_files);
+    git.read_files(&mut |setting, place| last(files, sparse, &mut refused, setting, place))?;
+    let (variables, sparse) = (&mut found.variables, &mut found.sparse_variables);
+    git.read_variables(&mut |setting, place| {
+        last(variables, sparse, &mut refused, setting, place)
+    })?;
+    refused.map_or(Ok(found), Err)
 }
 
-/// Keeps `setting`, set at `place`, in `last` if it is an `lfs.storage`.
-fn last_lfs_storage(last: &mut Option<(Vec<u8>, String)>, setting: UserSetting, place: &Place) {
-    if let UserSetting::LfsStorage(value) = setting {
-        *last = Some((value, place.to_string()));
+/// Keeps `setting`, set at `place`, in `storage` if it is an `lfs.storage`, or in `sparse` if it
+/// is a `core.sparseCheckout`; the first of those Git refuses goes in `refused`.
+fn last(
+    storage: &mut Option<(Vec<u8>, String)>,
+    sparse: &mut Option<bool>,
+    refused: &mut Option<ConfigError>,
+    setting: UserSetting,
+    place: &Place,
+) {
+    match setting {
+        UserSetting::LfsStorage(value) => *storage = Some((value, place.to_string())),
+        UserSetting::SparseCheckout(Some(on)) => *sparse = Some(on),
+        UserSetting::SparseCheckout(None) => {
+            refused.get_or_insert_with(|| {
+                let detail =
+                    "its core.sparseCheckout isn't true or false to Git, which refuses it too";
+                place.error(detail.to_owned())
+            });
+        }
+        _ => {}
     }
 }
 

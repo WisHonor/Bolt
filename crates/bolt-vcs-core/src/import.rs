@@ -11,8 +11,8 @@ use crate::config::UserLfsStorage;
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{
-    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, lfs_pointer, parse_tag,
-    parse_tree, shown,
+    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, Refusal, lfs_pointer,
+    parse_tag, parse_tree, shown,
 };
 use crate::id::{ChangeId, Id, hash_record};
 use crate::listing::{EntryKind, SaveLimits};
@@ -508,6 +508,11 @@ fn plan(
 ) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
+    // As in Git: the environment's, then the repository's, then the user's own files.
+    let users = lfs_storage.map_or((None, None), |u| (u.sparse_variables, u.sparse_files));
+    if users.0.or(git.sparse_checkout()).or(users.1) == Some(true) {
+        return Err(GitError::Refused(Refusal::SparseCheckout).into());
+    }
     let lfs_storage = lfs_storage_elsewhere(&git, lfs_storage);
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
