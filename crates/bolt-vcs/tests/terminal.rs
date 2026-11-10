@@ -256,14 +256,8 @@ fn a_failing_command_that_warns_first_starts_with_the_warning() {
 fn no_progress_reaches_stderr_without_a_terminal() {
     for terminal in [true, false] {
         let env = Env::new();
-        env.commit(
-            "a.txt", "a
-", "First",
-        );
-        env.commit(
-            "b.txt", "b
-", "Second",
-        );
+        env.commit("a.txt", "a\n", "First");
+        env.commit("b.txt", "b\n", "Second");
         // A sign of Git LFS, so the import looks for its files too.
         std::fs::create_dir(env.root().join(".git/lfs")).unwrap();
         for (args, label) in [
@@ -271,12 +265,7 @@ fn no_progress_reaches_stderr_without_a_terminal() {
             (&["save", "Third"], "Saving"),
         ] {
             if args[0] == "save" {
-                std::fs::write(
-                    env.root().join("c.txt"),
-                    "c
-",
-                )
-                .unwrap();
+                std::fs::write(env.root().join("c.txt"), "c\n").unwrap();
             }
             let mut cmd = if terminal {
                 bolt_on_a_terminal(&env, env.root())
