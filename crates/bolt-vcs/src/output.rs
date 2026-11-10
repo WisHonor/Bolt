@@ -66,10 +66,14 @@ pub fn change_json(c: &FileChange) -> Value {
             ChangeKind::Modified => "modified",
             ChangeKind::KindChanged => "kind_changed",
         },
-        // People see `project-link`; every value in JSON is written with underscores.
+        // Named here, not by `as_str`, which gives people `project-link`: JSON values use underscores.
         "kind": match c.kind {
+            EntryKind::File => "file",
+            EntryKind::Executable => "executable",
+            EntryKind::Symlink => "symlink",
+            EntryKind::Folder => "folder",
             EntryKind::ProjectLink => "project_link",
-            kind => kind.as_str(),
+            EntryKind::Conflict => "conflict",
         },
         "old_size": c.old_size,
         "new_size": c.new_size,
