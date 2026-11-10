@@ -306,6 +306,7 @@ Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-wi
 - Tests for what speed puts at risk: a torn, stale or planted cache; files changed during a walk or within the cache's 2 seconds; folders swapped mid-walk; a flush that fails halfway through a big file.
 - *Done when:* each passes on all three systems, and the model test passes with the cache on.
 
-**9. Docs, red team, review, benchmarks and merge**
+**9. Docs, red team, review, benchmarks and merge** ✅ (2026-11-10)
 - The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, the whole benchmark and all three gates run again, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and [benchmarks.md](benchmarks.md) gives the numbers before and after, losses included.
+- **The third gate is not met yet.** `status` and the small save pass; going back on Linux is at twice Git's time, where it was 4.5 times, and missed in four runs of six ([benchmarks.md](benchmarks.md) §8). What would settle it is the owner's call: the first row of this session's section of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).

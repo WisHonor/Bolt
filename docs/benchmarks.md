@@ -1,6 +1,6 @@
 # Bolt Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Bolt against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work. Every speed or size claim Bolt makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Bolt against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it. Every speed or size claim Bolt makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
 **In plain words.** Bolt promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Bolt must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Bolt beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
@@ -442,3 +442,301 @@ Every file was stored each way and added up by kind of file (a throwaway test on
 - Bolt keeps 9.1 MB more than zlib would. 7.0 MB of that is six `.hdr` images of 1 MiB or more: 108.1 MB that Bolt keeps in 96.2 MB and zlib in 89.2 MB. The next kinds are `.exr` images (0.4 MB), `.glb` models (0.3 MB) and `.res` files (0.3 MB).
 - On these images zlib's level 6 simply compresses better than zstd's level 3, whole or in pieces. zstd's level 9 on each piece would still leave Bolt 1.1% behind zlib.
 - The 95% rule costs 1.1 MB, 0.4%.
+
+## 8. After milestone 6's speed work
+
+**In plain words.** Milestone 6 set out to stop losing to Git on an everyday code project, and to Git LFS on big files. On Git's own source Bolt now asks "what changed?" in about one and a half times Git's time where it took four times, saves a small change as fast as Git, and goes back to another version in twice Git's time or less where it took four and a half times. On a long history, commands that took from half a second to three seconds take from a few milliseconds to a quarter of a second, and amending the newest save is quicker than Git's own amend. Big files are saved in about 60% of the time wherever the disk keeps up and little faster where it doesn't, and Git LFS still wins their first save on a slow disk, because Bolt waits for the disk and Git LFS doesn't. The new gate (within twice Git's time) is not met yet: `status` and a small save pass in every run but one on Windows, and `goto` on Linux sits at twice Git's time, so it passed in only two runs of six. This section gives every number, the losses included.
+
+Everything here was measured on 2026-11-10. The code is commit `b8fccef` unless a line names another; the commits after it change only how the check before an amend treats a cache that lies (what it does with an honest one is the same code), tests and docs. "Before" is `main` at `73a1a0d`, the code §1 to §7 measured.
+
+### What changed
+
+In the order the work was done ([the plan](plans/2026-11-10-milestone-6-speed-and-space.md)); none of it changes a stored ID, a format, or what a command says:
+
+- **Ignore rules.** Lines that are plain names are found by a hash lookup, and a line with one `*` is matched by the name's two ends. A file the last save holds isn't matched at all until it changes ([decision 107](decisions/107-a-saved-files-ignore-rules-are-read-only-when-it-changed.md)).
+- **The file cache** is loaded as one block by a helper thread while the walk runs, asked once for each file, written only when it changed, and never flushed ([decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md)).
+- **The walk** lists a folder before it asks it for anything by name ([decisions 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md) and [106](decisions/106-on-linux-and-macos-a-folder-is-still-asked-for-git-and-bolt-by-name.md)), and does each name's work once.
+- **The store** finds and reads a small record in three reads where it took a dozen, and answers small reads that sit side by side from the last block it read of each pack ([decisions 111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md) and [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md) say when a block is read).
+- **Listings.** A folder whose entries all match the last save's takes that listing's ID; the scan hands the last save's listings on to the comparisons after it; and those listings are read just ahead of the walk by a helper thread ([decision 110](decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md)).
+- **Big files.** A pack, or a file a switch writes, is flushed while it is written ([decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)); a switch reads each chunk whole and keeps the chunks it has checked while it writes one file.
+- **Long histories.** `cache/change-ids` keeps each line's saves in order ([decision 105](decisions/105-the-change-id-cache-keeps-each-lines-saves-in-order.md)), and the check before an amend keeps what it read of the other lines in `cache/other-lines` ([decision 112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)).
+- **The import** keeps 96 MiB of rebuilt objects where it kept 256 MiB ([decision 104](decisions/104-an-import-keeps-96-mib-of-rebuilt-objects.md)).
+- **Deep folders.** Past the levels the walk holds open, every 48th level stays open too ([decision 109](decisions/109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md)).
+
+### Before and after on one runner
+
+GitHub's runners differ from one another by more than some of these changes, in their processors and above all in their disks (§6). So the fairest comparison builds `main` and the branch side by side and runs them turn by turn on one machine, with Git on the same files: [run 42910259739](https://github.com/WisHonor/Bolt/actions/runs/42910259739), a throwaway workflow on a branch since deleted. Git's source at `v2.56.0`, set up as §2 sets it up; each number is the median of 40 runs (`status`) or 15 (the others), timed from a shell, so each holds the millisecond or two a shell takes to start a program, which §2's numbers don't.
+
+| Step, on Git's source | Linux: before, after, Git | Times Git's: before, after | Windows: before, after, Git | Times Git's: before, after |
+|---|---|---|---|---|
+| `status`, nothing changed | 50.0 ms, 17.9 ms, 12.0 ms | 4.2, 1.5 | 127.2 ms, 84.5 ms, 60.8 ms | 2.1, 1.4 |
+| A small change, saved | 53.9 ms, 23.8 ms, 24.6 ms | 2.2, 0.97 | 157.4 ms, 108.0 ms, 134.9 ms | 1.2, 0.80 |
+| Back to the first version | 55.8 ms, 24.6 ms, 12.3 ms | 4.5, 2.0 | 149.7 ms, 97.3 ms, 68.6 ms | 2.2, 1.4 |
+| The first save of all 4,853 files | 263 ms, 246 ms, 1,216 ms | 0.22, 0.20 | 552 ms, 481 ms, 3,599 ms | 0.15, 0.13 |
+
+### The three gates
+
+The first two gates as measured again on the finished code ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822)): saving 10 GiB peaked at 43,667,456 bytes and took 26.2 s on GitHub's Linux runner (the limit is 500,000,000; the time is that runner's disk, and was 28.7 s on the runner of §1). `status` on an unchanged 100,000-file project, whose limit is 2 s, took 0.20 s twice on GitHub's Linux runner, where `main` took 0.61 s and 0.66 s on the same machine, and 1.02 s then 0.92 s on its Windows runner, where `main` took 1.33 s and 1.32 s ([run 42910259739](https://github.com/WisHonor/Bolt/actions/runs/42910259739)).
+
+The third gate, by the `speed-gate` job (`bench/run.sh gate`: medians of 10 runs, timed by `hyperfine` with no shell):
+
+| Run, commit | Linux: Bolt, Git, times Git's | Windows: Bolt, Git, times Git's |
+|---|---|---|
+| [42834201117](https://github.com/WisHonor/Bolt/actions/runs/42834201117), `ecdfb17` | `status` 23.1 ms, 12.8 ms, 1.80; small save 30.2 ms, 29.3 ms, 1.03; `goto` 33.7 ms, 15.9 ms, **2.12 (over)** | `status` 72.9 ms, 43.5 ms, 1.68; small save 82.3 ms, 123.3 ms, 0.67; `goto` 86.9 ms, 53.5 ms, 1.62 |
+| [42839335754](https://github.com/WisHonor/Bolt/actions/runs/42839335754), `ecdfb17` | `status` 21.6 ms, 13.4 ms, 1.62; small save 28.4 ms, 30.6 ms, 0.93; `goto` 30.6 ms, 17.1 ms, 1.79 | `status` 84.2 ms, 47.8 ms, 1.76; small save 94.1 ms, 130.7 ms, 0.72; `goto` 100.5 ms, 58.3 ms, 1.72 |
+| [42889870154](https://github.com/WisHonor/Bolt/actions/runs/42889870154), `eaf55ee` | `status` 16.8 ms, 9.8 ms, 1.71; small save 23.4 ms, 22.2 ms, 1.05; `goto` 25.3 ms, 12.5 ms, **2.02 (over)** | `status` 52.6 ms, 29.7 ms, 1.77; small save 52.6 ms, 84.4 ms, 0.62; `goto` 59.0 ms, 36.5 ms, 1.62 |
+| [42887158889](https://github.com/WisHonor/Bolt/actions/runs/42887158889), in a whole-benchmark run, `eaf55ee` | `status` 17.7 ms, 11.0 ms, 1.60; small save 23.7 ms, 25.5 ms, 0.93; `goto` 26.9 ms, 13.6 ms, 1.99 | `status` 103.1 ms, 46.0 ms, **2.24 (over)**; small save 116.0 ms, 127.8 ms, 0.91; `goto` 121.5 ms, 55.5 ms, **2.19 (over)** |
+| [42910249929](https://github.com/WisHonor/Bolt/actions/runs/42910249929), `b8fccef` | `status` 18.3 ms, 10.1 ms, 1.81; small save 24.8 ms, 25.7 ms, 0.97; `goto` 27.3 ms, 11.4 ms, **2.40 (over)** | `status` 82.5 ms, 44.6 ms, 1.85; small save 91.5 ms, 125.9 ms, 0.73; `goto` 95.6 ms, 56.3 ms, 1.70 |
+| [42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822), in the whole-benchmark run, `b8fccef` | `status` 14.5 ms, 8.4 ms, 1.73; small save 19.6 ms, 20.4 ms, 0.96; `goto` 22.9 ms, 11.0 ms, **2.08 (over)** | `status` 81.8 ms, 45.5 ms, 1.80; small save 90.0 ms, 125.8 ms, 0.72; `goto` 94.9 ms, 55.2 ms, 1.72 |
+
+- **`status` and the small save pass on Linux in all six runs** (1.60 to 1.81 times Git's time, and 0.93 to 1.05).
+- **Linux's `goto` passes in two runs of the six** (1.79 and 1.99) and misses in four (2.02 to 2.40). Turn by turn on one runner it is twice Git's time (the table above).
+- **Windows passes all three steps in five runs of the six,** and misses `status` and `goto` in one (2.24 and 2.19).
+- **Why Linux's `goto` sits on the limit.** Bolt's `goto` flushes ten times (the drive clock's file, the diary's pack and its folder, the journal and its folder, the file and its folder, `head` and its folder, and the folder again once the journal is gone); Git's checkout flushes nothing. On the runner where one `goto` was traced, the ten flushes took 2.6 ms of its 25 and its seven renames a millisecond more ("Where the time goes now", below), a seventh of the command between them. On a disk whose flushes take longer, they are more.
+- **Why Windows can miss it.** A look at one file costs Bolt five system calls there, and it spreads the looks over several threads; Git makes fewer calls, on one thread. In the run that missed, Bolt's ten `status` runs spread from 96 to 126 ms while Git's stayed within 44 to 49. The likely reading is a runner busy with something else, which several threads feel more than one does; that reading wasn't tested.
+- **So the gate isn't met yet as decision 099 states it** (on GitHub's Linux and Windows runners, every run). What would settle each step is in "Where Git or Git LFS still wins" below; none of it was done here, because each touches a flush a crash relies on, the module that decides what is saved, or `unsafe` code the owner reviews.
+
+### Against Git and Git LFS, again
+
+§2's whole table, measured the same way by the same workflow on the finished code ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822)): means of 5 runs, with the lowest and the highest. These runners are not the ones §2's numbers came from, so set each number beside the Git and Git LFS numbers of its own row before setting it beside §2's.
+
+Two things to know when reading them:
+
+- **Going back, on the big-file sets,** reads again whatever the step before wrote less than two seconds earlier: the cache doesn't vouch for a file that young (the 2-second rule), and Bolt won't write over a file it hasn't shown to be saved. So that step is slower the faster the step before it was.
+- **The first save of big files that don't compress** (the noise and versions sets) is as fast as the runner's disk takes a gigabyte, because Bolt flushes the pack before it names it. "Big files on one runner" below shows the same code beside Git LFS on a fast disk and on a slow one. Both runners of this run had slow ones.
+- **A mean of five runs holds any stall.** On this Linux runner a flush stalled in several of Bolt's steps (a small change on the code set ran from 23.6 to 130 ms) and in some of Git's (Godot's small change ran from 23.9 to 243 ms). The range beside each mean shows it; the gate's medians of ten runs, from the same run, are in the table above.
+
+#### GitHub's Linux runner
+
+**Code**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 350 ms (212–589) | 1.22 s (1.20–1.24) | 1.26 s (1.24–1.27) |
+| A small change | 63.5 ms (23.6–130) | 26.0 ms (25.4–27.2) | 57.5 ms (56.4–59.1) |
+| `status`, nothing changed | 19.1 ms (17.3–25.5) | 11.6 ms (11.3–11.8) | 12.2 ms (11.1–13.5) |
+| `status` after touching the biggest file | 19.8 ms (19.2–20.3) | 15.7 ms (15.1–16.8) | 15.7 ms (15.4–16.1) |
+| Back to the first version | 25.0 ms (24.2–25.8) | 14.1 ms (13.9–14.4) | 45.0 ms (44.1–46.6) |
+
+**Godot's demo projects**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 1.10 s (1.07–1.15) | 7.21 s (7.20–7.23) | 3.05 s (3.02–3.06) |
+| A small change | 30.6 ms (30.0–31.0) | 69.8 ms (23.9–243) | 54.2 ms (53.4–56.0) |
+| `status`, nothing changed | 25.9 ms (25.2–26.7) | 11.7 ms (11.3–12.6) | 11.2 ms (10.5–12.2) |
+| `status` after touching the biggest file | 52.8 ms (34.9–121) | 76.0 ms (74.5–78.5) | 88.0 ms (87.5–88.8) |
+| Back to the first version | 48.5 ms (39.0–77.5) | 22.3 ms (9.56–71.8) | 56.4 ms (41.2–115) |
+
+**Noise**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 4.76 s (3.84–5.11) | 24.4 s (24.4–24.4) | 1.83 s (1.81–1.85) |
+| A small change | 62.2 ms (61.3–62.6) | 1.23 s (1.22–1.24) | 233 ms (152–254) |
+| `status`, nothing changed | 6.18 ms (2.25–13.4) | 1.53 ms (1.43–1.77) | 1.56 ms (1.45–1.75) |
+| `status` after touching the biggest file | 15.0 ms (14.9–15.1) | 112 ms (112–112) | 117 ms (116–119) |
+| Back to the first version | 238 ms (229–255) | 181 ms (159–269) | 238 ms (216–313) |
+
+**Versions**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 5.20 s (5.13–5.34) | 30.9 s (30.8–31.0) | 1.91 s (1.87–1.97) |
+| A small change | 1.18 s (1.15–1.24) | 31.0 s (30.9–31.2) | 1.87 s (1.82–1.92) |
+| `status`, nothing changed | 2.27 ms (2.20–2.39) | 1.86 ms (1.45–2.65) | 1.51 ms (1.44–1.68) |
+| `status` after touching the biggest file | 268 ms (268–269) | 2.32 s (2.31–2.33) | 1.96 s (1.93–2.01) |
+| Back to the first version | 4.81 s (4.21–5.62) | 3.25 s (3.22–3.28) | 3.45 s (1.59–6.88) |
+
+**Repeated**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 1.20 s (1.15–1.32) | 30.0 s (29.6–31.0) | 1.89 s (1.86–1.95) |
+| A small change | 1.11 s (1.09–1.14) | 30.0 s (29.8–30.2) | 1.90 s (1.88–1.93) |
+| `status`, nothing changed | 2.48 ms (2.24–3.05) | 1.49 ms (1.43–1.63) | 1.87 ms (1.45–2.25) |
+| `status` after touching the biggest file | 250 ms (249–250) | 2.28 s (2.27–2.30) | 1.99 s (1.97–2.02) |
+| Back to the first version | 4.68 s (4.44–5.15) | 3.18 s (3.16–3.22) | 3.52 s (3.47–3.63) |
+
+**Imports in the same job**
+
+- lfs-import: 8.85 s (8.78–8.91)
+- history-import: 40.4 s (40.2–40.6)
+
+**Space**
+
+| Set | The files | Bolt | Git | Git with Git LFS |
+|---|---|---|---|---|
+| Code | 50,141,205 | 16,086,209 | 17,122,254 | 17,123,859 |
+| Godot's demo projects | 312,757,968 | 237,701,369 | 229,915,518 | 276,207,113 |
+| Noise | 1,048,576,000 | 1,051,271,584 | 1,363,601,944 | 1,363,192,300 |
+| Versions | 1,073,741,824 | 1,091,689,096 | 10,740,917,054 | 10,737,640,524 |
+| Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,838 | 7,516,228,782 |
+- history-bolt: 368,998,025 bytes
+- history-git: 313,774,870 bytes
+- lfs-bolt: 580,585,708 bytes
+- lfs-git: 5,242,922,183 bytes
+- lfs-git-lfs-objects: 5,242,880,000 bytes
+
+#### GitHub's Windows runner
+
+**Code**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 424 ms (410–449) | 3.42 s (3.38–3.46) | 3.69 s (3.63–3.76) |
+| A small change | 71.3 ms (68.7–75.5) | 105 ms (100–110) | 382 ms (361–454) |
+| `status`, nothing changed | 65.6 ms (62.3–77.1) | 38.2 ms (36.0–39.9) | 36.5 ms (33.9–42.6) |
+| `status` after touching the biggest file | 65.4 ms (63.0–69.6) | 44.2 ms (42.7–46.1) | 41.1 ms (38.9–42.3) |
+| Back to the first version | 74.1 ms (71.5–76.4) | 46.4 ms (45.0–48.5) | 287 ms (276–299) |
+
+**Godot's demo projects**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 1.78 s (1.75–1.82) | 10.5 s (10.4–10.8) | 6.75 s (6.57–7.01) |
+| A small change | 81.6 ms (78.4–90.5) | 103 ms (102–104) | 387 ms (375–398) |
+| `status`, nothing changed | 72.5 ms (71.4–73.1) | 37.1 ms (35.5–40.7) | 36.6 ms (35.8–37.4) |
+| `status` after touching the biggest file | 84.8 ms (84.0–85.3) | 117 ms (115–119) | 293 ms (277–307) |
+| Back to the first version | 82.0 ms (77.1–86.6) | 44.9 ms (42.7–47.9) | 308 ms (291–317) |
+
+**Noise**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 5.48 s (5.42–5.53) | 28.0 s (27.6–28.5) | 2.48 s (2.45–2.51) |
+| A small change | 103 ms (99.8–108) | 1.52 s (1.46–1.58) | 650 ms (584–881) |
+| `status`, nothing changed | 16.1 ms (14.2–17.3) | 26.5 ms (24.1–28.1) | 26.6 ms (24.6–28.6) |
+| `status` after touching the biggest file | 31.1 ms (29.4–32.2) | 163 ms (161–166) | 313 ms (306–327) |
+| Back to the first version | 275 ms (268–285) | 257 ms (234–337) | 693 ms (673–726) |
+
+**Versions**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 5.62 s (5.55–5.65) | 28.4 s (28.3–28.6) | 2.50 s (2.48–2.52) |
+| A small change | 1.38 s (1.35–1.41) | 37.8 s (28.2–52.4) | 2.76 s (2.44–3.92) |
+| `status`, nothing changed | 15.4 ms (13.4–17.4) | 25.6 ms (25.3–26.1) | 25.5 ms (25.0–26.8) |
+| `status` after touching the biggest file | 303 ms (301–307) | 2.61 s (2.60–2.62) | 2.26 s (2.24–2.29) |
+| Back to the first version | 6.09 s (5.42–7.74) | 4.11 s (4.08–4.18) | 4.26 s (2.63–4.72) |
+
+**Repeated**
+
+| Step | Bolt | Git | Git with Git LFS |
+|---|---|---|---|
+| First save | 1.57 s (1.55–1.59) | 28.2 s (28.1–28.4) | 2.60 s (2.50–2.76) |
+| A small change | 1.36 s (1.34–1.37) | 37.8 s (28.3–51.9) | 2.53 s (2.48–2.68) |
+| `status`, nothing changed | 15.7 ms (15.5–16.1) | 25.8 ms (25.3–27.0) | 25.6 ms (25.1–27.0) |
+| `status` after touching the biggest file | 338 ms (333–345) | 2.55 s (2.55–2.56) | 2.25 s (2.24–2.26) |
+| Back to the first version | 5.05 s (5.03–5.09) | 4.07 s (4.04–4.11) | 4.67 s (4.63–4.69) |
+
+**Imports in the same job**
+
+- lfs-import: 11.7 s (11.7–11.8)
+- history-import: 38.9 s (38.7–39.1)
+
+**Space**
+
+| Set | The files | Bolt | Git | Git with Git LFS |
+|---|---|---|---|---|
+| Code | 52,458,897 | 16,085,759 | 17,121,515 | 17,123,138 |
+| Godot's demo projects | 312,757,968 | 237,701,360 | 229,915,463 | 276,207,080 |
+| Noise | 1,048,576,000 | 1,051,271,583 | 1,363,601,964 | 1,363,192,324 |
+| Versions | 1,073,741,824 | 1,091,689,095 | 10,740,917,076 | 10,737,640,549 |
+| Repeated | 1,073,741,824 | 5,504,716 | 7,518,523,853 | 7,516,228,810 |
+- history-bolt: 368,998,024 bytes
+- history-git: 313,774,890 bytes
+- lfs-bolt: 580,585,708 bytes
+- lfs-git: 5,242,922,196 bytes
+- lfs-git-lfs-objects: 5,242,880,000 bytes
+
+### Big files on one runner
+
+`main`, the branch and Git LFS turn by turn on the same files on one machine, three turns each (the lowest and the highest are given). Each row is one runner, because their disks differ and the disk is what decides. The big-file code is the same in every row.
+
+| Runner, run | First save of 1 GiB of noise in 20 files: before, after, Git LFS | First save of one 1 GiB file: before, after, Git LFS | Back to that file's first version: before, after |
+|---|---|---|---|
+| Linux, [42853821053](https://github.com/WisHonor/Bolt/actions/runs/42853821053) | 4.13–4.16 s, 2.45 s, 2.25–2.28 s | 4.19–4.22 s, 2.49–2.51 s, 2.26–2.29 s | 3.83–4.39 s, 2.67–3.10 s |
+| Linux, [42856204349](https://github.com/WisHonor/Bolt/actions/runs/42856204349) | 6.47–6.61 s, 4.90–4.95 s, 1.81–1.86 s | 6.69–6.78 s, 5.17–5.22 s, 1.87–1.93 s | 6.53–6.58 s, 3.98–4.23 s |
+| Linux, [42887296255](https://github.com/WisHonor/Bolt/actions/runs/42887296255) | 4.15–4.21 s, 2.44–2.46 s, 2.25–2.36 s | 4.23–4.25 s, 2.50–2.51 s, 2.28–2.37 s | 3.85–4.39 s, 3.09–3.21 s |
+| Linux, [42910259739](https://github.com/WisHonor/Bolt/actions/runs/42910259739) | 6.53–7.04 s, 5.01–5.12 s, 1.80–1.86 s | 6.81–7.06 s, 5.26–5.63 s, 1.83–1.91 s | 5.61–6.70 s, 4.26–5.57 s |
+| Windows, [42853821053](https://github.com/WisHonor/Bolt/actions/runs/42853821053) | 5.77–6.01 s, 5.67–5.88 s, 2.88–3.40 s | 6.19–6.27 s, 5.87–6.26 s, 2.89–4.49 s | 4.48–5.61 s, 5.13–5.52 s |
+| Windows, [42856204349](https://github.com/WisHonor/Bolt/actions/runs/42856204349) | 4.48–6.03 s, 5.98–6.11 s, 2.86–3.48 s | 6.06–6.39 s, 6.12–6.43 s, 2.84–4.08 s | 5.34–5.58 s, 5.25–5.64 s |
+| Windows, [42887296255](https://github.com/WisHonor/Bolt/actions/runs/42887296255) | 4.57–5.28 s, 2.76–3.27 s, 3.40–4.17 s | 4.72–5.49 s, 2.86–3.36 s, 3.31–4.02 s | 4.02–4.52 s, 2.51–2.94 s |
+| Windows, [42910259739](https://github.com/WisHonor/Bolt/actions/runs/42910259739) | 5.63–6.08 s, 5.61–5.79 s, 2.77–2.89 s | 6.15–6.17 s, 5.77–5.82 s, 2.79–2.83 s | 4.06–5.84 s, 4.47–5.25 s |
+
+- **Where the disk keeps up, the first save takes about 60% of the time it took** (2.45 s where it took 4.15 s), and Bolt is within a tenth of Git LFS, or ahead of it. The pack is flushed to the disk while it is still being written, so the disk works while Bolt reads and hashes ([decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)).
+- **Where the disk is slow, Git LFS wins by a wide margin** (1.8 to 1.9 s against 4.9 to 5.1 s on two Linux runners; about 3 s against 5.6 to 6.1 s on three Windows runners, where flushing while writing changed little or nothing; on those Linux runners the first save takes three quarters of what it took). Git LFS's time doesn't follow the disk, so it isn't waiting for it. Bolt's does: it flushes the pack before it gives it its name, and a save that says it is done is on the disk.
+- **Going back to an old version of a big file** is a fifth to a third faster on every Linux runner and on the one Windows runner whose disk kept up, and unchanged on the other three.
+
+### Imports
+
+git/git, imported three times by each `bolt` in turn on one runner ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822), job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs):
+
+| | Import | Peak memory | The first save after it |
+|---|---|---|---|
+| `main` (`73a1a0d`) | 166.7–166.9 s | 656,176–659,084 KiB (642 MiB) | 0.63–0.64 s |
+| The branch | 141.4–141.9 s | 448,440–449,248 KiB (438 MiB) | 0.35–0.36 s |
+
+The import is faster because the store finds and reads records in fewer reads; its memory is lower because it keeps 96 MiB of rebuilt objects where it kept 256 MiB.
+
+And the largest history at hand, once, with `main`'s engine and its 256 MiB of rebuilt objects ([run 42759080455](https://github.com/WisHonor/Bolt/actions/runs/42759080455), GitHub's Linux runner): torvalds/linux at `b3dfbde` (2026-11-09), 1,506,211 commits and 12,024,624 objects. It imports in 2,955 s (49 minutes) with a peak of 3,329,288 KiB (3.4 GB), and the `.bolt` folder takes 64,636,524,309 bytes (64.6 GB) where Git's pack takes 6.6 GB. Bolt stores every version of every file and listing whole or in chunks; Git stores most of them as deltas against another version. That is the biggest loss on this page, and records stored as deltas ([decision 009](decisions/009-storage-engine.md)'s later feature) are what would close it.
+
+### Long histories
+
+git/git at `1891de4`: 86,222 commits, 24,498 of them on `master` along first parents, with its four other branches as lines too (`maint`, `next` and `seen`, each about as long, and `todo`, 2,636 saves). It was imported by `main`'s `bolt` and by the branch's on one runner, with Git on a third clone; three turns each, timed from a shell ([run 42910267213](https://github.com/WisHonor/Bolt/actions/runs/42910267213)). A range is the three turns; a command's very first run, which reads files nothing has read yet, is left out where it stood apart.
+
+| Step | Linux: before, after, Git | Windows: before, after, Git |
+|---|---|---|
+| The import | 135 s, 116 s | 206 s, 164 s |
+| `goto` one save back (35 files) | 1,390–1,539 ms, 48–59 ms, 26–27 ms | 2,403–2,760 ms, 171–197 ms, 124–126 ms |
+| `goto` 20 saves back (98 files) | 1,253–1,580 ms, 86–108 ms, 39–44 ms | 2,646–2,724 ms, 248–267 ms, 159–162 ms |
+| `goto` 2,000 saves back (3,557 files) | 4.0–5.6 s, 1.8–3.1 s, 0.46–0.75 s | 6.3–6.9 s, 3.9–4.4 s, 1.4–1.7 s |
+| `status` | 481–533 ms, 20 ms, 12 ms | 1,336–1,854 ms, 113–118 ms, 71 ms |
+| `undo --list` | 583–592 ms, 39–40 ms | 1,259–1,273 ms, 120–126 ms |
+| The history listing, its first line | 914–955 ms, 5–6 ms, 2–3 ms | 1,202–1,421 ms, 68–84 ms, 59–69 ms |
+| The history listing, all 24,498 lines | 1.37–1.39 s, 0.27 s, 0.18 s | 2.50–2.70 s, 0.67 s, 0.32–0.33 s |
+| The first amend of a new save | 1,357 ms, 32 ms, 12 ms | 3,167 ms, 117 ms, 109 ms |
+| Each amend after it | 9 ms, 8–9 ms, 12–15 ms | 55–57 ms, 52–57 ms, 109–110 ms |
+
+Git's column is `git checkout`, `git status`, `git log --first-parent --oneline` and `git commit --amend`. One of the branch's nine turns of `goto` 20 saves back took 338 ms on Linux.
+
+- **Before, each of these commands read the whole line from the store,** to shorten a change ID or to find a save: half a second to three seconds, whatever was asked. Now the line's saves are kept in order in a sealed cache, and a command reads only the saves it shows. A list is never the reason a save is shown or gone to unchecked ([decision 109](decisions/109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md)): going to a save by its ID checks the list link by link down to it, which is why `goto` 2,000 saves back reads 2,000 saves.
+- **The amend.** Before an amend Bolt checks that no other line shows the save. `main` read each of the four other lines whole the first time, 1.4 s on Linux, and kept a list of each. The branch reads only the saves a line doesn't share with `master`, and keeps them ([decisions 111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md) and [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)); a later amend reads none, and takes 8 to 9 ms where `git commit --amend` takes 12 to 15. The second red-team session's own shape, 300 lines of 2,000 saves each, took 19 to 21 s for every amend before that cache, and `main` 34 s once ([report](redteam/2026-11-10-milestone-6-speed-session-2.md)).
+
+### Deep folders and tiny chunks
+
+Two shapes only a planted project has, measured on the laptop of §1 in a release build:
+
+- **The deepest chain the limits allow,** 2,048 levels with a file in each: a save took 108 s and takes 2.4 s; a `status` that must read every file took 106 s and takes 1.3 s. Writing that chain out is unchanged and slow: a `goto` that removes the files takes 335 s, and one that writes them back 529 s, because write-out opens every folder again from the top for each file ([decision 048](decisions/048-handle-relative-file-access.md)'s safe design). A tree a tenth as deep costs a hundredth.
+- **A list of 8,388,608 one-byte chunks** took 82 s to write out its 8 MiB file and takes 22 s: a chunk the list repeats is read once.
+
+### Where the time goes now
+
+One `status` of Git's source on GitHub's Linux runner, counted by `strace` ([run 42910259739](https://github.com/WisHonor/Bolt/actions/runs/42910259739)):
+
+| | System calls | Looks at files | Reads of packs | Opens | Folder listings | Waits between threads | Threads made |
+|---|---|---|---|---|---|---|---|
+| `main` | 10,697 | 5,311 | 1,626 | 949 | 512 | 893 | 8 |
+| The branch | 9,481 | 5,309 | 655 | 530 | 512 | 1,021 | 10 |
+| Git | 6,812 | 5,155 | none (it reads one index file) | 334 | 457 | 6 | 9 |
+
+- **All three look at every file once.** That part is level.
+- **What Bolt does and Git doesn't:** it reads the last save's listings from its packs (Git reads one index file); it opens every folder by handle, so that nothing is ever followed through a link; its threads hand work to each other about a thousand times; and it flushes one small file to read the drive's clock, which the 2-second rule rests on.
+
+One `goto` that writes one file, traced the same way ([run 42890907947](https://github.com/WisHonor/Bolt/actions/runs/42890907947)): after the scan it makes 9 more flushes (the diary's pack and its folder, the journal and its folder, the file and its folder, `head` and its folder, the folder again once the journal is gone), 0.15 to 0.4 ms each on that runner's quiet disk and 2.6 ms together with the scan's; and 7 renames, which cost 0.16 to 0.35 ms each wherever one replaces a file. Git's checkout flushes nothing.
+
+### Where Git or Git LFS still wins
+
+Each is a row of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) ("Deferred by milestone 6: speed and space"), with what would change it.
+
+- **`status` on a code project:** 1.5 times Git's time on Linux turn by turn (17.9 ms against 12.0) and 1.4 times on Windows (84.5 ms against 60.8); 1.6 to 1.8 times in the gate's Linux runs and 1.7 to 2.2 in its Windows runs. What is left is in the table above; the walk on several threads, or fewer system calls for each file on Windows, would change it.
+- **`goto` on a code project, on Linux:** twice Git's time turn by turn (24.6 ms against 12.3), and 1.8 to 2.4 times across the gate's six runs, so the third gate misses more often than it passes. What would change it: flushing less in a `goto`, which is the owner's call, or the walk on several threads.
+- **Godot's demos:** `status` takes about twice Git's time where it took four to five times (25.9 ms against 11.7 on Linux, 72.5 ms against 37.1 on Windows), and going back to the first version about twice on Windows too (82 ms against 45). A small change is behind Git's on Linux when Git's disk doesn't stall (30.6 ms against 23.9 at Git's best) and ahead of it on Windows (82 ms against 103). Its 4,018 files sit in 569 folders, so what a folder costs shows more (§7).
+- **`status` on a project of a few files:** 2.3 to 2.5 ms against Git's 1.5 to 1.9 on Linux (the 6.2 ms mean of the noise set holds a stall); on Windows Bolt is ahead, 15 to 16 ms against 26. That is Bolt starting up: opening the project, its packs, and reading the drive's clock.
+- **The first save of big files that don't compress, wherever the disk is slow** (above).
+- **Going back to an old version of a big file, where the disk is slow:** 4.7 to 4.8 s for a gigabyte against Git's 3.2 s on the Linux runner of the whole benchmark, and 5.1 to 6.1 s against 4.1 s on its Windows runner. Bolt flushes the file it wrote before it renames it into place; Git doesn't.
+- **A switch that rewrites thousands of files:** 1.8 to 3.1 s against Git's 0.46 to 0.75 s on Linux for 3,557 files, and 3.9 to 4.4 s against 1.4 to 1.7 s on Windows. Bolt flushes each file before it renames it into place.
+- **The history listing, all of it:** 0.27 s against 0.18 s on Linux for 24,498 saves, 0.67 s against 0.33 s on Windows. Bolt reads and checks each save; `git log --oneline` reads less of each commit.
+- **Space, on a long history:** Linux's takes 64.6 GB against Git's 6.6 GB, and git/git's 369 MB against Git's 314 MB. On the five data sets of §2 nothing changed: Bolt keeps 3% more than Git on Godot's demos and less on the others.
+- **The import's memory:** 3.4 GB for Linux's history.
