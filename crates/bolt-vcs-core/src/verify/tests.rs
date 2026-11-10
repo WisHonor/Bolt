@@ -646,7 +646,7 @@ fn verify_writes_nothing() {
 }
 
 fn found(ids: &[u8]) -> Verdict {
-    Verdict::Found(ids.iter().map(|b| Id([*b; 32])).collect())
+    Verdict::Found(ids.iter().map(|b| Finding::Missing(Id([*b; 32]))).collect())
 }
 
 fn lost(why: &str) -> Verdict {
@@ -782,4 +782,152 @@ fn an_unreadable_head_and_an_unreadable_pack_do_not_agree() {
     let head = Verdict::Failed(ProblemKind::HeadLost, "can't read it".into());
     assert_eq!(agreed(&[head.clone(), failed("pack")]), None);
     assert_eq!(agreed(&[failed("pack"), head]), None);
+}
+
+#[test]
+fn a_chunk_held_only_as_a_chunk_list_is_missing() {
+    let (_dir, mut repo) = project(0);
+    let list = hello_world();
+    // "world" is in no pack as content: a chunk list of its two halves stands under its ID.
+    let world = ChunkList {
+        file: hash_content(b"world"),
+        size: 5,
+        chunks: [&b"wor"[..], b"ld"]
+            .iter()
+            .map(|p| Chunk {
+                id: hash_content(p),
+                size: p.len() as u64,
+            })
+            .collect(),
+    };
+    own_pack(&mut repo, |p| {
+        p.add_content(b"hello ").unwrap();
+        p.add_content(b"wor").unwrap();
+        p.add_content(b"ld").unwrap();
+        p.add_chunk_list(&world).unwrap();
+        p.add_chunk_list(&list).unwrap();
+    });
+    let save = plant_file(&mut repo, "big.bin", list.file, 11);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(world.file));
+    assert_eq!(
+        v.problems[0].message,
+        "It is stored, but as another kind of object than what needs it."
+    );
+    assert_eq!(v.problems[0].needed_by, Some((save, "big.bin".to_owned())));
+}
+
+#[test]
+fn a_listing_that_gives_a_file_another_size_is_damaged() {
+    let (_dir, mut repo) = project(0);
+    let list = hello_world();
+    let mut small = None;
+    own_pack(&mut repo, |p| {
+        small = Some(p.add_content(b"hello\n").unwrap());
+        p.add_content(b"hello ").unwrap();
+        p.add_content(b"world").unwrap();
+        p.add_chunk_list(&list).unwrap();
+    });
+    let small = small.unwrap();
+    plant_root(&mut repo, |packs| {
+        let files = [("a.txt", small, 999), ("big.bin", list.file, 12)];
+        let entries = files.map(|(name, id, size)| Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id,
+            size,
+        });
+        let (docs, _) = add_listing(packs, entries.to_vec());
+        let folder = Entry {
+            name: "docs".into(),
+            kind: EntryKind::Folder,
+            id: docs,
+            size: 0,
+        };
+        add_listing(packs, vec![folder]).0
+    });
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(
+        kinds(&v),
+        [ProblemKind::ObjectDamaged, ProblemKind::ObjectDamaged],
+        "{:?}",
+        v.problems
+    );
+    let docs = repo
+        .store()
+        .listing(&repo.store().save(&save, false).unwrap().root);
+    let docs = docs.unwrap().entries()[0].id;
+    for (p, (path, listed, stored)) in v
+        .problems
+        .iter()
+        .zip([("docs/a.txt", 999, 6), ("docs/big.bin", 12, 11)])
+    {
+        assert_eq!(p.object, Some(docs), "{p:?}");
+        assert!(p.message.contains(&format!("{listed} bytes")), "{p:?}");
+        assert!(p.message.contains(&format!("{stored} bytes")), "{p:?}");
+        assert_eq!(p.needed_by, Some((save, path.to_owned())), "{p:?}");
+    }
+}
+
+/// A listing of `n` entries named 00000 and up, each of `kind` naming `id` with `size`.
+fn many(packs: &mut PackSet, n: usize, kind: EntryKind, id: Id, size: u64) -> Id {
+    let entries = (0..n)
+        .map(|i| Entry {
+            name: format!("{i:05}"),
+            kind,
+            id,
+            size,
+        })
+        .collect();
+    add_listing(packs, entries).0
+}
+
+#[test]
+fn a_save_past_the_entry_limit_is_too_big() {
+    let (_dir, mut repo) = project(0);
+    plant_root(&mut repo, |packs| {
+        let x = packs.add_content(b"x").unwrap();
+        let folder = many(packs, 1_000, EntryKind::File, x, 1);
+        many(packs, 10_001, EntryKind::Folder, folder, 0)
+    });
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::SaveTooBig], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(save));
+    assert!(
+        v.problems[0].message.contains("files and folders in total"),
+        "{v:?}"
+    );
+    assert_eq!(v.count(ProblemKind::SaveTooBig), 1);
+}
+
+#[test]
+fn a_save_with_a_path_past_the_limit_is_too_big() {
+    let (_dir, mut repo) = project(0);
+    plant_root(&mut repo, |packs| {
+        let mut at = packs.add_content(b"x").unwrap();
+        let mut kind = EntryKind::File;
+        // Twenty levels of 250-byte names: a path of more than 5,000 bytes.
+        for level in 0..20 {
+            let entry = Entry {
+                name: format!("{level:02}{}", "n".repeat(248)),
+                kind,
+                id: at,
+                size: u64::from(kind == EntryKind::File),
+            };
+            at = add_listing(packs, vec![entry]).0;
+            kind = EntryKind::Folder;
+        }
+        at
+    });
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::SaveTooBig], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(save));
+    assert!(
+        v.problems[0].message.contains("longer than 4096 bytes"),
+        "{v:?}"
+    );
 }

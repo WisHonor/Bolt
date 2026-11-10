@@ -13,12 +13,12 @@ use crate::diary::{DiaryEntry, ServerLines, TagList};
 use crate::encoding::DecodeError;
 use crate::id::Id;
 use crate::link::ProjectLink;
-use crate::listing::{EntryKind, Listing};
+use crate::listing::{EntryKind, Listing, SaveLimits};
 use crate::pack::{ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, head_entry};
 use crate::save::Save;
 use crate::store::{Store, is_damage};
-use crate::text::escape;
+use crate::text::{escape, thousands};
 use crate::tidy::{self, Noted, Source, Unread};
 use crate::warning::Warning;
 use crate::writeout;
@@ -31,6 +31,7 @@ pub enum ProblemKind {
     ObjectDamaged,
     ObjectMissing,
     HeadLost,
+    SaveTooBig,
 }
 
 impl ProblemKind {
@@ -43,6 +44,7 @@ impl ProblemKind {
             ProblemKind::ObjectDamaged => "object_damaged",
             ProblemKind::ObjectMissing => "object_missing",
             ProblemKind::HeadLost => "head_lost",
+            ProblemKind::SaveTooBig => "save_too_big",
         }
     }
 }
@@ -83,6 +85,7 @@ pub struct Verified {
     pub object_damaged: u64,
     pub object_missing: u64,
     pub head_lost: u64,
+    pub save_too_big: u64,
     pub problems: Vec<Problem>,
     /// Objects that failed when the packs were read back, their own check.
     pub objects_failed: u64,
@@ -105,6 +108,7 @@ impl Verified {
             ProblemKind::ObjectDamaged => &mut self.object_damaged,
             ProblemKind::ObjectMissing => &mut self.object_missing,
             ProblemKind::HeadLost => &mut self.head_lost,
+            ProblemKind::SaveTooBig => &mut self.save_too_big,
         };
         *count = count.saturating_add(1);
         if self.problems.len() < PROBLEMS_KEPT {
@@ -121,6 +125,7 @@ impl Verified {
             ProblemKind::ObjectDamaged => self.object_damaged,
             ProblemKind::ObjectMissing => self.object_missing,
             ProblemKind::HeadLost => self.head_lost,
+            ProblemKind::SaveTooBig => self.save_too_big,
         }
     }
 }
@@ -155,8 +160,8 @@ pub fn verify(
         Verdict::Found(missing) => {
             if let Some(look) = look {
                 v.needs_checked = true;
-                told_needs(&mut v, &look, &missing, &damaged);
-                name_needers(&mut v, &look, repo.signatures_allowed());
+                let names = told_needs(&mut v, &look, &missing, &damaged);
+                name_needers(&mut v, &look, repo.signatures_allowed(), &names);
             }
             return v;
         }
@@ -523,8 +528,8 @@ fn object_problem(e: &PackError) -> (ProblemKind, String) {
 /// What a look at what the project needs concluded, kept once its working sets are dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Verdict {
-    /// What the project needs that no pack holds.
-    Found(BTreeSet<Id>),
+    /// What it found wrong with what the project needs.
+    Found(BTreeSet<Finding>),
     /// `state/head` names nothing Bolt can read: why.
     Lost(String),
     /// The look couldn't be made: the kind it is told as, and why.
@@ -641,14 +646,31 @@ fn look(
     }
 }
 
-/// [`look`]: what is missing and the look's sets, or a lost head, or why it couldn't be made.
+/// Something wrong with what the project needs, as one look found it: two looks agree on it only
+/// when both found it the same.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Finding {
+    /// Needed, and in no pack as what needs it.
+    Missing(Id),
+    /// The listing gives the file `name` another size than what is stored for it.
+    Size {
+        listing: Id,
+        name: String,
+        listed: u64,
+        stored: u64,
+    },
+    /// The save passes a limit every reader keeps: which, in the readers' words.
+    TooBig { save: Id, why: String },
+}
+
+/// [`look`]: what is wrong and the look's sets, or a lost head, or why it couldn't be made.
 #[allow(clippy::type_complexity)]
 fn look_at(
     repo: &Repository,
     window_days: u32,
     now_ms: i64,
     damaged: &HashSet<Id>,
-) -> Result<Result<(BTreeSet<Id>, Box<Look>), RepoError>, Unmade> {
+) -> Result<Result<(BTreeSet<Finding>, Box<Look>), RepoError>, Unmade> {
     // `head` before the packs are listed: whatever it names was stored before the listing began.
     let head = match repo.head() {
         Ok(head) => head,
@@ -677,18 +699,32 @@ fn look_at(
         watch: damaged.clone(),
         ..Noted::default()
     };
-    let (kept, noted) = tidy::needs(&src, &packs, head, since, watch).map_err(packs_failed)?;
-    let mut missing: BTreeSet<Id> = kept
+    let (kept, mut noted) = tidy::needs(&src, &packs, head, since, watch).map_err(packs_failed)?;
+    let mut found: BTreeSet<Finding> = kept
         .iter()
-        .filter(|id| !noted.known.contains(id))
-        .copied()
+        .filter(|id| !noted.known.contains_key(id))
+        .map(|id| Finding::Missing(*id))
         .collect();
     let unread = noted.unread.iter();
-    missing.extend(
+    found.extend(
         unread
             .filter(|(_, why)| matches!(why, Unread::Missing | Unread::OtherKind))
-            .map(|(id, _)| *id),
+            .map(|(id, _)| Finding::Missing(*id)),
     );
+    let sizes = std::mem::take(&mut noted.sizes);
+    found.extend(
+        sizes
+            .into_iter()
+            .map(|(listing, name, listed, stored)| Finding::Size {
+                listing,
+                name,
+                listed,
+                stored,
+            }),
+    );
+    found.extend(too_big(&noted));
+    // Measured; not needed once done.
+    noted.shapes = HashMap::new();
     let look = Look {
         store,
         kept,
@@ -696,12 +732,85 @@ fn look_at(
         lines: entry.state.lines.len() as u64,
         shelves: entry.state.shelves.len() as u64,
     };
-    Ok(Ok((missing, Box::new(look))))
+    Ok(Ok((found, Box::new(look))))
+}
+
+/// How big the part of a save below one listing is, counted by path.
+#[derive(Clone, Copy, Default)]
+struct Measure {
+    entries: u64,
+    /// Levels of folders below it.
+    depth: usize,
+    /// Its longest path, from below it.
+    longest: usize,
+}
+
+/// Each save `noted` read that passes a limit every reader keeps, with which, in the readers'
+/// words. Each listing is measured once, however many paths reach it, and a listing that
+/// couldn't be read counts as empty.
+fn too_big(noted: &Noted) -> Vec<Finding> {
+    let mut measured: HashMap<Id, Measure> = HashMap::new();
+    let mut found = Vec::new();
+    for &(save, root) in &noted.roots {
+        // Below every folder first, without a call per level: a save may nest deeper than a stack.
+        let mut todo = vec![(root, false)];
+        while let Some((id, ready)) = todo.pop() {
+            if measured.contains_key(&id) {
+                continue;
+            }
+            let Some(shape) = noted.shapes.get(&id) else {
+                measured.insert(id, Measure::default());
+                continue;
+            };
+            if !ready {
+                todo.push((id, true));
+                let unmeasured = shape
+                    .folders
+                    .iter()
+                    .filter(|(_, f)| !measured.contains_key(f));
+                todo.extend(unmeasured.map(|&(_, folder)| (folder, false)));
+                continue;
+            }
+            let mut m = Measure {
+                entries: shape.entries,
+                depth: 0,
+                longest: shape.longest,
+            };
+            for &(name, folder) in &shape.folders {
+                let below = measured.get(&folder).copied().unwrap_or_default();
+                m.entries = m.entries.saturating_add(below.entries);
+                m.depth = m.depth.max(below.depth.saturating_add(1));
+                let path = match below.longest {
+                    0 => name,
+                    longest => name.saturating_add(1).saturating_add(longest),
+                };
+                m.longest = m.longest.max(path);
+            }
+            measured.insert(id, m);
+        }
+        let m = measured.get(&root).copied().unwrap_or_default();
+        let mut limits = SaveLimits::default();
+        let entries = usize::try_from(m.entries).unwrap_or(usize::MAX);
+        let passed = [
+            limits.add(entries),
+            limits.check_depth(m.depth),
+            limits.check_path(m.longest),
+        ];
+        let why = passed.into_iter().filter_map(Result::err);
+        found.extend(why.map(|why| Finding::TooBig { save, why }));
+    }
+    found
 }
 
 /// Tells what `look` found the project needs but couldn't read, past the objects in `damaged`,
-/// told already, and `missing`, which the looks agree no pack holds.
-fn told_needs(v: &mut Verified, look: &Look, missing: &BTreeSet<Id>, damaged: &HashSet<Id>) {
+/// told already, and `found`, which the looks agree on. Gives, for each problem kept that is a
+/// listing giving a file the wrong size, the file's name.
+fn told_needs(
+    v: &mut Verified,
+    look: &Look,
+    found: &BTreeSet<Finding>,
+    damaged: &HashSet<Id>,
+) -> HashMap<usize, String> {
     v.saves = look.noted.saves.len() as u64;
     v.entries = look.noted.entries;
     v.lines = look.lines;
@@ -737,27 +846,56 @@ fn told_needs(v: &mut Verified, look: &Look, missing: &BTreeSet<Id>, damaged: &H
             });
         }
     }
-    for id in missing {
-        let message = if other_kind.contains(id) {
-            "It is stored, but as another kind of object than what needs it."
-        } else if all_read {
-            "It isn't in any pack."
-        } else {
-            "It isn't in any pack Bolt could read."
+    let mut names = HashMap::new();
+    for finding in found {
+        let (kind, object, message) = match finding {
+            Finding::Missing(id) => {
+                let message = if other_kind.contains(id) {
+                    "It is stored, but as another kind of object than what needs it."
+                } else if all_read {
+                    "It isn't in any pack."
+                } else {
+                    "It isn't in any pack Bolt could read."
+                };
+                (ProblemKind::ObjectMissing, *id, message.to_owned())
+            }
+            Finding::Size {
+                listing,
+                name,
+                listed,
+                stored,
+            } => {
+                let message = format!(
+                    "It gives {} as {} bytes, but what is stored for it is {} bytes.",
+                    escape(name, false),
+                    thousands(*listed),
+                    thousands(*stored)
+                );
+                if v.problems.len() < PROBLEMS_KEPT {
+                    names.insert(v.problems.len(), name.clone());
+                }
+                (ProblemKind::ObjectDamaged, *listing, message)
+            }
+            Finding::TooBig { save, why } => {
+                let message = format!("No reader takes it: {why}.");
+                (ProblemKind::SaveTooBig, *save, message)
+            }
         };
         v.found(Problem {
-            kind: ProblemKind::ObjectMissing,
+            kind,
             pack: None,
-            object: Some(*id),
+            object: Some(object),
             needed_by: None,
-            message: message.to_owned(),
+            message,
         });
     }
+    names
 }
 
 /// Names one save, and the path in it, that need each object found damaged or missing that the
-/// project needs, walking the saves read once more. Each folder is read once.
-fn name_needers(v: &mut Verified, look: &Look, signed: bool) {
+/// project needs, walking the saves read once more. Each folder is read once. A listing that
+/// gives a file the wrong size is needed at that file's path, its name in `names`.
+fn name_needers(v: &mut Verified, look: &Look, signed: bool, names: &HashMap<usize, String>) {
     let mut wanted: HashMap<Id, Vec<usize>> = HashMap::new();
     for (i, p) in v.problems.iter().enumerate() {
         let needs = matches!(
@@ -773,6 +911,13 @@ fn name_needers(v: &mut Verified, look: &Look, signed: bool) {
             wanted.entry(at).or_default().push(i);
         }
     }
+    let joined = |path: &str, name: &str| {
+        if path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{path}/{name}")
+        }
+    };
     let mut seen = HashSet::new();
     for save in &look.noted.saves {
         if wanted.is_empty() {
@@ -784,7 +929,10 @@ fn name_needers(v: &mut Verified, look: &Look, signed: bool) {
         let mut folders = vec![(read.root, String::new())];
         while let Some((folder, path)) = folders.pop() {
             for i in wanted.remove(&folder).into_iter().flatten() {
-                v.problems[i].needed_by = Some((*save, path.clone()));
+                let at = names
+                    .get(&i)
+                    .map_or_else(|| path.clone(), |n| joined(&path, n));
+                v.problems[i].needed_by = Some((*save, at));
             }
             if !seen.insert(folder) {
                 continue;
@@ -793,11 +941,7 @@ fn name_needers(v: &mut Verified, look: &Look, signed: bool) {
                 continue;
             };
             for entry in listing.entries() {
-                let at = if path.is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{path}/{}", entry.name)
-                };
+                let at = joined(&path, &entry.name);
                 if entry.kind == EntryKind::Folder {
                     folders.push((entry.id, at));
                 } else {

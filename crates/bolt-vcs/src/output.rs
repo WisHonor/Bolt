@@ -1222,8 +1222,11 @@ pub fn verified(v: &Verified, project: &str) -> String {
 
     // What the saves, lines and shelves need; the diary.
     if v.needs_checked {
-        let missing = rows(ProblemKind::ObjectMissing);
-        if missing.1 == 0 {
+        let (missing, too_big) = (
+            rows(ProblemKind::ObjectMissing),
+            rows(ProblemKind::SaveTooBig),
+        );
+        if missing.1 == 0 && too_big.1 == 0 {
             let line = format!(
                 "{}, {} and {} point to objects that exist",
                 counted(v.saves, "save", "saves"),
@@ -1237,6 +1240,11 @@ pub fn verified(v: &Verified, project: &str) -> String {
             "objects the project needs are missing:",
         );
         unshown |= group(&mut text, s, &missing, needed);
+        let big = (
+            "save is too big for any reader:",
+            "saves are too big for any reader:",
+        );
+        unshown |= group(&mut text, s, &too_big, big);
         let entries = counted(v.entries, "entry", "entries");
         let _ = writeln!(
             text,

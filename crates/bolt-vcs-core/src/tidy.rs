@@ -362,7 +362,7 @@ struct Survey {
     /// young packs.
     reads: BTreeMap<(usize, u64), IndexEntry>,
     /// Every ID an index names, for `verify`.
-    all: HashSet<Id>,
+    all: HashMap<Id, Held>,
 }
 
 /// Reads the index of each of `packs`, in `folder` at `packs_dir`, young ones too, and checks it
@@ -392,7 +392,7 @@ fn survey(
                 Err(e) => return Err(cant(e)),
             };
             if lenient {
-                survey.all.insert(line.id);
+                survey.all.entry(line.id).or_default().add(&line);
             }
             match line.kind {
                 ObjectKind::DiaryEntry => {
@@ -455,7 +455,7 @@ pub(crate) struct Noted {
     /// What couldn't be read, and why.
     pub(crate) unread: Vec<(Id, Unread)>,
     /// Every ID the packs' indexes name.
-    pub(crate) known: HashSet<Id>,
+    pub(crate) known: HashMap<Id, Held>,
     /// Chunks to find the files of, as well as those no index names.
     pub(crate) watch: HashSet<Id>,
     /// Each chunk no index names, or watched, with the file whose list names it.
@@ -464,6 +464,90 @@ pub(crate) struct Noted {
     pub(crate) saves: Vec<Id>,
     /// The diary entries read from the current one back.
     pub(crate) entries: u64,
+    /// Each save read, with its top folder's listing.
+    pub(crate) roots: Vec<(Id, Id)>,
+    /// What each listing read holds, to count a save's entries by path.
+    pub(crate) shapes: HashMap<Id, Shape>,
+    /// Each file a listing gives another size than what is stored: the listing, the file's
+    /// name, the size it gives and the size stored.
+    pub(crate) sizes: Vec<(Id, String, u64, u64)>,
+}
+
+impl Noted {
+    /// Notes what the listing `id` holds: its shape, each file whose size isn't the size stored,
+    /// and each file stored only as another kind of object.
+    fn listing_read(&mut self, id: Id, listing: &Listing) {
+        let mut shape = Shape {
+            entries: listing.entries().len() as u64,
+            ..Shape::default()
+        };
+        for entry in listing.entries() {
+            if entry.kind == EntryKind::Folder {
+                shape.folders.push((entry.name.len(), entry.id));
+                continue;
+            }
+            shape.longest = shape.longest.max(entry.name.len());
+            if !matches!(
+                entry.kind,
+                EntryKind::File | EntryKind::Executable | EntryKind::Symlink
+            ) {
+                continue;
+            }
+            // One no index names at all is told as missing from the set of IDs kept.
+            let Some(held) = self.known.get(&entry.id).copied() else {
+                continue;
+            };
+            match held.file_size() {
+                Some(stored) if stored != entry.size => {
+                    let name = entry.name.clone();
+                    self.sizes.push((id, name, entry.size, stored));
+                }
+                Some(_) => {}
+                None => self.unread.push((entry.id, Unread::OtherKind)),
+            }
+        }
+        self.shapes.insert(id, shape);
+    }
+}
+
+/// How an ID is held in the packs' indexes.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Held {
+    /// As file contents, of this size.
+    pub(crate) content: Option<u64>,
+    /// As a chunk list, of a file of this size.
+    pub(crate) list: Option<u64>,
+    /// As some other kind.
+    pub(crate) other: bool,
+}
+
+impl Held {
+    fn add(&mut self, line: &IndexEntry) {
+        match line.kind {
+            ObjectKind::Content => {
+                self.content.get_or_insert(line.uncompressed_size);
+            }
+            ObjectKind::ChunkList => {
+                self.list.get_or_insert(line.uncompressed_size);
+            }
+            _ => self.other = true,
+        }
+    }
+
+    /// The size of the file stored under this ID, if it is stored as one.
+    pub(crate) fn file_size(self) -> Option<u64> {
+        self.content.or(self.list)
+    }
+}
+
+/// What a listing holds, as far as a save's size goes.
+#[derive(Default)]
+pub(crate) struct Shape {
+    pub(crate) entries: u64,
+    /// The longest name of an entry that isn't a folder.
+    pub(crate) longest: usize,
+    /// Each folder's name length and listing.
+    pub(crate) folders: Vec<(usize, Id)>,
 }
 
 /// Why `verify`'s marking couldn't read a record.
@@ -755,9 +839,21 @@ impl Marks<'_> {
                     Err(e) => return Err(cant(e)),
                 };
                 if let Some(noted) = &mut self.noted {
-                    let told = |id: &Id| !noted.known.contains(id) || noted.watch.contains(id);
-                    for chunk in list.chunks.iter().filter(|c| told(&c.id)) {
-                        noted.via.entry(chunk.id).or_insert(list.file);
+                    for chunk in &list.chunks {
+                        // A chunk is read as file contents only, never through another list.
+                        let held = noted.known.get(&chunk.id).copied();
+                        let as_content = held.is_some_and(|h| h.content.is_some());
+                        if !as_content {
+                            let why = if held.is_some() {
+                                Unread::OtherKind
+                            } else {
+                                Unread::Missing
+                            };
+                            noted.unread.push((chunk.id, why));
+                        }
+                        if !as_content || noted.watch.contains(&chunk.id) {
+                            noted.via.entry(chunk.id).or_insert(list.file);
+                        }
                     }
                 }
                 self.kept.extend(list.chunks.iter().map(|c| c.id));
@@ -832,6 +928,7 @@ impl Marks<'_> {
                 };
                 if let Some(noted) = &mut self.noted {
                     noted.saves.push(id);
+                    noted.roots.push((id, save.root));
                 }
                 for parent in save.parents {
                     self.save(parent);
@@ -846,6 +943,9 @@ impl Marks<'_> {
                 let Some(listing) = self.decoded(&id, "folder listing", decoded)? else {
                     continue;
                 };
+                if let Some(noted) = &mut self.noted {
+                    noted.listing_read(id, &listing);
+                }
                 for entry in listing.entries() {
                     match entry.kind {
                         // Content is kept by its fingerprint, unread; a big file's chunk lists

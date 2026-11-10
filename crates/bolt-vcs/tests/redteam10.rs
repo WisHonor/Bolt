@@ -13,7 +13,6 @@ use support::{Env, main_tip, noise, plant_save, text, top_listing};
 /// ID instead, whose two pieces build the chunk. Reading the file takes chunks as content only,
 /// so `goto` can't write it; `verify` must not say the project is fine.
 #[test]
-#[ignore = "RT10-1: verify passes a big file whose chunk is stored only as a chunk list"]
 fn rt10_1_verify_finds_a_chunk_stored_only_as_a_chunk_list() {
     let env = Env::empty();
     env.bolt()
@@ -72,7 +71,6 @@ fn rt10_1_verify_finds_a_chunk_stored_only_as_a_chunk_list() {
 
 /// A save whose listing gives a file a size its content doesn't have: `goto` can't write it.
 #[test]
-#[ignore = "RT10-2: verify passes a save whose listing gives a file the wrong size"]
 fn rt10_2_verify_finds_a_listing_whose_size_isnt_its_files() {
     let env = Env::empty();
     env.bolt()
@@ -116,7 +114,6 @@ fn rt10_2_verify_finds_a_listing_whose_size_isnt_its_files() {
 /// A save whose folders describe more than 10,000,000 entries, through one listing reached by
 /// many paths: every reader must refuse it, so `goto` does; `verify` reads each listing once.
 #[test]
-#[ignore = "RT10-3: verify passes a save past the 10,000,000-entry limit"]
 fn rt10_3_verify_finds_a_save_past_the_entry_limit() {
     use bolt_core::listing::{Entry, EntryKind, Listing};
     use bolt_core::pack::ObjectKind;

@@ -1811,3 +1811,75 @@ fn each_kind_of_reference_is_followed() {
         );
     }
 }
+
+/// Every ID some pack's index names.
+fn indexed(repo: &Repository) -> HashSet<Id> {
+    let mut all = HashSet::new();
+    for name in pack_names(repo) {
+        let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+        all.extend(pack.entries().map(|e| e.unwrap().id));
+    }
+    all
+}
+
+/// A listing of `n` files or folders, all `id` of `size`.
+fn many(packs: &mut PackSet, n: usize, kind: EntryKind, id: Id, size: u64) -> Id {
+    let entries = (0..n)
+        .map(|i| Entry {
+            name: format!("{i:05}"),
+            kind,
+            id,
+            size,
+        })
+        .collect();
+    add_listing(packs, entries).0
+}
+
+/// What `verify` finds wrong in a save that can't be written out doesn't stop `tidy`, nor make
+/// it free what it keeps: a chunk held only as a chunk list, a listing giving a file another size,
+/// and a save past the entry limit.
+#[test]
+fn tidy_is_unchanged_by_saves_that_cannot_be_written_out() {
+    let piece = |bytes: &[u8]| Chunk {
+        id: hash_content(bytes),
+        size: bytes.len() as u64,
+    };
+    let plants: [&dyn Fn(&mut PackSet) -> Id; 3] = [
+        &|packs| {
+            let world = ChunkList {
+                file: hash_content(b"world"),
+                size: 5,
+                chunks: vec![piece(b"wor"), piece(b"ld")],
+            };
+            let list = ChunkList {
+                file: hash_content(b"hello world"),
+                size: 11,
+                chunks: vec![piece(b"hello "), piece(b"world")],
+            };
+            for bytes in [&b"hello "[..], b"wor", b"ld"] {
+                packs.add_content(bytes).unwrap();
+            }
+            packs.add_chunk_list(&world).unwrap();
+            packs.add_chunk_list(&list).unwrap();
+            many(packs, 1, EntryKind::File, list.file, 11)
+        },
+        &|packs| {
+            let small = packs.add_content(b"hello\n").unwrap();
+            many(packs, 1, EntryKind::File, small, 999)
+        },
+        &|packs| {
+            let x = packs.add_content(b"x").unwrap();
+            let folder = many(packs, 1_000, EntryKind::File, x, 1);
+            many(packs, 10_001, EntryKind::Folder, folder, 0)
+        },
+    ];
+    for plant in plants {
+        let (_dir, mut repo) = project(50);
+        plant_root(&mut repo, plant);
+        age_packs(&repo, 48);
+        let keep = marked(&repo);
+        tidied(&mut repo);
+        let left = indexed(&repo);
+        assert!(keep.iter().all(|id| left.contains(id)));
+    }
+}
