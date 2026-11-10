@@ -820,6 +820,23 @@ impl Store {
         mut f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
     ) -> Result<Option<T>, E> {
         let mut done = HashSet::new();
+        // The pack that held the last object, if open, is asked before the order is built: it
+        // goes first in that order, and most lookups end there.
+        let last = {
+            let mut packs = self.packs();
+            let n = packs.last;
+            if packs.by_name.contains(&n) {
+                packs.take_open(n).map(|pack| (n, pack))
+            } else {
+                None
+            }
+        };
+        if let Some((n, pack)) = last {
+            if let ControlFlow::Break(value) = f(n, &pack)? {
+                return Ok(Some(value));
+            }
+            done.insert(n);
+        }
         let mut listed_again = false;
         loop {
             let order: Vec<usize> = {

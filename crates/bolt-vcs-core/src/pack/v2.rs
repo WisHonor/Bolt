@@ -15,6 +15,8 @@ const HEAD_LEN: u64 = 1032;
 const ID_LEN: u64 = 32;
 /// Kind, offset, uncompressed size, stored size.
 const LINE_LEN: u64 = 25;
+/// The most bytes of IDs a lookup reads in one go: 128 IDs.
+const SHORT_RANGE: u64 = 4096;
 
 /// How many bytes the index of `count` objects takes.
 pub(super) fn index_len(count: u64) -> u64 {
@@ -156,7 +158,8 @@ impl Index {
         (b.checked_sub(1).map_or(0, at), at(b))
     }
 
-    /// The line of `id`, by a binary search of the IDs in its fan-out range.
+    /// The line of `id`, by a binary search of the IDs in its fan-out range. Once the range left
+    /// is short it is read in one go, and the search goes on in memory, probing the same IDs.
     pub(super) fn find(
         &self,
         file: &File,
@@ -164,9 +167,29 @@ impl Index {
         id: &Id,
     ) -> Result<Option<IndexEntry>, PackError> {
         let (mut lo, mut hi) = self.range(id.0[0]);
+        let mut short = [0u8; SHORT_RANGE as usize];
+        let mut short_from = None;
         while lo < hi {
+            if short_from.is_none() && hi.saturating_sub(lo) <= SHORT_RANGE / ID_LEN {
+                let len = hi.saturating_sub(lo).saturating_mul(ID_LEN);
+                if let Some(ids) = short.get_mut(..len as usize) {
+                    let (pos, end) = (self.id_pos(lo), self.id_pos(hi));
+                    Section { file, pos, end }.read_exact(ids)?;
+                    short_from = Some(lo);
+                }
+            }
             let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
-            let at = Id(read_at(file, self.id_pos(mid))?);
+            let held = short_from.and_then(|from| {
+                let at = mid.saturating_sub(from).saturating_mul(ID_LEN) as usize;
+                short
+                    .get(at..at.saturating_add(ID_LEN as usize))?
+                    .try_into()
+                    .ok()
+            });
+            let at = Id(match held {
+                Some(at) => at,
+                None => read_at(file, self.id_pos(mid))?,
+            });
             match at.cmp(id) {
                 Ordering::Less => lo = mid.saturating_add(1),
                 Ordering::Greater => hi = mid,
@@ -293,5 +316,37 @@ impl Iterator for Lines<'_> {
         let read = self.read_next();
         self.failed = read.is_err();
         Some(read)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+    use super::super::{PackReader, PackWriter, open_files};
+
+    #[test]
+    fn a_lookup_reads_a_short_range_once() {
+        let root = tempfile::tempdir().unwrap();
+        let (tmp, packs) = (root.path().join("tmp"), root.path().join("packs"));
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::create_dir(&packs).unwrap();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let ids: Vec<_> = (0u32..5000)
+            .map(|i| w.add_content(&i.to_le_bytes()).unwrap())
+            .collect();
+        let pack = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
+        for id in &ids {
+            let before = open_files::reads();
+            assert_eq!(pack.find(id).unwrap().unwrap().id, *id);
+            let reads = open_files::reads() - before;
+            assert!(reads <= 3, "{id} took {reads} reads");
+        }
+        let mut absent = ids[0];
+        absent.0[31] ^= 1;
+        assert!(pack.find(&absent).unwrap().is_none());
     }
 }

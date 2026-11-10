@@ -7,6 +7,7 @@ use crate::id::{ContentHasher, Flavor, Id, hash_content, hash_record};
 use crate::safe_fs;
 use crate::text::escape;
 use bolt_platform::dir::Dir;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -47,6 +48,8 @@ const SAMPLE_LEN: u64 = 64 << 10;
 const ZSTD_MAX_FRAME_HEADER: u64 = 18;
 const NO_COMPRESSION: u8 = 0;
 const ZSTD: u8 = 1;
+/// An entry this small is read whole in one read rather than streamed.
+const ONE_READ: u64 = 1 << 20;
 
 /// What an object in a pack is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -866,12 +869,18 @@ impl PackReader {
             .kind
             .flavor()
             .ok_or_else(|| misuse("read_record cannot read content"))?;
-        let mut out = Vec::new();
-        out.try_reserve_exact(
-            usize::try_from(entry.uncompressed_size).map_err(|_| PackError::TooLarge)?,
-        )
-        .map_err(|_| PackError::OutOfMemory)?;
-        self.decode_into(entry, &mut out)?;
+        let out = match self.read_small(entry)? {
+            Some(out) => out,
+            None => {
+                let mut out = Vec::new();
+                out.try_reserve_exact(
+                    usize::try_from(entry.uncompressed_size).map_err(|_| PackError::TooLarge)?,
+                )
+                .map_err(|_| PackError::OutOfMemory)?;
+                self.decode_into(entry, &mut out)?;
+                out
+            }
+        };
         if hash_record(flavor, &out) != entry.id {
             return Err(PackError::FingerprintMismatch { id: entry.id });
         }
@@ -883,6 +892,16 @@ impl PackReader {
     pub fn copy_content(&self, entry: &IndexEntry, out: &mut dyn Write) -> Result<(), PackError> {
         if entry.kind != ObjectKind::Content {
             return Err(misuse("copy_content can only read content"));
+        }
+        // Only content small once uncompressed too is held whole.
+        if entry.uncompressed_size <= ONE_READ
+            && let Some(bytes) = self.read_small(entry)?
+        {
+            if hash_content(&bytes) != entry.id {
+                return Err(PackError::FingerprintMismatch { id: entry.id });
+            }
+            out.write_all(&bytes)?;
+            return Ok(());
         }
         let mut hashing = HashingWriter {
             inner: out,
@@ -970,7 +989,21 @@ impl PackReader {
     /// Checks the entry's header against `entry`, and returns its compression and stored bytes.
     fn stored(&self, entry: &IndexEntry) -> Result<(u8, Section<'_>), PackError> {
         let header = read_vec(&self.file, entry.offset, ENTRY_HEADER_LEN)?;
-        let mut r = Reader::new(&header);
+        let compression = self.check_header(entry, &header)?;
+        let data_start = entry.offset + ENTRY_HEADER_LEN;
+        let data = Section {
+            file: &self.file,
+            pos: data_start,
+            end: data_start
+                .checked_add(entry.stored_size)
+                .ok_or_else(|| self.corrupt("an entry runs past the end of the file"))?,
+        };
+        Ok((compression, data))
+    }
+
+    /// Checks an entry's header against `entry`, and returns its compression.
+    fn check_header(&self, entry: &IndexEntry, header: &[u8]) -> Result<u8, PackError> {
+        let mut r = Reader::new(header);
         let fields = (r.u8(), r.id(), r.u64(), r.u64(), r.u8());
         let (Ok(kind), Ok(id), Ok(size), Ok(stored), Ok(compression)) = fields else {
             return Err(self.corrupt("an entry header is cut short"));
@@ -982,15 +1015,71 @@ impl PackReader {
         {
             return Err(self.corrupt(format!("the header of {id} does not match the index")));
         }
-        let data_start = entry.offset + ENTRY_HEADER_LEN;
-        let data = Section {
+        Ok(compression)
+    }
+
+    /// A small entry's bytes, from one read of its header and stored bytes and one call to zstd
+    /// into room for exactly its size. `None` when anything is off, or it isn't small: the
+    /// streamed path then reads it again and tells what.
+    fn read_small(&self, entry: &IndexEntry) -> Result<Option<Vec<u8>>, PackError> {
+        if entry.stored_size > ONE_READ {
+            return Ok(None);
+        }
+        let mut whole = Vec::new();
+        let len = ENTRY_HEADER_LEN + entry.stored_size;
+        whole
+            .try_reserve_exact(len as usize)
+            .map_err(|_| PackError::OutOfMemory)?;
+        whole.resize(len as usize, 0);
+        let mut section = Section {
             file: &self.file,
-            pos: data_start,
-            end: data_start
-                .checked_add(stored)
-                .ok_or_else(|| self.corrupt("an entry runs past the end of the file"))?,
+            pos: entry.offset,
+            end: entry.offset.saturating_add(len),
         };
-        Ok((compression, data))
+        if section.read_exact(&mut whole).is_err() {
+            return Ok(None);
+        }
+        let (header, data) = whole.split_at(ENTRY_HEADER_LEN as usize);
+        let Ok(compression) = self.check_header(entry, header) else {
+            return Ok(None);
+        };
+        let size = entry.uncompressed_size;
+        match compression {
+            NO_COMPRESSION if entry.stored_size == size => {
+                whole.drain(..ENTRY_HEADER_LEN as usize);
+                Ok(Some(whole))
+            }
+            ZSTD => {
+                let frame_header = &data[..data.len().min(ZSTD_MAX_FRAME_HEADER as usize)];
+                let stated = zstd::zstd_safe::get_frame_content_size(frame_header);
+                if !stated.is_ok_and(|n| n.is_none_or(|n| n == size)) {
+                    return Ok(None);
+                }
+                let Ok(size) = usize::try_from(size) else {
+                    return Ok(None);
+                };
+                let mut out = Vec::new();
+                out.try_reserve_exact(size)
+                    .map_err(|_| PackError::OutOfMemory)?;
+                let decoded = DECOMPRESSOR
+                    .try_with(|d| -> Result<bool, PackError> {
+                        let Ok(mut d) = d.try_borrow_mut() else {
+                            return Ok(false);
+                        };
+                        if d.is_none() {
+                            // Making one fails only when memory runs out.
+                            let made = zstd::bulk::Decompressor::new()
+                                .map_err(|_| PackError::OutOfMemory)?;
+                            *d = Some(made);
+                        }
+                        Ok(d.as_mut()
+                            .is_some_and(|d| d.decompress_to_buffer(data, &mut out).is_ok()))
+                    })
+                    .unwrap_or(Ok(false))?;
+                Ok((decoded && out.len() == size).then_some(out))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Checks the entry's header against `entry`, then writes its uncompressed bytes to `out`,
@@ -1033,8 +1122,8 @@ impl PackReader {
     }
 }
 
-/// How many packs this thread has opened, and how many it held open at once: tests of the store's
-/// limit on open files read them.
+/// How many packs this thread has opened, how many it held open at once, and how many reads it
+/// made of them: tests of the store's limit on open files and of reading read them.
 #[cfg(test)]
 pub(crate) mod open_files {
     use std::cell::Cell;
@@ -1044,6 +1133,16 @@ pub(crate) mod open_files {
         static OPENED: Cell<usize> = const { Cell::new(0) };
         static OPEN: Cell<usize> = const { Cell::new(0) };
         static MOST: Cell<usize> = const { Cell::new(0) };
+        static READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn read() {
+        READS.set(READS.get() + 1);
+    }
+
+    /// How many reads of a pack file this thread has made.
+    pub(crate) fn reads() -> usize {
+        READS.get()
     }
 
     pub(super) fn opened() {
@@ -1097,6 +1196,12 @@ impl Drop for PackReader {
             count.closed();
         }
     }
+}
+
+thread_local! {
+    // Kept, so reading many small entries doesn't make a decompressor for each.
+    static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        const { RefCell::new(None) };
 }
 
 /// zstd tells its errors apart only by their text.
@@ -1306,6 +1411,8 @@ impl Read for Section<'_> {
         if want == 0 {
             return Ok(0);
         }
+        #[cfg(test)]
+        open_files::read();
         let n = safe_fs::read_at(self.file, &mut buf[..want], self.pos)?;
         self.pos += n as u64;
         Ok(n)
@@ -1856,6 +1963,140 @@ mod tests {
             let err = r.copy_content(&entries(&r)[0], &mut out).unwrap_err();
             assert!(matches!(err, PackError::Corrupt { .. }), "{err:?}");
             assert!(out.len() <= 11, "produced {} bytes", out.len());
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Damage {
+        Header,
+        FrameSize,
+        MoreBytes,
+        FewerBytes,
+        CutShort,
+        Fingerprint { zstd: bool },
+    }
+
+    /// Reading an entry of `len` random bytes stored as `kind` with `damage` done to it, told
+    /// without its ID or the pack's path.
+    fn read_damaged(kind: ObjectKind, len: usize, damage: Damage) -> String {
+        let (_root, tmp, packs) = dirs();
+        let mut data = vec![0u8; len];
+        getrandom::fill(&mut data).unwrap();
+        let id_of = |bytes: &[u8]| {
+            kind.flavor()
+                .map_or(hash_content(bytes), |f| hash_record(f, bytes))
+        };
+        let unsized_frame = |bytes: &[u8]| {
+            let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+            enc.include_contentsize(false).unwrap();
+            std::io::Write::write_all(&mut enc, bytes).unwrap();
+            enc.finish().unwrap()
+        };
+        let mut longer = data.clone();
+        longer.push(7);
+        let mut id = id_of(&data);
+        let (zstd, stored) = match damage {
+            Damage::Header => (false, data.clone()),
+            Damage::FrameSize => (true, zstd::bulk::compress(&longer, 3).unwrap()),
+            Damage::MoreBytes => (true, unsized_frame(&longer)),
+            Damage::FewerBytes => (true, unsized_frame(&data[..len - 1])),
+            Damage::CutShort => {
+                let frame = zstd::bulk::compress(&data, 3).unwrap();
+                (true, frame[..frame.len() - 100].to_vec())
+            }
+            Damage::Fingerprint { zstd } => {
+                id.0[0] ^= 1;
+                let stored = if zstd {
+                    zstd::bulk::compress(&data, 3).unwrap()
+                } else {
+                    data.clone()
+                };
+                (zstd, stored)
+            }
+        };
+        let p = Prepared {
+            id,
+            size: len as u64,
+            zstd,
+            stored,
+        };
+        let mut w = PackWriter::create(&tmp).unwrap();
+        w.add_prepared(kind, &p).unwrap();
+        let path = w.finish(&packs).unwrap().unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let entry = entries(&PackReader::open(&path).unwrap())[0];
+        if let Damage::Header = damage {
+            // The low byte of the uncompressed size.
+            bytes[entry.offset as usize + 33] ^= 1;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+        let r = PackReader::open(&path).unwrap();
+        let shown = match read_any(&r, &entry) {
+            Ok(_) => "read".to_string(),
+            Err(PackError::Corrupt { reason, .. }) => format!("damaged: {reason}"),
+            Err(e) => e.to_string(),
+        };
+        shown.replace(&id.to_string(), "<id>")
+    }
+
+    #[test]
+    fn a_small_entry_is_refused_as_a_streamed_one_is() {
+        let invalid = "damaged: the zstd data of <id> is invalid: ";
+        let cases = [
+            (
+                Damage::Header,
+                "damaged: the header of <id> does not match the index",
+            ),
+            (
+                Damage::FrameSize,
+                "damaged: the zstd frame of <id> has the wrong size",
+            ),
+            (
+                Damage::MoreBytes,
+                "damaged: <id> does not have its recorded size",
+            ),
+            (
+                Damage::FewerBytes,
+                "damaged: <id> does not have its recorded size",
+            ),
+            (Damage::CutShort, invalid),
+            (
+                Damage::Fingerprint { zstd: false },
+                "object <id> does not match its fingerprint",
+            ),
+            (
+                Damage::Fingerprint { zstd: true },
+                "object <id> does not match its fingerprint",
+            ),
+        ];
+        for kind in [ObjectKind::Content, ObjectKind::FolderListing] {
+            for (damage, expected) in cases {
+                let small = read_damaged(kind, ONE_READ as usize - 4096, damage);
+                let streamed = read_damaged(kind, ONE_READ as usize + 4096, damage);
+                assert_eq!(small, streamed, "{kind:?} {damage:?}");
+                assert!(small.starts_with(expected), "{kind:?} {damage:?}: {small}");
+                if expected != invalid {
+                    assert_eq!(small, expected, "{kind:?} {damage:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_small_entry_is_read_in_one_read() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let listing = one_file_listing().encode();
+        w.add_record(ObjectKind::FolderListing, &listing).unwrap();
+        let mut random = vec![0u8; 1000];
+        getrandom::fill(&mut random).unwrap();
+        w.add_content(&random).unwrap();
+        w.add_content(&b"squeezes well ".repeat(1000)).unwrap();
+        let r = PackReader::open(&w.finish(&packs).unwrap().unwrap()).unwrap();
+        for e in entries(&r) {
+            let before = open_files::reads();
+            read_any(&r, &e).unwrap();
+            assert_eq!(open_files::reads() - before, 1, "{e:?}");
         }
     }
 
