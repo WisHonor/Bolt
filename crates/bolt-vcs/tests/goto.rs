@@ -662,3 +662,46 @@ fn a_placeholder_you_changed_is_unsaved_work() {
     );
     assert_eq!(std::fs::read(env.root().join("out")).unwrap(), b"mine\n");
 }
+
+/// A goto to a save whose files' pack is gone stops before it writes anything: no journal is left
+/// to finish or delete, and the folder is as it was.
+#[test]
+fn a_goto_that_needs_a_pack_that_is_gone_stops_before_its_journal() {
+    let env = Env::empty();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let packs = |env: &Env| -> Vec<std::path::PathBuf> {
+        let folder = env.root().join(".bolt/store/packs");
+        std::fs::read_dir(folder)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    };
+    let started = packs(&env);
+    support::write(&env, "f.txt", "x\n");
+    support::write(&env, "g.txt", "a\n");
+    env.bolt().args(["save", "One"]).assert().success();
+    let first: Vec<_> = packs(&env)
+        .into_iter()
+        .filter(|p| !started.contains(p))
+        .collect();
+    support::write(&env, "g.txt", "b\n");
+    env.bolt().args(["save", "Two"]).assert().success();
+    let two = support::main_tip(&env).to_hex();
+    support::write(&env, "f.txt", "z\n");
+    env.bolt().args(["save", "Three"]).assert().success();
+    for pack in first {
+        std::fs::remove_file(pack).unwrap();
+    }
+    let out = env.bolt().args(["goto", &two]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("is not in the store"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!env.root().join(".bolt/state/journal").exists());
+    assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
+}

@@ -110,6 +110,13 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
         Expect::Refused(why) => {
             assert_eq!(code, Some(1), "{doc}");
             refused(&doc, &p, stopped, why);
+            // The damage stops every later try too, so the hint names the way on.
+            let hint = doc["error"]["hint"].as_str().unwrap();
+            assert!(
+                hint.contains("delete .bolt/state/journal: your files stay as they are"),
+                "{hint}"
+            );
+            assert!(case.root().join(".bolt/state/journal").exists());
             assert!(project_entries(&case.env).is_empty());
         }
         Expect::Good { named } => {
