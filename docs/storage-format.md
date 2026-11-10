@@ -328,21 +328,22 @@ bytes[32] seal
 
 An entry is trusted only if it isn't racy, the file's kind, size, modified time, change time and both numbers are the ones recorded ([decision 069](decisions/069-the-file-cache-matches-the-change-time.md): a file written over in place keeps its number but not its change time), and the file's number isn't 0, which some network and FUSE drives give every file ([decision 067](decisions/067-the-file-cache-matches-file-identity.md)): a file moved or copied onto the path is another file, so it is read. At the start of a scan Bolt writes a file in `tmp/`, takes its modified time as "now" and removes it, so the drive's own clock and resolution count. When the cache is written, an entry whose modified time isn't at least 2 seconds older than that "now" (FAT's resolution) is marked racy, and stays racy until the file is read again ([decision 053](decisions/053-file-state-cache.md)). The file is replaced whole, through `tmp/` and a rename, and only when what a scan would write differs from what it read: an entry added, dropped or changed, or one that becomes racy or stops being racy against the scan's "now". Neither the file nor `cache/` is flushed to the disk: a cache a crash left empty, cut short or mixed fails its seal and is rebuilt, and an older one that survived whole is still only trusted file by file ([decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md)). The file that gives "now" is still flushed before its time is read, and the throwaway file that tests how the drive treats names is renamed without a flush.
 
-**`cache/change-ids`** (not normative) lists the change IDs of each line's saves, so that a save and `history` can shorten change IDs (§5) without reading the line. Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
+**`cache/change-ids`** (not normative) lists each line's saves in order, each with its change ID, so that Bolt can shorten a change ID (§5), list what `undo` can take back, and find a save by its change ID or by its whole ID without reading the line from the store ([decision 105](decisions/105-the-change-id-cache-keeps-each-lines-saves-in-order.md)). Sealed as above; at most 256 MiB with the seal (a bigger one is not written).
 
 ```text
 bytes[8] "BOLTCHID"
-u8       version = 1
+u8       version = 2 (a cache of another version is ignored and rebuilt)
 varint   line count (at most 100,000)
-lines, sorted by name in byte order, no name twice:
+lines, sorted by name in byte order, no name twice; the empty name is the project's own position when it is at a save rather than on a line:
   string   name (at most 255 bytes)
-  id       the line's newest save when its IDs were read
-  varint   change-ID count (refused if more than the bytes left hold)
-  change-id × count   the change IDs of the saves from that save back along first parents, sorted, repeats kept
+  varint   save count (at least 1; refused if more than the bytes left hold at 48 bytes each)
+  save × count, from the newest back along first parents:
+    id         the save
+    change-id  its change ID
 bytes[32] seal
 ```
 
-A line's IDs are used only for a line whose newest save is the one recorded, or one whose first parents lead back to it: Bolt reads the saves from the newest back to the recorded one and adds their IDs. If the walk reaches the line's first save without meeting it (an undo moved the line back, say), the IDs read replace the line's. Lines the current diary entry doesn't have are dropped when the file is next written. Commands write it through `tmp/` and a rename, without the lock and without a flush, like `cache/files`; a write that fails is just skipped.
+A line's list is used when its first save is the line's newest save. If the line has moved forward, Bolt reads the saves from the newest back to the list's first and puts them in front. If it has moved back to a save the list holds (an undo, say), the saves in front of that one are dropped, with no read. Otherwise the line is read once and its list replaced. The saves back from a save the project is at are the tail of any list that holds that save; only when none does are they read and kept under the empty name. A list is a fact about saves, which never change, so one that starts at the right save can't be stale; it never stands in for a save's contents, which are read, and checked, whenever a command goes to a save. Lines the current diary entry doesn't have are dropped when the file is next written. Commands write it through `tmp/` and a rename, without the lock and without a flush, like `cache/files`; a write that fails is just skipped.
 
 ## 11. Pack files
 
