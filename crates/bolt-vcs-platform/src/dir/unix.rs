@@ -102,6 +102,10 @@ pub(super) fn file_meta(file: &File) -> io::Result<EntryMeta> {
     Ok(meta(&rustix::fs::fstat(file)?))
 }
 
+pub(super) fn own_meta(dir: &OwnedFd) -> io::Result<EntryMeta> {
+    Ok(meta(&rustix::fs::fstat(dir)?))
+}
+
 pub(super) fn open_file(dir: &OwnedFd, name: &OsStr) -> io::Result<File> {
     let fd =
         rustix::fs::openat(dir, name, TO_READ, Mode::empty()).map_err(|e| refusal(e, dir, name))?;

@@ -138,6 +138,15 @@ pub fn read_at(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
     }
 }
 
+/// The drive and file number of the folder at `path`, from one open of it that doesn't follow its
+/// last name: a link, junction or other reparse point there is refused
+/// (`bolt_platform::dir::is_link_refusal`). Links before the last name are followed. A trailing
+/// separator is dropped first, since on Unix it would make the system follow a link.
+pub fn folder_id(path: &Path) -> io::Result<(u64, u128)> {
+    let tidied: std::path::PathBuf = path.components().collect();
+    Ok(Dir::open_top(&tidied)?.own_meta()?.file_id)
+}
+
 /// Checks that `path` is a real folder: not a link, junction or other reparse point, and not a
 /// file. `NotFound` comes back unchanged.
 pub fn check_real_dir(path: &Path) -> io::Result<()> {

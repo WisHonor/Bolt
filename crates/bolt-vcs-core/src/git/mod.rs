@@ -306,11 +306,15 @@ fn owner_message(path: &Path, refusal: &RepoError) -> String {
             "Bolt couldn't find out who owns the Git repository at {git}: {}",
             escape(&source.to_string(), false)
         ),
-        RepoError::SafeFolderIsLink { entry, refusal } => {
+        RepoError::SafeFolderPassedOver {
+            entry,
+            why,
+            refusal,
+        } => {
             format!(
                 "{} {}",
                 owner_message(path, refusal),
-                repo::passed_over(entry)
+                repo::passed_over(entry, why)
             )
         }
         // The user's settings, which hold safe-folders, can't be read.

@@ -456,7 +456,7 @@ fn begun(root: &Path, e: RepoError) -> ImportError {
         | RepoError::AdminsNotElevated { .. }
         | RepoError::OwnerUnknown { .. }
         | RepoError::OwnerLookupFailed { .. }
-        | RepoError::SafeFolderIsLink { .. }
+        | RepoError::SafeFolderPassedOver { .. }
         | RepoError::Config(_) => starting(e),
         other => after_begin(root, other.into()),
     }

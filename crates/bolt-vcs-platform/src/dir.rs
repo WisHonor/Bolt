@@ -110,6 +110,12 @@ impl Dir {
         sys::metadata(&self.handle, name)
     }
 
+    /// This folder's own details, read through the handle held, so they are of the folder opened
+    /// whatever its path names by now.
+    pub fn own_meta(&self) -> io::Result<EntryMeta> {
+        sys::own_meta(&self.handle)
+    }
+
     /// The details of an open file, to check that it is the entry `metadata` described.
     pub fn file_meta(file: &File) -> io::Result<EntryMeta> {
         sys::file_meta(file)

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, TryLockError};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -73,10 +73,11 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     OwnerLookupFailed { path: PathBuf, source: io::Error },
-    /// `refusal`, though safe-folders lists `entry`: a link, which never counts.
-    #[error("{refusal} {}", passed_over(entry))]
-    SafeFolderIsLink {
+    /// `refusal`, though safe-folders lists `entry`, which never counts for `why`.
+    #[error("{refusal} {}", passed_over(entry, why))]
+    SafeFolderPassedOver {
         entry: PathBuf,
+        why: &'static str,
         refusal: Box<RepoError>,
     },
     #[error(
@@ -199,7 +200,7 @@ impl RepoError {
             | RepoError::OwnerUnknown { path }
             | RepoError::OwnerLookupFailed { path, .. }
             | RepoError::AdminsNotElevated { path } => Some(path.as_path()),
-            RepoError::SafeFolderIsLink { refusal, .. } => refusal.trust_path(),
+            RepoError::SafeFolderPassedOver { refusal, .. } => refusal.trust_path(),
             _ => None,
         }
     }
@@ -207,7 +208,7 @@ impl RepoError {
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
-        if let RepoError::SafeFolderIsLink { refusal, .. } = self {
+        if let RepoError::SafeFolderPassedOver { refusal, .. } = self {
             return refusal.hint();
         }
         if let Some(path) = self.trust_path() {
@@ -592,35 +593,51 @@ pub(crate) fn owner_allows(
     let Some(refusal) = refusal else {
         return Ok(());
     };
-    // Its last part only: a link above it, such as macOS's `/var`, is followed as usual.
-    let is_link = |folder: &Path| {
-        let tidied: PathBuf = folder.components().collect();
-        fs::symlink_metadata(tidied).is_ok_and(|meta| meta.is_symlink())
-    };
+    // Each entry is judged from one open of it, by the identity of the folder that open holds, so
+    // swapping it for a link between two looks can't win. A link above its last part, such as
+    // macOS's `/var`, is followed as usual.
+    let project = safe_fs::folder_id(root).ok();
     let mut passed_over = None;
-    for folder in safe
-        .iter()
-        .filter(|folder| config::same_folder(folder, root))
-    {
-        if !is_link(folder) {
-            return Ok(());
+    for folder in safe {
+        let why = if folder.components().any(|c| c == Component::ParentDir) {
+            DOT_DOT
+        } else {
+            match safe_fs::folder_id(folder) {
+                Ok(id) if Some(id) == project => return Ok(()),
+                Err(e) if bolt_platform::dir::is_link_refusal(&e) => A_LINK,
+                _ => continue,
+            }
+        };
+        // Named only when it leads to the project, so the refusal says why that didn't count.
+        if passed_over.is_none() && config::same_folder(folder, root) {
+            passed_over = Some((folder.clone(), why));
         }
-        passed_over.get_or_insert_with(|| folder.clone());
     }
     Err(match passed_over {
-        Some(entry) => RepoError::SafeFolderIsLink {
+        Some((entry, why)) => RepoError::SafeFolderPassedOver {
             entry,
+            why,
             refusal: Box::new(refusal),
         },
         None => refusal,
     })
 }
 
-/// What a refusal adds when safe-folders lists the folder only through `entry`, a link.
-pub(crate) fn passed_over(entry: &Path) -> String {
+/// Why an entry with `..` in it never counts.
+const DOT_DOT: &str = "it has `..` in it, which the system resolves through any link before it";
+
+/// Why a link entry never counts: what the check refuses there.
+const A_LINK: &str = if cfg!(windows) {
+    "it is a link, a junction, a mounted volume or another reparse point"
+} else {
+    "it is a link"
+};
+
+/// What a refusal adds when safe-folders lists the folder only through `entry`, passed over for
+/// `why`.
+pub(crate) fn passed_over(entry: &Path, why: &str) -> String {
     format!(
-        "Its safe-folders entry {} doesn't count: it is a link (or a junction), and Bolt never \
-         trusts a folder through one.",
+        "Its safe-folders entry {} doesn't count: {why}, and Bolt never trusts a folder that way.",
         escape(&entry.display().to_string(), false)
     )
 }
@@ -2620,13 +2637,13 @@ mod tests {
                 [Ok(Owner::User), failed()],
             ]
         };
-        // Listing the project folder trusts both, as Git's safe.directory does, however it is
-        // written; a folder above it or beside it trusts nothing.
+        // Listing the project folder trusts both, as Git's safe.directory does; written with `..`
+        // it trusts nothing, and nor does a folder above it or beside it.
         for owners in refused() {
             assert!(allows(owners, std::slice::from_ref(&root)).is_ok());
         }
         for owners in refused() {
-            assert!(allows(owners, &[sibling.join("..").join("project")]).is_ok());
+            assert!(allows(owners, &[sibling.join("..").join("project")]).is_err());
         }
         for owners in refused() {
             assert!(allows(owners, &[dir.path().to_owned(), sibling.clone()]).is_err());
@@ -3590,8 +3607,9 @@ mod tests {
                     path: PathBuf::from(HOSTILE),
                 }),
             },
-            RepoError::SafeFolderIsLink {
+            RepoError::SafeFolderPassedOver {
                 entry: PathBuf::from(HOSTILE),
+                why: A_LINK,
                 refusal: Box::new(RepoError::NotYours {
                     path: PathBuf::from(HOSTILE),
                 }),
@@ -3619,7 +3637,7 @@ mod tests {
                     | RepoError::AdminsNotElevated { .. }
                     | RepoError::OwnerLookupFailed { .. }
                     | RepoError::StartStopped { .. }
-                    | RepoError::SafeFolderIsLink { .. }
+                    | RepoError::SafeFolderPassedOver { .. }
             ) {
                 assert_hostile_text_escaped(&e.hint().unwrap());
             }
@@ -3893,38 +3911,75 @@ mod tests {
         assert!(crate::test_support::symlink(target, link));
     }
 
+    /// `folder_link`, for a test that races it: a link that can't be made is left unmade.
+    fn try_folder_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        let _ = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(target, link);
+    }
+
+    /// Fails unless `entry` is passed over for `root`, whose owner isn't the user, saying `why`.
+    fn passed_over_for(root: &Path, entry: &Path, why: &str) {
+        let owners = [Ok(Owner::Other), Ok(Owner::User)];
+        let Err(e) = owner_allows(owners, root, &[entry.to_owned()]) else {
+            panic!("{} counted", entry.display());
+        };
+        match &e {
+            RepoError::SafeFolderPassedOver {
+                entry: named,
+                refusal,
+                ..
+            } => {
+                assert_eq!(named, entry);
+                assert!(matches!(**refusal, RepoError::NotYours { .. }), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let said = e.to_string();
+        assert!(
+            said.starts_with("The project at ")
+                && said.contains("belongs to another user account. Its safe-folders entry ")
+                && said.contains(&format!("doesn't count: {why}")),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("safe-folders"), "{e:?}");
+    }
+
     #[test]
     fn a_safe_folders_entry_that_is_a_link_does_not_count() {
         let dir = tempdir();
         let (root, link) = (dir.path().join("project"), dir.path().join("trusted"));
         std::fs::create_dir(&root).unwrap();
         folder_link(&link, &root);
-        let owners = || [Ok(Owner::Other), Ok(Owner::User)];
         let slashed = PathBuf::from(format!("{}{}", link.display(), std::path::MAIN_SEPARATOR));
-        for entry in [link.clone(), slashed] {
-            let Err(e) = owner_allows(owners(), &root, std::slice::from_ref(&entry)) else {
-                panic!("{} counted", entry.display());
-            };
-            match &e {
-                RepoError::SafeFolderIsLink {
-                    entry: named,
-                    refusal,
-                } => {
-                    assert_eq!(*named, entry);
-                    assert!(matches!(**refusal, RepoError::NotYours { .. }), "{e:?}");
-                }
-                other => panic!("{other:?}"),
-            }
-            let said = e.to_string();
-            assert!(
-                said.starts_with("The project at ")
-                    && said.contains("belongs to another user account.")
-                    && said.contains("trusted")
-                    && said.contains("is a link"),
-                "{said}"
-            );
-            assert!(e.hint().unwrap().contains("safe-folders"), "{e:?}");
+        for entry in [&link, &slashed] {
+            passed_over_for(&root, entry, A_LINK);
         }
+        // A symbolic link to a folder, where this account may make one.
+        #[cfg(windows)]
+        {
+            let symbolic = dir.path().join("symbolic");
+            if crate::test_support::symlink(&root, &symbolic) {
+                passed_over_for(&root, &symbolic, A_LINK);
+            }
+        }
+    }
+
+    /// `..` is resolved by the system, through any link before it, so it never counts.
+    #[test]
+    fn a_safe_folders_entry_with_dot_dot_does_not_count() {
+        let dir = tempdir();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let why = "it has `..` in it";
+        passed_over_for(&root, &root.join("sub").join(".."), why);
     }
 
     #[test]
@@ -3938,5 +3993,44 @@ mod tests {
         let above = dir.path().join("above");
         folder_link(&above, dir.path());
         assert!(owner_allows(owners(), &root, &[above.join("project")]).is_ok());
+        // Another real folder doesn't count for it.
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(owner_allows(owners(), &root, &[other]).is_err());
+    }
+
+    /// The trusted folder swapped back and forth between a real folder and a link to someone
+    /// else's project: whatever is there when Bolt looks, that project is never trusted.
+    #[test]
+    fn a_safe_folders_entry_swapped_for_a_link_never_trusts_the_link_target() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempdir();
+        let (theirs, entry) = (dir.path().join("theirs"), dir.path().join("trusted"));
+        std::fs::create_dir(&theirs).unwrap();
+        std::fs::create_dir(&entry).unwrap();
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (theirs, entry, done) = (theirs.clone(), entry.clone(), done.clone());
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    // Errors are fine: a swap that fails leaves one or the other there.
+                    let _ = std::fs::remove_dir(&entry);
+                    try_folder_link(&entry, &theirs);
+                    let _ = std::fs::remove_dir(&entry);
+                    let _ = std::fs::remove_file(&entry);
+                    let _ = std::fs::create_dir(&entry);
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let owners = || [Ok(Owner::Other), Ok(Owner::User)];
+        for _ in 0..100_000 {
+            let checked = owner_allows(owners(), &theirs, std::slice::from_ref(&entry));
+            assert!(checked.is_err(), "trusted through a swapped link");
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        swapper.join().unwrap();
     }
 }
