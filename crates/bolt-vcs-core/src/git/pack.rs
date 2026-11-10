@@ -4,7 +4,7 @@
 //! object in it is.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 
 use super::id::Hasher;
 use super::odb::{Input, MAX_IN_MEMORY_OBJECT};
-use super::{GitError, GitId, HashKind, ObjectType, Refusal, broken, read_error, real_dir, shrank};
+use super::{
+    GitError, GitId, HashKind, ObjectType, Refusal, broken, out_of_memory, read_error, real_dir,
+    shrank,
+};
 use crate::safe_fs;
 
 /// Entries `objects/pack` may hold, of any kind: room for tens of thousands of packs.
@@ -55,6 +58,36 @@ pub(super) struct Pack {
     in_order: Vec<u32>,
     /// One bit an entry, in that order: whether it has been inflated yet.
     inflated: Vec<Cell<u64>>,
+    /// What each entry is built on, read the first time a delta family is rebuilt from the pack.
+    bases: OnceCell<Bases>,
+}
+
+/// What each entry of a pack is built on, by its number: its place in pack order. Read from every
+/// entry's header once, 8 bytes an entry at most.
+pub(super) struct Bases {
+    /// The number of each entry's base, or `NO_BASE` for one stored whole, one whose header is
+    /// damaged, and one whose base the index doesn't list.
+    base: Vec<u32>,
+    /// The numbers of the entries that have a base, by their base's number, then their own.
+    built_on: Vec<u32>,
+}
+
+const NO_BASE: u32 = u32::MAX;
+
+impl Bases {
+    /// The number of the entry `number` is built on, if it has one.
+    pub(super) fn base(&self, number: usize) -> Option<usize> {
+        let base = *self.base.get(number)?;
+        (base != NO_BASE).then_some(base as usize)
+    }
+
+    /// The numbers of the entries built on entry `number`, in pack order.
+    pub(super) fn built_on(&self, number: usize) -> &[u32] {
+        let base = |n: &u32| self.base(*n as usize).unwrap_or(usize::MAX);
+        let start = self.built_on.partition_point(|n| base(n) < number);
+        let end = self.built_on.partition_point(|n| base(n) <= number);
+        self.built_on.get(start..end).unwrap_or_default()
+    }
 }
 
 /// What a pack entry holds.
@@ -179,6 +212,7 @@ impl Pack {
             offsets: index.offsets,
             in_order,
             inflated,
+            bases: OnceCell::new(),
         };
         pack.check(&file, index.count, &index.pack_checksum)?;
         Ok(Some(pack))
@@ -187,13 +221,7 @@ impl Pack {
     /// Marks the entry at `at` as inflated, and says whether this is the first time. An offset
     /// the index doesn't list is never a first time.
     pub(super) fn first_inflation(&self, at: u64) -> bool {
-        let found = self.in_order.binary_search_by_key(&at, |&place| {
-            self.offsets
-                .get(place as usize)
-                .copied()
-                .unwrap_or(u64::MAX)
-        });
-        let Ok(number) = found else {
+        let Some(number) = self.number(at) else {
             return false;
         };
         let Some(word) = self.inflated.get(number / 64) else {
@@ -279,6 +307,78 @@ impl Pack {
     /// Where the entries end and the pack's checksum starts.
     pub(super) fn entries_end(&self) -> u64 {
         self.len.saturating_sub(self.hash.len() as u64)
+    }
+
+    /// The number of the entry at `at`, its place in pack order, if the index lists one there.
+    pub(super) fn number(&self, at: u64) -> Option<usize> {
+        let offset = |place: &u32| self.offsets.get(*place as usize).copied();
+        self.in_order
+            .binary_search_by_key(&at, |place| offset(place).unwrap_or(u64::MAX))
+            .ok()
+    }
+
+    /// Where entry `number` is, and the name the index gives it.
+    pub(super) fn listed(&self, number: usize) -> Option<(u64, GitId)> {
+        let place = *self.in_order.get(number)? as usize;
+        let len = self.hash.len();
+        let start = place.checked_mul(len)?;
+        let name = self.names.get(start..start.checked_add(len)?)?;
+        Some((*self.offsets.get(place)?, GitId::new(self.hash, name)))
+    }
+
+    /// The bytes the scan of the pack's entries holds, once it was made.
+    #[cfg(test)]
+    pub(super) fn scanned(&self) -> Option<usize> {
+        let bases = self.bases.get()?;
+        let numbers = bases
+            .base
+            .capacity()
+            .saturating_add(bases.built_on.capacity());
+        Some(numbers.saturating_mul(size_of::<u32>()))
+    }
+
+    /// What each entry is built on, read the first time it is asked for.
+    pub(super) fn bases(&self, file: &File) -> Result<&Bases, GitError> {
+        if let Some(bases) = self.bases.get() {
+            return Ok(bases);
+        }
+        let bases = self.scan(file)?;
+        Ok(self.bases.get_or_init(|| bases))
+    }
+
+    /// Reads every entry's header once, in pack order. An entry whose header is damaged, or whose
+    /// base the index doesn't list, gets no base: read alone, it is refused as before.
+    fn scan(&self, file: &File) -> Result<Bases, GitError> {
+        let mut base: Vec<u32> = Vec::new();
+        base.try_reserve_exact(self.in_order.len())
+            .map_err(|_| out_of_memory(&self.path))?;
+        for place in &self.in_order {
+            let at = self.offsets.get(*place as usize).copied().unwrap_or(0);
+            let on = match self.entry(file, at) {
+                Ok(entry) => match entry.kind {
+                    EntryKind::Whole(_) => None,
+                    EntryKind::OfsDelta(base) => Some(base),
+                    EntryKind::RefDelta(id) => self.find(&id),
+                },
+                Err(GitError::Broken { .. }) => None,
+                Err(e) => return Err(e),
+            };
+            let number = on.and_then(|at| self.number(at));
+            base.push(
+                number
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or(NO_BASE),
+            );
+        }
+        let has_base = |n: &u32| base.get(*n as usize).is_some_and(|b| *b != NO_BASE);
+        let numbers = 0..u32::try_from(base.len()).unwrap_or(u32::MAX);
+        let mut built_on: Vec<u32> = Vec::new();
+        built_on
+            .try_reserve_exact(numbers.clone().filter(has_base).count())
+            .map_err(|_| out_of_memory(&self.path))?;
+        built_on.extend(numbers.filter(has_base));
+        built_on.sort_unstable_by_key(|n| (base.get(*n as usize).copied(), *n));
+        Ok(Bases { base, built_on })
     }
 
     /// The header of the entry at `at`.
@@ -557,13 +657,6 @@ fn is_old_index(head: &[u8], len: u64, hash_len: u64) -> bool {
     })
 }
 
-fn out_of_memory(path: &Path) -> GitError {
-    GitError::Io {
-        path: path.to_owned(),
-        source: io::ErrorKind::OutOfMemory.into(),
-    }
-}
-
 /// An index read in order, a buffer at a time, hashing what it reads for the checksum at its
 /// end.
 struct Hashed<'p> {
@@ -824,6 +917,7 @@ mod tests {
             git: dir.path().join(".git"),
             hash: HashKind::Sha1,
             includes: false,
+            lfs_storage: None,
             objects: Default::default(),
         }
     }

@@ -20,7 +20,7 @@ use support::corpus::{
     sorted, strings,
 };
 use support::{
-    Env, add_listing, holding_bolt_spelling, listings, plant_save, text,
+    Env, add_listing, holding_bolt_spelling, listings, main_tip, noise, plant_save, text,
     with_bolt_spelling_under_git,
 };
 
@@ -34,15 +34,7 @@ impl Case {
 
     /// `bolt goto main --json`: its exit code, its document and what it printed to stderr.
     fn goto_main(&self) -> (Option<i32>, serde_json::Value, String) {
-        let out = self
-            .env
-            .bolt()
-            .args(["goto", "main", "--json"])
-            .output()
-            .unwrap();
-        let doc = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stdout)));
-        (out.status.code(), doc, text(&out.stderr))
+        self.run_json(&["goto", "main"])
     }
 }
 
@@ -682,7 +674,44 @@ fn modes_are_exactly_0644_and_0755_whatever_the_umask() {
     }
 }
 
-// No folder checked once and trusted after (gitoxide, 2026).
+// No file written in place, nor through a folder checked once and trusted after (Git LFS,
+// CVE-2025-26625; gitoxide, 2026).
+
+/// 1.5 MiB that look random, which a save cuts into chunks.
+fn big(seed: u64) -> Vec<u8> {
+    noise(seed, 3 << 19)
+}
+
+#[test]
+fn a_hard_link_at_a_written_path_keeps_the_other_names_file() {
+    let mut case = Case::new();
+    let (old, new) = (big(1), big(2));
+    case.plant(&[("big.bin", File, &old), ("small.txt", File, b"old")]);
+    let (code, doc, _) = case.run_json(&["goto", &main_tip(&case.env).to_hex()]);
+    assert_eq!(code, Some(0), "{doc}");
+    // Each file is now a hard link to one beside the project, holding what the save expects.
+    for (name, bytes) in [("big.bin", &old[..]), ("small.txt", b"old")] {
+        let theirs = case.outside.path().join(name);
+        std::fs::write(&theirs, bytes).unwrap();
+        std::fs::remove_file(case.root().join(name)).unwrap();
+        std::fs::hard_link(&theirs, case.root().join(name)).unwrap();
+    }
+    case.look_around();
+    case.plant(&[("big.bin", File, &new), ("small.txt", File, b"new")]);
+    let (code, doc, _) = case.goto_main();
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["written"], 2, "{doc}");
+    assert!(kinds(&doc).is_empty(), "{doc}");
+    assert_eq!(
+        project_entries(&case.env),
+        BTreeMap::from([
+            ("big.bin".into(), file(&new)),
+            ("small.txt".into(), file(b"new"))
+        ])
+    );
+    // The files beside the project, the links' other names, are as they were.
+    case.assert_nothing_escaped();
+}
 
 /// Makes `link` lead to the folder `target`: a symlink on Unix, a junction on Windows, which
 /// needs no rights.
@@ -694,11 +723,17 @@ fn folder_link(target: &Path, link: &Path) {
     support::junction(link, target);
 }
 
+/// A folder the switch made, put back as a link before it finishes, is checked again: nothing
+/// below it is written through the link, a file stored as chunks included.
 #[cfg(feature = "fault-injection")]
 #[test]
-fn a_folder_made_in_a_stopped_switch_is_checked_again_when_it_finishes() {
+fn a_link_above_a_written_file_is_never_followed() {
     let mut case = Case::new();
-    case.plant(&[("a/pwned", File, PAYLOAD), ("a/b/pwned", File, PAYLOAD)]);
+    case.plant(&[
+        ("a/pwned", File, PAYLOAD),
+        ("a/b/pwned", File, PAYLOAD),
+        ("a/big.bin", File, &big(1)),
+    ]);
     let out = case
         .env
         .bolt()

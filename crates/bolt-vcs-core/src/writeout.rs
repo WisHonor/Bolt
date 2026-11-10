@@ -5,11 +5,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
+use crate::chunks::{is_cut, is_too_long_to_cut};
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
@@ -17,16 +20,18 @@ use crate::filecache::FileCache;
 use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
 use crate::history::{current_save, tip_of};
 use crate::id::{ContentHasher, Id, hash_content};
+use crate::ingest::{self, IngestError, Ready};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::{MAX_PATH_BYTES, is_bolt_alias, is_git_alias, validate_path, writable_here};
-use crate::pack::{ObjectKind, PackError, PackSet};
+use crate::pack::{ObjectKind, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
-use crate::snapshot::{NAMED, SaveError, listed, read_folder, same_file};
+use crate::snapshot::{NAMED, SaveError, ingest_failed, listed, read_folder, same_file};
 use crate::store::{Store, StoreError};
 use crate::warning::{self, Warning};
+use crate::workers::{WINDOW, with_workers};
 
 /// A switch worked out, before anything changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -382,33 +387,137 @@ pub fn keep_safety_copies(
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let stored = HashMap::new();
     let mut saved = Tree::new(store, &stored, from_root, drive);
-    let mut disk = Folders::open(repo.root()).map_err(|e| unreadable("the project folder", e))?;
+    let top = Dir::open_top(repo.root()).map_err(|e| unreadable("the project folder", e))?;
+    let top = Arc::new(top);
+    // Looked up in turn, as each is reached, so a problem reading the save is that entry's.
+    let wanted = actions.iter().filter_map(|a| {
+        let kinds = [EntryKind::File, EntryKind::Executable, EntryKind::Symlink];
+        let e = a.expected.filter(|e| kinds.contains(&e.kind))?;
+        match saved.entry(&a.path) {
+            Ok(Some(s)) if s.kind == e.kind && s.id == e.id => None,
+            Ok(_) => Some(Ok((a.path.as_str(), e))),
+            Err(err) => Some(Err(SaveError::from(err))),
+        }
+    });
+    // A small file is read on the workers; a link, and a file too big to read whole, here.
+    let on_worker = |e: Expected| e.kind != EntryKind::Symlink && ingest::is_small(e.size);
+    let cost = |&(_, e): &(&str, Expected)| match e.kind {
+        _ if on_worker(e) => ingest::cost(e.size),
+        EntryKind::Symlink => 0,
+        // Nothing else goes out while this thread copies in a big file.
+        _ => WINDOW,
+    };
+    let mut disk = Folders::from_top(Arc::clone(&top));
     let mut copies = Vec::new();
-    for a in actions {
-        let Some(e) = a.expected else { continue };
-        if !matches!(
-            e.kind,
-            EntryKind::File | EntryKind::Executable | EntryKind::Symlink
-        ) || saved
-            .entry(&a.path)?
-            .is_some_and(|s| s.kind == e.kind && s.id == e.id)
-        {
-            continue;
-        }
-        let held =
-            packs.contains(&e.id) || store.has_good_copy(&e.id, ObjectKind::Content, e.size)?;
-        if !held && !copy_in(&mut disk, &a.path, e, packs)? {
-            continue;
-        }
-        copies.push(SafetyCopy {
-            path: a.path.clone(),
-            kind: e.kind,
-            id: e.id,
-            size: e.size,
-        });
-    }
+    with_workers(|workers| {
+        workers.in_order(
+            wanted,
+            WINDOW,
+            |job| job.as_ref().map_or(0, cost),
+            |job| {
+                job.map(|(path, e)| {
+                    let read = on_worker(e).then(|| read_copy(&top, path, e, store));
+                    (path, e, read)
+                })
+            },
+            |done| {
+                let (path, e, read) = done?;
+                let kept = if packs.contains(&e.id) {
+                    true
+                } else if let Some(read) = read {
+                    match read? {
+                        Copied::Held => true,
+                        Copied::Changed => false,
+                        Copied::Read(ready) => {
+                            ingest::add_ready(packs, &ready)
+                                .map_err(|err| ingest_failed(err, path))?;
+                            true
+                        }
+                    }
+                } else {
+                    // A big file is relied on as held only once it is cut again, which `copy_in`
+                    // does.
+                    (!is_cut(e.size) && store.has_good_copy(&e.id, ObjectKind::Content, e.size)?)
+                        || copy_in(&mut disk, path, e, store, packs)?
+                };
+                if kept {
+                    copies.push(SafetyCopy {
+                        path: path.to_owned(),
+                        kind: e.kind,
+                        id: e.id,
+                        size: e.size,
+                    });
+                }
+                Ok::<_, SaveError>(())
+            },
+        )
+    })?;
     copies.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(copies)
+}
+
+/// What a worker finds of a small file the plan found holding `e`.
+enum Copied {
+    /// The store holds a good copy of `e` already.
+    Held,
+    /// It holds `e` no longer, so the switch leaves it.
+    Changed,
+    /// It still does: its bytes, ready for a pack.
+    Read(Ready),
+}
+
+/// Reads the small file at `path` below `top` whole, unless the store holds a good copy of `e`.
+fn read_copy(top: &Arc<Dir>, path: &str, e: Expected, store: &Store) -> Result<Copied, SaveError> {
+    if store.has_good_copy(&e.id, ObjectKind::Content, e.size)? {
+        return Ok(Copied::Held);
+    }
+    let mut disk = Folders::from_top(Arc::clone(top));
+    let Some(name) = enter_above(&mut disk, path)? else {
+        return Ok(Copied::Changed);
+    };
+    let Some(mut file) = open_to_copy(disk.here(), name, path)? else {
+        return Ok(Copied::Changed);
+    };
+    let bytes = match ingest::read_whole(&mut file, e.size) {
+        Ok(bytes) => bytes,
+        Err(IngestError::Changed) => return Ok(Copied::Changed),
+        Err(err) => return Err(ingest_failed(err, path)),
+    };
+    // Not what the plan found any more: left as it is, like a changed one.
+    if hash_content(&bytes) != e.id {
+        return Ok(Copied::Changed);
+    }
+    // The store was found not to hold it above.
+    let ready = ingest::ready_new(e.id, &bytes).map_err(|err| ingest_failed(err, path))?;
+    Ok(Copied::Read(ready))
+}
+
+/// Enters, through `disk`, the folder holding `path`, and gives `path`'s name there; `None` if
+/// the folder changed since the plan, so the switch leaves what is there.
+fn enter_above<'p>(disk: &mut Folders, path: &'p str) -> Result<Option<&'p str>, SaveError> {
+    let (up, name) = split(path);
+    match disk.enter(up) {
+        Ok(()) => Ok(Some(name)),
+        Err(err) if folder_changed(&err) => Ok(None),
+        Err(err) => Err(unreadable(path, err)),
+    }
+}
+
+/// Opens the file `name` in `dir`, at the project path `path`, to keep a copy of it; `None` if it
+/// is gone or no longer a file, so the switch leaves what is there.
+fn open_to_copy(dir: &Dir, name: &str, path: &str) -> Result<Option<File>, SaveError> {
+    let os = OsStr::new(name);
+    match fsio::open_point(path).and_then(|()| dir.open_file(os)) {
+        Ok(file) => Ok(Some(file)),
+        Err(_)
+            if !dir
+                .metadata(os)
+                .is_ok_and(|now| now.kind == EntryType::File) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(unreadable(path, err)),
+    }
 }
 
 /// Stores the entry at `path` if it still holds `e`; `false` if it doesn't.
@@ -416,39 +525,33 @@ fn copy_in(
     disk: &mut Folders,
     path: &str,
     e: Expected,
+    store: &Store,
     packs: &mut PackSet,
 ) -> Result<bool, SaveError> {
-    let (up, name) = split(path);
-    match disk.enter(up) {
-        Ok(()) => {}
-        Err(err) if folder_changed(&err) => return Ok(false),
-        Err(err) => return Err(unreadable(path, err)),
-    }
+    let Some(name) = enter_above(disk, path)? else {
+        return Ok(false);
+    };
     let dir = disk.here();
     if e.kind == EntryKind::Symlink {
         let Some(target) = link_in(dir, name, path, e)? else {
             return Ok(false);
         };
-        packs.add_content(target.as_bytes())?;
+        ingest::store_held(packs, store, target.as_bytes())
+            .map_err(|err| ingest_failed(err, path))?;
         return Ok(true);
     }
-    let os = OsStr::new(name);
-    let mut file = match dir.open_file(os) {
-        Ok(file) => file,
-        // Gone, or no longer what it was: the switch leaves what is there.
-        Err(_)
-            if !dir
-                .metadata(os)
-                .is_ok_and(|now| now.kind == EntryType::File) =>
-        {
-            return Ok(false);
-        }
-        Err(err) => return Err(unreadable(path, err)),
+    let Some(mut file) = open_to_copy(dir, name, path)? else {
+        return Ok(false);
     };
-    match packs.add_content_from(&mut file, e.id) {
-        Ok(_) => Ok(true),
-        Err(PackError::ContentChanged) => Ok(false),
-        Err(err) => Err(err.into()),
+    if is_too_long_to_cut(e.size) {
+        // Stored whole, and compared with the plan's ID as it is read.
+        return ingest::store_long(packs, store, e.id, e.size, || Ok(file));
+    }
+    // A file that isn't what the plan found any more is left as it is, like a changed one.
+    match ingest::store_bytes(packs, store, &mut file, e.size) {
+        Ok(id) => Ok(id == e.id),
+        Err(IngestError::Changed) => Ok(false),
+        Err(err) => Err(ingest_failed(err, path)),
     }
 }
 
@@ -460,12 +563,9 @@ pub(crate) fn planned_link(
     path: &str,
     e: Expected,
 ) -> Result<Option<String>, SaveError> {
-    let (up, name) = split(path);
-    match disk.enter(up) {
-        Ok(()) => {}
-        Err(err) if folder_changed(&err) => return Ok(None),
-        Err(err) => return Err(unreadable(path, err)),
-    }
+    let Some(name) = enter_above(disk, path)? else {
+        return Ok(None);
+    };
     link_in(disk.here(), name, path, e)
 }
 
@@ -1800,16 +1900,18 @@ fn hash(file: &mut std::fs::File) -> io::Result<Id> {
 /// The project's folders, each opened from the top one name at a time, never through a link. One
 /// is held at a time, so a folder about to be removed is never held open.
 pub(crate) struct Folders {
-    top: Dir,
+    top: Arc<Dir>,
     at: Option<(String, Dir)>,
 }
 
 impl Folders {
     pub(crate) fn open(root: &Path) -> io::Result<Folders> {
-        Ok(Folders {
-            top: Dir::open_top(root)?,
-            at: None,
-        })
+        Ok(Folders::from_top(Arc::new(Dir::open_top(root)?)))
+    }
+
+    /// The folders below `top`, which other threads may hold too.
+    pub(crate) fn from_top(top: Arc<Dir>) -> Folders {
+        Folders { top, at: None }
     }
 
     /// Opens the folder at the project path `rel` (`""` for the top).
@@ -1831,7 +1933,7 @@ impl Folders {
     }
 
     pub(crate) fn here(&self) -> &Dir {
-        self.at.as_ref().map_or(&self.top, |(_, dir)| dir)
+        self.at.as_ref().map_or(&*self.top, |(_, dir)| dir)
     }
 }
 

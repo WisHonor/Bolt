@@ -23,7 +23,7 @@ use bolt_core::repo::Repository;
 use bolt_core::save::Person;
 use bolt_core::store::StoreError;
 use bolt_core::text::escape_all;
-use support::{Env, git_commit, text, top_folder};
+use support::{Env, git_commit, link_file, link_folder, text, top_folder};
 
 use ObjectType::{Blob, Commit, Tag, Tree};
 
@@ -105,6 +105,7 @@ fn import_here(dir: &Path) -> Result<ImportReport, ImportError> {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
+        lfs_storage: None,
         progress,
     };
     import_git(dir, &mut req, &mut None)
@@ -181,33 +182,6 @@ const BROKEN: &str = "Bolt can't import this Git repository: ";
 const NOT_PLAIN: &str = "\nhint: Nothing was changed. Bolt reads only plain files and real \
                          folders in a Git repository, and never follows links there: put what a \
                          link points to in its place, or import a fresh clone.\n";
-
-/// Makes `link` a link to the folder `target`: on Windows a junction, which needs no rights.
-fn link_folder(target: &Path, link: &Path) {
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link).unwrap();
-    #[cfg(windows)]
-    support::junction(link, target);
-}
-
-/// Makes `link` a link to the file `target`; false, with a note, where Windows lacks the right.
-fn link_file(target: &Path, link: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link).unwrap();
-        true
-    }
-    #[cfg(windows)]
-    match std::os::windows::fs::symlink_file(target, link) {
-        Ok(()) => true,
-        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights, which CI has.
-        Err(e) if e.raw_os_error() == Some(1314) && std::env::var_os("CI").is_none() => {
-            eprintln!("note: skipped, this account can't make links");
-            false
-        }
-        Err(e) => panic!("can't make a link: {e}"),
-    }
-}
 
 /// The characters HFS+ ignores in names, Git's `next_hfs_char` list.
 fn hfs_ignorable() -> impl Iterator<Item = char> {
@@ -1179,40 +1153,51 @@ fn speed_up_files_are_ignored() {
     assert!(one.parents.is_empty());
 }
 
-// Decision 037
+// security.md T6 and T31
 #[test]
-fn lfs_pointers_and_files_that_look_like_one_stop_the_import() {
+fn lfs_pointers_come_in_as_their_files_and_lookalikes_as_they_are() {
     let pointer = "version https://git-lfs.github.com/spec/v1\noid \
                    sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
                    size 12345\n";
-    for (file, stop) in [
-        // Git LFS reads an extension line before `version`, so this is a pointer.
-        (
-            format!("ext-0-foo sha256:{}\n{pointer}", "f".repeat(64)),
-            "holds a Git LFS pointer at `art/big.psd`, and this version of Bolt can't import Git \
-             LFS files yet: Git LFS repositories come in milestone 5.",
-        ),
-        // Git LFS rejects a line after `size`, but the file still looks like a pointer.
-        (
-            format!("{pointer}and then some\n"),
-            "holds a file at `art/big.psd` that looks like a Git LFS pointer, though Git LFS \
-             wouldn't read it as one; Bolt stops rather than guess whether it is a Git LFS file.",
-        ),
-    ] {
-        let (env, git) = repo();
-        let art = git.tree(&[(b"100644", b"big.psd", git.object(Blob, file.as_bytes()))]);
-        let id = main_of(&git, &[(b"40000", b"art", art)]);
-        let err = stopped(&env);
-        let stop = format!("error: Commit `{}` {stop}\n", id.to_hex());
-        assert!(err.contains(&stop), "{err}");
-    }
-
-    // A file that only quotes a pointer is an ordinary file.
+    // Git LFS reads an extension line before `version`, so this is a pointer, whose file only
+    // Git LFS can rebuild, by running a program.
     let (env, git) = repo();
+    let extended = format!("ext-0-foo sha256:{}\n{pointer}", "f".repeat(64));
+    let art = git.tree(&[(b"100644", b"big.psd", git.object(Blob, extended.as_bytes()))]);
+    let id = main_of(&git, &[(b"40000", b"art", art)]);
+    let err = stopped(&env);
+    let stop = format!(
+        "error: Commit `{}` holds a Git LFS pointer at `art/big.psd` with extensions (`ext-` \
+         lines): only Git LFS can rebuild its file, by running a program, which Bolt never does.\n",
+        id.to_hex()
+    );
+    assert!(err.contains(&stop), "{err}");
+
+    // A pointer is the file it stands for. Git LFS rejects a line after `size`, so it checks that
+    // file out as it is; Git checks a link out as a link; and a file that only quotes a pointer
+    // is an ordinary file.
+    let (env, git) = repo();
+    let real = b"the real file\n";
+    let kept = git.lfs_object(real);
+    let looks = format!("{pointer}and then some\n");
     let notes = format!("Our big files use Git LFS:\n{pointer}");
-    let notes_id = git.object(Blob, notes.as_bytes());
-    main_of(&git, &[(b"100644", b"notes.txt", notes_id)]);
-    env.import();
+    main_of(
+        &git,
+        &[
+            (b"100644", b"big.psd", git.object(Blob, kept.as_bytes())),
+            (b"120000", b"link", git.object(Blob, kept.as_bytes())),
+            (b"100644", b"looks.psd", git.object(Blob, looks.as_bytes())),
+            (b"100644", b"notes.txt", git.object(Blob, notes.as_bytes())),
+        ],
+    );
+    let (_, err) = env.import();
+    assert!(
+        err.contains("warning: A file looks like a Git LFS pointer"),
+        "{err}"
+    );
+    assert_eq!(content(&env, "big.psd"), real);
+    assert_eq!(content(&env, "link"), kept.as_bytes());
+    assert_eq!(content(&env, "looks.psd"), looks.as_bytes());
     assert_eq!(content(&env, "notes.txt"), notes.as_bytes());
 }
 

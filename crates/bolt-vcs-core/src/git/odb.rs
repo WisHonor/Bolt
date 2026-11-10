@@ -3,6 +3,8 @@
 //! object is checked against its ID.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
+mod family;
+
 use std::borrow::{Borrow, Cow};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -18,7 +20,9 @@ use super::id::Hasher;
 use super::pack::{
     self, DeltaError, Entry, EntryKind, Pack, PackFolder, build_delta, delta_sizes, delta_start,
 };
-use super::{GitError, GitId, ObjectType, Repo, broken, read_error, real_dir, shrank};
+use super::{
+    GitError, GitId, ObjectType, Repo, broken, out_of_memory, read_error, real_dir, shrank,
+};
 use crate::safe_fs;
 
 /// The most an object read whole into memory may hold, and so the most a delta may build or
@@ -54,6 +58,20 @@ const CHUNK: usize = 16 << 10;
 /// files.
 const MAX_OPEN_PACKS: usize = 16;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_LIMITS: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+}
+
+/// Sets this thread's limits for rebuilding through deltas to `(work, cache)`, so a test can
+/// reach them with small data; `None` goes back. The work allowed, `work` bytes however much was
+/// inflated, holds from the next step on, in repositories already open too. The cache's
+/// `cache` bytes hold for the repositories opened from then on.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_test_delta_limits(limits: Option<(u64, u64)>) {
+    TEST_LIMITS.set(limits);
+}
+
 /// An object read whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Object {
@@ -78,6 +96,11 @@ pub(super) struct Objects {
     work: Cell<u64>,
     /// Compressed bytes of the pack entries inflated so far, each entry counted once.
     inflated: Cell<u64>,
+    /// The delta families rebuilt, by pack number and the number of the entry at the bottom.
+    families: RefCell<HashSet<(usize, usize)>>,
+    /// Objects built through deltas so far.
+    #[cfg(test)]
+    built: Cell<u64>,
 }
 
 impl fmt::Debug for Objects {
@@ -129,7 +152,7 @@ impl Repo {
                 object?
             }
         };
-        self.check(id, &object)?;
+        self.check(id, object.kind, &object.data)?;
         Ok(object)
     }
 
@@ -148,7 +171,7 @@ impl Repo {
                     let object = self.unpack(n, pack, &file, at);
                     self.keep_open(n, file);
                     let object = object?;
-                    self.check(id, &object)?;
+                    self.check(id, object.kind, &object.data)?;
                     is_blob(id, object.kind)?;
                     return Ok(BlobReader(Reading::Memory(io::Cursor::new(object.data))));
                 };
@@ -233,46 +256,85 @@ impl Repo {
         Err(broken(format!("missing object `{hex}`")))
     }
 
-    /// The object at `at` in pack number `n`, rebuilt through its deltas. A base comes from the
-    /// cache if it is there, and goes into it once built on. What the deltas take to inflate and
-    /// apply is counted against the import's budget before each step.
+    /// The object at `at` in pack number `n`, rebuilt through its deltas from the nearest base
+    /// the cache holds, or from the object stored whole at the bottom of its chain. A base used
+    /// stays in the cache and counts as just used; what is built goes in too.
     fn unpack(&self, n: usize, pack: &Pack, file: &File, at: u64) -> Result<Object, GitError> {
+        self.build(n, pack, file, at, true)
+    }
+
+    /// `unpack`, putting nothing new in the cache unless `keep`. What the deltas take to inflate
+    /// and apply is counted against the import's budget before each step.
+    fn build(
+        &self,
+        n: usize,
+        pack: &Pack,
+        file: &File,
+        at: u64,
+        keep: bool,
+    ) -> Result<Object, GitError> {
         let cache = &self.objects.cache;
-        let chain = self.chain(pack, file, at, &mut |base| {
-            let base = cache.try_borrow_mut().ok()?.take((n, base))?;
-            let depth = base.depth;
-            Some((base, depth))
+        let chain = self.chain(pack, file, at, &mut |here| {
+            let depth = cache.try_borrow().ok()?.depth((n, here))?;
+            Some(((), depth))
         })?;
-        let mut base = match chain.bottom {
-            Bottom::Cached(base, _) => base,
+        let stored_whole = chain.deltas.is_empty();
+        let mut deltas = chain.deltas.into_iter().rev();
+        let mut built_at = chain.bottom_at;
+        let mut object = match chain.bottom {
+            // Read, not built, so the cache is left as it is.
+            Bottom::Whole(kind, entry) if stored_whole => {
+                let data = self.inflate_entry(pack, file, built_at, &entry)?;
+                return Ok(Object { kind, data });
+            }
             Bottom::Whole(kind, entry) => {
-                if !chain.deltas.is_empty() {
-                    self.spend(entry.size)?;
-                }
+                self.spend(entry.size)?;
                 Base {
                     kind,
-                    data: self.inflate_entry(pack, file, chain.bottom_at, &entry)?,
+                    data: self.inflate_entry(pack, file, built_at, &entry)?,
                     depth: 0,
                 }
             }
-        };
-        let mut base_at = chain.bottom_at;
-        for (delta_at, entry) in chain.deltas.into_iter().rev() {
-            let built = self.apply(pack, file, delta_at, &entry, &base.data)?;
-            let next = Base {
-                kind: base.kind,
-                data: built,
-                depth: base.depth.saturating_add(1),
-            };
-            let done = std::mem::replace(&mut base, next);
-            if let Ok(mut cache) = cache.try_borrow_mut() {
-                cache.put((n, base_at), done);
+            // Built on where it lies, so it stays in the cache.
+            Bottom::Cached((), _) => {
+                let mut cache = cache.try_borrow_mut().map_err(|_| lost(pack))?;
+                let base = cache.get((n, built_at)).ok_or_else(|| lost(pack))?;
+                let Some((delta_at, entry)) = deltas.next() else {
+                    let mut data = Vec::new();
+                    data.try_reserve_exact(base.data.len())
+                        .map_err(|_| out_of_memory(&pack.path))?;
+                    data.extend_from_slice(&base.data);
+                    return Ok(Object {
+                        kind: base.kind,
+                        data,
+                    });
+                };
+                built_at = delta_at;
+                Base {
+                    kind: base.kind,
+                    data: self.apply(pack, file, delta_at, &entry, &base.data)?,
+                    depth: base.depth.saturating_add(1),
+                }
             }
-            base_at = delta_at;
+        };
+        for (delta_at, entry) in deltas {
+            let next = Base {
+                kind: object.kind,
+                data: self.apply(pack, file, delta_at, &entry, &object.data)?,
+                depth: object.depth.saturating_add(1),
+            };
+            let base = std::mem::replace(&mut object, next);
+            if keep && let Ok(mut cache) = cache.try_borrow_mut() {
+                cache.put((n, built_at), base);
+            }
+            built_at = delta_at;
+        }
+        if keep && let Ok(mut cache) = cache.try_borrow_mut() {
+            cache.put_copy((n, built_at), &object);
         }
         Ok(Object {
-            kind: base.kind,
-            data: base.data,
+            kind: object.kind,
+            data: object.data,
         })
     }
 
@@ -321,6 +383,10 @@ impl Repo {
         let built = build_delta(base, size, &mut delta).map_err(failed)?;
         let taken = delta.into_inner().inflater.taken;
         count_inflated(&self.objects.inflated, pack, at, taken);
+        #[cfg(test)]
+        self.objects
+            .built
+            .set(self.objects.built.get().saturating_add(1));
         Ok(built)
     }
 
@@ -342,7 +408,8 @@ impl Repo {
 
     /// Counts `bytes` more inflated or built through deltas, stopping past the import's
     /// allowance: a delta of a few bytes can build hundreds of megabytes, again for each object
-    /// read on it.
+    /// read on it. An honest history of many small edits to a big file gets there too, since
+    /// each edit adds little to what is inflated, so the stop names both.
     fn spend(&self, bytes: u64) -> Result<(), GitError> {
         // No step does more: it refuses a bigger claim itself, in its own words.
         let bytes = bytes.min(MAX_IN_MEMORY_OBJECT);
@@ -355,17 +422,25 @@ impl Repo {
         Err(GitError::TooMuchWork {
             what: format!(
                 "rebuilding objects from Git's deltas would take more than the {} GiB of work Bolt \
-                 allows, so the repository looks built to make importing slow",
+                 allows: the repository holds a long history of small edits to a big file, or it \
+                 was built to make importing slow",
                 allowance >> 30
             ),
         })
     }
 
-    /// Checks that `object` is the one `id` names.
-    fn check(&self, id: &GitId, object: &Object) -> Result<(), GitError> {
-        let mut hasher = Hasher::object(self.hash, object.kind, object.data.len() as u64);
-        hasher.update(&object.data);
+    /// Checks that `data` is the object of `kind` that `id` names.
+    fn check(&self, id: &GitId, kind: ObjectType, data: &[u8]) -> Result<(), GitError> {
+        let mut hasher = Hasher::object(self.hash, kind, data.len() as u64);
+        hasher.update(data);
         verify(id, hasher)
+    }
+}
+
+/// What only a bug in Bolt causes: something the reader kept of `pack` went missing.
+fn lost(pack: &Pack) -> GitError {
+    GitError::Bug {
+        what: format!("Bolt lost track of what it read of {}", pack.path.display()),
     }
 }
 
@@ -536,6 +611,10 @@ impl Repo {
 /// The most an import may inflate and build through deltas once it has inflated `inflated`
 /// compressed bytes of pack entries.
 fn delta_work_allowance(inflated: u64) -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((work, _)) = TEST_LIMITS.get() {
+        return work;
+    }
     MIN_DELTA_WORK.max(DELTA_WORK_PER_INFLATED_BYTE.saturating_mul(inflated))
 }
 
@@ -860,10 +939,8 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
         }
         let len = usize::try_from(size).unwrap_or(usize::MAX);
         let mut data = Vec::new();
-        data.try_reserve_exact(len).map_err(|_| GitError::Io {
-            path: self.input.path.to_path_buf(),
-            source: io::ErrorKind::OutOfMemory.into(),
-        })?;
+        data.try_reserve_exact(len)
+            .map_err(|_| out_of_memory(&self.input.path))?;
         let mut chunk = [0u8; CHUNK];
         while data.len() < len {
             let want = chunk.len().min(len.saturating_sub(data.len()));
@@ -1024,6 +1101,10 @@ struct BaseCache {
 
 impl Default for BaseCache {
     fn default() -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((_, cache)) = TEST_LIMITS.get() {
+            return BaseCache::new(cache);
+        }
         BaseCache::new(DELTA_BASE_CACHE)
     }
 }
@@ -1039,7 +1120,23 @@ impl BaseCache {
         }
     }
 
-    /// Takes the base at `key` out, to build on.
+    /// How many deltas deep the base at `key` is, if it is kept.
+    fn depth(&self, key: (usize, u64)) -> Option<u32> {
+        self.entries.get(&key).map(|(_, base)| base.depth)
+    }
+
+    /// The base at `key`, to build on where it lies: it counts as just used.
+    fn get(&mut self, key: (usize, u64)) -> Option<&Base> {
+        let clock = self.clock.saturating_add(1);
+        let (used, base) = self.entries.get_mut(&key)?;
+        self.by_use.remove(used);
+        self.by_use.insert(clock, key);
+        *used = clock;
+        self.clock = clock;
+        Some(base)
+    }
+
+    /// Takes the base at `key` out.
     fn take(&mut self, key: (usize, u64)) -> Option<Base> {
         let (used, base) = self.entries.remove(&key)?;
         self.by_use.remove(&used);
@@ -1050,9 +1147,29 @@ impl BaseCache {
     /// Keeps a base, dropping the least recently used ones to stay within the budget. One bigger
     /// than the whole budget isn't kept.
     fn put(&mut self, key: (usize, u64), base: Base) {
-        let len = base.data.len() as u64;
-        if len > self.budget {
+        if self.make_room(key, base.data.len() as u64) {
+            self.insert(key, base);
+        }
+    }
+
+    /// `put` for a copy of `base`, made once there is room for it.
+    fn put_copy(&mut self, key: (usize, u64), base: &Base) {
+        if !self.make_room(key, base.data.len() as u64) {
             return;
+        }
+        let mut data = Vec::new();
+        if data.try_reserve_exact(base.data.len()).is_ok() {
+            data.extend_from_slice(&base.data);
+            let (kind, depth) = (base.kind, base.depth);
+            self.insert(key, Base { kind, data, depth });
+        }
+    }
+
+    /// Drops what `key` held, then the least recently used bases until `len` more bytes fit:
+    /// false if they never can.
+    fn make_room(&mut self, key: (usize, u64), len: u64) -> bool {
+        if len > self.budget {
+            return false;
         }
         self.take(key);
         while self.bytes.saturating_add(len) > self.budget {
@@ -1063,10 +1180,14 @@ impl BaseCache {
                 self.bytes = self.bytes.saturating_sub(gone.data.len() as u64);
             }
         }
+        true
+    }
+
+    fn insert(&mut self, key: (usize, u64), base: Base) {
         self.clock = self.clock.saturating_add(1);
         self.by_use.insert(self.clock, key);
+        self.bytes = self.bytes.saturating_add(base.data.len() as u64);
         self.entries.insert(key, (self.clock, base));
-        self.bytes = self.bytes.saturating_add(len);
     }
 }
 
@@ -1083,17 +1204,17 @@ mod tests {
     use crate::git::HashKind::{self, Sha1, Sha256};
     use ObjectType::{Blob, Commit, Tree};
 
-    fn craft(hash: HashKind) -> (tempfile::TempDir, Craft) {
+    pub(super) fn craft(hash: HashKind) -> (tempfile::TempDir, Craft) {
         let dir = tempfile::tempdir().unwrap();
         let git = Craft::new(dir.path(), hash);
         (dir, git)
     }
 
-    fn open(dir: &tempfile::TempDir) -> Repo {
+    pub(super) fn open(dir: &tempfile::TempDir) -> Repo {
         Repo::open(dir.path()).unwrap()
     }
 
-    fn id(kind: ObjectType, data: &[u8], hash: HashKind) -> GitId {
+    pub(super) fn id(kind: ObjectType, data: &[u8], hash: HashKind) -> GitId {
         object_id(kind, data, hash).unwrap()
     }
 
@@ -1103,7 +1224,7 @@ mod tests {
 
     /// The message of a `Broken` error, failing the test on anything else.
     #[track_caller]
-    fn broken<T: std::fmt::Debug>(result: Result<T, GitError>) -> String {
+    pub(super) fn broken<T: std::fmt::Debug>(result: Result<T, GitError>) -> String {
         match result {
             Err(e @ GitError::Broken { .. }) => {
                 assert!(e.hint().is_some());
@@ -1123,7 +1244,7 @@ mod tests {
     }
 
     /// All `reader` gives, `step` bytes at a time.
-    fn read_all(mut reader: impl Read, step: usize) -> io::Result<Vec<u8>> {
+    pub(super) fn read_all(mut reader: impl Read, step: usize) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
         let mut buf = vec![0; step];
         loop {
@@ -1361,11 +1482,17 @@ mod tests {
                     MIN_DELTA_WORK >> 30
                 );
                 assert!(e.to_string().contains(&says), "{e}");
-                assert!(
-                    e.to_string().contains("built to make importing slow"),
-                    "{e}"
-                );
-                assert!(e.hint().unwrap().contains("repack -a -d -f"), "{e:?}");
+                // An honest history of small edits to a big file can get here too, and the way
+                // out works for both.
+                let why = "the repository holds a long history of small edits to a big file, or \
+                           it was built to make importing slow";
+                assert!(e.to_string().contains(why), "{e}");
+                let hint = "Nothing was changed. If you trust this repository, have Git store its \
+                            files over 1 MiB whole and make its other deltas anew, with `git -c \
+                            core.bigFileThreshold=1m repack -a -d -f`, then run bolt import \
+                            again. Git's packs stay bigger until its next `git gc`.";
+                assert_eq!(e.hint().unwrap(), hint);
+                assert!(hint.contains("`git -c core.bigFileThreshold=1m repack -a -d -f`"));
             }
             other => panic!("{other:?}"),
         }
@@ -1974,5 +2101,67 @@ mod tests {
         cache.put((1, 1), base(0, 11));
         assert_eq!(cache.take((1, 1)), None);
         assert_eq!(cache.bytes, 4);
+    }
+
+    /// Where `id` is: its pack's number and its offset there.
+    pub(super) fn place(repo: &Repo, id: &GitId) -> (usize, u64) {
+        match repo.find(id).unwrap() {
+            Place::Packed(n, _, at) => (n, at),
+            Place::Loose(_) => panic!("{} is loose", id.to_hex()),
+        }
+    }
+
+    #[test]
+    fn the_base_cache_keeps_what_it_builds() {
+        let (dir, git) = craft(Sha1);
+        let objects = pack_with_deltas(&git);
+        let [(_, base), (_, second), (_, third), _] = &objects[..] else {
+            unreachable!()
+        };
+        let blobs = [base, second, third];
+        let ids = blobs.map(|data| id(Blob, data, Sha1));
+        let kept = |repo: &Repo| {
+            ids.map(|id| {
+                let (n, at) = place(repo, &id);
+                repo.objects.cache.borrow().depth((n, at))
+            })
+        };
+        let repo = open(&dir);
+        repo.read(&ids[2]).unwrap();
+        // The bases it built on and what it built, each with how deep it is.
+        assert_eq!(kept(&repo), [Some(0), Some(1), Some(2)]);
+        // Each is read from where it lies, and left there: nothing is built again.
+        let work = repo.objects.work.get();
+        for _ in 0..2 {
+            for (id, data) in ids.iter().zip(blobs) {
+                assert_eq!(&repo.read(id).unwrap().data, data);
+            }
+        }
+        assert_eq!(repo.objects.work.get(), work);
+        assert_eq!(kept(&repo), [Some(0), Some(1), Some(2)]);
+        // A base used counts as just used, so it outlasts one left alone.
+        let mut cache = BaseCache::new(10);
+        let small = |byte| Base {
+            kind: Blob,
+            data: vec![byte; 4],
+            depth: 0,
+        };
+        cache.put((0, 1), small(1));
+        cache.put((0, 2), small(2));
+        assert_eq!(cache.get((0, 1)), Some(&small(1)));
+        cache.put((0, 3), small(3));
+        let held = |cache: &BaseCache| [1, 2, 3].map(|at| cache.depth((0, at)).is_some());
+        assert_eq!(held(&cache), [true, false, true]);
+        // One as big as the whole budget is kept.
+        cache.put_copy(
+            (0, 4),
+            &Base {
+                kind: Blob,
+                data: vec![4; 10],
+                depth: 0,
+            },
+        );
+        assert_eq!(cache.depth((0, 4)), Some(0));
+        assert_eq!(cache.bytes, 10);
     }
 }

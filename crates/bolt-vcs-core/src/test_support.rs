@@ -170,6 +170,36 @@ pub(crate) fn plant_root(repo: &mut Repository, build: impl FnOnce(&mut PackSet)
     repo.commit(&lock, packs, &diary).expect("commit");
 }
 
+/// Bytes that look random, made from `seed`.
+pub(crate) fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0; len];
+    blake3::Hasher::new()
+        .update(&seed.to_le_bytes())
+        .finalize_xof()
+        .fill(&mut out);
+    out
+}
+
+/// The packs a command wrote, by name, with their bytes.
+pub(crate) type Written = Vec<(std::ffi::OsString, Vec<u8>)>;
+
+/// Moves the packs of `packs` into the store, and gives what they hold.
+pub(crate) fn written(packs: PackSet) -> Written {
+    let paths = packs.finish().expect("finish the packs");
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path.file_name().expect("a pack's name").to_owned();
+            (name, std::fs::read(&path).expect("read a pack"))
+        })
+        .collect()
+}
+
+/// The names of the packs in `written`.
+pub(crate) fn names(written: &Written) -> Vec<&std::ffi::OsString> {
+    written.iter().map(|(name, _)| name).collect()
+}
+
 /// Writes `00.pack` into `packs`: `objects` (kind and bytes), each with its first stored byte
 /// flipped so it fails its fingerprint. The name sorts before every pack Bolt names.
 pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]) {
@@ -190,6 +220,28 @@ pub(crate) fn plant_damaged_copies(packs: &Path, objects: &[(ObjectKind, &[u8])]
         pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).expect("an offset")] ^= 1;
     }
     std::fs::write(packs.join("00.pack"), pack).expect("write the pack");
+}
+
+/// Makes the pack at `path` one Bolt may not open while what this gives is held; `None` where
+/// that can't be done, as root reads everything.
+pub(crate) fn lock_pack(path: &Path) -> Option<Option<std::fs::File>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let none = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(path, none).expect("lock the pack");
+        std::fs::read(path).is_err().then_some(None)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("lock the pack");
+        Some(Some(held))
+    }
 }
 
 /// A folder other accounts can write to, as `trust_hint` sees one: the root of the C: drive on

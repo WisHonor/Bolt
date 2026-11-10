@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use bolt_core::changes::{Lines, save_changes, unsaved_changes};
 use bolt_core::config::{
-    ConfigError, Identity, git_excludes_file, ignored_identity_note, ignored_project_identity,
-    load_identity, now_person, undo_window_days,
+    ConfigError, Identity, git_excludes_file, git_lfs_storage, ignored_identity_note,
+    ignored_project_identity, load_identity, now_person, undo_window_days,
 };
 use bolt_core::diary::{Action, DiaryEntry, Position};
 use bolt_core::diff::{count_changes, for_each_change};
@@ -332,6 +332,7 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
     let who = now_person(&load_identity(Some(&root))?);
+    let lfs_storage = git_lfs_storage(&root)?;
     let mut reading = output::Progress::new("Reading Git's history", "commits");
     let mut importing = output::Progress::new("Importing commits", "commits");
     let imported = import_git(
@@ -339,6 +340,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         &mut ImportRequest {
             who: &who,
             command: "import",
+            lfs_storage: Some(&lfs_storage),
             // The first pass can't say how many commits there are; the second can.
             progress: &mut |done, total| match total {
                 None => reading.update(done, None),

@@ -15,18 +15,23 @@ mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
 pub use object::{
-    Commit, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_lfs_pointer, looks_like_lfs_pointer,
-    parse_commit, parse_person, parse_tag, parse_tree, rebuild_commit,
+    Commit, LfsPointer, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_exact_lfs_pointer,
+    is_lfs_lookalike, lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person, parse_tag,
+    parse_tree, rebuild_commit,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use odb::set_test_delta_limits;
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
 // For the delta fuzz target.
 #[cfg(feature = "test-support")]
 pub use pack::apply_delta;
 pub use refs::{Head, Refs};
 
-pub(crate) use config::{UserSetting, read_user_settings};
+pub(crate) use config::{
+    UserSetting, read_bool, read_count, read_user_settings, read_user_variable,
+};
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -189,11 +194,23 @@ pub enum GitError {
     /// much.
     #[error("Bolt can't import this Git repository: {}.", escape(what, false))]
     TooMuchWork { what: String },
+    /// What only a bug in Bolt's reader causes; `what` says what went wrong.
+    #[error(
+        "Bolt can't import this Git repository: {}; please report this.",
+        escape(what, false)
+    )]
+    Bug { what: String },
     #[error(
         "Git changed the repository while Bolt read it: {}.",
         escape(what, false)
     )]
     Changed { what: String },
+    /// Too little free memory to read what `path` holds.
+    #[error(
+        "Bolt ran out of memory while reading {}.",
+        escape(&path.display().to_string(), false)
+    )]
+    OutOfMemory { path: PathBuf },
     #[error(
         "Bolt couldn't read {}: {}",
         escape(&path.display().to_string(), false),
@@ -244,12 +261,21 @@ impl GitError {
                      bolt import again."
                 }
                 GitError::TooMuchWork { .. } => {
-                    "Nothing was changed. If you trust this repository, have Git store its big \
-                     files whole and make its deltas anew with `git -c core.bigFileThreshold=64m \
-                     repack -a -d -f`, then run bolt import again."
+                    "Nothing was changed. If you trust this repository, have Git store its files \
+                     over 1 MiB whole and make its other deltas anew, with `git -c \
+                     core.bigFileThreshold=1m repack -a -d -f`, then run bolt import again. Git's \
+                     packs stay bigger until its next `git gc`."
+                }
+                GitError::Bug { .. } => {
+                    "Nothing was changed. This is a bug in Bolt, not a problem with the \
+                     repository."
                 }
                 GitError::Changed { .. } => {
                     "Nothing was changed. Run bolt import again once Git has finished."
+                }
+                GitError::OutOfMemory { .. } => {
+                    "Nothing was changed. Close other programs to free memory, then run bolt \
+                     import again."
                 }
                 GitError::Io { .. } => {
                     "Nothing was changed. Check that your account may read it and that no other \
@@ -332,7 +358,8 @@ fn trim_start(mut text: &[u8]) -> &[u8] {
 
 /// `safe_fs`'s refusal of anything but the plain file or real folder Git keeps there (a link, a
 /// special file, a folder for a file or a file for a folder) is `NotPlain`, and of a file past its
-/// cap `Broken`; a file gone while Bolt read is `Changed`, anything else `Io`. Each names `path`.
+/// cap `Broken`; a file gone while Bolt read is `Changed`, running out of memory `OutOfMemory`,
+/// anything else `Io`. Each names `path`.
 fn read_error(path: &Path, e: io::Error) -> GitError {
     match e.kind() {
         io::ErrorKind::InvalidInput => GitError::NotPlain {
@@ -342,11 +369,19 @@ fn read_error(path: &Path, e: io::Error) -> GitError {
         io::ErrorKind::NotFound => GitError::Changed {
             what: format!("{} went away", path.display()),
         },
+        io::ErrorKind::OutOfMemory => GitError::OutOfMemory {
+            path: path.to_owned(),
+        },
         _ => GitError::Io {
             path: path.to_owned(),
             source: e,
         },
     }
+}
+
+/// Running out of memory while reading `path`.
+fn out_of_memory(path: &Path) -> GitError {
+    read_error(path, io::ErrorKind::OutOfMemory.into())
 }
 
 /// A file that ended before the length Bolt measured when it opened it.
@@ -400,6 +435,8 @@ pub struct Repo {
     hash: HashKind,
     /// Whether its config has `[include]` or `[includeIf]` sections, which Bolt doesn't follow.
     includes: bool,
+    /// The last `lfs.storage` its config sets, and the file that sets it.
+    lfs_storage: Option<(Vec<u8>, &'static str)>,
     objects: odb::Objects,
 }
 
@@ -434,12 +471,13 @@ impl Repo {
         check_owner(work_tree, &git, owner_of, safe_folders)?;
         // Looked at again: it may have become a link while its owner was asked.
         safe_fs::check_real_dir(&git).map_err(|e| read_error(&git, e))?;
-        let (hash, includes) = read_format(&git)?;
+        let format = read_format(&git)?;
         refuse_layouts(&git)?;
         Ok(Repo {
             git,
-            hash,
-            includes,
+            hash: format.hash,
+            includes: format.includes,
+            lfs_storage: format.lfs_storage,
             objects: odb::Objects::default(),
         })
     }
@@ -473,6 +511,73 @@ impl Repo {
     pub fn has_lfs_folder(&self) -> Result<bool, GitError> {
         exists(&self.git.join("lfs"))
     }
+
+    /// The `lfs.storage` this repository's own config sets, as Git reads it (`config.worktree`
+    /// after `.git/config`), empty for one with no value, and the file that sets it. Read only to
+    /// tell whether Git LFS keeps its files elsewhere.
+    #[must_use]
+    pub fn lfs_storage(&self) -> Option<(&[u8], &'static str)> {
+        let (value, file) = self.lfs_storage.as_ref()?;
+        Some((value, file))
+    }
+
+    /// Which of `.git/lfs` and `.git/lfs/objects` is a link, or isn't a folder, if one is: Git
+    /// LFS's files are then kept behind it, where Bolt never reads. A missing one isn't a link.
+    pub fn lfs_folder_link(&self) -> Result<Option<&'static str>, GitError> {
+        let lfs = self.git.join("lfs");
+        let objects = lfs.join("objects");
+        for (folder, shown) in [(lfs, ".git/lfs"), (objects, ".git/lfs/objects")] {
+            match safe_fs::check_real_dir(&folder) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) if e.kind() == io::ErrorKind::InvalidInput => return Ok(Some(shown)),
+                Err(e) => return Err(read_error(&folder, e)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Where Git LFS keeps the object of `p`: `.git/lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`.
+    #[must_use]
+    pub fn lfs_object_path(&self, p: &LfsPointer) -> PathBuf {
+        let oid = p.oid_hex();
+        let (first, second) = (oid.get(..2), oid.get(2..4));
+        let folder = self.git.join("lfs").join("objects");
+        folder
+            .join(first.unwrap_or_default())
+            .join(second.unwrap_or_default())
+            .join(&oid)
+    }
+
+    /// The Git LFS object of `p`, opened as every file in `.git` is, without following a link, if
+    /// it is a regular file of the size `p` gives. `None` if it isn't there as that: missing, a
+    /// folder, a link (to it or to a folder on the way), or a file of another length.
+    pub fn lfs_object(&self, p: &LfsPointer) -> Result<Option<File>, GitError> {
+        let path = self.lfs_object_path(p);
+        // What isn't a real folder or a plain file is never followed: the object isn't there.
+        let absent = |e: &io::Error| {
+            matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
+            )
+        };
+        // `lfs`, `objects` and the two folders the oid names; `open` checked `.git` itself.
+        let folders: Vec<&Path> = path.ancestors().skip(1).take(4).collect();
+        for folder in folders.into_iter().rev() {
+            match safe_fs::check_real_dir(folder) {
+                Ok(()) => {}
+                Err(e) if absent(&e) => return Ok(None),
+                Err(e) => return Err(read_error(folder, e)),
+            }
+        }
+        let file = match safe_fs::open_regular(&path, fs::OpenOptions::new().read(true)) {
+            Ok(file) => file,
+            Err(e) if absent(&e) => return Ok(None),
+            Err(e) => return Err(read_error(&path, e)),
+        };
+        let len = file.metadata().map_err(|e| read_error(&path, e))?.len();
+        Ok((len == p.size).then_some(file))
+    }
 }
 
 /// Refuses a `.git` that isn't the user's, unless they listed the work tree in safe-folders, as
@@ -497,24 +602,24 @@ fn check_owner(
     repo::owner_allows([owner], work_tree, &safe).map_err(refused)
 }
 
-/// The repository's hash, and whether its config has include sections, after refusing a format,
-/// extension or sparse checkout Bolt can't import.
-fn read_format(git: &Path) -> Result<(HashKind, bool), GitError> {
+/// What `.git/config` says, with what `config.worktree` adds when Git reads it too, after refusing
+/// a format, extension or sparse checkout Bolt can't import.
+fn read_format(git: &Path) -> Result<config::Format, GitError> {
     // Git reads a repository without a config with its defaults.
     let text = read_optional(&git.join("config"), MAX_CONFIG_BYTES)?.unwrap_or_default();
-    let format = config::read_format(&text, ".git/config")?;
-    let (mut sparse, mut includes) = (format.sparse, format.includes);
+    let mut format = config::read_format(&text, ".git/config")?;
     if format.worktree_config
         && let Some(text) = read_optional(&git.join("config.worktree"), MAX_CONFIG_BYTES)?
     {
-        let (value, more) = config::read_sparse(&text, ".git/config.worktree")?;
-        sparse = value.or(sparse);
-        includes |= more;
+        let worktree = config::read_worktree(&text, ".git/config.worktree")?;
+        format.sparse = worktree.sparse.or(format.sparse);
+        format.includes |= worktree.includes;
+        format.lfs_storage = worktree.lfs_storage.or(format.lfs_storage);
     }
-    if sparse == Some(true) {
+    if format.sparse == Some(true) {
         return Err(GitError::Refused(Refusal::SparseCheckout));
     }
-    Ok((format.hash, includes))
+    Ok(format)
 }
 
 /// Refuses the files and folders that mean refs, history or objects Bolt doesn't read.
@@ -978,6 +1083,27 @@ mod tests {
         }
     }
 
+    /// Running out of memory says so and how to free some, not that the file may be locked.
+    #[test]
+    fn running_out_of_memory_says_so() {
+        let path = Path::new("objects/pack/pack-1.pack");
+        for e in [
+            read_error(path, io::ErrorKind::OutOfMemory.into()),
+            out_of_memory(path),
+        ] {
+            assert!(matches!(e, GitError::OutOfMemory { .. }), "{e:?}");
+            assert_eq!(
+                e.to_string(),
+                "Bolt ran out of memory while reading objects/pack/pack-1.pack."
+            );
+            let hint = e.hint().unwrap();
+            assert!(
+                hint.contains("Close other programs to free memory") && !hint.contains("locked"),
+                "{hint}"
+            );
+        }
+    }
+
     #[test]
     fn messages_show_repository_text_escaped() {
         let refused = GitError::Refused(Refusal::UnknownExtension(HOSTILE.to_owned()));
@@ -1007,6 +1133,9 @@ mod tests {
             GitError::TooMuchWork {
                 what: HOSTILE.into(),
             },
+            GitError::Bug {
+                what: HOSTILE.into(),
+            },
             GitError::NotYours {
                 git: HOSTILE.into(),
                 refusal: RepoError::NotYours { path: "x".into() },
@@ -1020,6 +1149,9 @@ mod tests {
             },
             GitError::Changed {
                 what: HOSTILE.into(),
+            },
+            GitError::OutOfMemory {
+                path: HOSTILE.into(),
             },
             GitError::Io {
                 path: HOSTILE.into(),

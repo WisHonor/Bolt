@@ -9,19 +9,21 @@ mod vs_git;
 pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command as Bolt;
+use bolt_core::chunks::{Chunk, ChunkList, chunk_len, is_cut};
 use bolt_core::diary::{Action, DiaryEntry, State};
 use bolt_core::history::current_save;
-use bolt_core::id::{ChangeId, Id};
+use bolt_core::id::{ChangeId, ContentHasher, Id, hash_content};
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackSet};
+use bolt_core::pack::{ObjectKind, PackReader, PackSet, Prepared};
 use bolt_core::repo::Repository;
-use bolt_core::save::{EXTRA_GIT_COMMIT, Save};
+use bolt_core::save::{EXTRA_GIT_COMMIT, Person, Save};
+use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use tempfile::TempDir;
 
 /// `git args` in `dir`, with nothing from this computer's Git set-up: no system or user config,
@@ -118,6 +120,33 @@ pub fn junction(link: &Path, target: &Path) {
         link.display(),
         target.display()
     );
+}
+
+/// Makes `link` a link to the folder `target`: on Windows a junction, which needs no rights.
+pub fn link_folder(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    junction(link, target);
+}
+
+/// Makes `link` a link to the file `target`; false, with a note, where Windows lacks the right.
+pub fn link_file(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+    #[cfg(windows)]
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => true,
+        // ERROR_PRIVILEGE_NOT_HELD: links need Developer Mode or admin rights, which CI has.
+        Err(e) if e.raw_os_error() == Some(1314) && std::env::var_os("CI").is_none() => {
+            eprintln!("note: skipped, this account can't make links");
+            false
+        }
+        Err(e) => panic!("can't make a link: {e}"),
+    }
 }
 
 pub fn text(bytes: &[u8]) -> String {
@@ -230,6 +259,101 @@ pub fn saved_files(env: &Env, save: Id) -> Files {
     found
 }
 
+// Big files, written and read a block at a time.
+
+/// Writes `size` bytes at `path` that look random, so they don't compress, made from `seed`; their
+/// ID.
+pub fn write_noise(path: &Path, seed: u64, size: u64) -> Id {
+    let mut file = std::fs::File::create(path).unwrap();
+    let mut hasher = ContentHasher::new();
+    let mut state = noise_from(seed);
+    let mut block = vec![0u8; 1 << 20];
+    let mut left = size;
+    while left > 0 {
+        let n = left.min(block.len() as u64) as usize;
+        fill_noise(&mut state, &mut block[..n]);
+        file.write_all(&block[..n]).unwrap();
+        hasher.update(&block[..n]);
+        left -= n as u64;
+    }
+    hasher.finish()
+}
+
+/// `len` bytes that look random, made from `seed`: what `write_noise` writes.
+pub fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut bytes = vec![0; len];
+    fill_noise(&mut noise_from(seed), &mut bytes);
+    bytes
+}
+
+fn noise_from(seed: u64) -> u64 {
+    seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1
+}
+
+/// Fills `block` with the generator's next bytes; any block but the last a multiple of 8 long.
+fn fill_noise(state: &mut u64, block: &mut [u8]) {
+    for word in block.chunks_mut(8) {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
+    }
+}
+
+/// The ID of the file at `path`.
+pub fn id_of(path: &Path) -> Id {
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut hasher = ContentHasher::new();
+    let mut block = vec![0u8; 1 << 20];
+    loop {
+        match file.read(&mut block).unwrap() {
+            0 => return hasher.finish(),
+            n => hasher.update(&block[..n]),
+        }
+    }
+}
+
+/// The kind of each copy of `id` in the store of the project at `root`, a pack at a time.
+pub fn copies_of(root: &Path, id: &Id) -> Vec<ObjectKind> {
+    let mut kinds = Vec::new();
+    for pack in std::fs::read_dir(root.join(".bolt/store/packs")).unwrap() {
+        let path = pack.unwrap().path();
+        if path.extension().is_some_and(|e| e == "pack")
+            && let Some(copy) = PackReader::open(&path).unwrap().find(id).unwrap()
+        {
+            kinds.push(copy.kind);
+        }
+    }
+    kinds
+}
+
+/// Ada, at a set time, for commands run in the test's own process.
+pub fn ada() -> Person {
+    Person {
+        name: "Ada".into(),
+        email: "ada@example.com".into(),
+        time_ms: 1_700_000_000_000,
+        tz_offset_min: 0,
+    }
+}
+
+/// `bolt save <message>` in the project at `root`, run by Ada in the test's own process.
+pub fn save_here(root: &Path, message: &str) -> Result<SaveOutcome, SaveError> {
+    let mut repo = Repository::open(root).unwrap();
+    let who = ada();
+    let req = SaveRequest {
+        message: Some(message),
+        who: &who,
+        command: "save",
+        accept_crlf: false,
+        git_excludes: None,
+        new_line: None,
+        only: None,
+        amend: false,
+    };
+    save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true)
+}
+
 /// Copies the folder `from`, everything in it, to `to`.
 pub fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -263,7 +387,7 @@ pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id
 }
 
 /// Stores the folder listings that hold `entries` (a path, a kind, and a file's bytes or a link's
-/// target) and returns the top one's ID.
+/// target, each stored as `add_file` stores it) and returns the top one's ID.
 pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
     let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
     for &(path, kind, bytes) in entries {
@@ -271,7 +395,7 @@ pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id 
         folders.entry(up.to_owned()).or_default().push(Entry {
             name: name.to_owned(),
             kind,
-            id: pack.add_content(bytes).unwrap(),
+            id: add_file(pack, bytes),
             size: bytes.len() as u64,
         });
         // Every folder above, even one that holds only folders.
@@ -409,6 +533,90 @@ pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     repo.commit(&lock, pack, &diary).unwrap();
 }
 
+// Big files as Bolt stores them, and chunk lists no honest writer makes.
+
+/// `bytes` cut as Bolt cuts a big file: its chunk list, and its chunks.
+pub fn cut(bytes: &[u8]) -> (ChunkList, Vec<&[u8]>) {
+    let mut chunks = Vec::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let (chunk, after) = rest.split_at(chunk_len(rest));
+        chunks.push(chunk);
+        rest = after;
+    }
+    let list = ChunkList {
+        file: hash_content(bytes),
+        size: bytes.len() as u64,
+        chunks: chunks
+            .iter()
+            .map(|c| Chunk {
+                id: hash_content(c),
+                size: c.len() as u64,
+            })
+            .collect(),
+    };
+    (list, chunks)
+}
+
+/// Stores `bytes` as Bolt stores a big file, its chunks and then its chunk list; the file's ID.
+pub fn add_chunked(pack: &mut PackSet, bytes: &[u8]) -> Id {
+    let (list, chunks) = cut(bytes);
+    for chunk in chunks {
+        pack.add_content(chunk).unwrap();
+    }
+    pack.add_chunk_list(&list).unwrap();
+    list.file
+}
+
+/// Stores a file's bytes as Bolt stores them: cut into chunks if this thread's cut sizes take
+/// them, else whole; its ID.
+pub fn add_file(pack: &mut PackSet, bytes: &[u8]) -> Id {
+    if is_cut(bytes.len() as u64) {
+        add_chunked(pack, bytes)
+    } else {
+        pack.add_content(bytes).unwrap()
+    }
+}
+
+/// Stores `record` as it is, however it decodes, as a chunk list of the file `file` of `size`
+/// bytes.
+pub fn add_list_record(pack: &mut PackSet, file: Id, size: u64, record: Vec<u8>) {
+    let entry = Prepared {
+        id: file,
+        size,
+        zstd: false,
+        stored: record,
+    };
+    pack.add_prepared(ObjectKind::ChunkList, &entry).unwrap();
+}
+
+/// Stores a top listing of files, each named by the ID and size it is saved with, whatever the
+/// store holds for them; its ID.
+pub fn top_listing(pack: &mut PackSet, files: &[(&str, Id, u64)]) -> Id {
+    let entries = files
+        .iter()
+        .map(|&(name, id, size)| Entry {
+            name: name.to_owned(),
+            kind: EntryKind::File,
+            id,
+            size,
+        })
+        .collect();
+    let listing = Listing::new(entries).unwrap();
+    pack.add_record(ObjectKind::FolderListing, &listing.encode())
+        .unwrap()
+}
+
+/// Moves packs of what `add` stores into the store of the project at `root`, though nothing names
+/// it; their paths.
+pub fn add_pack(root: &Path, add: impl FnOnce(&mut PackSet)) -> Vec<PathBuf> {
+    let mut repo = Repository::open(root).unwrap();
+    let _lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    add(&mut pack);
+    pack.finish().unwrap()
+}
+
 // Commands that run under a limit: of time, or of memory.
 
 /// `bolt <args>` in `dir`, as the test user with its settings in `config`, with its address space
@@ -448,9 +656,17 @@ fn as_test_user(cmd: &mut Command, config: &Path) {
         .env("BOLT_USER_EMAIL", "test@example.com")
         .env_remove("BOLT_FAULT_AT")
         .env("BOLT_CONFIG_DIR", config)
-        // Git's own settings and ignore list are found from here (decision 047).
+        // Git's own settings and ignore list are found from here (decision 047), and only here.
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config);
+    for key in [
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_COUNT",
+    ] {
+        cmd.env_remove(key);
+    }
 }
 
 /// `bolt_capped_at`, with about 1.5 GB.
@@ -466,20 +682,21 @@ pub struct Ended {
     pub code: Option<i32>,
     pub timed_out: bool,
     pub secs: f64,
-    /// Highest resident memory seen (Linux `/proc` only; 0 elsewhere).
+    /// Highest resident memory seen, in MiB and in bytes (Linux `/proc` only; 0 elsewhere).
     pub peak_mb: u64,
+    pub peak_bytes: u64,
     pub stderr: String,
 }
 
-/// The process's peak resident memory so far, in MB (Linux only).
-fn peak_mb_of(pid: u32) -> u64 {
+/// The process's peak resident memory so far, in bytes (Linux only).
+fn peak_of(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()
         .and_then(|s| {
             let line = s.lines().find(|l| l.starts_with("VmHWM:"))?.to_owned();
             line.split_whitespace().nth(1)?.parse::<u64>().ok()
         })
-        .map_or(0, |kb| kb / 1024)
+        .map_or(0, |kb| kb * 1024)
 }
 
 /// Runs `cmd`, killing it after `secs` seconds.
@@ -491,9 +708,9 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
         .spawn()
         .unwrap();
     let start = Instant::now();
-    let mut peak_mb = 0;
+    let mut peak = 0;
     loop {
-        peak_mb = peak_mb.max(peak_mb_of(child.id()));
+        peak = peak.max(peak_of(child.id()));
         if let Some(status) = child.try_wait().unwrap() {
             let mut stderr = String::new();
             std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
@@ -503,7 +720,8 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
                 code: status.code(),
                 timed_out: false,
                 secs: start.elapsed().as_secs_f64(),
-                peak_mb,
+                peak_mb: peak >> 20,
+                peak_bytes: peak,
                 stderr,
             };
         }
@@ -514,7 +732,8 @@ pub fn run_limited(mut cmd: Command, secs: u64) -> Ended {
                 code: None,
                 timed_out: true,
                 secs: start.elapsed().as_secs_f64(),
-                peak_mb,
+                peak_mb: peak >> 20,
+                peak_bytes: peak,
                 stderr: String::new(),
             };
         }

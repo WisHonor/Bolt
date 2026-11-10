@@ -47,6 +47,9 @@ pub const DUPLICATE_CHANGE_ID: &str = "duplicate_change_id";
 /// The Git repository's config includes other files, which the import didn't read, so it can't
 /// tell whether they turn on sparse checkout.
 pub const CONFIG_INCLUDES_IGNORED: &str = "config_includes_ignored";
+/// Files that look like Git LFS pointers, which Git LFS doesn't read as such, were imported as
+/// they are.
+pub const LFS_LOOKALIKES: &str = "lfs_lookalikes";
 /// Folders that hold a repository or project of their own, which saves take nothing new from.
 pub const NESTED_PROJECTS_LEFT_OUT: &str = "nested_projects_left_out";
 /// The file-state cache couldn't be written, so the next status reads every file again.

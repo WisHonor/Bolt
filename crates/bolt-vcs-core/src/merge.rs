@@ -3,12 +3,13 @@
 
 use crate::fsio::{self, fault_point};
 use crate::id::Id;
-use crate::pack::{PackError, PackReader, PackSet};
+use crate::pack::{IndexEntry, ObjectKind, PackError, PackReader, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository};
-use crate::store::{is_damage, read_whole};
+use crate::store::{is_damage, is_pack_name, read_whole};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 use bolt_platform::dir::{Dir, EntryType};
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,10 +59,7 @@ pub(crate) fn merge_small_packs(
     let packs_dir = repo.packs_dir().to_owned();
     let mut on_disk = Vec::new();
     for entry in folder.entries()? {
-        if Path::new(&entry.name)
-            .extension()
-            .is_none_or(|e| e != "pack")
-        {
+        if !is_pack_name(&entry.name) {
             continue;
         }
         // Anything but a file is left for reads to report.
@@ -94,13 +92,18 @@ pub(crate) fn merge_small_packs(
     }
     let mut taken = Vec::new();
     let mut out = repo.new_packs()?;
-    for name in small {
-        let path = packs_dir.join(&name);
-        fsio::act_point("merge:copying");
-        match copy_pack(&folder, &name, &path, &mut out, &|_| true) {
+    let copied = copy_packs(
+        &folder,
+        &packs_dir,
+        &small,
+        &mut out,
+        &|_| true,
+        "merge:copying",
+    )?;
+    for (name, copied) in small.into_iter().zip(copied) {
+        match copied {
             Ok(_) => taken.push(name),
-            Err(Failed::Read(e)) => report.keep(path, &e),
-            Err(Failed::Write(e)) => return Err(e.into()),
+            Err(e) => report.keep(packs_dir.join(&name), &e),
         }
     }
     let made: Vec<OsString> = out
@@ -179,12 +182,22 @@ fn holds_little(folder: &Dir, name: &OsStr, path: &Path) -> Result<bool, PackErr
     let pack = PackReader::open_in(folder, name, path)?;
     let mut total = 0u64;
     for entry in pack.entries() {
-        total = total.saturating_add(entry?.uncompressed_size);
+        total = total.saturating_add(counted(&entry?));
         if total > SMALL_UNCOMPRESSED {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// What an index line counts toward a small pack's uncompressed bytes: a chunk list its own bytes,
+/// not its file's, which its chunks count.
+pub(crate) fn counted(entry: &IndexEntry) -> u64 {
+    if entry.kind == ObjectKind::ChunkList {
+        entry.stored_size
+    } else {
+        entry.uncompressed_size
+    }
 }
 
 /// Whether the old pack `name` may be one of the new packs `made`, compared ignoring letter case:
@@ -201,42 +214,113 @@ pub(crate) fn is_small(on_disk: u64, uncompressed: u64) -> bool {
 
 /// Why a pack wasn't copied: reading it, which keeps only that pack out, or writing the new ones,
 /// which stops the merge.
-pub(crate) enum Failed {
+enum Failed {
     Read(PackError),
     Write(PackError),
 }
 
-/// Checks each object of the pack `name` that `keep` takes and copies it into `out`, and gives how
-/// many it copied.
-pub(crate) fn copy_pack(
+/// Checks each object `keep` takes of the packs `names` in `folder`, at `packs_dir`, and copies it
+/// into `out`, which holds nothing yet. A pack holds one object per ID, so chunk lists, checked
+/// only by their structure, come after every other object: a list whose ID the pack being written
+/// holds as another object, or as the same list, is left out; one it holds as another list starts
+/// a new pack, so both are kept. Gives each pack's count of objects copied or left out, or why it
+/// couldn't be read; only a failure to write stops it.
+pub(crate) fn copy_packs(
     folder: &Dir,
-    name: &OsStr,
-    path: &Path,
+    packs_dir: &Path,
+    names: &[OsString],
     out: &mut PackSet,
     keep: &dyn Fn(&Id) -> bool,
-) -> Result<u64, Failed> {
-    let pack = PackReader::open_in(folder, name, path).map_err(Failed::Read)?;
-    let mut copied = 0u64;
+    act: &'static str,
+) -> Result<Vec<Result<u64, PackError>>, PackError> {
+    let mut copied = Vec::new();
+    for name in names {
+        fsio::act_point(act);
+        copied.push(match copy_pack(folder, name, packs_dir, out, keep, None) {
+            Err(Failed::Write(e)) => return Err(e),
+            Err(Failed::Read(e)) => Err(e),
+            Ok(done) => Ok(done),
+        });
+    }
+    // The hash of each list in the pack being written, by its file's ID.
+    let mut lists = HashMap::new();
+    for (name, done) in names.iter().zip(&mut copied) {
+        let Ok((count, true)) = done else {
+            continue;
+        };
+        match copy_pack(folder, name, packs_dir, out, keep, Some(&mut lists)) {
+            Ok((more, _)) => *count = count.saturating_add(more),
+            Err(Failed::Read(e)) => *done = Err(e),
+            Err(Failed::Write(e)) => return Err(e),
+        }
+    }
+    Ok(copied
+        .into_iter()
+        .map(|done| done.map(|(count, _)| count))
+        .collect())
+}
+
+/// Copies what `keep` takes of the pack `name`: its chunk lists given `lists`, which `copy_packs`
+/// keeps, and everything else without. Gives how many it copied or left out, and whether it holds
+/// a list `keep` takes.
+fn copy_pack(
+    folder: &Dir,
+    name: &OsStr,
+    packs_dir: &Path,
+    out: &mut PackSet,
+    keep: &dyn Fn(&Id) -> bool,
+    mut lists: Option<&mut HashMap<Id, Id>>,
+) -> Result<(u64, bool), Failed> {
+    let pack = PackReader::open_in(folder, name, &packs_dir.join(name)).map_err(Failed::Read)?;
+    let (mut copied, mut holds_lists) = (0u64, false);
     for entry in pack.entries() {
         let entry = entry.map_err(Failed::Read)?;
+        let is_list = entry.kind == ObjectKind::ChunkList;
         if !keep(&entry.id) {
             continue;
         }
-        read_whole(entry.kind)(&pack, &entry).map_err(Failed::Read)?;
-        match out.add_stored(&pack, &entry) {
-            // The copy's header, read again.
-            Err(e) if is_damage(&e) => return Err(Failed::Read(e)),
-            added => added.map_err(Failed::Write)?,
+        holds_lists |= is_list;
+        match (&mut lists, is_list) {
+            (None, false) => {
+                read_whole(entry.kind)(&pack, &entry).map_err(Failed::Read)?;
+                add(out, &pack, &entry)?;
+            }
+            (Some(lists), true) => {
+                let (_, hash) = pack.read_chunk_list_hashed(&entry).map_err(Failed::Read)?;
+                match out.kind_of(&entry.id) {
+                    // Content stored whole, checked by its hash as it was copied, is the file.
+                    Some(kind) if kind != ObjectKind::ChunkList => {}
+                    Some(_) if lists.get(&entry.id) == Some(&hash) => {}
+                    held => {
+                        if held.is_some() {
+                            out.start_next().map_err(Failed::Write)?;
+                        }
+                        add(out, &pack, &entry)?;
+                        lists.insert(entry.id, hash);
+                    }
+                }
+            }
+            _ => continue,
         }
         copied = copied.saturating_add(1);
     }
-    Ok(copied)
+    Ok((copied, holds_lists))
+}
+
+/// Copies `entry` of `pack`, checked already, into `out`.
+fn add(out: &mut PackSet, pack: &PackReader, entry: &IndexEntry) -> Result<(), Failed> {
+    match out.add_stored(pack, entry) {
+        // The copy's header, read again.
+        Err(e) if is_damage(&e) => Err(Failed::Read(e)),
+        added => added.map_err(Failed::Write),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::chunks::{Chunk, ChunkList};
     use crate::diary::DiaryEntry;
     use crate::id::Id;
     use crate::pack::ObjectKind;
@@ -584,6 +668,209 @@ mod tests {
         assert!(is_new(&made, OsStr::new("ab12.pack")));
         assert!(is_new(&made, OsStr::new("AB12.pack")));
         assert!(!is_new(&made, OsStr::new("ab13.pack")));
+    }
+
+    /// `bytes` cut every `every` bytes: its chunk list, and the chunks' bytes.
+    fn chunked(bytes: &[u8], every: usize) -> (ChunkList, Vec<Vec<u8>>) {
+        let pieces: Vec<Vec<u8>> = bytes.chunks(every).map(<[u8]>::to_vec).collect();
+        let list = ChunkList {
+            file: crate::id::hash_content(bytes),
+            size: bytes.len() as u64,
+            chunks: pieces
+                .iter()
+                .map(|p| Chunk {
+                    id: crate::id::hash_content(p),
+                    size: p.len() as u64,
+                })
+                .collect(),
+        };
+        (list, pieces)
+    }
+
+    fn pieces(pieces: &[Vec<u8>]) -> Vec<&[u8]> {
+        pieces.iter().map(Vec::as_slice).collect()
+    }
+
+    /// Stores `contents` and `lists` in a pack of their own, named `name` if given (one that sorts
+    /// before Bolt's names, say), else as Bolt names it.
+    fn add_pack(
+        repo: &Repository,
+        name: Option<&str>,
+        contents: &[&[u8]],
+        lists: &[&ChunkList],
+    ) -> PathBuf {
+        let mut packs = repo.new_packs().unwrap();
+        for c in contents {
+            packs.add_content(c).unwrap();
+        }
+        for l in lists {
+            packs.add_chunk_list(l).unwrap();
+        }
+        let path = packs.finish().unwrap().remove(0);
+        let Some(name) = name else { return path };
+        std::fs::rename(&path, repo.packs_dir().join(name)).unwrap();
+        repo.packs_dir().join(name)
+    }
+
+    /// The file `id`, read through a store opened afresh.
+    fn file(repo: &Repository, id: &Id) -> Vec<u8> {
+        let mut out = Vec::new();
+        Store::open(repo.packs_dir())
+            .unwrap()
+            .copy_content(id, &mut out)
+            .unwrap();
+        out
+    }
+
+    /// Every entry under `id` in the store's packs.
+    fn held(repo: &Repository, id: &Id) -> Vec<(PathBuf, crate::pack::IndexEntry)> {
+        let mut found = Vec::new();
+        for name in pack_names(repo.packs_dir()) {
+            let path = repo.packs_dir().join(name);
+            if let Some(e) = PackReader::open(&path).unwrap().find(id).unwrap() {
+                found.push((path, e));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn merging_keeps_chunked_files_readable() {
+        let (_dir, mut repo) = project();
+        let lock = add_packs(&mut repo, 33);
+        // One file's chunks and list each in a pack of their own, another's together.
+        let (small, small_chunks) = chunked(b"hello world", 6);
+        for c in &small_chunks {
+            add_pack(&repo, None, &[c], &[]);
+        }
+        add_pack(&repo, None, &[], &[&small]);
+        let mut big = vec![0u8; 3 << 20];
+        blake3::Hasher::new()
+            .update(b"big")
+            .finalize_xof()
+            .fill(&mut big);
+        let (big_list, big_chunks) = chunked(&big, 256 << 10);
+        add_pack(&repo, None, &pieces(&big_chunks), &[&big_list]);
+        // A list that is only damage: kept, and named.
+        let compressed = crate::pack::Prepared {
+            id: crate::id::hash_content(b"compressed"),
+            size: 10,
+            zstd: true,
+            stored: zstd::bulk::compress(&chunked(b"compressed", 4).0.encode(), 3).unwrap(),
+        };
+        let mut packs = repo.new_packs().unwrap();
+        packs
+            .add_prepared(ObjectKind::ChunkList, &compressed)
+            .unwrap();
+        let damaged = packs.finish().unwrap().remove(0);
+
+        let report = merge_small_packs(&mut repo, &lock).unwrap().unwrap();
+        assert_eq!(report.kept_damaged, [damaged]);
+        assert!(report.kept_unreadable.is_empty(), "{report:?}");
+        assert_eq!(pack_names(repo.packs_dir()).len(), 2);
+        assert_all_readable(&repo, 33, "after the merge");
+        assert_eq!(file(&repo, &small.file), b"hello world");
+        assert!(file(&repo, &big_list.file) == big);
+        for list in [&small, &big_list] {
+            let held = held(&repo, &list.file);
+            assert_eq!(held.len(), 1);
+            let (path, e) = &held[0];
+            assert_eq!(e.kind, ObjectKind::ChunkList);
+            let pack = PackReader::open(path).unwrap();
+            assert_eq!(pack.read_chunk_list(e).unwrap(), *list);
+        }
+    }
+
+    /// A planted list, checked only by its structure, under a chunk's ID, in a pack merged first:
+    /// were it copied first, the pack being written would hold the chunk's ID, and the chunk would
+    /// be left out and lost.
+    #[test]
+    fn a_planted_list_under_a_chunks_id_never_takes_the_chunks_place_in_a_merge() {
+        let (_dir, mut repo) = project();
+        let lock = add_packs(&mut repo, 33);
+        let (list, chunks) = chunked(b"hello world", 6);
+        add_pack(&repo, None, &pieces(&chunks), &[&list]);
+        let planted = ChunkList {
+            file: list.chunks[0].id,
+            size: 6,
+            chunks: vec![Chunk {
+                id: Id([0x11; 32]),
+                size: 6,
+            }],
+        };
+        add_pack(&repo, Some("00.pack"), &[], &[&planted]);
+        let report = merge_small_packs(&mut repo, &lock).unwrap().unwrap();
+        assert!(report.kept_damaged.is_empty(), "{report:?}");
+        assert_eq!(pack_names(repo.packs_dir()).len(), 1);
+        assert_eq!(file(&repo, &list.file), b"hello world");
+        let held = held(&repo, &list.chunks[0].id);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].1.kind, ObjectKind::Content);
+    }
+
+    #[test]
+    fn a_list_never_takes_a_whole_copys_place_in_a_merge() {
+        let (_dir, mut repo) = project();
+        let lock = add_packs(&mut repo, 33);
+        let (list, _) = chunked(b"hello world", 6);
+        add_pack(&repo, None, &[b"hello world"], &[]);
+        // A list under the file's ID that builds another file, in a pack merged first.
+        let (mut lying, other) = chunked(b"jello world", 6);
+        lying.file = list.file;
+        add_pack(&repo, Some("00.pack"), &pieces(&other), &[&lying]);
+        merge_small_packs(&mut repo, &lock).unwrap().unwrap();
+        assert_eq!(pack_names(repo.packs_dir()).len(), 1);
+        assert_eq!(file(&repo, &list.file), b"hello world");
+        let held = held(&repo, &list.file);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].1.kind, ObjectKind::Content);
+    }
+
+    #[test]
+    fn two_different_lists_for_one_file_both_survive_a_merge() {
+        let (one, one_chunks) = chunked(b"hello world", 6);
+        let (two, two_chunks) = chunked(b"hello world", 4);
+        let (_dir, mut repo) = project();
+        let lock = add_packs(&mut repo, 33);
+        add_pack(&repo, None, &pieces(&one_chunks), &[&one]);
+        add_pack(&repo, None, &pieces(&two_chunks), &[&two]);
+        merge_small_packs(&mut repo, &lock).unwrap().unwrap();
+        // The second list starts a pack of its own.
+        assert_eq!(pack_names(repo.packs_dir()).len(), 2);
+        let mut lists: Vec<ChunkList> = held(&repo, &one.file)
+            .iter()
+            .map(|(path, e)| PackReader::open(path).unwrap().read_chunk_list(e).unwrap())
+            .collect();
+        lists.sort_by_key(|l| l.chunks.len());
+        assert_eq!(lists, [one.clone(), two]);
+        assert_eq!(file(&repo, &one.file), b"hello world");
+
+        // The same list twice is one list.
+        let (_dir, mut repo) = project();
+        let lock = add_packs(&mut repo, 33);
+        add_pack(&repo, None, &pieces(&one_chunks), &[&one]);
+        add_pack(&repo, None, &[], &[&one]);
+        let report = merge_small_packs(&mut repo, &lock).unwrap().unwrap();
+        assert_eq!(report.merged, 36);
+        assert_eq!(pack_names(repo.packs_dir()).len(), 1);
+        assert_eq!(held(&repo, &one.file).len(), 1);
+    }
+
+    #[test]
+    fn a_pack_holding_the_list_of_a_10_gib_file_still_counts_as_small() {
+        let (_dir, mut repo) = project();
+        let _lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let ten_gib = ChunkList {
+            file: Id([7; 32]),
+            size: 10 << 30,
+            chunks: vec![Chunk {
+                id: Id([8; 32]),
+                size: 10 << 30,
+            }],
+        };
+        let path = add_pack(&repo, None, &[], &[&ten_gib]);
+        let name = path.file_name().unwrap();
+        assert!(holds_little(repo.packs_folder(), name, &path).unwrap());
     }
 
     #[test]

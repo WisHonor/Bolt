@@ -63,14 +63,14 @@ pub(crate) fn message(command: &str, paths: &[String]) -> String {
 /// wherever it touched. The "from" save is that with what the folder held at each path the plan
 /// writes. Both are `kept.base` elsewhere, at what the plan leaves unwritten too, except inside a
 /// folder the plan makes where the folder held a file, a link or nothing: there "to" holds only
-/// what the plan writes or finds already there. Below a path the plan writes, where `from`
-/// differs from `kept.base`, both hold `from`'s version: the folder matched it there, or the plan
-/// would have collided. A folder above a path the plan writes, which it neither makes nor
-/// removes, is a folder on both sides: it was one before and after. A held file or link the store
-/// lacks is stored first; one that couldn't be, having changed since the plan, is left out of
-/// both sides with what is planned below it, and the folders above it, which can't be emptied,
-/// are neither made nor removed. Each side is `kept.base`, `from` or `target` when its folders
-/// are exactly that save's, otherwise a kept save stored in `packs`.
+/// what the plan writes or finds already there. Below a path the plan writes, outside such a
+/// folder, where `from` differs from `kept.base`, both hold `from`'s version: the folder matched
+/// it there, or the plan would have collided. A folder above a path the plan writes, which it
+/// neither makes nor removes, is a folder on both sides: it was one before and after. A held file
+/// or link the store lacks is stored first; one that couldn't be, having changed since the plan,
+/// is left out of both sides with what is planned below it, and the folders above it, which can't
+/// be emptied, are neither made nor removed. Each side is `kept.base`, `from` or `target` when its
+/// folders are exactly that save's, otherwise a kept save stored in `packs`.
 /// `None` when the two sides are the same. Also gives how many safety copies it kept.
 pub(crate) fn switch_saves(
     repo: &Repository,
@@ -104,10 +104,26 @@ pub(crate) fn switch_saves(
         };
         for_each_entry_change_in(store, &unstored, Some(from_root), target_root, changes)?;
     }
+    // Folders the plan makes where the folder held a file, a link or nothing. Only a rename in
+    // letter case or Unicode form makes a folder over a folder.
+    let made: BTreeSet<&str> = plan
+        .actions
+        .iter()
+        .filter(|a| {
+            a.change == Change::MakeFolder
+                && !a.expected.is_some_and(|e| e.kind == EntryKind::Folder)
+                && held.contains_key(&a.path)
+        })
+        .map(|a| a.path.as_str())
+        .collect();
     // Below a path the plan writes, the folder held what `from` holds, not the base: where
-    // `--shelve` set work aside, or an unshelf is planned from the save shelved on.
+    // `--shelve` set work aside, or an unshelf is planned from the save shelved on. Not inside a
+    // folder the plan makes: the folder held nothing of `from`'s there.
     if from_root != base_root {
-        let below = |path: &str| ancestors(path).any(|up| held.contains_key(up));
+        let below = |path: &str| {
+            ancestors(path).any(|up| held.contains_key(up))
+                && !ancestors(path).any(|up| made.contains(up))
+        };
         let aside = |path: &str, _: Option<&Entry>, f: Option<&Entry>| {
             if below(path) {
                 after.entry(path.to_owned()).or_insert(f.map(put));
@@ -116,20 +132,13 @@ pub(crate) fn switch_saves(
         };
         for_each_entry_change_in(store, &unstored, Some(base_root), from_root, aside)?;
     }
-    // The base's entries in such a folder went with it when the user removed or replaced it: they
-    // stay gone. Only a rename in letter case or Unicode form makes a folder over a folder.
+    // The base's entries in a folder the plan makes went with it when the user removed or
+    // replaced it: they stay gone.
     let mut base = Tree::new(store, &unstored, base_root, EXACT);
-    let made = plan.actions.iter().filter(|a| {
-        a.change == Change::MakeFolder
-            && !a.expected.is_some_and(|e| e.kind == EntryKind::Folder)
-            && held.contains_key(&a.path)
-    });
-    for a in made {
-        if let Some(folder) = base.folder(&a.path)? {
+    for path in &made {
+        if let Some(folder) = base.folder(path)? {
             for e in folder.listing.entries() {
-                after
-                    .entry(format!("{}/{}", a.path, e.name))
-                    .or_insert(None);
+                after.entry(format!("{path}/{}", e.name)).or_insert(None);
             }
         }
     }

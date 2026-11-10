@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
+use crate::chunks::{Chunk, ChunkList, set_test_cut_sizes};
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, ServerLines, State, Tag, TagList};
 use crate::history::tip_of;
 use crate::id::{ChangeId, hash_content};
@@ -10,7 +11,8 @@ use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
 use crate::store::Store;
 use crate::switch::{SwitchError, discard};
 use crate::test_support::{
-    add_link, add_listing, commit_records, plant_damaged_copies, plant_root, plant_save,
+    add_link, add_listing, commit_records, lock_pack, noise, plant_damaged_copies, plant_root,
+    plant_save,
 };
 use crate::undo::{self, StepRequest};
 use crate::warning;
@@ -70,6 +72,74 @@ fn save_text(dir: &Path, repo: &mut Repository, text: &str, days: i64) -> Id {
     saved(repo, days, false)
 }
 
+/// Writes `bytes` into `big.bin` and saves it, `days` ago, cutting files from 64 KiB on so that a
+/// big file stays small here. Gives the file's ID.
+fn save_big(dir: &Path, repo: &mut Repository, bytes: &[u8], days: i64) -> Id {
+    set_test_cut_sizes(Some((64 << 10, 1 << 30)));
+    fs::write(dir.join("big.bin"), bytes).unwrap();
+    saved(repo, days, false);
+    hash_content(bytes)
+}
+
+/// Two versions of a big file that share most chunks: the dropped one is saved first, so only its
+/// pack holds the chunks they share, then undone long ago. Gives the kept file's ID and the
+/// dropped one's, and the chunks only the dropped one names.
+fn two_versions(dir: &Path, repo: &mut Repository) -> (Id, Id, Vec<Id>) {
+    let kept = noise(1, 512 << 10);
+    let mut dropped = kept.clone();
+    dropped[256 << 10..(256 << 10) + 6].copy_from_slice(b"edited");
+    let dropped = save_big(dir, repo, &dropped, 45);
+    step(repo, 45, false).unwrap();
+    let kept = save_big(dir, repo, &kept, 40);
+    let keeps = chunks_of(repo, &kept);
+    let drops = chunks_of(repo, &dropped);
+    let own: Vec<Id> = drops.difference(&keeps).copied().collect();
+    assert!(!own.is_empty() && own.len() < drops.len(), "{own:?}");
+    let shared_in = holding(repo, &dropped);
+    assert_eq!(shared_in.len(), 1);
+    for id in keeps.intersection(&drops) {
+        assert_eq!(holding(repo, id), shared_in, "{id}");
+    }
+    (kept, dropped, own)
+}
+
+/// The packs that hold `id`, by name.
+fn holding(repo: &Repository, id: &Id) -> Vec<String> {
+    let holds = |name: &String| {
+        let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+        pack.find(id).unwrap().is_some()
+    };
+    pack_names(repo).into_iter().filter(holds).collect()
+}
+
+/// Stores `list` again in a pack of its own, as a command a crash stopped can leave it.
+fn store_again(repo: &mut Repository, list: &ChunkList) {
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    packs.add_chunk_list(list).unwrap();
+    repo.store_packs(&lock, packs).unwrap();
+}
+
+/// Every chunk list stored under `file`, from every pack.
+fn lists_of(repo: &Repository, file: &Id) -> Vec<ChunkList> {
+    let mut lists = Vec::new();
+    for name in pack_names(repo) {
+        let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
+        if let Some(e) = pack.find(file).unwrap()
+            && e.kind == ObjectKind::ChunkList
+        {
+            lists.push(pack.read_chunk_list(&e).unwrap());
+        }
+    }
+    lists
+}
+
+/// The chunks the lists of `file` name.
+fn chunks_of(repo: &Repository, file: &Id) -> BTreeSet<Id> {
+    let lists = lists_of(repo, file).into_iter();
+    lists.flat_map(|l| l.chunks).map(|c| c.id).collect()
+}
+
 /// Undoes one step, or redoes one, `days` ago.
 fn step(repo: &mut Repository, days: i64, redo: bool) -> Result<(), SwitchError> {
     let who = days_ago(days);
@@ -96,9 +166,19 @@ fn discard_text(dir: &Path, repo: &mut Repository, text: &str, days: i64) -> Id 
     repo.current().unwrap().1.folder_change.unwrap().from
 }
 
-/// Sets the modified time of the pack at `path` `hours` back.
+/// Sets the modified time of the pack, or folder, at `path` `hours` back.
 fn set_age(path: &Path, hours: u64) {
-    let file = fs::File::options().write(true).open(path).unwrap();
+    // A folder opens on Windows only with FILE_FLAG_BACKUP_SEMANTICS, and elsewhere only to read,
+    // which lets its owner change its times.
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut options = fs::File::options();
+        options.write(true).custom_flags(0x0200_0000);
+        options.open(path).unwrap()
+    };
+    #[cfg(not(windows))]
+    let file = fs::File::open(path).unwrap();
     let then = SystemTime::now() - Duration::from_secs(hours * 3600);
     file.set_modified(then).unwrap();
 }
@@ -123,11 +203,14 @@ fn tidied(repo: &mut Repository) -> TidyReport {
     tidy(repo, 30, now(), &mut |_| {}, &mut |_| {}).unwrap()
 }
 
-/// Whether a store opened afresh reads `id` back as a `kind`.
+/// Whether a store opened afresh reads `id` back as a `kind`; a file stored as chunks is read
+/// whole, each chunk checked.
 fn reads(repo: &Repository, id: &Id, kind: ObjectKind) -> bool {
     let store = Store::open(repo.packs_dir()).unwrap();
     match kind {
-        ObjectKind::Content => store.copy_content(id, &mut Vec::new()).is_ok(),
+        ObjectKind::Content | ObjectKind::ChunkList => {
+            store.copy_content(id, &mut Vec::new()).is_ok()
+        }
         _ => store.read_record(id, kind).is_ok(),
     }
 }
@@ -483,9 +566,9 @@ fn tidy_stops_before_removing_anything_when_something_to_keep_is_missing() {
 
 /// What `tidy` would keep now, with a 30-day window.
 fn marked(repo: &Repository) -> HashSet<Id> {
-    let listed = packs(repo.packs_folder()).unwrap();
-    let entries = entries_in(repo.packs_folder(), repo.packs_dir(), &listed);
-    kept(repo, entries, 30, now()).unwrap()
+    let now_ns = i128::from(now()) * 1_000_000;
+    let listed = listed(repo.packs_folder(), repo.packs_dir(), now_ns).unwrap();
+    kept(repo, &listed, 30, now()).unwrap()
 }
 
 /// Every object `keep` names, by kind, from the packs' indexes.
@@ -532,30 +615,88 @@ fn tidy_stopped_at_every_step_loses_nothing() {
             }
         };
         all_read(&repo);
-        let done = match &result {
-            Err(e) => {
-                let said = e.to_string();
-                // A fault replacing Bolt's own file comes after the file's name.
-                let at = said.split_once("injected fault at ").map(|(_, at)| at);
-                stopped.insert(at.unwrap_or_else(|| panic!("{why}: {said}")).to_owned());
-                false
-            }
-            Ok(_) => {
-                let warnings = repo.store().warnings();
-                let hit = warnings
-                    .iter()
-                    .any(|w| w.message.contains("injected fault"));
-                if hit {
-                    stopped.insert("tidy:removing".to_owned());
-                }
-                !hit
-            }
-        };
+        let done = ran_to_the_end(&repo, &result, &why, &mut stopped);
         // Tidying again finishes the job.
         tidied(&mut repo);
         all_read(&repo);
         assert!(!text_reads(&repo, "two") && !text_reads(&repo, "thrown away"));
         assert!(!text_reads(&repo, "left by a crash"), "{why}");
+        if done {
+            break;
+        }
+    }
+    for at in ["tidy:marked", "tidy:written", "tidy:removing"] {
+        assert!(stopped.contains(at), "never stopped at {at}: {stopped:?}");
+    }
+}
+
+/// Whether an armed `tidy` that gave `result` ran to the end; if not, where it stopped goes into
+/// `stopped`.
+#[cfg(feature = "fault-injection")]
+fn ran_to_the_end(
+    repo: &Repository,
+    result: &Result<TidyReport, RepoError>,
+    why: &str,
+    stopped: &mut BTreeSet<String>,
+) -> bool {
+    match result {
+        Err(e) => {
+            let said = e.to_string();
+            // A fault replacing Bolt's own file comes after the file's name.
+            let at = said.split_once("injected fault at ").map(|(_, at)| at);
+            stopped.insert(at.unwrap_or_else(|| panic!("{why}: {said}")).to_owned());
+            false
+        }
+        Ok(_) => {
+            let warnings = repo.store().warnings();
+            let hit = warnings
+                .iter()
+                .any(|w| w.message.contains("injected fault"));
+            if hit {
+                stopped.insert("tidy:removing".to_owned());
+            }
+            !hit
+        }
+    }
+}
+
+/// Stopped anywhere, `tidy` leaves every file of every kept save whole, with its chunks.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn tidy_stopped_at_every_step_loses_no_chunk() {
+    use crate::fsio::fault;
+    let mut stopped = BTreeSet::new();
+    for n in 1.. {
+        assert!(n < 100, "tidy never finished");
+        let (dir, mut repo) = project(50);
+        let (kept, dropped, own) = two_versions(dir.path(), &mut repo);
+        // A file nothing keeps any more, but for its list stored again in a young pack.
+        let young = save_big(dir.path(), &mut repo, &noise(6, 256 << 10), 40);
+        step(&mut repo, 40, false).unwrap();
+        crash_leftover(&mut repo);
+        age_packs(&repo, 48);
+        let list = lists_of(&repo, &young).remove(0);
+        store_again(&mut repo, &list);
+        let objects = stored(&repo, &marked(&repo));
+        assert_eq!(objects.get(&kept), Some(&ObjectKind::ChunkList));
+        fault::arm(n);
+        let result = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {});
+        fault::disarm();
+        let why = format!("fault {n}");
+        let all_read = |repo: &Repository| {
+            for (id, kind) in &objects {
+                assert!(reads(repo, id, *kind), "{why}: {kind:?} {id}");
+            }
+            assert!(reads(repo, &young, ObjectKind::ChunkList), "{why}: young");
+        };
+        all_read(&repo);
+        let done = ran_to_the_end(&repo, &result, &why, &mut stopped);
+        tidied(&mut repo);
+        all_read(&repo);
+        assert!(lists_of(&repo, &dropped).is_empty(), "{why}");
+        for id in &own {
+            assert!(!reads(&repo, id, ObjectKind::Content), "{why}: {id}");
+        }
         if done {
             break;
         }
@@ -649,14 +790,12 @@ fn tidy_rewrites_version_1_and_small_packs_as_version_2() {
 }
 
 #[test]
-fn tidy_leaves_a_pack_it_cannot_read_with_a_warning() {
+fn tidy_leaves_a_pack_whose_copy_fails_its_check_with_a_warning() {
     let (dir, mut repo) = project(50);
     save_text(dir.path(), &mut repo, "one", 40);
     let (entry, _) = crash_leftover(&mut repo);
-    // A bad copy of something kept, whose good copy is in another pack, and a pack that isn't one.
+    // A bad copy of something kept, whose good copy is in another pack.
     plant_damaged_copies(repo.packs_dir(), &[(ObjectKind::Content, b"one")]);
-    let junk = repo.packs_dir().join("zz.pack");
-    fs::write(&junk, vec![b'x'; 200]).unwrap();
     age_packs(&repo, 48);
     tidied(&mut repo);
     let warnings: Vec<_> = repo
@@ -665,12 +804,10 @@ fn tidy_leaves_a_pack_it_cannot_read_with_a_warning() {
         .into_iter()
         .filter(|w| w.kind == warning::PACK_NOT_TIDIED)
         .collect();
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
-    for name in ["00.pack", "zz.pack"] {
-        assert!(repo.packs_dir().join(name).exists(), "{name}");
-        let named = warnings.iter().filter(|w| w.message.contains(name)).count();
-        assert_eq!(named, 1, "{name}: {warnings:?}");
-    }
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].message.contains("00.pack"), "{warnings:?}");
+    assert!(warnings[0].message.contains("Ask for help"), "{warnings:?}");
+    assert!(repo.packs_dir().join("00.pack").exists());
     assert!(text_reads(&repo, "one"));
     assert!(!reads(&repo, &entry, ObjectKind::DiaryEntry));
 }
@@ -690,39 +827,134 @@ fn flip_index_id(path: &Path, id: &Id) {
     fs::write(path, pack).unwrap();
 }
 
+/// Gives the first line of the version 2 index of the pack at `path` a kind no version knows.
+fn garble_index_line(path: &Path) {
+    let mut pack = fs::read(path).unwrap();
+    let u64_at = |at: usize| u64::from_le_bytes(pack[at..at + 8].try_into().unwrap());
+    let index = usize::try_from(u64_at(pack.len() - 48)).unwrap();
+    let count = usize::try_from(u64_at(index)).unwrap();
+    pack[index + 8 + 1024 + 32 * count] = 0xee;
+    fs::write(path, pack).unwrap();
+}
+
+/// A pack `tidy` can't open, or whose index it can't read or check, could hold the only chunk
+/// list naming chunks in the others, however young it is: `tidy` stops, naming it, before it
+/// removes anything. Here it is mostly the pack holding the chunks two versions of a file share.
 #[test]
-fn a_pack_whose_index_fails_its_checksum_is_left_whole() {
-    let (dir, mut repo) = project(50);
-    save_text(dir.path(), &mut repo, "one", 40);
-    let content = hash_content(b"one");
-    let holding = pack_names(&repo)
-        .into_iter()
-        .find(|name| {
-            let pack = PackReader::open(&repo.packs_dir().join(name)).unwrap();
-            pack.find(&content).unwrap().is_some()
-        })
-        .unwrap();
-    let path = repo.packs_dir().join(&holding);
-    // Read by its index alone, the kept file would look like something nothing needs.
-    repo.store().close_all();
-    flip_index_id(&path, &content);
-    let bytes = fs::read(&path).unwrap();
-    age_packs(&repo, 48);
-    tidied(&mut repo);
-    assert_eq!(fs::read(&path).unwrap(), bytes);
-    let warned: Vec<_> = repo
-        .store()
-        .warnings()
-        .into_iter()
-        .filter(|w| w.kind == warning::PACK_NOT_TIDIED)
-        .collect();
-    assert_eq!(warned.len(), 1, "{warned:?}");
-    let said = &warned[0].message;
-    assert!(
-        said.contains(&holding) && said.contains("checksum"),
-        "{said}"
-    );
-    assert!(said.contains("Ask for help"), "{said}");
+fn tidy_stops_at_a_pack_it_cannot_read() {
+    let damages = [
+        "locked",
+        "not a pack",
+        "a folder",
+        "index unreadable",
+        "checksum failing",
+    ];
+    for young in [false, true] {
+        for damage in damages {
+            let why = format!("{damage}, young: {young}");
+            let (dir, mut repo) = project(50);
+            let (_, dropped, _) = two_versions(dir.path(), &mut repo);
+            // What tidy would remove, were it to go on.
+            let (entry, _) = crash_leftover(&mut repo);
+            age_packs(&repo, 48);
+            let shared = repo.packs_dir().join(&holding(&repo, &dropped)[0]);
+            let junk = repo.packs_dir().join("zz.pack");
+            let path = match damage {
+                "not a pack" => {
+                    fs::write(&junk, vec![b'x'; 200]).unwrap();
+                    junk
+                }
+                "a folder" => {
+                    fs::create_dir(&junk).unwrap();
+                    junk
+                }
+                "index unreadable" => {
+                    garble_index_line(&shared);
+                    shared
+                }
+                "checksum failing" => {
+                    flip_index_id(&shared, &dropped);
+                    shared
+                }
+                _ => shared,
+            };
+            set_age(&path, if young { 1 } else { 48 });
+            let held = (damage == "locked").then(|| lock_pack(&path));
+            if held.as_ref().is_some_and(Option::is_none) {
+                // Root reads everything.
+                continue;
+            }
+            let before = pack_names(&repo);
+            let stopped = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {
+                panic!("an estimate was given")
+            });
+            drop(held);
+            match stopped {
+                Err(e @ RepoError::CantTidy { .. }) => {
+                    let name = path.file_name().unwrap().to_str().unwrap();
+                    assert!(e.to_string().contains(name), "{why}: {e}");
+                    let hint = e.hint().unwrap();
+                    assert!(hint.starts_with("Nothing was removed"), "{why}: {hint}");
+                    assert!(hint.contains(".bolt/store/packs"), "{why}: {hint}");
+                    assert!(hint.contains("only its chunk lists name"), "{why}: {hint}");
+                }
+                other => panic!("{why}: {other:?}"),
+            }
+            assert_eq!(pack_names(&repo), before, "{why}");
+            assert!(reads(&repo, &entry, ObjectKind::DiaryEntry), "{why}");
+        }
+    }
+}
+
+/// A chunk list that can't be read stops `tidy`, naming its pack: one in a young pack, and one of
+/// a file it keeps.
+#[test]
+fn a_chunk_list_tidy_cannot_read_stops_it_naming_its_pack() {
+    for young in [true, false] {
+        let (_dir, mut repo) = project(50);
+        let file = hash_content(b"a file");
+        // Compressed, so it fails its check.
+        let list = crate::pack::Prepared {
+            id: file,
+            size: 6,
+            zstd: true,
+            stored: zstd::bulk::compress(b"a list", 3).unwrap(),
+        };
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        packs.add_prepared(ObjectKind::ChunkList, &list).unwrap();
+        let path = packs.finish().unwrap().remove(0);
+        drop(lock);
+        if !young {
+            plant_root(&mut repo, |packs| {
+                let entry = Entry {
+                    name: "a.bin".into(),
+                    kind: EntryKind::File,
+                    id: file,
+                    size: 6,
+                };
+                add_listing(packs, vec![entry]).0
+            });
+        }
+        age_packs(&repo, 48);
+        if young {
+            set_age(&path, 1);
+        }
+        let before = pack_names(&repo);
+        let stopped = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {
+            panic!("an estimate was given")
+        });
+        match stopped {
+            Err(e @ RepoError::CantTidy { .. }) => {
+                let said = e.to_string();
+                let name = path.file_name().unwrap().to_str().unwrap();
+                assert!(said.contains(name) && said.contains("compressed"), "{said}");
+                assert!(!said.contains("must be kept"), "{said}");
+            }
+            other => panic!("young: {young}: {other:?}"),
+        }
+        assert_eq!(pack_names(&repo), before, "young: {young}");
+    }
 }
 
 /// An index that reads otherwise the second time, as a failing disk could, must not drop a kept
@@ -788,35 +1020,184 @@ fn an_old_pack_named_like_a_new_one_in_other_letters_is_never_removed() {
 }
 
 #[test]
-fn tidy_stops_at_a_chunk_list_or_a_conflict_record() {
-    for kind in [ObjectKind::ChunkList, ObjectKind::Conflict] {
+fn tidy_still_stops_at_a_conflict_record() {
+    for young in [false, true] {
         let (dir, mut repo) = project(50);
         save_text(dir.path(), &mut repo, "one", 40);
         let (entry, _) = crash_leftover(&mut repo);
-        age_packs(&repo, 48);
-        // In a young pack: a chunk list there could name chunks in the older ones.
         let before = pack_names(&repo);
         let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
         let mut packs = repo.new_packs().unwrap();
-        packs.add_record(kind, b"not followed here").unwrap();
+        packs
+            .add_record(ObjectKind::Conflict, b"not followed here")
+            .unwrap();
         repo.store_packs(&lock, packs).unwrap();
         drop(lock);
         let planted = pack_names(&repo).difference(&before).next().cloned();
         let planted = planted.unwrap();
+        age_packs(&repo, 48);
+        if young {
+            set_age(&repo.packs_dir().join(&planted), 1);
+        }
         let before = pack_names(&repo);
         let stopped = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {
             panic!("an estimate was given")
         });
         match stopped {
             Err(e @ RepoError::CantTidy { .. }) => {
-                assert!(e.to_string().contains(&planted), "{e}");
-                assert!(e.hint().unwrap().starts_with("Nothing was removed"), "{e}");
+                let said = e.to_string();
+                assert!(said.contains(&planted), "{said}");
+                assert!(said.contains("a conflict record"), "{said}");
+                let hint = e.hint().unwrap();
+                assert!(hint.starts_with("Nothing was removed"), "{hint}");
+                assert!(hint.contains("follows them"), "{hint}");
             }
-            other => panic!("{kind:?}: {other:?}"),
+            other => panic!("young: {young}: {other:?}"),
         }
-        assert_eq!(pack_names(&repo), before, "{kind:?}");
-        assert!(reads(&repo, &entry, ObjectKind::DiaryEntry), "{kind:?}");
+        assert_eq!(pack_names(&repo), before, "young: {young}");
+        assert!(reads(&repo, &entry, ObjectKind::DiaryEntry));
     }
+}
+
+/// The chunks of an older version of a file, shared with the version kept, sit only in the pack
+/// of the older one, beside its own chunks.
+#[test]
+fn tidy_keeps_every_chunk_a_kept_file_needs() {
+    let (dir, mut repo) = project(50);
+    let (kept, dropped, own) = two_versions(dir.path(), &mut repo);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(reads(&repo, &kept, ObjectKind::ChunkList));
+    assert!(!reads(&repo, &dropped, ObjectKind::ChunkList));
+    assert!(lists_of(&repo, &dropped).is_empty());
+    for id in &own {
+        assert!(!reads(&repo, id, ObjectKind::Content), "{id}");
+    }
+}
+
+#[test]
+fn tidy_removes_the_chunks_only_an_old_file_needed() {
+    let (dir, mut repo) = project(50);
+    save_text(dir.path(), &mut repo, "one", 45);
+    let old = save_big(dir.path(), &mut repo, &noise(2, 512 << 10), 40);
+    step(&mut repo, 40, false).unwrap();
+    let recent = save_big(dir.path(), &mut repo, &noise(3, 512 << 10), 2);
+    step(&mut repo, 2, false).unwrap();
+    let old_chunks = chunks_of(&repo, &old);
+    let recent_chunks = chunks_of(&repo, &recent);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    // Undone within the window, the recent one can still come back, every chunk of it.
+    assert!(reads(&repo, &recent, ObjectKind::ChunkList));
+    assert!(!reads(&repo, &old, ObjectKind::ChunkList));
+    for id in &old_chunks {
+        assert!(!reads(&repo, id, ObjectKind::Content), "{id}");
+    }
+    // A month on, the recent one goes too.
+    tidy(&mut repo, 30, now() + 29 * DAY, &mut |_| {}, &mut |_| {}).unwrap();
+    assert!(!reads(&repo, &recent, ObjectKind::ChunkList));
+    for id in &recent_chunks {
+        assert!(!reads(&repo, id, ObjectKind::Content), "{id}");
+    }
+    assert!(text_reads(&repo, "one"));
+}
+
+#[test]
+fn tidy_keeps_the_chunks_a_young_packs_list_names() {
+    let (dir, mut repo) = project(50);
+    let file = save_big(dir.path(), &mut repo, &noise(4, 512 << 10), 40);
+    step(&mut repo, 40, false).unwrap();
+    let list = lists_of(&repo, &file).remove(0);
+    age_packs(&repo, 48);
+    // Not its chunks, which the store held.
+    store_again(&mut repo, &list);
+    let report = tidied(&mut repo);
+    assert_eq!(report.packs_young, 1, "{report:?}");
+    assert!(reads(&repo, &file, ObjectKind::ChunkList));
+    // A day later, the list goes, and its chunks with it.
+    age_packs(&repo, 25);
+    tidied(&mut repo);
+    assert!(!reads(&repo, &file, ObjectKind::ChunkList));
+    for chunk in &list.chunks {
+        assert!(
+            !reads(&repo, &chunk.id, ObjectKind::Content),
+            "{}",
+            chunk.id
+        );
+    }
+}
+
+#[test]
+fn tidy_follows_every_list_stored_under_a_files_id() {
+    let (dir, mut repo) = project(50);
+    let bytes = noise(5, 512 << 10);
+    let file = save_big(dir.path(), &mut repo, &bytes, 40);
+    // The same file cut otherwise, its chunks beside it in a pack of their own.
+    let pieces: Vec<&[u8]> = bytes.chunks(100 << 10).collect();
+    let other = ChunkList {
+        file,
+        size: bytes.len() as u64,
+        chunks: pieces
+            .iter()
+            .map(|p| Chunk {
+                id: hash_content(p),
+                size: p.len() as u64,
+            })
+            .collect(),
+    };
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    for piece in &pieces {
+        packs.add_content(piece).unwrap();
+    }
+    packs.add_chunk_list(&other).unwrap();
+    repo.store_packs(&lock, packs).unwrap();
+    drop(lock);
+    let mut lists = lists_of(&repo, &file);
+    assert_eq!(lists.len(), 2);
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    // Both lists stay, and so does every chunk either names.
+    let mut after = lists_of(&repo, &file);
+    lists.sort_by_key(ChunkList::encode);
+    after.sort_by_key(ChunkList::encode);
+    assert_eq!(after, lists);
+    for chunk in lists.iter().flat_map(|l| &l.chunks) {
+        assert!(reads(&repo, &chunk.id, ObjectKind::Content), "{}", chunk.id);
+    }
+}
+
+/// A pack is small by its chunk lists' own bytes, not their files' sizes.
+#[test]
+fn a_pack_holding_a_big_files_list_is_written_again_as_small() {
+    let (_dir, mut repo) = project(50);
+    let big = ChunkList {
+        file: Id([7; 32]),
+        size: 10 << 30,
+        chunks: vec![Chunk {
+            id: Id([8; 32]),
+            size: 10 << 30,
+        }],
+    };
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    packs.add_chunk_list(&big).unwrap();
+    let path = packs.finish().unwrap().remove(0);
+    drop(lock);
+    plant_root(&mut repo, |packs| {
+        let file = Entry {
+            name: "big.bin".into(),
+            kind: EntryKind::File,
+            id: big.file,
+            size: big.size,
+        };
+        add_listing(packs, vec![file]).0
+    });
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    // It held only what is kept, in version 2, so only being small had it written again.
+    assert!(!path.exists());
+    assert_eq!(lists_of(&repo, &big.file), [big]);
 }
 
 #[cfg(feature = "fault-injection")]
@@ -846,15 +1227,17 @@ fn packs_holding_nothing_to_keep_go_first_even_when_writing_fails() {
     }
 }
 
+/// Anything named like a pack is judged as one, a folder too, so one that isn't a pack stops
+/// `tidy`; anything else is passed over.
 #[test]
-fn only_pack_files_are_judged() {
+fn everything_named_like_a_pack_is_judged() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.pack"), b"x").unwrap();
     fs::create_dir(dir.path().join("b.pack")).unwrap();
     fs::write(dir.path().join("c.txt"), b"x").unwrap();
-    let found = packs(&Dir::open_top(dir.path()).unwrap()).unwrap();
-    let names: Vec<&OsString> = found.iter().map(|(name, _)| name).collect();
-    assert_eq!(names, [&OsString::from("a.pack")]);
+    let found = listed(&Dir::open_top(dir.path()).unwrap(), dir.path(), 0).unwrap();
+    let names: Vec<&OsString> = found.iter().map(|pack| &pack.name).collect();
+    assert_eq!(names, ["a.pack", "b.pack"]);
 }
 
 #[test]

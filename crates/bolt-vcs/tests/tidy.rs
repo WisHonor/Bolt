@@ -8,7 +8,7 @@ use bolt_core::repo::Repository;
 use serde_json::{Value, json};
 
 mod support;
-use support::{Env, text};
+use support::{Env, id_of, main_tip, text, write_noise};
 
 /// `bolt <args>`, which must succeed; what it printed, and what it said on stderr.
 fn ok(env: &Env, args: &[&str]) -> (String, String) {
@@ -109,6 +109,47 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
              hours as they are: a later bolt tidy frees what they hold that nothing needs.\n"
         )
     );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn tidy_keeps_every_chunk_of_the_big_files_it_keeps() {
+    let env = Env::empty();
+    env.bolt().arg("start").assert().success();
+    let big = env.root().join("big.bin");
+    let first = write_noise(&big, 1, 2 << 20);
+    ok(&env, &["save", "Big"]);
+    let one = main_tip(&env);
+    let second = write_noise(&big, 2, 2 << 20);
+    ok(&env, &["save", "Another"]);
+    let two = main_tip(&env);
+    age(&env, 48);
+    ok(&env, &["tidy"]);
+    ok(&env, &["goto", &one.to_hex()]);
+    assert_eq!(id_of(&big), first);
+    ok(&env, &["goto", &two.to_hex()]);
+    assert_eq!(id_of(&big), second);
+}
+
+#[test]
+fn tidy_stops_at_a_pack_it_cannot_read() {
+    let env = with_garbage();
+    let junk = env.root().join(".bolt/store/packs/zz.pack");
+    fs::write(&junk, vec![b'x'; 200]).unwrap();
+    age(&env, 48);
+    let before = env.standing();
+    let out = env.bolt().args(["tidy", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let said = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        said.contains("zz.pack") && said.contains("damaged"),
+        "{doc}"
+    );
+    let hint = doc["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains(".bolt/store/packs"), "{doc}");
+    assert!(hint.contains("only its chunk lists name"), "{doc}");
+    // Nothing was removed.
     assert_eq!(env.standing(), before);
 }
 

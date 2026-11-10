@@ -203,7 +203,7 @@ impl Index {
         };
         let kind = ObjectKind::from_u8(kind)
             .ok_or_else(|| corrupt(path, format!("unknown object kind {kind}")))?;
-        if uncompressed_size > kind.max_size() {
+        if !kind.sizes_allowed(uncompressed_size, stored_size) {
             return Err(corrupt(path, format!("{id} is larger than allowed")));
         }
         let entry_end = offset

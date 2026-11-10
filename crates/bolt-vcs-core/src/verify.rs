@@ -1,5 +1,6 @@
 //! Integrity check: reads every object of every pack. The core of the later `bolt verify`.
 use crate::pack::{ObjectKind, PackReader};
+use crate::store::{Store, is_pack_name};
 use crate::text::escape;
 use std::io;
 use std::path::Path;
@@ -17,20 +18,23 @@ impl VerifyReport {
 }
 
 /// Opens each pack on its own, so a broken pack becomes a listed problem instead of stopping the
-/// check. Folder and pack names in the problems came from outside Bolt, so they are escaped.
+/// check. A chunk list is checked by its structure, then by the file its chunks build, found
+/// through the store. Folder and pack names in the problems came from outside Bolt, so they are
+/// escaped.
 #[must_use]
 pub fn verify_store(packs_dir: &Path) -> VerifyReport {
     let mut report = VerifyReport {
         objects_checked: 0,
         problems: Vec::new(),
     };
+    let store = Store::open(packs_dir);
     let folder = escape(&packs_dir.display().to_string(), false);
     let mut paths = Vec::new();
     match std::fs::read_dir(packs_dir) {
         Ok(rd) => {
             for entry in rd {
                 match entry {
-                    Ok(e) if e.path().extension().is_some_and(|x| x == "pack") => {
+                    Ok(e) if is_pack_name(&e.file_name()) => {
                         paths.push(e.path());
                     }
                     Ok(_) => {}
@@ -64,10 +68,15 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
                 }
             };
             report.objects_checked += 1;
-            let result = if entry.kind == ObjectKind::Content {
-                reader.copy_content(&entry, &mut io::sink())
-            } else {
-                reader.read_record(&entry).map(drop)
+            let result = match entry.kind {
+                ObjectKind::Content => reader.copy_content(&entry, &mut io::sink()),
+                ObjectKind::ChunkList => reader.read_chunk_list(&entry).and_then(|list| {
+                    let store = store
+                        .as_ref()
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    store.copy_chunks(&list, &path, &mut io::sink())
+                }),
+                _ => reader.read_record(&entry).map(drop),
             };
             if let Err(err) = result {
                 report
@@ -83,6 +92,8 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::chunks::{Chunk, ChunkList};
+    use crate::id::hash_content;
     use crate::pack::{ENTRY_HEADER_LEN, PackReader, PackWriter};
 
     fn make(
@@ -157,6 +168,51 @@ mod tests {
         let report = verify_store(&packs);
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         assert!(report.problems[0].contains(&tags_id.to_hex()));
+    }
+
+    #[test]
+    fn verify_finds_a_chunk_list_that_builds_the_wrong_file() {
+        let (root, packs, _) = make(0);
+        let tmp = root.path().join("tmp");
+        let pieces = [&b"hello "[..], b"world"];
+        let good = ChunkList {
+            file: hash_content(b"hello world"),
+            size: 11,
+            chunks: pieces
+                .iter()
+                .map(|p| Chunk {
+                    id: hash_content(p),
+                    size: p.len() as u64,
+                })
+                .collect(),
+        };
+        let mut w = PackWriter::create(&tmp).unwrap();
+        for p in pieces {
+            w.add_content(p).unwrap();
+        }
+        w.add_chunk_list(&good).unwrap();
+        w.finish(&packs).unwrap();
+        let report = verify_store(&packs);
+        assert!(report.is_ok(), "{:?}", report.problems);
+        assert_eq!(report.objects_checked, 3);
+
+        // Each chunk is good, and so is the list's structure, but they build another file.
+        let wrong = ChunkList {
+            file: hash_content(b"HELLO WORLD"),
+            ..good
+        };
+        let mut w = PackWriter::create(&tmp).unwrap();
+        w.add_chunk_list(&wrong).unwrap();
+        let path = w.finish(&packs).unwrap().unwrap();
+        let report = verify_store(&packs);
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let problem = &report.problems[0];
+        assert!(
+            problem.starts_with(&format!("{name}: object {}: ", wrong.file)),
+            "{problem}"
+        );
+        assert!(problem.contains("build another file"), "{problem}");
     }
 
     #[test]

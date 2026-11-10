@@ -5,7 +5,7 @@ use crate::history::{current_save, tip_of};
 use crate::journal::{Change, Content, Expected};
 use crate::listing::EntryKind;
 use crate::save::Person;
-use crate::test_support::plant_save;
+use crate::test_support::{Written, names, noise, plant_save, written};
 use crate::warning;
 use std::fs;
 
@@ -1472,4 +1472,214 @@ fn a_placeholder_swapped_in_for_an_unsaved_link_is_kept_before_it_goes() {
     let mut kept = Vec::new();
     repo.store().copy_content(&id, &mut kept).unwrap();
     assert_eq!(kept, target);
+}
+
+#[test]
+fn unsaved_work_changed_to_as_many_bytes_after_the_plan_is_left_alone() {
+    let mut big = noise(9, 3 << 20);
+    let small = (b"mine".to_vec(), b"MINE".to_vec());
+    let planned_big = big.clone();
+    big[1 << 20..(1 << 20) + 4].copy_from_slice(b"MINE");
+    for (name, mine, now) in [("small", small.0, small.1), ("big", planned_big, big)] {
+        let (dir, mut repo) = project();
+        let from = current_save(&repo).unwrap();
+        // What a discard plans for the unsaved file: to remove it, holding `mine`.
+        let actions = vec![Action {
+            path: name.into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::File,
+                id: hash_content(&mine),
+                size: mine.len() as u64,
+            }),
+        }];
+        // Then the user writes as many bytes over it.
+        fs::write(dir.path().join(name), &now).unwrap();
+        let (head, _) = repo.current().unwrap();
+        let lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let copies = keep_safety_copies(&repo, &actions, from, drive, &mut packs).unwrap();
+        assert!(copies.is_empty(), "{name}: {copies:?}");
+        repo.store_packs(&lock, packs).unwrap();
+        let journal = Journal {
+            target: head,
+            from: head,
+            actions,
+        };
+        let done = apply(&repo, &lock, &journal, drive).unwrap();
+        assert_eq!(done.changed_since_plan, [name]);
+        assert_eq!(fs::read(dir.path().join(name)).unwrap(), now, "{name}");
+    }
+}
+
+/// Unsaved work too long to cut is kept whole, compared with the plan's ID as it is read, so one
+/// changed to as many bytes is left out.
+#[test]
+fn unsaved_work_too_long_to_cut_is_kept_whole_unless_it_changed() {
+    // Files of 1 to 2 MiB are cut; a longer one is too long to cut.
+    crate::chunks::set_test_cut_sizes(Some((1 << 20, 2 << 20)));
+    let mine = noise(11, 3 << 20);
+    let mut changed = mine.clone();
+    changed[1 << 20..(1 << 20) + 4].copy_from_slice(b"MINE");
+    let id = hash_content(&mine);
+    for (now, kept) in [(&mine, true), (&changed, false)] {
+        let (dir, mut repo) = project();
+        let from = current_save(&repo).unwrap();
+        let actions = vec![Action {
+            path: "big".into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind: EntryKind::File,
+                id,
+                size: mine.len() as u64,
+            }),
+        }];
+        fs::write(dir.path().join("big"), now).unwrap();
+        let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+        let drive = drive::probe(repo.tmp_folder()).unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let copies = keep_safety_copies(&repo, &actions, from, drive, &mut packs).unwrap();
+        assert_eq!(copies.len(), usize::from(kept), "{kept}");
+        assert_eq!(packs.kind_of(&id), kept.then_some(ObjectKind::Content));
+    }
+    crate::chunks::set_test_cut_sizes(None);
+}
+
+/// A new project holding unsaved work a discard would remove, and the actions that remove it:
+/// 120 small files in five folders, some of them alike, a big file and, where links can be made,
+/// a link.
+fn unsaved_work() -> (tempfile::TempDir, Repository, Vec<Action>) {
+    let (dir, repo) = project();
+    let mut actions = Vec::new();
+    let mut plan = |path: &str, kind: EntryKind, bytes: &[u8]| {
+        actions.push(Action {
+            path: path.into(),
+            change: Change::RemoveFile,
+            expected: Some(Expected {
+                kind,
+                id: hash_content(bytes),
+                size: bytes.len() as u64,
+            }),
+        });
+    };
+    for i in 0..120u64 {
+        let bytes = match i % 3 {
+            0 => format!("unsaved {i}\n").repeat(i as usize + 1).into_bytes(),
+            1 => noise(i, 100 + (i as usize * 97) % 5000),
+            _ => b"the same in many folders\n".to_vec(),
+        };
+        let path = format!("d{}/f{i:03}.txt", i % 5);
+        fs::create_dir_all(dir.path().join(format!("d{}", i % 5))).unwrap();
+        fs::write(dir.path().join(&path), &bytes).unwrap();
+        plan(&path, EntryKind::File, &bytes);
+    }
+    let big = noise(500, 3 << 20);
+    fs::write(dir.path().join("big.bin"), &big).unwrap();
+    plan("big.bin", EntryKind::File, &big);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("d0/f000.txt", dir.path().join("link")).unwrap();
+        plan("link", EntryKind::Symlink, b"d0/f000.txt");
+    }
+    (dir, repo, actions)
+}
+
+/// The safety copies `keep_safety_copies` keeps of `actions` with `count` workers, or the first
+/// problem, and the packs it wrote, 7 objects a pack so that the set rolls over many times.
+fn copied_with(
+    count: usize,
+    repo: &mut Repository,
+    actions: &[Action],
+) -> (Result<Vec<SafetyCopy>, String>, Written) {
+    let from = current_save(repo).unwrap();
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let tmp = repo.root().join(".bolt/tmp");
+    let mut packs = PackSet::with_limit(&tmp, repo.packs_dir(), 7).unwrap();
+    crate::workers::set_test_workers(Some(count));
+    let copies = keep_safety_copies(repo, actions, from, drive, &mut packs);
+    crate::workers::set_test_workers(None);
+    (copies.map_err(|e| format!("{e:?}")), written(packs))
+}
+
+#[test]
+fn safety_copies_of_many_files_are_the_same_on_one_thread_or_eight() {
+    let mut seen = Vec::new();
+    for count in [1, 8] {
+        let (dir, mut repo, actions) = unsaved_work();
+        // Changed to as many bytes since the plan: neither kept nor stored.
+        let changed = dir.path().join("d1/f001.txt");
+        let mut now = fs::read(&changed).unwrap();
+        now[50] ^= 1;
+        fs::write(&changed, &now).unwrap();
+        let (copies, written) = copied_with(count, &mut repo, &actions);
+        let copies = copies.unwrap();
+        assert_eq!(copies.len(), actions.len() - 1, "{count}");
+        assert!(copies.iter().all(|c| c.path != "d1/f001.txt"));
+        for (name, _) in &written {
+            let pack = crate::pack::PackReader::open(&repo.packs_dir().join(name)).unwrap();
+            let mut ids = pack.entries().map(|e| e.unwrap().id);
+            assert!(!ids.any(|id| id == hash_content(&now)), "{count}: stored");
+        }
+        assert!(written.len() > 5, "{} packs", written.len());
+        seen.push((copies, written));
+    }
+    assert_eq!(seen[0].0, seen[1].0);
+    assert_eq!(names(&seen[0].1), names(&seen[1].1));
+    assert!(seen[0].1 == seen[1].1, "the packs hold other bytes");
+}
+
+/// The copies run on workers; the hook this thread sets reaches them.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_file_the_hook_makes_unreadable_is_caught_when_copies_run_on_workers() {
+    for count in [8, 1] {
+        let (_dir, mut repo, actions) = unsaved_work();
+        crate::fsio::fault::unreadable(Some("d2/f052.txt"));
+        let (copies, _) = copied_with(count, &mut repo, &actions);
+        crate::fsio::fault::unreadable(None);
+        let said = copies.unwrap_err();
+        assert!(
+            said.contains("Unreadable") && said.contains("\"d2/f052.txt\""),
+            "{count}: {said}"
+        );
+    }
+}
+
+/// The copies are kept in the actions' order, so an earlier entry's problem comes first: here a
+/// file that can't be read before a folder of the save that the store can't read.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_earlier_entrys_problem_comes_before_a_later_ones() {
+    let (dir, mut repo) = project();
+    // The save's folder `b` names a listing the store doesn't hold.
+    crate::test_support::plant_root(&mut repo, |packs| {
+        let lost = Entry {
+            name: "b".into(),
+            kind: EntryKind::Folder,
+            id: Id([9; 32]),
+            size: 0,
+        };
+        crate::test_support::add_listing(packs, vec![lost]).0
+    });
+    fs::write(dir.path().join("a.txt"), b"mine").unwrap();
+    let remove = |path: &str| Action {
+        path: path.into(),
+        change: Change::RemoveFile,
+        expected: Some(Expected {
+            kind: EntryKind::File,
+            id: hash_content(b"mine"),
+            size: 4,
+        }),
+    };
+    let actions = [remove("a.txt"), remove("b/c.txt")];
+    crate::fsio::fault::unreadable(Some("a.txt"));
+    let (copies, _) = copied_with(8, &mut repo, &actions);
+    crate::fsio::fault::unreadable(None);
+    let said = copies.unwrap_err();
+    assert!(
+        said.contains("Unreadable") && said.contains("\"a.txt\""),
+        "{said}"
+    );
 }

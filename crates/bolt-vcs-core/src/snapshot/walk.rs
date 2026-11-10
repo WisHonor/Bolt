@@ -123,6 +123,18 @@ impl Handles {
         self.dir(Path::new(rel)).map_err(|e| folder_problem(rel, e))
     }
 
+    /// `folder`, as a handle a job can hold while this set moves on.
+    pub(super) fn shared(&mut self, rel: &str) -> Result<Arc<Dir>, SaveError> {
+        self.held(Path::new(rel))
+            .map(Arc::clone)
+            .map_err(|e| folder_problem(rel, e))
+    }
+
+    /// Leaves room for `held` folders held open elsewhere, by jobs that read their files.
+    pub(super) fn lend(&mut self, held: usize) {
+        self.most = MOST_HELD.saturating_sub(held);
+    }
+
     fn deepest(&self) -> &Arc<Dir> {
         self.down.last().map_or(&self.top, |(_, dir)| dir)
     }
@@ -3827,19 +3839,23 @@ mod tests {
         use std::io::Write;
         let (dir, mut repo) = project();
         // 600 levels of `d`, made a name at a time: macOS takes no path that long. Level 300 also
-        // holds `e`, which the walk reaches after all of `d`.
+        // holds `e00` to `e39`, which the walk reaches after all of `d`: their files are read on
+        // eight workers, each job holding its own folder.
         {
             let n = OsStr::new;
             let mut at = Dir::open_top(dir.path()).unwrap();
             for level in 1..=600 {
                 at.create_dir(n("d")).unwrap();
                 if level == 300 {
-                    at.create_dir(n("e")).unwrap();
-                    let e = at.open_dir(n("e")).unwrap();
-                    e.create_new(n("x"), false)
-                        .unwrap()
-                        .write_all(b"e")
-                        .unwrap();
+                    for i in 0..40 {
+                        let name = format!("e{i:02}");
+                        at.create_dir(n(&name)).unwrap();
+                        let e = at.open_dir(n(&name)).unwrap();
+                        e.create_new(n("x"), false)
+                            .unwrap()
+                            .write_all(b"e")
+                            .unwrap();
+                    }
                 }
                 at = at.open_dir(n("d")).unwrap();
             }
@@ -3856,6 +3872,7 @@ mod tests {
         let limits = SaveLimits::default();
         let mut scan = scan_folder(dir.path(), newest(&repo), limits, drive, None).unwrap();
         let mut packs = repo.new_packs().unwrap();
+        crate::workers::set_test_workers(Some(8));
         let (built, ..) = crate::snapshot::build(
             repo.store(),
             &mut packs,
@@ -3866,6 +3883,7 @@ mod tests {
             &scan.gitignored,
         )
         .unwrap();
+        crate::workers::set_test_workers(None);
         let most = open_count::most_since_last() - before;
         assert!((1..=129).contains(&most), "{most} folders open at once");
         drop(packs);
@@ -3875,7 +3893,7 @@ mod tests {
         let tree = saved_tree(repo.store(), saved);
         let down = |levels: usize| "d/".repeat(levels);
         assert_eq!(tree[&format!("{}x", down(600))].1, b"bottom");
-        assert_eq!(tree[&format!("{}e/x", down(299))].1, b"e");
+        assert_eq!(tree[&format!("{}e07/x", down(299))].1, b"e");
     }
 
     /// Lets `gate`'s lookers go at the `sends`th job the walk sends, from this thread.

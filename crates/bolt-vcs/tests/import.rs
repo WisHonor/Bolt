@@ -285,11 +285,20 @@ const POINTER: &str = "version https://git-lfs.github.com/spec/v1\noid sha256:\
 #[test]
 fn an_import_that_stops_partway_says_its_bolt_folder_is_kept() {
     let env = Env::new();
-    // With no sign of Git LFS but the pointer itself, only the converter finds it.
-    env.commit("art/big.psd", POINTER, "Add a big file");
+    env.commit("a.txt", "a\n", "First");
+    // A commit naming a file Git doesn't have: only the converter reads files, so only it finds
+    // this one missing.
+    let blob = "12".repeat(20);
+    let entry = format!("100644,{blob},art/big.psd");
+    env.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    let tree = env.git(&["write-tree", "--missing-ok"]);
+    let commit = env.git(&["commit-tree", "-p", "HEAD", "-m", "Add a big file", &tree]);
+    env.git(&["update-ref", "refs/heads/main", &commit]);
     let err = env.refused_import();
     assert!(
-        err.contains("holds a Git LFS pointer at `art/big.psd`"),
+        err.contains(&format!(
+            "missing object `{blob}`, in the file `art/big.psd` of commit `{commit}`"
+        )),
         "{err}"
     );
     assert!(
@@ -365,8 +374,8 @@ fn import_and_start_refuse_a_project_that_lost_only_its_format() {
     refused_over_saves(started.path(), "start");
 }
 
-/// A sign of Git LFS has the first pass look for a pointer in `HEAD`'s files, so the usual Git
-/// LFS repository stops before `.bolt` is made, with the stop the converter gives.
+/// A sign of Git LFS has the first pass look for every Git LFS file's object, so the usual Git
+/// LFS repository missing some stops before `.bolt` is made.
 #[test]
 fn a_git_lfs_repository_stops_before_anything_is_written() {
     let lfs_line = "*.psd filter=lfs diff=lfs merge=lfs -text\n";
@@ -378,10 +387,13 @@ fn a_git_lfs_repository_stops_before_anything_is_written() {
         } else {
             std::fs::create_dir_all(env.root().join(".git/lfs/objects")).unwrap();
         }
-        env.commit("art/big.psd", POINTER, "Add a big file");
+        let commit = env.commit("art/big.psd", POINTER, "Add a big file");
         let err = env.refused_import();
         assert!(
-            err.contains("holds a Git LFS pointer at `art/big.psd`, and this version of Bolt"),
+            err.contains(&format!(
+                "error: A Git LFS file in this history isn't in .git/lfs/objects:\n  \
+                 `art/big.psd` in commit `{commit}` (12 KB)\n"
+            )),
             "{sign}: {err}"
         );
         assert!(err.contains("hint: Nothing was changed."), "{sign}: {err}");

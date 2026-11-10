@@ -2,13 +2,16 @@
 //! `safe-folders` they trust. A project's own `.bolt/config.toml` is never asked: a shared zip
 //! carries it, so a stranger could make the user's saves claim to be someone else (decision 025).
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use bolt_platform::dir::Dir;
 use serde::Deserialize;
 
-use crate::git::{UserSetting, read_user_settings};
+use crate::git::{
+    UserSetting, read_bool, read_count, read_user_settings, read_user_variable,
+    shown as shown_bytes,
+};
 use crate::repo::Repository;
 use crate::safe_fs;
 use crate::save::Person;
@@ -39,16 +42,30 @@ pub enum ConfigError {
         escape(&path.display().to_string(), false)
     )]
     NotAtTop { key: &'static str, path: PathBuf },
-    /// The user's own Git settings, read for their ignore list (decision 047), can't be read.
+    /// The user's own Git settings, read for their ignore list (decision 047) and for
+    /// `lfs.storage`, can't be read.
     #[error(
         "Bolt can't read your Git settings in {}: {}",
         escape(&path.display().to_string(), false),
         escape(detail, false)
     )]
     GitSettings { path: PathBuf, detail: String },
+    /// A variable of the environment that places the user's own Git settings, or gives one, as
+    /// `GIT_CONFIG_COUNT` does, can't be read.
+    #[error(
+        "Bolt can't read your Git settings in {}: {}",
+        escape(name, false),
+        escape(detail, false)
+    )]
+    GitVariable { name: String, detail: String },
 }
 
 const SNIPPET: &str = "[user]\nname = \"Your Name\"\nemail = \"you@example.com\"";
+
+/// What the hints for the user's own Git settings add.
+const GIT_SETTINGS_READ: &str = "Bolt reads your Git settings only for core.excludesFile, your \
+                                 own list of files Git ignores, and for lfs.storage; `git config \
+                                 --list --show-origin` shows what Git makes of them.";
 
 impl ConfigError {
     /// What the user can do next, if there is something to say.
@@ -66,11 +83,10 @@ impl ConfigError {
             ConfigError::NotAtTop { .. } => {
                 Some("Move that line above [user] and every other [section].".to_owned())
             }
-            ConfigError::GitSettings { .. } => Some(
-                "Bolt reads them only for core.excludesFile, your own list of files Git ignores. \
-                 Fix that file; `git config --global --list` shows what Git makes of it."
-                    .to_owned(),
-            ),
+            ConfigError::GitSettings { .. } => Some(format!("Fix that file. {GIT_SETTINGS_READ}")),
+            ConfigError::GitVariable { .. } => Some(format!(
+                "Fix that variable, or unset it. {GIT_SETTINGS_READ}"
+            )),
         }
     }
 }
@@ -234,114 +250,575 @@ pub fn user_config_path() -> Option<PathBuf> {
 const MAX_GIT_SETTINGS_BYTES: u64 = 1 << 20;
 
 /// The user's own Git ignore list (decision 047): the file `core.excludesFile` names in the
-/// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. Git's home folder is `HOME`, as
-/// Git for Windows takes it too. `None` when there is no home folder, or the setting is empty.
+/// user's own Git settings, else `$XDG_CONFIG_HOME/git/ignore`. `None` when the setting is empty
+/// or names no file (`/dev/null`, and `nul` on Windows), or with neither a home folder nor
+/// `XDG_CONFIG_HOME` to find the default list in.
 pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigError> {
-    let env_path = |key| {
-        std::env::var_os(key)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
+    git_excludes_file_in(&UserGit::from_env(project_root))
+}
+
+/// The `lfs.storage` the user's own Git settings set, for `bolt import` in `top`, which reads it
+/// only to tell whether Git LFS keeps its files elsewhere.
+pub fn git_lfs_storage(top: &Path) -> Result<UserLfsStorage, ConfigError> {
+    git_lfs_storage_in(&UserGit::from_env(top))
+}
+
+/// The last `lfs.storage` in the user's own Git settings files, which the repository's own
+/// setting overrides, and the last the environment gives through `GIT_CONFIG_COUNT`, which
+/// overrides that in turn, as in Git: each with where it is set, and empty for one with no value.
+#[derive(Debug, Default)]
+pub struct UserLfsStorage {
+    pub files: Option<(Vec<u8>, String)>,
+    pub variables: Option<(Vec<u8>, String)>,
+}
+
+/// Where Git finds the user's own settings: the home folder and `XDG_CONFIG_HOME`'s folder, if
+/// there are any, the environment's variables, read through `var` (`std::env::var_os` but in
+/// tests), and the project's top, where Git runs, so a relative path is read from there.
+struct UserGit<'a> {
+    home: Option<PathBuf>,
+    xdg: Option<PathBuf>,
+    top: &'a Path,
+    var: &'a dyn Fn(&str) -> Option<OsString>,
+}
+
+impl<'a> UserGit<'a> {
+    /// The user's own Git settings as this process's environment places them.
+    fn from_env(top: &'a Path) -> UserGit<'a> {
+        fn var(key: &str) -> Option<OsString> {
+            std::env::var_os(key)
+        }
+        UserGit::new(top, &var, cfg!(windows), &Path::is_dir)
+    }
+
+    /// The user's own Git settings as the environment `var` places them, on Windows or not, with
+    /// `is_dir` telling which paths are folders.
+    fn new(
+        top: &'a Path,
+        var: &'a dyn Fn(&str) -> Option<OsString>,
+        windows: bool,
+        is_dir: &dyn Fn(&Path) -> bool,
+    ) -> UserGit<'a> {
+        let home = git_home(var, windows, is_dir).map(|home| {
+            // Git puts `~/x` at the home folder's text and `/x`, so an empty one is `/`.
+            if home.is_empty() {
+                PathBuf::from("/")
+            } else {
+                PathBuf::from(home)
+            }
+        });
+        // As Git's `xdg_config_home`: the variable when it is set to something, else `~/.config`.
+        let xdg = var("XDG_CONFIG_HOME")
+            .filter(|xdg| !xdg.is_empty())
+            .map(PathBuf::from);
+        UserGit {
+            xdg: xdg.or_else(|| Some(home.as_ref()?.join(".config"))),
+            home,
+            top,
+            var,
+        }
+    }
+
+    /// The user's own Git settings files, in Git's order, each with whether it is the user's own,
+    /// which Git skips when it may not read it: the file `GIT_CONFIG_SYSTEM` names, unless
+    /// `GIT_CONFIG_NOSYSTEM` is true, then the file `GIT_CONFIG_GLOBAL` names, or when that isn't
+    /// set `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`. Set to nothing, or to a name for no
+    /// file, either variable names no file, as in Git.
+    fn files(&self) -> Result<Vec<(PathBuf, bool)>, ConfigError> {
+        let mut files = Vec::new();
+        if !self.no_system()? {
+            files.extend(self.system_file()?.map(|path| (path, false)));
+        }
+        let global = (self.var)("GIT_CONFIG_GLOBAL").map(|path| {
+            let none = path.is_empty() || names_no_file(path.as_encoded_bytes(), cfg!(windows));
+            (!none).then(|| self.top.join(path))
+        });
+        let own = match global {
+            Some(global) => Vec::from_iter(global),
+            // Without a home folder, there is no `~/.gitconfig`, as in Git.
+            None => [
+                self.xdg.as_ref().map(|xdg| xdg.join("git").join("config")),
+                self.home.as_ref().map(|home| home.join(".gitconfig")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        };
+        files.extend(own.into_iter().map(|path| (path, true)));
+        Ok(files)
+    }
+
+    /// The file `GIT_CONFIG_SYSTEM` names, tidied first as Git tidies it, if it names one.
+    fn system_file(&self) -> Result<Option<PathBuf>, ConfigError> {
+        let name = "GIT_CONFIG_SYSTEM";
+        let Some(value) = (self.var)(name) else {
+            return Ok(None);
+        };
+        let refused = |detail: String| ConfigError::GitVariable {
+            name: name.to_owned(),
+            detail,
+        };
+        let absolute = Path::new(&value).has_root();
+        let value = value.as_encoded_bytes();
+        let tidied = system_file_named(value, cfg!(windows)).map_err(|()| {
+            let fix = if absolute {
+                "write it without the `..`"
+            } else {
+                "write the full path instead"
+            };
+            refused(format!(
+                "`{}` goes above its start with `..`, where Git's tidying of the path fails; {fix}",
+                shown_bytes(value)
+            ))
+        })?;
+        let Some(tidied) = tidied else {
+            return Ok(None);
+        };
+        let path = os_path(tidied).ok_or_else(|| refused("it isn't valid Unicode".to_owned()))?;
+        Ok(Some(self.top.join(path)))
+    }
+
+    /// Gives `each` every setting Bolt reads in the user's own Git settings files, in Git's order.
+    fn read_files(&self, each: &mut dyn FnMut(UserSetting, &Place)) -> Result<(), ConfigError> {
+        for (path, own) in self.files()? {
+            read_git_settings(&path, self.home.as_deref(), 0, own, each)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `GIT_CONFIG_NOSYSTEM` is true, read as Git reads it.
+    fn no_system(&self) -> Result<bool, ConfigError> {
+        let name = "GIT_CONFIG_NOSYSTEM";
+        let Some(value) = (self.var)(name) else {
+            return Ok(false);
+        };
+        read_bool(value.as_encoded_bytes()).ok_or_else(|| ConfigError::GitVariable {
+            name: name.to_owned(),
+            detail: format!(
+                "`{}` isn't true or false to Git, which refuses it too",
+                shown_bytes(value.as_encoded_bytes())
+            ),
+        })
+    }
+
+    /// Gives `each` every setting Bolt reads among those the environment gives through
+    /// `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>`, which Git reads after
+    /// every file, in their order. What Git refuses there stops Bolt too.
+    fn read_variables(&self, each: &mut dyn FnMut(UserSetting, &Place)) -> Result<(), ConfigError> {
+        let refused = |name: &str, detail: String| ConfigError::GitVariable {
+            name: name.to_owned(),
+            detail,
+        };
+        let Some(count) = (self.var)("GIT_CONFIG_COUNT") else {
+            return Ok(());
+        };
+        let count = read_count(count.as_encoded_bytes()).map_err(|why| {
+            let value = shown_bytes(count.as_encoded_bytes());
+            refused(
+                "GIT_CONFIG_COUNT",
+                format!("`{value}` {why}, and Git refuses it too"),
+            )
+        })?;
+        for n in 0..count {
+            let (key_name, value_name) = (
+                format!("GIT_CONFIG_KEY_{n}"),
+                format!("GIT_CONFIG_VALUE_{n}"),
+            );
+            let read = |name: &str| {
+                (self.var)(name).ok_or_else(|| {
+                    let detail = format!("it isn't set, though GIT_CONFIG_COUNT is {count}");
+                    refused(name, format!("{detail}, and Git refuses that too"))
+                })
+            };
+            let (key, value) = (read(&key_name)?, read(&value_name)?);
+            let setting = read_user_variable(key.as_encoded_bytes(), value.as_encoded_bytes())
+                .map_err(|()| {
+                    let key = shown_bytes(key.as_encoded_bytes());
+                    let detail = format!("`{key}` isn't a setting's name to Git (section.name)");
+                    refused(&key_name, format!("{detail}, which refuses it too"))
+                })?;
+            let place = Place::Variable(value_name);
+            match setting {
+                // Git takes a relative include only from a file, from that file's folder.
+                Some(UserSetting::Include(value)) => {
+                    let value = utf8(value, "include.path", &place)?;
+                    let path =
+                        git_path(&value, "include.path", self.home.as_deref(), None, &place)?;
+                    if let Some(included) = path {
+                        read_git_settings(&included, self.home.as_deref(), 1, false, each)?;
+                    }
+                }
+                Some(other) => each(other, &place),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `git_excludes_file` with the places given, so tests can choose them. The repository's own
+/// config is never read for this: it could name any file on the computer.
+fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
+    let (mut named, mut stop) = (None, None);
+    let mut take = |setting: UserSetting, place: &Place| {
+        if let UserSetting::ExcludesFile(value) = setting {
+            // Git expands the values in order once all are loaded, so with no home folder the
+            // first `~/` one stops it, even where a later one overrides it.
+            if git.home.is_none() && stop.is_none() && from_home(&value) {
+                stop = Some((value.clone(), place.clone()));
+            }
+            named = Some((value, place.clone()));
+        }
     };
-    let home = env_path("HOME")
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned()));
-    let Some(home) = home else {
+    // Git loads every file and variable before it expands a value, so what it can't load
+    // stops it first.
+    git.read_files(&mut take)?;
+    git.read_variables(&mut take)?;
+    let Some((value, place)) = stop.or(named) else {
+        return Ok(git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore")));
+    };
+    let value = utf8(value, "core.excludesFile", &place)?;
+    // Git reads no list from an empty setting, which is how one turns it off.
+    if value.is_empty() {
         return Ok(None);
-    };
-    let xdg = env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
-    git_excludes_file_in(&home, &xdg, project_root)
+    }
+    git_path(
+        &value,
+        "core.excludesFile",
+        git.home.as_deref(),
+        Some(git.top),
+        &place,
+    )
+}
+
+/// `git_lfs_storage` with the places given, so tests can choose them.
+fn git_lfs_storage_in(git: &UserGit) -> Result<UserLfsStorage, ConfigError> {
+    let mut found = UserLfsStorage::default();
+    git.read_files(&mut |setting, place| last_lfs_storage(&mut found.files, setting, place))?;
+    let variables = &mut found.variables;
+    git.read_variables(&mut |setting, place| last_lfs_storage(variables, setting, place))?;
+    Ok(found)
+}
+
+/// Keeps `setting`, set at `place`, in `last` if it is an `lfs.storage`.
+fn last_lfs_storage(last: &mut Option<(Vec<u8>, String)>, setting: UserSetting, place: &Place) {
+    if let UserSetting::LfsStorage(value) = setting {
+        *last = Some((value, place.to_string()));
+    }
+}
+
+/// Where a setting of the user's own Git settings is set: a file, or the variable of the
+/// environment that holds its value.
+#[derive(Debug, Clone)]
+enum Place {
+    File(PathBuf),
+    Variable(String),
+}
+
+impl Place {
+    /// The error for a setting here that `detail` says is wrong.
+    fn error(&self, detail: String) -> ConfigError {
+        match self {
+            Place::File(path) => ConfigError::GitSettings {
+                path: path.clone(),
+                detail,
+            },
+            Place::Variable(name) => ConfigError::GitVariable {
+                name: name.clone(),
+                detail,
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for Place {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Place::File(path) => path.display().fmt(f),
+            Place::Variable(name) => name.fmt(f),
+        }
+    }
+}
+
+/// `value`, the path `setting` is set to at `place`, as text.
+fn utf8(value: Vec<u8>, setting: &str, place: &Place) -> Result<String, ConfigError> {
+    String::from_utf8(value).map_err(|_| place.error(format!("its {setting} isn't valid UTF-8")))
 }
 
 /// How many includes deep Git reads settings, its `MAX_INCLUDE_DEPTH`.
 const MAX_INCLUDE_DEPTH: usize = 10;
 
-/// `git_excludes_file` with the home folder and `XDG_CONFIG_HOME` given, so tests can choose
-/// them. The repository's own config is never read for this: it could name any file on the
-/// computer.
-fn git_excludes_file_in(
-    home: &Path,
-    xdg: &Path,
-    project_root: &Path,
-) -> Result<Option<PathBuf>, ConfigError> {
-    let mut named = None;
-    // In Git's order, so that `~/.gitconfig` wins.
-    for path in [xdg.join("git").join("config"), home.join(".gitconfig")] {
-        read_git_settings(&path, home, 0, &mut named)?;
-    }
-    let Some((value, path)) = named else {
-        return Ok(Some(xdg.join("git").join("ignore")));
-    };
-    let Ok(value) = String::from_utf8(value) else {
-        let detail = "its core.excludesFile isn't valid UTF-8".to_owned();
-        return Err(ConfigError::GitSettings { path, detail });
-    };
-    // Git reads no list from an empty setting, which is how one turns it off.
-    if value.is_empty() {
-        return Ok(None);
-    }
-    git_path(&value, home, project_root, &path).map(Some)
-}
-
-/// Reads `path`, a file of the user's own Git settings `depth` includes down, into `named`: the
-/// last `core.excludesFile` so far, and the file that set it. A plain include is read where it
-/// stands, as Git reads it (decision 060); one that isn't there is skipped, as in Git.
+/// Reads `path`, a file of the user's own Git settings `depth` includes down, giving `each` every
+/// setting Bolt reads in it but an include, with the file that holds it. A plain include is read
+/// where it stands, as Git reads it (decision 060). A file Bolt can't read is skipped where Git
+/// skips it (`skipped`), the user's `own` files apart; anything else stops Bolt, naming it.
 fn read_git_settings(
     path: &Path,
-    home: &Path,
+    home: Option<&Path>,
     depth: usize,
-    named: &mut Option<(Vec<u8>, PathBuf)>,
+    own: bool,
+    each: &mut dyn FnMut(UserSetting, &Place),
 ) -> Result<(), ConfigError> {
-    let fail = |detail: String| ConfigError::GitSettings {
-        path: path.to_owned(),
-        detail,
-    };
+    let place = Place::File(path.to_owned());
     let text = match safe_fs::read_capped_following_links(path, MAX_GIT_SETTINGS_BYTES) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(fail(e.to_string())),
+        Err(e) if skipped(e.kind(), e.raw_os_error(), own, cfg!(windows)) => return Ok(()),
+        Err(e) => return Err(place.error(e.to_string())),
     };
     if depth > MAX_INCLUDE_DEPTH {
-        return Err(fail(format!(
+        return Err(place.error(format!(
             "it is included more than {MAX_INCLUDE_DEPTH} deep, where Git stops too; perhaps an \
              include leads back to it"
         )));
     }
     let settings = read_user_settings(&text)
-        .map_err(|line| fail(format!("line {line} can't be read as Git reads it")))?;
+        .map_err(|line| place.error(format!("line {line} can't be read as Git reads it")))?;
     for setting in settings {
         match setting {
-            UserSetting::ExcludesFile(value) => *named = Some((value, path.to_owned())),
             UserSetting::Include(value) => {
-                let value = String::from_utf8(value)
-                    .map_err(|_| fail("an include.path in it isn't valid UTF-8".to_owned()))?;
                 // A relative include is from the including file's folder.
                 let folder = path.parent().unwrap_or(Path::new(""));
-                let included = git_path(&value, home, folder, path)?;
-                read_git_settings(&included, home, depth + 1, named)?;
+                let value = utf8(value, "include.path", &place)?;
+                if let Some(included) =
+                    git_path(&value, "include.path", home, Some(folder), &place)?
+                {
+                    read_git_settings(&included, home, depth + 1, false, each)?;
+                }
             }
+            other => each(other, &place),
         }
     }
     Ok(())
 }
 
-/// `value`, a path set in `path`, a file of the user's own Git settings, as Git expands it: `~`
-/// is the home folder, an absolute path stays as it is, and a relative one is from `folder`.
-fn git_path(value: &str, home: &Path, folder: &Path, path: &Path) -> Result<PathBuf, ConfigError> {
-    let Some(rest) = value.strip_prefix('~') else {
-        return Ok(folder.join(value));
-    };
-    let separator = |c: char| c == '/' || (cfg!(windows) && c == '\\');
-    // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
-    if rest.starts_with(|c: char| !separator(c)) {
-        return Err(ConfigError::GitSettings {
-            path: path.to_owned(),
-            detail: format!(
-                "Bolt can't expand {value}, which names a home folder by its user (~user/); \
-                 write the full path instead"
-            ),
-        });
+/// Whether Git skips a settings file it couldn't read for `kind` (the system's error `raw`), as
+/// Bolt does too: one that isn't there, or has a file where a folder on its path should be, and
+/// one of the user's `own` that it may not read, but not on Windows (`windows`).
+fn skipped(kind: std::io::ErrorKind, raw: Option<i32>, own: bool, windows: bool) -> bool {
+    use std::io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    // Git skips EACCES, 13 on Linux and macOS, but not EPERM, which Rust reports alike.
+    const EACCES: i32 = 13;
+    match kind {
+        NotFound | NotADirectory => true,
+        // Git for Windows' access check doesn't see permissions, so its read fails and Git stops.
+        PermissionDenied => own && !windows && raw == Some(EACCES),
+        _ => false,
     }
+}
+
+/// `GIT_CONFIG_SYSTEM`'s value as Git takes it: tidied as `tidy_path` does, then none when it is
+/// nothing or names no file. `Err` where the tidying fails.
+fn system_file_named(value: &[u8], windows: bool) -> Result<Option<Vec<u8>>, ()> {
+    let tidied = tidy_path(value, windows).ok_or(())?;
+    if tidied.is_empty() || names_no_file(&tidied, windows) {
+        return Ok(None);
+    }
+    Ok(Some(tidied))
+}
+
+/// `bytes`, a path the environment gave once tidied, as the system's path again: only ASCII was
+/// dropped or changed, so any bytes do on Unix, and valid Unicode stays so on Windows.
+fn os_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(OsString::from_vec(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(PathBuf::from)
+    }
+}
+
+/// Git's `normalize_path_copy`, which Git runs on `GIT_CONFIG_SYSTEM` alone: on Windows (`windows`)
+/// `\` is a separator too, and a drive or `//server/share/` starts a path; each run of separators
+/// becomes one `/`; a `.` part is dropped; and a `..` part takes the part before it away. Only the
+/// text changes. `None` where a `..` would climb above the path's start, where Git's fails.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
+    let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
+    // Past the end reads as the C string's closing NUL.
+    let at = |i: usize| src.get(i).copied().unwrap_or(0);
+    let skip_seps = |mut i: usize| {
+        while is_sep(at(i)) {
+            i = i.saturating_add(1);
+        }
+        i
+    };
+    let start = first_component(src, windows);
+    let root = src.get(..start)?.iter();
+    let mut out: Vec<u8> = root.map(|&c| if is_sep(c) { b'/' } else { c }).collect();
+    let kept = out.len();
+    let mut i = skip_seps(start);
+    loop {
+        if at(i) == b'.' {
+            let up_to = match (at(i.saturating_add(1)), at(i.saturating_add(2))) {
+                (0, _) => {
+                    i = i.saturating_add(1);
+                    None
+                }
+                (c, _) if is_sep(c) => {
+                    i = skip_seps(i.saturating_add(2));
+                    continue;
+                }
+                (b'.', 0) => Some(i.saturating_add(2)),
+                (b'.', c) if is_sep(c) => Some(skip_seps(i.saturating_add(3))),
+                _ => None,
+            };
+            if let Some(next) = up_to {
+                // Back past the `/` that ends the part before, to the `/` before that part.
+                let end = out.len().checked_sub(1).filter(|&end| end > kept)?;
+                let part = out.get(kept..end)?.iter().rposition(|&c| c == b'/');
+                out.truncate(part.map_or(kept, |at| kept.saturating_add(at).saturating_add(1)));
+                i = next;
+                continue;
+            }
+        }
+        // A part, up to the next separator, then that run of separators as one `/`.
+        loop {
+            let c = at(i);
+            i = i.saturating_add(1);
+            if c == 0 {
+                return Some(out);
+            }
+            if is_sep(c) {
+                out.push(b'/');
+                i = skip_seps(i);
+                break;
+            }
+            out.push(c);
+        }
+    }
+}
+
+/// Git's `offset_1st_component`: how long the root of `path` is, which `tidy_path` keeps but for
+/// its `\`, which becomes `/`: a leading `/`, and on Windows a drive (Git's `has_dos_drive_prefix`,
+/// in compat/win32/path-utils.c) or the `//server/share/` of a network path.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+fn first_component(path: &[u8], windows: bool) -> usize {
+    let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
+    let at = |i: usize| path.get(i).copied().unwrap_or(0);
+    if !windows {
+        return usize::from(is_sep(at(0)));
+    }
+    let drive = match at(0) {
+        0 => 0,
+        c if c & 0x80 == 0 => {
+            if at(1) == b':' {
+                2
+            } else {
+                0
+            }
+        }
+        // A drive named by a letter beyond ASCII, of up to four bytes in UTF-8.
+        _ => {
+            let letter = (1..4).find(|&i| at(i) & 0x80 == 0).unwrap_or(4);
+            if at(letter) == b':' {
+                letter.saturating_add(1)
+            } else {
+                0
+            }
+        }
+    };
+    if drive == 0 && is_sep(at(0)) && is_sep(at(1)) {
+        // Past the server's name, then the share's.
+        let Some(server) = path.iter().skip(2).position(|&c| is_sep(c)) else {
+            return 0;
+        };
+        let mut end = server.saturating_add(3);
+        while at(end) != 0 && !is_sep(at(end)) {
+            end = end.saturating_add(1);
+        }
+        return end.saturating_add(usize::from(is_sep(at(end))));
+    }
+    drive.saturating_add(usize::from(is_sep(at(drive))))
+}
+
+/// Whether `value`, a path a Git setting or variable gives, names no file, as Git reads it: the
+/// exact text `/dev/null`, and on Windows (`windows`) `nul` in any case, which Git opens as the
+/// null device. It is judged on the value as written, before `~/` is expanded or it is joined to
+/// a folder, which on Windows would make `/dev/null` a file on the project's drive.
+fn names_no_file(value: &[u8], windows: bool) -> bool {
+    value == b"/dev/null" || (windows && value.eq_ignore_ascii_case(b"nul"))
+}
+
+/// `value`, the path `setting` is set to at `place`, as Git expands it: none for a name for no
+/// file; `~` is the `home` folder, and stops where there is none, as Git stops; an absolute path
+/// stays as it is; and a relative one is from `folder`. With no folder, as for a variable's
+/// include, Git refuses a relative one.
+fn git_path(
+    value: &str,
+    setting: &str,
+    home: Option<&Path>,
+    folder: Option<&Path>,
+    place: &Place,
+) -> Result<Option<PathBuf>, ConfigError> {
+    if names_no_file(value.as_bytes(), cfg!(windows)) {
+        return Ok(None);
+    }
+    let Some(rest) = value.strip_prefix('~') else {
+        return match folder {
+            Some(folder) => Ok(Some(folder.join(value))),
+            None if Path::new(value).has_root() => Ok(Some(PathBuf::from(value))),
+            // Git puts the folder it is installed in there.
+            None if value.starts_with("%(prefix)/") => Err(place.error(format!(
+                "Bolt can't expand its {setting}, {value}: %(prefix)/ stands for the folder Git is \
+                 installed in, which Bolt can't tell; write the full path instead"
+            ))),
+            None => Err(place.error(format!(
+                "its {setting}, `{value}`, is a relative path, which Git takes only from a file \
+                 and refuses here too"
+            ))),
+        };
+    };
+    // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
+    if !from_home(value.as_bytes()) {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}, which names a home folder by its user \
+             (~user/); write the full path instead"
+        )));
+    }
+    // Git dies here: "failed to expand user dir".
+    let Some(home) = home else {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}: there is no home folder for `~` (HOME \
+             isn't set), and Git stops there too; set HOME, or write the full path instead"
+        )));
+    };
     // Git puts what follows `~` after the home folder, so `~//x` is the home folder's `x`.
-    Ok(home.join(rest.trim_start_matches(separator)))
+    Ok(Some(
+        home.join(rest.trim_start_matches(std::path::is_separator)),
+    ))
+}
+
+/// Whether Git puts the home folder at the start of `value`: `~` alone or before a separator.
+fn from_home(value: &[u8]) -> bool {
+    let separator = |&c: &u8| std::path::is_separator(char::from(c));
+    value.first() == Some(&b'~') && value.get(1).is_none_or(separator)
+}
+
+/// The home folder Git v2.56.0 takes `~` and its own files from: `HOME`, whatever it is set to;
+/// on Windows (`windows`), where Git for Windows sets `HOME` when it isn't set
+/// (`setup_windows_environment`), `HOMEDRIVE` followed by `HOMEPATH` when that names a folder
+/// (`is_dir`), else `USERPROFILE`. `None` where there is none: Git doesn't ask the system.
+fn git_home(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    windows: bool,
+    is_dir: &dyn Fn(&Path) -> bool,
+) -> Option<OsString> {
+    if let Some(home) = var("HOME") {
+        return Some(home);
+    }
+    if !windows {
+        return None;
+    }
+    if let (Some(mut home), Some(path)) = (var("HOMEDRIVE"), var("HOMEPATH")) {
+        home.push(path);
+        if is_dir(Path::new(&home)) {
+            return Some(home);
+        }
+    }
+    var("USERPROFILE")
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
@@ -634,7 +1111,7 @@ mod tests {
         let home = dir.path();
         let xdg = home.join("xdg");
         let root = home.join("project");
-        let find = || git_excludes_file_in(home, &xdg, &root).unwrap();
+        let find = || excludes(home, &xdg, &root, &[]).unwrap();
         // Nothing set: git/ignore in XDG_CONFIG_HOME.
         assert_eq!(find(), Some(xdg.join("git").join("ignore")));
         // A relative path is from the project's top, as in Git.
@@ -658,7 +1135,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         std::fs::write(home.join(".gitconfig"), "[user]\n[core\n").unwrap();
-        let e = git_excludes_file_in(home, &home.join("xdg"), home).unwrap_err();
+        let e = excludes(home, &home.join("xdg"), home, &[]).unwrap_err();
         assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
         let said = e.to_string();
         assert!(
@@ -674,7 +1151,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         let xdg = home.join("xdg");
-        let find = || git_excludes_file_in(home, &xdg, &home.join("project")).unwrap();
+        let find = || excludes(home, &xdg, &home.join("project"), &[]).unwrap();
         let set = |path: &Path, text: &str| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
@@ -722,7 +1199,7 @@ mod tests {
     fn includes_stop_ten_deep_as_in_git() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        let find = || git_excludes_file_in(home, &home.join("xdg"), home);
+        let find = || excludes(home, &home.join("xdg"), home, &[]);
         // `.gitconfig` includes `1`, which includes `2`, and so on; the last one sets the list.
         let chain = |deepest: u32| {
             std::fs::write(home.join(".gitconfig"), "[include]\n\tpath = 1\n").unwrap();
@@ -753,7 +1230,7 @@ mod tests {
         let home = dir.path();
         let find = |text: &str| {
             std::fs::write(home.join(".gitconfig"), text).unwrap();
-            git_excludes_file_in(home, &home.join("xdg"), &home.join("project"))
+            excludes(home, &home.join("xdg"), &home.join("project"), &[])
         };
         let list = |value: &str| find(&format!("[core]\n\texcludesFile = {value}\n"));
         // Git puts what follows `~` after the home folder, so more slashes change nothing.
@@ -772,6 +1249,756 @@ mod tests {
                 "{said}"
             );
         }
+    }
+
+    /// Reads the user's own Git settings with `read`, as Git finds them with this home folder,
+    /// `XDG_CONFIG_HOME` and project top, and only `vars` set in the environment, so no test
+    /// reads the user's own.
+    fn as_git_finds<T>(
+        (home, xdg, top): (&Path, &Path, &Path),
+        vars: &[(&str, &str)],
+        read: fn(&UserGit) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        let places = (Some(home), Some(xdg), top);
+        as_git_finds_where(places, vars, read)
+    }
+
+    /// `as_git_finds`, where there may be no home folder, or no `XDG_CONFIG_HOME` folder.
+    fn as_git_finds_where<T>(
+        (home, xdg, top): (Option<&Path>, Option<&Path>, &Path),
+        vars: &[(&str, &str)],
+        read: fn(&UserGit) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        let var = |key: &str| {
+            let (_, value) = vars.iter().find(|(name, _)| *name == key)?;
+            Some(OsString::from(value))
+        };
+        read(&UserGit {
+            home: home.map(Path::to_owned),
+            xdg: xdg.map(Path::to_owned),
+            top,
+            var: &var,
+        })
+    }
+
+    fn excludes(
+        home: &Path,
+        xdg: &Path,
+        top: &Path,
+        vars: &[(&str, &str)],
+    ) -> Result<Option<PathBuf>, ConfigError> {
+        as_git_finds((home, xdg, top), vars, git_excludes_file_in)
+    }
+
+    /// A file of Git settings at `path` whose `core.excludesFile` is `list`.
+    fn excludes_file_set(path: &Path, list: &str) -> String {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("[core]\n\texcludesFile = {list}\n")).unwrap();
+        path.display().to_string()
+    }
+
+    /// The variable an error names, which must be one of the environment's.
+    fn variable_named(e: ConfigError) -> String {
+        assert!(e.hint().unwrap().contains("unset it"), "{e}");
+        match e {
+            ConfigError::GitVariable { name, .. } => name,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_system_file_comes_first_unless_git_config_nosystem_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let (xdg, top) = (home.join("xdg"), home.join("project"));
+        let system = excludes_file_set(&home.join("etc/gitconfig"), "~/system");
+        let find = |vars: &[(&str, &str)]| excludes(home, &xdg, &top, vars);
+        let unset = Some(xdg.join("git").join("ignore"));
+        // Only the file `GIT_CONFIG_SYSTEM` names: Git's own place depends on how it was built.
+        assert_eq!(find(&[]).unwrap(), unset);
+        let named = [("GIT_CONFIG_SYSTEM", system.as_str())];
+        assert_eq!(find(&named).unwrap(), Some(home.join("system")));
+        // A relative one is from the project's top, where Git runs; set to nothing, it names no
+        // file, as in Git.
+        excludes_file_set(&top.join("etc/gitconfig"), "~/relative");
+        let relative = [("GIT_CONFIG_SYSTEM", "etc/gitconfig")];
+        assert_eq!(find(&relative).unwrap(), Some(home.join("relative")));
+        assert_eq!(find(&[("GIT_CONFIG_SYSTEM", "")]).unwrap(), unset);
+        // `GIT_CONFIG_NOSYSTEM` is read as Git reads a true or false value.
+        for (value, skipped) in [
+            ("1", true),
+            ("true", true),
+            ("YES", true),
+            ("on", true),
+            ("2", true),
+            ("", false),
+            ("0", false),
+            ("false", false),
+            ("Off", false),
+        ] {
+            let vars = [named[0], ("GIT_CONFIG_NOSYSTEM", value)];
+            let want = if skipped {
+                unset.clone()
+            } else {
+                Some(home.join("system"))
+            };
+            assert_eq!(find(&vars).unwrap(), want, "{value:?}");
+        }
+        // Git stops at a value it can't read, whether or not `GIT_CONFIG_SYSTEM` is set.
+        let e = find(&[("GIT_CONFIG_NOSYSTEM", "maybe")]).unwrap_err();
+        assert!(e.to_string().contains("`maybe`"), "{e}");
+        assert_eq!(variable_named(e), "GIT_CONFIG_NOSYSTEM");
+        // The user's own files come after it, so they win.
+        excludes_file_set(&home.join(".gitconfig"), "~/mine");
+        assert_eq!(find(&named).unwrap(), Some(home.join("mine")));
+    }
+
+    #[test]
+    fn git_config_global_takes_the_place_of_the_home_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let (xdg, top) = (home.join("xdg"), home.join("project"));
+        excludes_file_set(&xdg.join("git").join("config"), "~/xdg");
+        excludes_file_set(&home.join(".gitconfig"), "~/home");
+        let find = |vars: &[(&str, &str)]| excludes(home, &xdg, &top, vars);
+        assert_eq!(find(&[]).unwrap(), Some(home.join("home")));
+        let global = excludes_file_set(&home.join("global"), "~/global");
+        assert_eq!(
+            find(&[("GIT_CONFIG_GLOBAL", global.as_str())]).unwrap(),
+            Some(home.join("global"))
+        );
+        // Neither home file is read, even when the file named sets nothing, isn't there, is
+        // nothing at all or is `/dev/null`, as Git's own documentation suggests.
+        std::fs::write(home.join("empty"), "[user]\n\tname = x\n").unwrap();
+        let empty = home.join("empty").display().to_string();
+        let gone = home.join("gone").display().to_string();
+        for named in [empty.as_str(), gone.as_str(), "", "/dev/null"] {
+            let vars = [("GIT_CONFIG_GLOBAL", named)];
+            let want = Some(xdg.join("git").join("ignore"));
+            assert_eq!(find(&vars).unwrap(), want, "{named:?}");
+        }
+        // The system's file comes before it.
+        let system = excludes_file_set(&home.join("system"), "~/system");
+        let both = |global: &str| {
+            find(&[
+                ("GIT_CONFIG_SYSTEM", system.as_str()),
+                ("GIT_CONFIG_GLOBAL", global),
+            ])
+            .unwrap()
+        };
+        assert_eq!(both(&empty), Some(home.join("system")));
+        assert_eq!(both(&global), Some(home.join("global")));
+        let dev_null = [
+            ("GIT_CONFIG_SYSTEM", "/dev/null"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ];
+        assert_eq!(
+            find(&dev_null).unwrap(),
+            Some(xdg.join("git").join("ignore"))
+        );
+    }
+
+    #[test]
+    fn git_config_count_gives_settings_after_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let (xdg, top) = (home.join("xdg"), home.join("project"));
+        let system = excludes_file_set(&home.join("system"), "~/system");
+        let global = excludes_file_set(&home.join("global"), "~/global");
+        let find = |given: &[(&str, &str)]| {
+            let mut vars = vec![("GIT_CONFIG_SYSTEM", system.as_str())];
+            vars.extend([("GIT_CONFIG_GLOBAL", global.as_str())]);
+            vars.extend(given);
+            excludes(home, &xdg, &top, &vars)
+        };
+        assert_eq!(find(&[]).unwrap(), Some(home.join("global")));
+        // In their order, the last winning, whatever other settings are given; the section and
+        // the key are read in any letter case, as in Git, but a subsection is another setting.
+        let given = [
+            ("GIT_CONFIG_COUNT", "3"),
+            ("GIT_CONFIG_KEY_0", "core.excludesFile"),
+            ("GIT_CONFIG_VALUE_0", "~/first"),
+            ("GIT_CONFIG_KEY_1", "CORE.EXCLUDESFILE"),
+            ("GIT_CONFIG_VALUE_1", "~/second"),
+            ("GIT_CONFIG_KEY_2", "core.Sub.excludesFile"),
+            ("GIT_CONFIG_VALUE_2", "~/third"),
+        ];
+        assert_eq!(find(&given).unwrap(), Some(home.join("second")));
+        // Only as many as the count says; nothing set is none, a relative path is from the
+        // project's top, and set to nothing, it names no list.
+        let count = |count: &'static str, value: &'static str| {
+            find(&[
+                ("GIT_CONFIG_COUNT", count),
+                ("GIT_CONFIG_KEY_0", "core.excludesFile"),
+                ("GIT_CONFIG_VALUE_0", value),
+            ])
+            .unwrap()
+        };
+        assert_eq!(count("0", "~/first"), Some(home.join("global")));
+        assert_eq!(count("", "~/first"), Some(home.join("global")));
+        assert_eq!(count("-0", "~/first"), Some(home.join("global")));
+        assert_eq!(count(" \t+1", "list"), Some(top.join("list")));
+        assert_eq!(count("1", ""), None);
+        // An include there is followed, from a full path only, as Git follows it.
+        let included = excludes_file_set(&home.join("included"), "~/included");
+        let include = |path: &str| {
+            let vars = [
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "include.path"),
+                ("GIT_CONFIG_VALUE_0", path),
+            ];
+            find(&vars)
+        };
+        assert_eq!(include(&included).unwrap(), Some(home.join("included")));
+        assert_eq!(include("~/included").unwrap(), Some(home.join("included")));
+        let e = include("included").unwrap_err();
+        assert!(e.to_string().contains("relative path"), "{e}");
+        assert_eq!(variable_named(e), "GIT_CONFIG_VALUE_0");
+    }
+
+    #[test]
+    fn what_git_refuses_in_git_config_count_stops_bolt_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let find = |vars: &[(&str, &str)]| excludes(home, &home.join("xdg"), home, vars);
+        for count in [
+            "x",
+            "1 ",
+            "0x1",
+            " ",
+            "+",
+            "1k",
+            "-1",
+            "2147483648",
+            "99999999999999999999",
+        ] {
+            let e = find(&[("GIT_CONFIG_COUNT", count)]).unwrap_err();
+            assert!(e.to_string().contains(&format!("`{count}`")), "{e}");
+            assert_eq!(variable_named(e), "GIT_CONFIG_COUNT", "{count:?}");
+        }
+        let count = |n| ("GIT_CONFIG_COUNT", n);
+        let (key, value) = (("GIT_CONFIG_KEY_0", "a.b"), ("GIT_CONFIG_VALUE_0", "x"));
+        // As many keys and values as the count says must be set.
+        for (vars, missing) in [
+            (vec![count("2")], "GIT_CONFIG_KEY_0"),
+            (vec![count("1"), key], "GIT_CONFIG_VALUE_0"),
+            (vec![count("2"), key, value], "GIT_CONFIG_KEY_1"),
+        ] {
+            let e = find(&vars).unwrap_err();
+            assert!(e.to_string().contains("isn't set"), "{e}");
+            assert_eq!(variable_named(e), missing);
+        }
+        // Each key must be one Git takes, whatever setting it names.
+        for name in [
+            "",
+            "core",
+            ".x",
+            "core.",
+            "core.1x",
+            "co_re.x",
+            "a.b\nc.d",
+            "user.na me",
+        ] {
+            let e = find(&[count("1"), ("GIT_CONFIG_KEY_0", name), value]).unwrap_err();
+            assert_eq!(variable_named(e), "GIT_CONFIG_KEY_0", "{name:?}");
+        }
+        for name in ["-.x", ".a.b", "1.x", "a.b c\t.d"] {
+            let vars = [count("1"), ("GIT_CONFIG_KEY_0", name), value];
+            assert!(find(&vars).is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn lfs_storage_is_found_in_the_files_and_in_the_variables_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let set = |path: &Path, value: &str| {
+            std::fs::write(path, format!("[lfs]\n\tstorage = {value}\n")).unwrap();
+            path.display().to_string()
+        };
+        let xdg = home.join("xdg");
+        let find = |vars: &[(&str, &str)]| {
+            as_git_finds((home, &xdg, home), vars, git_lfs_storage_in).unwrap()
+        };
+        let system = set(&home.join("system"), "/system");
+        let gitconfig = set(&home.join(".gitconfig"), "/home");
+        let found = find(&[("GIT_CONFIG_SYSTEM", system.as_str())]);
+        assert_eq!(found.files, Some((b"/home".to_vec(), gitconfig)));
+        assert_eq!(found.variables, None);
+        let found = find(&[
+            ("GIT_CONFIG_SYSTEM", system.as_str()),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "lfs.storage"),
+            ("GIT_CONFIG_VALUE_0", ""),
+        ]);
+        // Named as Git tidies it: on Windows with `/`.
+        let tidied = if cfg!(windows) {
+            system.replace('\\', "/")
+        } else {
+            system
+        };
+        assert_eq!(found.files, Some((b"/system".to_vec(), tidied)));
+        let variable = "GIT_CONFIG_VALUE_0".to_owned();
+        assert_eq!(found.variables, Some((Vec::new(), variable)));
+    }
+
+    /// `/dev/null`, and `nul` in any case on Windows, names no file wherever a Git setting or
+    /// variable names one, judged as written: joined to a folder on Windows, `/dev/null` would be
+    /// `C:\dev\null`, which anyone may make.
+    #[test]
+    fn a_name_for_no_file_is_judged_before_it_is_joined_to_a_folder() {
+        for (value, on_windows, elsewhere) in [
+            ("/dev/null", true, true),
+            ("nul", true, false),
+            ("NUL", true, false),
+            ("Nul", true, false),
+            ("C:\\dev\\null", false, false),
+            ("C:/dev/null", false, false),
+            ("\\dev\\null", false, false),
+            ("//dev/null", false, false),
+            ("/dev/null/", false, false),
+            ("/DEV/NULL", false, false),
+            ("nul.txt", false, false),
+            ("C:\\x\\nul", false, false),
+            ("", false, false),
+        ] {
+            assert_eq!(
+                names_no_file(value.as_bytes(), true),
+                on_windows,
+                "{value:?}"
+            );
+            assert_eq!(
+                names_no_file(value.as_bytes(), false),
+                elsewhere,
+                "{value:?}"
+            );
+        }
+        // Where the project's top is on a drive, no name for no file becomes a path on it.
+        let top = Path::new("C:\\project");
+        let files = |name: &'static str| {
+            let vars = [("GIT_CONFIG_SYSTEM", name), ("GIT_CONFIG_GLOBAL", name)];
+            let places = (Path::new("home"), Path::new("xdg"), top);
+            as_git_finds(places, &vars, |git| git.files()).unwrap()
+        };
+        let place = Place::Variable("GIT_CONFIG_VALUE_0".into());
+        let path = |value| {
+            git_path(
+                value,
+                "include.path",
+                Some(Path::new("home")),
+                Some(top),
+                &place,
+            )
+        };
+        assert_eq!(files("/dev/null"), []);
+        assert_eq!(path("/dev/null").unwrap(), None);
+        for name in ["nul", "NUL"] {
+            let want_files = if cfg!(windows) {
+                vec![]
+            } else {
+                vec![(top.join(name), false), (top.join(name), true)]
+            };
+            assert_eq!(files(name), want_files, "{name}");
+            let want_path = (!cfg!(windows)).then(|| top.join(name));
+            assert_eq!(path(name).unwrap(), want_path, "{name}");
+        }
+        // So `core.excludesFile = /dev/null` is no list, and an include of it no include.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let find = |text: &str| {
+            std::fs::write(home.join(".gitconfig"), text).unwrap();
+            excludes(home, &home.join("xdg"), &home.join("project"), &[])
+        };
+        assert_eq!(find("[core]\n\texcludesFile = /dev/null\n").unwrap(), None);
+        let included = "[core]\n\texcludesFile = ~/mine\n[include]\n\tpath = /dev/null\n";
+        assert_eq!(find(included).unwrap(), Some(home.join("mine")));
+        let named = if cfg!(windows) {
+            None
+        } else {
+            Some(home.join("project").join("NUL"))
+        };
+        assert_eq!(find("[core]\n\texcludesFile = NUL\n").unwrap(), named);
+    }
+
+    /// As in Git, a settings file is skipped when a file stands where a folder on its path should
+    /// be, and the user's own when Bolt may not read it; anything else that keeps one from being
+    /// read stops Bolt, a folder or a device included.
+    #[test]
+    fn settings_files_git_skips_are_skipped_and_others_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let xdg = home.join("xdg");
+        std::fs::write(home.join("plain"), "not a folder").unwrap();
+        let under_a_file = home.join("plain").join("config").display().to_string();
+        let find = |vars: &[(&str, &str)]| excludes(home, &xdg, home, vars);
+        let unset = Some(xdg.join("git").join("ignore"));
+        for name in ["GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"] {
+            assert_eq!(
+                find(&[(name, under_a_file.as_str())]).unwrap(),
+                unset,
+                "{name}"
+            );
+        }
+        let include = format!(
+            "[include]\n\tpath = {}\n",
+            home.join("plain").join("x").display()
+        );
+        std::fs::write(home.join("included"), include.replace('\\', "/")).unwrap();
+        let included = home.join("included").display().to_string();
+        assert_eq!(
+            find(&[("GIT_CONFIG_GLOBAL", included.as_str())]).unwrap(),
+            unset
+        );
+        let folder = home.display().to_string();
+        let e = find(&[("GIT_CONFIG_GLOBAL", folder.as_str())]).unwrap_err();
+        assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for device in ["/dev/zero", "//dev/null"] {
+                let e = find(&[("GIT_CONFIG_GLOBAL", device)]).unwrap_err();
+                assert!(
+                    matches!(e, ConfigError::GitSettings { .. }),
+                    "{device}: {e}"
+                );
+            }
+            let locked = home.join("locked");
+            std::fs::write(&locked, "[core]\n\texcludesFile = ~/locked-list\n").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Whoever may read it anyway (root) can't show what Git skips.
+            if std::fs::read(&locked).is_err() {
+                let locked = locked.display().to_string();
+                assert_eq!(
+                    find(&[("GIT_CONFIG_GLOBAL", locked.as_str())]).unwrap(),
+                    unset
+                );
+                let e = find(&[("GIT_CONFIG_SYSTEM", locked.as_str())]).unwrap_err();
+                assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+                let include = format!("[include]\n\tpath = {locked}\n");
+                std::fs::write(home.join(".gitconfig"), include).unwrap();
+                let e = find(&[]).unwrap_err();
+                assert!(matches!(e, ConfigError::GitSettings { .. }), "{e}");
+            }
+        }
+    }
+
+    /// Git skips the user's own settings file it may not read, but Git for Windows can't tell that
+    /// before it reads one, and stops there; Bolt does as each does, so it never applies other
+    /// settings than Git.
+    #[test]
+    fn a_settings_file_is_skipped_where_git_skips_it() {
+        use std::io::ErrorKind::{InvalidInput, NotADirectory, NotFound, PermissionDenied};
+        // EACCES and EPERM, as Linux and macOS number them.
+        let (eacces, eperm) = (Some(13), Some(1));
+        for (kind, raw, own, windows, want) in [
+            (NotFound, None, false, false, true),
+            (NotFound, Some(2), true, true, true),
+            (NotADirectory, Some(20), false, true, true),
+            (NotADirectory, None, true, false, true),
+            (PermissionDenied, eacces, true, false, true),
+            (PermissionDenied, eacces, true, true, false),
+            (PermissionDenied, eacces, false, false, false),
+            (PermissionDenied, eacces, false, true, false),
+            // Git skips EACCES only; Rust reports EPERM as the same kind.
+            (PermissionDenied, eperm, true, false, false),
+            (PermissionDenied, None, true, false, false),
+            (InvalidInput, None, true, false, false),
+            (InvalidInput, None, false, true, false),
+        ] {
+            let said = format!("{kind:?} ({raw:?}), own: {own}, on Windows: {windows}");
+            assert_eq!(skipped(kind, raw, own, windows), want, "{said}");
+        }
+    }
+
+    /// Git's own cases for `normalize_path_copy` (t/t0060-path-utils.sh, v2.56.0), with what
+    /// Windows adds: `\`, drives and network paths.
+    #[test]
+    fn git_config_system_is_tidied_as_git_tidies_it() {
+        let failed = None;
+        let to = |text: &str| Some(text.to_owned());
+        // Run on every system; those marked POSIX there aren't run on Windows.
+        let everywhere = [
+            ("", to("")),
+            (".", to("")),
+            ("./", to("")),
+            ("./.", to("")),
+            ("./..", failed.clone()),
+            ("../.", failed.clone()),
+            ("./.././/", failed.clone()),
+            ("dir/..", to("")),
+            ("dir/sub/../..", to("")),
+            ("dir/sub/../../..", failed.clone()),
+            ("dir", to("dir")),
+            ("dir//", to("dir/")),
+            ("./dir", to("dir")),
+            ("dir/.", to("dir/")),
+            ("dir///./", to("dir/")),
+            ("dir//sub/..", to("dir/")),
+            ("dir/sub/../", to("dir/")),
+            ("dir/sub/../.", to("dir/")),
+            ("dir/s1/../s2/", to("dir/s2/")),
+            ("d1/s1///s2/..//../s3/", to("d1/s3/")),
+            ("d1/s1//../s2/../../d2", to("d2")),
+            ("d1/.../d2", to("d1/.../d2")),
+            ("d1/..././../d2", to("d1/d2")),
+            ("/", to("/")),
+            ("/.", to("/")),
+            ("/../.", failed.clone()),
+            ("/dir", to("/dir")),
+            ("/dir//", to("/dir/")),
+            ("/./dir", to("/dir")),
+            ("/dir/.", to("/dir/")),
+            ("/dir///./", to("/dir/")),
+            ("/dir//sub/..", to("/dir/")),
+            ("/dir/sub/../", to("/dir/")),
+            ("/dir/s1/../s2/", to("/dir/s2/")),
+            ("/d1/s1///s2/..//../s3/", to("/d1/s3/")),
+            ("/d1/s1//../s2/../../d2", to("/d2")),
+            ("/d1/.../d2", to("/d1/.../d2")),
+            ("/d1/..././../d2", to("/d1/d2")),
+        ];
+        let posix = [
+            ("//", to("/")),
+            ("///", to("/")),
+            ("/./", to("/")),
+            ("/./..", failed.clone()),
+            ("/./.././/", failed.clone()),
+            ("/dir/..", to("/")),
+            ("/dir/sub/../..", to("/")),
+            ("/dir/sub/../../..", failed.clone()),
+            ("//dir/sub/../.", to("/dir/")),
+            // `\` is no separator there.
+            ("\\dev\\null", to("\\dev\\null")),
+        ];
+        let windows = [
+            ("\\dev\\null", to("/dev/null")),
+            ("C:\\dir\\..\\x", to("C:/x")),
+            ("C:dir/../..", failed.clone()),
+            ("C:\\..", failed.clone()),
+            ("\\\\server\\share\\dir\\..\\x", to("//server/share/x")),
+            ("//server/share/../x", failed.clone()),
+            // A network path with no share keeps no root, as in Git.
+            ("//server", to("server")),
+            ("\u{e4}:\\x\\.\\y", to("\u{e4}:/x/y")),
+        ];
+        let tidy = |text: &str, windows| {
+            let tidied = tidy_path(text.as_bytes(), windows)?;
+            Some(String::from_utf8(tidied).unwrap())
+        };
+        for (text, want) in everywhere.iter() {
+            for on_windows in [false, true] {
+                assert_eq!(
+                    &tidy(text, on_windows),
+                    want,
+                    "{text:?}, Windows: {on_windows}"
+                );
+            }
+        }
+        for (text, want) in posix {
+            assert_eq!(tidy(text, false), want, "{text:?}");
+        }
+        for (text, want) in windows {
+            assert_eq!(tidy(text, true), want, "{text:?} on Windows");
+        }
+        // So these name no file on Windows, as they do to Git there.
+        let named = |text: &str, windows| system_file_named(text.as_bytes(), windows);
+        for text in ["\\dev\\null", "/dev//null", "/dev/./null", "/x/../dev/null"] {
+            assert_eq!(named(text, true), Ok(None), "{text:?}");
+        }
+        assert_eq!(named("/dev//null", false), Ok(None));
+        assert_eq!(named("dir/..", true), Ok(None));
+        let kept = named("C:\\Git\\etc\\gitconfig", true);
+        assert_eq!(kept, Ok(Some(b"C:/Git/etc/gitconfig".to_vec())));
+        assert_eq!(named("../gitconfig", false), Err(()));
+        // Bytes that aren't UTF-8 pass as they are, where the system takes them.
+        let latin =
+            named("/opt/caf\u{e9}/gitconfig", false).map(|path| path.map(String::from_utf8));
+        assert_eq!(latin, Ok(Some(Ok("/opt/caf\u{e9}/gitconfig".to_owned()))));
+        assert_eq!(
+            system_file_named(b"/opt/\xe9/x", false),
+            Ok(Some(b"/opt/\xe9/x".to_vec()))
+        );
+    }
+
+    /// The tidied file is the one read; where the tidying fails, the variable is named.
+    #[test]
+    fn git_config_system_names_what_git_reads() {
+        let top = Path::new("C:\\project");
+        let files = |vars: &[(&str, &str)]| {
+            let places = (Path::new("home"), Path::new("xdg"), top);
+            as_git_finds(places, vars, |git| git.files())
+        };
+        let system = |name| files(&[("GIT_CONFIG_SYSTEM", name), ("GIT_CONFIG_GLOBAL", "")]);
+        assert_eq!(system("/dev//null").unwrap(), []);
+        assert_eq!(
+            system("etc/./gitconfig").unwrap(),
+            [(top.join("etc/gitconfig"), false)]
+        );
+        // `\` separates only on Windows; elsewhere it is part of a name.
+        let want = if cfg!(windows) {
+            vec![]
+        } else {
+            vec![(PathBuf::from("C:\\project/\\dev\\null"), false)]
+        };
+        assert_eq!(system("\\dev\\null").unwrap(), want);
+        // A relative one needs a full path; an absolute one, only to lose its `..`.
+        for (value, fix) in [
+            ("../gitconfig", "write the full path instead"),
+            ("/../gitconfig", "write it without the `..`"),
+        ] {
+            let e = system(value).unwrap_err();
+            let said = e.to_string();
+            let goes = format!("`{value}` goes above its start with `..`");
+            assert!(said.contains(&goes) && said.ends_with(fix), "{said}");
+            assert_eq!(variable_named(e), "GIT_CONFIG_SYSTEM");
+        }
+        // Git reads no system file under GIT_CONFIG_NOSYSTEM, however it is spelled.
+        let unread = [
+            ("GIT_CONFIG_SYSTEM", "../gitconfig"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", ""),
+        ];
+        assert_eq!(files(&unread).unwrap(), []);
+    }
+
+    /// The environment `vars` gives, as `std::env::var_os` would read it.
+    fn lookup<'v>(vars: &'v [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'v {
+        |key: &str| {
+            let (_, value) = vars.iter().find(|(name, _)| *name == key)?;
+            Some(OsString::from(value))
+        }
+    }
+
+    /// The home folder is `HOME`, whatever it holds; on Unix nothing else, and on Windows, where
+    /// Git for Windows fills it in, `HOMEDRIVE` and `HOMEPATH` when they name a folder, else
+    /// `USERPROFILE`. Git never asks the system for one.
+    #[test]
+    fn the_home_folder_is_found_as_git_finds_it() {
+        let find = |vars: &[(&str, &str)], windows: bool, folders: &[&str]| {
+            let is_dir = |path: &Path| folders.iter().any(|folder| Path::new(folder) == path);
+            git_home(&lookup(vars), windows, &is_dir)
+        };
+        let home = |text: &str| Some(OsString::from(text));
+        let (drive, path) = (("HOMEDRIVE", "H:"), ("HOMEPATH", "\\me"));
+        let profile = ("USERPROFILE", "C:\\Users\\me");
+        let all = [("HOME", "/h"), drive, path, profile];
+        for windows in [false, true] {
+            assert_eq!(find(&all, windows, &["H:\\me"]), home("/h"), "{windows}");
+            assert_eq!(find(&[("HOME", "")], windows, &[]), home(""), "{windows}");
+        }
+        let empty_first = [("HOME", ""), drive, path, profile];
+        assert_eq!(find(&empty_first, true, &["H:\\me"]), home(""));
+        // On Unix, `HOME` alone.
+        assert_eq!(find(&all[1..], false, &["H:\\me"]), None);
+        assert_eq!(find(&[], false, &[]), None);
+        // On Windows, the home drive's folder when it is one, else the profile.
+        assert_eq!(find(&all[1..], true, &["H:\\me"]), home("H:\\me"));
+        assert_eq!(find(&all[1..], true, &[]), home("C:\\Users\\me"));
+        assert_eq!(
+            find(&[drive, profile], true, &["H:"]),
+            home("C:\\Users\\me")
+        );
+        assert_eq!(
+            find(&[path, profile], true, &["\\me"]),
+            home("C:\\Users\\me")
+        );
+        assert_eq!(find(&[drive, path], true, &[]), None);
+        assert_eq!(find(&[], true, &[]), None);
+    }
+
+    /// Without a home folder Git reads no `~/.gitconfig` and no `~/.config/git` file, but still
+    /// reads `XDG_CONFIG_HOME`'s and what the variables give, and stops at a `~/` path.
+    #[test]
+    fn without_a_home_folder_only_what_git_reads_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path();
+        let xdg = top.join("xdg");
+        let no_folder = |_: &Path| false;
+        let places = |vars: &[(&str, &str)], windows: bool| {
+            let var = lookup(vars);
+            let git = UserGit::new(top, &var, windows, &no_folder);
+            (git.home.clone(), git.xdg.clone(), git.files().unwrap())
+        };
+        // Neither: no file at all, on either system.
+        for windows in [false, true] {
+            assert_eq!(places(&[], windows), (None, None, vec![]), "{windows}");
+        }
+        let xdg_text = xdg.display().to_string();
+        let only_xdg = [("XDG_CONFIG_HOME", xdg_text.as_str())];
+        let own = vec![(xdg.join("git").join("config"), true)];
+        assert_eq!(places(&only_xdg, false), (None, Some(xdg.clone()), own));
+        // An empty HOME is Git's `/`: `~/.gitconfig` is `/.gitconfig`.
+        let root = PathBuf::from("/");
+        let (home, xdg_folder, files) = places(&[("HOME", "")], false);
+        assert_eq!(
+            (home, xdg_folder),
+            (Some(root.clone()), Some(root.join(".config")))
+        );
+        let want = [root.join(".config/git/config"), root.join(".gitconfig")];
+        assert_eq!(files, want.map(|path| (path, true)));
+        // The list: `XDG_CONFIG_HOME`'s default, a full path, and `~/`, which stops.
+        let find = |vars: &[(&str, &str)]| {
+            as_git_finds_where((None, Some(&xdg), top), vars, git_excludes_file_in)
+        };
+        assert_eq!(find(&[]).unwrap(), Some(xdg.join("git").join("ignore")));
+        let full = top.join("mine").display().to_string().replace('\\', "/");
+        let list = excludes_file_set(&top.join("list-settings"), &full);
+        let named = [("GIT_CONFIG_GLOBAL", list.as_str())];
+        assert_eq!(find(&named).unwrap(), Some(PathBuf::from(&full)));
+        let config = excludes_file_set(&xdg.join("git").join("config"), "~/old.ignore");
+        // Git stops at the first `~/` value, even with a full path set after it...
+        let set_later = [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.excludesFile"),
+            ("GIT_CONFIG_VALUE_0", full.as_str()),
+        ];
+        for later in [&[][..], &set_later[..]] {
+            let said = find(later).unwrap_err().to_string();
+            assert!(
+                said.contains(&config) && said.contains("~/old.ignore: there is no home folder"),
+                "{said}"
+            );
+        }
+        // ...but only once everything has loaded: a variable it can't load stops it first.
+        assert_eq!(
+            variable_named(find(&set_later[..1]).unwrap_err()),
+            "GIT_CONFIG_KEY_0"
+        );
+        let given = [
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.excludesFile"),
+            ("GIT_CONFIG_VALUE_0", "~/mine"),
+        ];
+        assert_eq!(
+            variable_named(find(&given).unwrap_err()),
+            "GIT_CONFIG_VALUE_0"
+        );
+        let no_list = as_git_finds_where((None, None, top), &[], git_excludes_file_in);
+        assert_eq!(no_list.unwrap(), None);
+    }
+
+    /// Git puts the folder it is installed in for `%(prefix)/`, which Bolt can't tell.
+    #[test]
+    fn an_include_from_where_git_is_installed_stops_and_asks_for_the_full_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let vars = [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "include.path"),
+            ("GIT_CONFIG_VALUE_0", "%(prefix)/etc/gitconfig"),
+        ];
+        let e = excludes(home, &home.join("xdg"), home, &vars).unwrap_err();
+        let said = e.to_string();
+        assert!(
+            said.contains(
+                "include.path, %(prefix)/etc/gitconfig: %(prefix)/ stands for the folder"
+            ) && said.contains("installed in, which Bolt can't tell; write the full path"),
+            "{said}"
+        );
+        assert!(!said.contains("refuses"), "{said}");
+        assert_eq!(variable_named(e), "GIT_CONFIG_VALUE_0");
     }
 
     #[test]
@@ -804,6 +2031,14 @@ mod tests {
         let shown = misplaced.to_string();
         assert_hostile_text_escaped(&shown);
         assert_eq!(shown.matches("b\\u{202e}c").count(), 1, "{shown}");
+        // A variable's name and what it holds.
+        let variable = ConfigError::GitVariable {
+            name: HOSTILE.into(),
+            detail: HOSTILE.into(),
+        };
+        let shown = variable.to_string();
+        assert_hostile_text_escaped(&shown);
+        assert_eq!(shown.matches("b\\u{202e}c").count(), 2, "{shown}");
         let missing = ConfigError::MissingIdentity {
             path: Some(PathBuf::from(HOSTILE)),
         };

@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 7)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 003](003-working-copy-model.md) (`bolt save <files or folders>`) and [decision 017](017-commands-and-output.md) (`save "msg" [files]`)
+- **Refined by:** [decision 090](090-the-first-save-looks-at-the-whole-folder-for-pointers.md) (the first save after an import looks for Git LFS pointers in the whole folder, even when it names paths)
 
 ## Context
 

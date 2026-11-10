@@ -1,8 +1,10 @@
 //! `.git/config`, read as Git reads it, keeping only what decides how to read the repository:
 //! `core.repositoryformatversion`, the `extensions.*` keys and `core.sparsecheckout` (decisions
-//! 031 and 039). Includes aren't followed, as Git's own format check doesn't follow them, but
-//! whether there are any is noted: they can set `core.sparsecheckout` (decision 043). The user's
-//! own Git settings are read with the same parser, for their ignore list (decisions 047 and 060).
+//! 031 and 039), and `lfs.storage`, which can keep Git LFS's files elsewhere. Includes aren't
+//! followed, as Git's own format check doesn't follow them, but whether there are any is noted:
+//! they can set `core.sparsecheckout` (decision 043). The user's own Git settings are read with
+//! the same parser, for their ignore list (decisions 047 and 060) and `lfs.storage`, and so are
+//! those the environment gives, with the variables that place them.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use super::{GitError, HashKind, Refusal, broken, is_git_space};
@@ -16,55 +18,162 @@ pub(super) struct Format {
     pub sparse: Option<bool>,
     /// Whether it has an `[include]` or `[includeIf]` section, whose files Bolt doesn't read.
     pub includes: bool,
+    /// The last `lfs.storage`, empty for one with no value, and the file it is in.
+    pub lfs_storage: Option<(Vec<u8>, &'static str)>,
 }
 
 /// Reads `text`, the config named `file` in messages, as Git's `read_repository_format` and
 /// `verify_repository_format` do, then refuses reftable and partial clones.
-pub(super) fn read_format(text: &[u8], file: &str) -> Result<Format, GitError> {
+pub(super) fn read_format(text: &[u8], file: &'static str) -> Result<Format, GitError> {
     let mut found = Found::default();
     parse(text, &mut |name, value| found.take(name, value)).map_err(|line| bad_line(file, line))?;
     found.check(file)
 }
 
-/// The last `core.sparsecheckout` in `text`, the config named `file` in messages, and whether
-/// `text` has an `[include]` or `[includeIf]` section.
-pub(super) fn read_sparse(text: &[u8], file: &str) -> Result<(Option<bool>, bool), GitError> {
-    let (mut sparse, mut includes) = (None, false);
+/// What `config.worktree` adds to `.git/config`.
+pub(super) struct Worktree {
+    /// The last `core.sparsecheckout`, if any.
+    pub sparse: Option<bool>,
+    /// Whether it has an `[include]` or `[includeIf]` section.
+    pub includes: bool,
+    /// The last `lfs.storage`, empty for one with no value, and the file it is in.
+    pub lfs_storage: Option<(Vec<u8>, &'static str)>,
+}
+
+/// Reads `text`, a `config.worktree` named `file` in messages, for what Git takes from it beside
+/// `.git/config`.
+pub(super) fn read_worktree(text: &[u8], file: &'static str) -> Result<Worktree, GitError> {
+    let mut read = Worktree {
+        sparse: None,
+        includes: false,
+        lfs_storage: None,
+    };
     parse(text, &mut |name, value| {
         if name == b"core.sparsecheckout" {
-            sparse = Some(parse_bool(value)?);
+            read.sparse = Some(parse_bool(value)?);
+        } else if name == b"lfs.storage" {
+            read.lfs_storage = Some((value.unwrap_or_default().to_vec(), file));
         }
-        includes |= is_include(name);
+        read.includes |= is_include(name);
         Some(())
     })
     .map_err(|line| bad_line(file, line))?;
-    Ok((sparse, includes))
+    Ok(read)
 }
 
-/// A setting in the user's own Git settings that decides their ignore list (decisions 047 and
-/// 060).
+/// A setting in the user's own Git settings that Bolt reads: one that decides their ignore list
+/// (decisions 047 and 060), or `lfs.storage`, which can keep Git LFS's files elsewhere.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UserSetting {
     /// A `core.excludesfile`.
     ExcludesFile(Vec<u8>),
     /// A plain `[include]` path, whose file Git reads at this place.
     Include(Vec<u8>),
+    /// An `lfs.storage`, empty for one with no value.
+    LfsStorage(Vec<u8>),
 }
 
-/// The settings in `text`, the user's own Git settings, that decide their ignore list, in order,
-/// or the number of the first line Git couldn't read. A key with no value is refused, as Git
-/// refuses it for a path. `[includeIf]` paths aren't given: their conditions need a repository.
+/// The settings in `text`, the user's own Git settings, that Bolt reads, in order, or the number
+/// of the first line Git couldn't read. A path with no value is refused, as Git refuses it.
+/// `[includeIf]` paths aren't given: their conditions need a repository.
 pub(crate) fn read_user_settings(text: &[u8]) -> Result<Vec<UserSetting>, usize> {
     let mut found = Vec::new();
     parse(text, &mut |name, value| {
-        if name == b"core.excludesfile" {
-            found.push(UserSetting::ExcludesFile(value?.to_vec()));
-        } else if name == b"include.path" {
-            found.push(UserSetting::Include(value?.to_vec()));
-        }
+        found.extend(user_setting(name, value).ok()?);
         Some(())
     })?;
     Ok(found)
+}
+
+/// The setting Bolt reads that the environment gives as `key`, a `GIT_CONFIG_KEY_<n>`, and
+/// `value`, its `GIT_CONFIG_VALUE_<n>`, if it is one. `Err` for a key Git refuses.
+pub(crate) fn read_user_variable(key: &[u8], value: &[u8]) -> Result<Option<UserSetting>, ()> {
+    user_setting(&variable_name(key).ok_or(())?, Some(value))
+}
+
+/// The setting Bolt reads that `name`, as `parse` gives names, is with `value`, if it is one.
+/// `Err` for a path with no value, which Git refuses; `lfs.storage` with none is empty.
+fn user_setting(name: &[u8], value: Option<&[u8]>) -> Result<Option<UserSetting>, ()> {
+    let path = || value.map(<[u8]>::to_vec).ok_or(());
+    Ok(Some(match name {
+        b"core.excludesfile" => UserSetting::ExcludesFile(path()?),
+        b"include.path" => UserSetting::Include(path()?),
+        b"lfs.storage" => UserSetting::LfsStorage(value.unwrap_or_default().to_vec()),
+        _ => return Ok(None),
+    }))
+}
+
+/// Git's `git_config_parse_key`: the name `key` gives, in `parse`'s form, with the section and
+/// key in lowercase and the subsection as written. `None` for what Git refuses: no `.` past the
+/// first byte, nothing after the last, a section or key with a byte that isn't a letter, digit or
+/// `-`, a key that doesn't start with a letter, or a line break in the subsection.
+fn variable_name(key: &[u8]) -> Option<Vec<u8>> {
+    let last_dot = key.iter().rposition(|&c| c == b'.').filter(|&at| at > 0)?;
+    let first_of_key = last_dot.checked_add(1)?;
+    key.get(first_of_key).filter(|c| c.is_ascii_alphabetic())?;
+    let mut in_section = true;
+    let mut name = Vec::with_capacity(key.len());
+    for (at, &c) in key.iter().enumerate() {
+        in_section &= c != b'.';
+        if in_section || at >= first_of_key {
+            if !is_key_char(c) {
+                return None;
+            }
+            name.push(c.to_ascii_lowercase());
+        } else if c == b'\n' {
+            return None;
+        } else {
+            name.push(c);
+        }
+    }
+    Some(name)
+}
+
+/// Git's `git_parse_maybe_bool` for a value that is there, as `git_env_bool` reads a variable of
+/// the environment: `None` where Git stops.
+pub(crate) fn read_bool(value: &[u8]) -> Option<bool> {
+    parse_bool(Some(value))
+}
+
+/// `GIT_CONFIG_COUNT` read as Git's `git_config_from_parameters` reads it: C's `strtoul` in base
+/// 10 (whitespace, a sign, then digits; a negative number wraps round as an `unsigned long` does,
+/// and one too big for it is its largest), which must read the whole text, so an empty one is 0;
+/// then at most `INT_MAX`. `Err` says why Git refuses it.
+pub(crate) fn read_count(text: &[u8]) -> Result<u32, &'static str> {
+    use std::ffi::c_ulong;
+    let after_space = text
+        .iter()
+        .position(|c| !matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .and_then(|at| text.get(at..))
+        .unwrap_or_default();
+    let (negative, digits) = match after_space.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, after_space),
+    };
+    // With no digit `strtoul` reads nothing, so only an empty text is read whole.
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return if text.is_empty() {
+            Ok(0)
+        } else {
+            Err("isn't a number Git reads as a count")
+        };
+    }
+    let zero: c_ulong = 0;
+    let read = digits.iter().try_fold(zero, |n, &d| {
+        n.checked_mul(10)?
+            .checked_add(c_ulong::from(d.checked_sub(b'0')?))
+    });
+    let count = match read {
+        None => c_ulong::MAX,
+        Some(n) if negative => n.wrapping_neg(),
+        Some(n) => n,
+    };
+    // At most `INT_MAX`; `count` is never negative.
+    i32::try_from(count)
+        .ok()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or("is more than Git takes")
 }
 
 /// Whether the setting `name` is in an `[include]` or `[includeIf]` section, where Git takes
@@ -92,6 +201,7 @@ struct Found {
     v1_only: Vec<String>,
     unknown: Vec<String>,
     includes: bool,
+    lfs_storage: Option<Vec<u8>>,
 }
 
 impl Found {
@@ -102,6 +212,8 @@ impl Found {
             self.version = Some(parse_int(value?)?);
         } else if name == b"core.sparsecheckout" {
             self.sparse = Some(parse_bool(value)?);
+        } else if name == b"lfs.storage" {
+            self.lfs_storage = Some(value.unwrap_or_default().to_vec());
         } else if let Some(ext) = name.strip_prefix(b"extensions.") {
             self.extension(&String::from_utf8_lossy(ext), value)?;
         }
@@ -163,7 +275,8 @@ impl Found {
     }
 
     /// Git's `verify_repository_format`, then what Bolt refuses on top.
-    fn check(self, file: &str) -> Result<Format, GitError> {
+    fn check(self, file: &'static str) -> Result<Format, GitError> {
+        let lfs_storage = self.lfs_storage.map(|value| (value, file));
         // Without a format version, Git ignores every extension.
         let Some(version) = self.version else {
             return Ok(Format {
@@ -171,6 +284,7 @@ impl Found {
                 worktree_config: false,
                 sparse: self.sparse,
                 includes: self.includes,
+                lfs_storage,
             });
         };
         match version {
@@ -207,6 +321,7 @@ impl Found {
             worktree_config: self.worktree_config,
             sparse: self.sparse,
             includes: self.includes,
+            lfs_storage,
         })
     }
 }
@@ -835,17 +950,33 @@ mod tests {
             storage("\trefStorage = files:///x\n\trefStorage = reftable://y\n"),
             Err(GitError::Refused(Refusal::Reftable))
         ));
+        // The last `lfs.storage` counts, as in Git; one with no value is empty.
+        let lfs_storage = |text: &str| format(text).unwrap().lfs_storage;
+        assert_eq!(
+            lfs_storage("[lfs]\n\tstorage = ../shared\n"),
+            Some((b"../shared".to_vec(), ".git/config"))
+        );
+        assert_eq!(
+            lfs_storage("[lfs]\n\tstorage = x\n[LFS]\n\tStorage\n"),
+            Some((Vec::new(), ".git/config"))
+        );
+        assert_eq!(lfs_storage("[lfs]\n\turl = x\n"), None);
         // Keys Bolt doesn't keep are still read, so a bad line among them refuses.
         assert!(format("[remote \"origin\"]\n\turl = \"x\n").is_err());
         assert!(format("[remote \"origin\"]\n\turl = x\n\tpromisor = maybe\n").is_ok());
+        let worktree = |text: &str| {
+            let read = read_worktree(text.as_bytes(), ".git/config.worktree").unwrap();
+            (read.sparse, read.includes, read.lfs_storage)
+        };
         assert_eq!(
-            read_sparse(b"[core]\n\tsparseCheckout = no\n", ".git/config.worktree").unwrap(),
-            (Some(false), false)
+            worktree("[core]\n\tsparseCheckout = no\n[lfs]\n\tstorage = lfs\n"),
+            (
+                Some(false),
+                false,
+                Some((b"lfs".to_vec(), ".git/config.worktree"))
+            )
         );
-        assert_eq!(
-            read_sparse(b"[extensions]\n\tx = y\n", ".git/config.worktree").unwrap(),
-            (None, false)
-        );
+        assert_eq!(worktree("[extensions]\n\tx = y\n"), (None, false, None));
     }
 
     /// Includes aren't followed, but a section that can take Git to another file is noted, in
@@ -864,8 +995,8 @@ mod tests {
             ("[include]\n", false),
         ] {
             assert_eq!(format(text).unwrap().includes, includes, "{text}");
-            let (_, worktree) = read_sparse(text.as_bytes(), ".git/config.worktree").unwrap();
-            assert_eq!(worktree, includes, "{text}");
+            let worktree = read_worktree(text.as_bytes(), ".git/config.worktree").unwrap();
+            assert_eq!(worktree.includes, includes, "{text}");
         }
     }
 
@@ -898,9 +1029,92 @@ mod tests {
             read("[includeIf \"gitdir:~/\"]\n\tpath = x\n[include \"y\"]\n\tpath = z\n"),
             Ok(vec![])
         );
+        // `lfs.storage` is kept whatever it holds; with no value it is empty.
+        assert_eq!(
+            read("[lfs]\n\tstorage = x\n[lfs]\n\tstorage\n"),
+            Ok(vec![
+                UserSetting::LfsStorage(b"x".to_vec()),
+                UserSetting::LfsStorage(Vec::new())
+            ])
+        );
         // A path needs a value, and a line Git can't read is refused.
         assert_eq!(read("[core]\n\texcludesFile\n"), Err(2));
         assert_eq!(read("[include]\n\tpath\n"), Err(2));
         assert_eq!(read("[user]\nname = x\n[core\n"), Err(3));
+    }
+
+    /// `git_config_parse_key`, as Git reads a `GIT_CONFIG_KEY_<n>`.
+    #[test]
+    fn keys_in_the_environment_are_read_as_git_reads_them() {
+        let read = |key: &str| read_user_variable(key.as_bytes(), b"x");
+        let excludes = Ok(Some(UserSetting::ExcludesFile(b"x".to_vec())));
+        assert_eq!(read("core.excludesFile"), excludes);
+        assert_eq!(read("CORE.EXCLUDESFILE"), excludes);
+        assert_eq!(
+            read("include.path"),
+            Ok(Some(UserSetting::Include(b"x".to_vec())))
+        );
+        assert_eq!(
+            read_user_variable(b"lfs.storage", b""),
+            Ok(Some(UserSetting::LfsStorage(Vec::new())))
+        );
+        // A subsection is kept as written, so this is another setting; Git takes these keys.
+        for key in [
+            "core.Sub.excludesFile",
+            "user.name",
+            "-.x",
+            ".a.b",
+            "1.x",
+            "a.b c\t.d",
+        ] {
+            assert_eq!(read(key), Ok(None), "{key:?}");
+        }
+        // No section, no name, a name that starts with a digit, a byte other than a letter, digit
+        // or `-` outside the subsection, or a line break in it.
+        for key in [
+            "",
+            "core",
+            ".x",
+            "core.",
+            "core.1x",
+            "co_re.x",
+            "core.ex_file",
+            "a.b\nc.d",
+        ] {
+            assert_eq!(read(key), Err(()), "{key:?}");
+        }
+        assert_eq!(read_user_variable(b"core.\xffx", b"x"), Err(()));
+        assert_eq!(read_user_variable(b"a.\xff.x", b"x"), Ok(None));
+    }
+
+    /// `strtoul` in base 10, then Git's own checks, as `git_config_from_parameters` reads
+    /// `GIT_CONFIG_COUNT`.
+    #[test]
+    fn a_count_in_the_environment_is_read_as_git_reads_it() {
+        for (text, want) in [
+            ("", Some(0)),
+            ("0", Some(0)),
+            ("-0", Some(0)),
+            ("+3", Some(3)),
+            (" \t\n3", Some(3)),
+            ("007", Some(7)),
+            ("2147483647", Some(2_147_483_647)),
+            // What strtoul doesn't read to the end.
+            (" ", None),
+            ("+", None),
+            ("3 ", None),
+            ("0x3", None),
+            ("- 3", None),
+            ("3k", None),
+            // More than an int holds, as a negative number is once it wraps round.
+            ("2147483648", None),
+            ("-1", None),
+            ("99999999999999999999999", None),
+        ] {
+            assert_eq!(read_count(text.as_bytes()).ok(), want, "{text:?}");
+        }
+        // strtoul negates in an unsigned long, whose size Git's build decides.
+        let wraps_to_one = format!("-{}", std::ffi::c_ulong::MAX);
+        assert_eq!(read_count(wraps_to_one.as_bytes()), Ok(1));
     }
 }

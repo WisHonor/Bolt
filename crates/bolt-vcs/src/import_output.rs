@@ -1,7 +1,7 @@
 //! What `bolt import` prints: its summary for people, and its `--json` document.
 
 use bolt_core::import::{ImportReport, MAX_LISTED};
-use bolt_core::text::{escape, escape_all, thousands};
+use bolt_core::text::{bytes, escape, escape_all, thousands};
 use bolt_core::warning::Warning;
 use serde_json::json;
 
@@ -140,6 +140,48 @@ pub fn import_text(report: &ImportReport, standing: &str) -> String {
             );
         }
     }
+    text + &lfs_text(report)
+}
+
+/// What the summary says of Git LFS files: how many came in, the commits that hold them, and
+/// the pointers a later export can't give back as they were.
+fn lfs_text(report: &ImportReport) -> String {
+    let mut text = String::new();
+    if report.lfs_files > 0 {
+        text += &format!(
+            "Brought in {} ({}) from .git/lfs/objects.\n",
+            counted(report.lfs_files, "Git LFS file", "Git LFS files"),
+            bytes(report.lfs_bytes)
+        );
+    }
+    match report.lfs_commits {
+        0 => {}
+        1 => {
+            text += "1 commit holds Git LFS files, so a later export can recreate its Git ID only \
+                     by turning them back into pointers.\n";
+        }
+        n => {
+            text += &format!(
+                "{} commits hold Git LFS files, so a later export can recreate their Git IDs only \
+                 by turning those files back into pointers.\n",
+                thousands(n)
+            );
+        }
+    }
+    match report.inexact_lfs_pointers {
+        0 => {}
+        1 => {
+            text += "1 Git LFS pointer isn't in the exact form Git LFS writes, so a later export \
+                     can't recreate it as it was.\n";
+        }
+        n => {
+            text += &format!(
+                "{} Git LFS pointers aren't in the exact form Git LFS writes, so a later export \
+                 can't recreate them as they were.\n",
+                thousands(n)
+            );
+        }
+    }
     text
 }
 
@@ -174,6 +216,9 @@ pub fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::V
         "skipped_tags": skipped_tags,
         "skipped_entries": {"count": report.skipped_entry_count, "first": first},
         "inexact_commits": report.inexact_commits,
+        "lfs_files": {"count": report.lfs_files, "bytes": report.lfs_bytes},
+        "lfs_commits": report.lfs_commits,
+        "inexact_lfs_pointers": report.inexact_lfs_pointers,
         "warnings": output::warnings_json(warnings),
     })
 }

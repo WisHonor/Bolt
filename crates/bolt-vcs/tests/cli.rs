@@ -67,6 +67,31 @@ fn start_and_save_work_in_a_normal_folder() {
     env.bolt().arg("history").assert().success();
 }
 
+/// A variable that places the user's Git settings, set to what Git refuses, stops a save as it
+/// stops Git, naming the variable and how to get past it.
+#[test]
+fn a_git_settings_variable_git_refuses_stops_a_save_and_is_named() {
+    let env = Env::new();
+    env.bolt().arg("start").assert().success();
+    std::fs::write(env.root().join("a.txt"), "a").unwrap();
+    let out = env
+        .bolt()
+        .args(["save", "first"])
+        .env("GIT_CONFIG_COUNT", "two")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert!(
+        err.starts_with(
+            "error: Bolt can't read your Git settings in GIT_CONFIG_COUNT: `two` isn't a number \
+             Git reads as a count, and Git refuses it too\nhint: Fix that variable, or unset it."
+        ),
+        "{err}"
+    );
+    env.bolt().args(["save", "first"]).assert().success();
+}
+
 /// A project reached through a link (a junction on Windows) is the folder the link leads to.
 #[test]
 fn save_works_through_a_link_to_the_project_folder() {

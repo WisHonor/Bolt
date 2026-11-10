@@ -3,6 +3,7 @@
 
 pub mod changeids;
 pub mod changes;
+pub mod chunks;
 pub mod config;
 pub mod diary;
 pub mod diff;
@@ -15,6 +16,7 @@ pub mod history;
 pub mod id;
 pub mod ignore;
 pub mod import;
+pub(crate) mod ingest;
 pub mod journal;
 pub(crate) mod kept;
 pub mod keyed;
@@ -39,6 +41,7 @@ pub(crate) mod timeline;
 pub mod undo;
 pub mod verify;
 pub mod warning;
+pub mod workers;
 pub mod writeout;
 
 #[cfg(test)]

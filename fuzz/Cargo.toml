@@ -148,3 +148,17 @@ path = "fuzz_targets/decode_project_link.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_chunk_list"
+path = "fuzz_targets/decode_chunk_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cut_chunks"
+path = "fuzz_targets/cut_chunks.rs"
+test = false
+doc = false
+bench = false

@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::Digest as _;
+
 use super::id::{Hasher, object_header};
 use super::pack::apply_delta;
 use super::{GitId, HashKind, ObjectType, object_id};
@@ -117,6 +119,13 @@ impl Craft {
         self.object(ObjectType::Commit, raw)
     }
 
+    /// Keeps `contents` in `.git/lfs/objects`, as `git lfs fetch` does; the pointer to them.
+    pub fn lfs_object(&self, contents: &[u8]) -> String {
+        let (pointer, path) = lfs_pointer_to(contents);
+        self.file(&path, contents);
+        pointer
+    }
+
     /// Writes `entries` as a pack and its index in `objects/pack`, as Git would, and returns
     /// their paths. Each entry is listed under its object's ID, worked out through earlier
     /// entries; one whose object can't be worked out (a `Raw` entry, or a delta on an unknown
@@ -126,9 +135,28 @@ impl Craft {
         self.pack_with_large_offsets(entries, 0x7fff_ffff)
     }
 
+    /// `pack`, listing the entries `renamed` gives by index under the names given, as a hostile
+    /// pack can: the entries built on them are still listed under what they build.
+    pub fn pack_renamed(
+        &self,
+        entries: &[PackEntry],
+        renamed: &[(usize, GitId)],
+    ) -> (PathBuf, PathBuf) {
+        self.write_pack(entries, 0x7fff_ffff, renamed)
+    }
+
     /// `pack`, with every offset over `limit` in the index's 64-bit table, as
     /// `git index-pack --index-version=2,<limit>` writes it.
     pub fn pack_with_large_offsets(&self, entries: &[PackEntry], limit: u64) -> (PathBuf, PathBuf) {
+        self.write_pack(entries, limit, &[])
+    }
+
+    fn write_pack(
+        &self,
+        entries: &[PackEntry],
+        limit: u64,
+        renamed: &[(usize, GitId)],
+    ) -> (PathBuf, PathBuf) {
         let count = u32::try_from(entries.len()).expect("fewer than 2^32 entries");
         let mut pack = b"PACK".to_vec();
         pack.extend_from_slice(&2u32.to_be_bytes());
@@ -174,6 +202,10 @@ impl Craft {
                 None => object_id(ObjectType::Blob, own, self.hash),
             }
             .expect("no SHA-1 collision attack");
+            let id = renamed
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map_or(id, |(_, name)| *name);
             listed.push(Listed {
                 at,
                 id,
@@ -233,6 +265,23 @@ impl Craft {
         out.extend_from_slice(&checksum);
         out
     }
+}
+
+/// The pointer Git LFS writes for a file holding `contents`, and where under `.git` its object
+/// goes: `lfs/objects/<oid[0..2]>/<oid[2..4]>/<oid>`.
+#[must_use]
+pub fn lfs_pointer_to(contents: &[u8]) -> (String, String) {
+    let oid: String = sha2::Sha256::digest(contents)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let (first, second) = (oid.get(..2), oid.get(2..4));
+    let (first, second) = (first.unwrap_or_default(), second.unwrap_or_default());
+    let pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+        contents.len()
+    );
+    (pointer, format!("lfs/objects/{first}/{second}/{oid}"))
 }
 
 /// What `Craft::pack` knows of an entry it wrote.

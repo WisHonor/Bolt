@@ -1,5 +1,6 @@
-//! The first save after an import stops at files that differ from it only in line endings: Git
-//! on Windows writes LF as CRLF and stores LF, and Bolt keeps bytes as they are (decision 039).
+//! The first save after an import stops at files Git wrote out unlike what the import brought
+//! in: Git LFS pointers in place of their files, and files that differ only in line endings, since
+//! Git on Windows writes LF as CRLF and stores LF. Bolt keeps bytes as they are (decision 039).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -8,11 +9,61 @@ use std::io::{self, Read, Write};
 use bolt_platform::dir::Dir;
 
 use super::{
-    Child, Folders, Handles, NAMED, SaveError, each_file_with_saved, open_scanned, stamp, stamp_of,
+    Child, Folders, Handles, NAMED, SaveError, each_file_with_saved, open_scanned, read_scanned,
+    stamp, stamp_of, vouched_by,
 };
 use crate::drive::Drive;
+use crate::filecache::FileCache;
+use crate::git::{MAX_LFS_POINTER_BYTES, lfs_pointer};
+use crate::id::hash_content;
 use crate::listing::{Entry, Listing};
 use crate::store::Store;
+
+/// Fails, naming the first few, if any file in `folders`, read through `handles`, is a Git LFS
+/// pointer in place of the base save's file, matched by name as `drive` compares names: it isn't
+/// that file, Git LFS's parser takes it for a pointer, and the pointer gives that file's size.
+/// It looks at the files a full save would read, even when the save names paths, so none that
+/// `trusted` vouches for.
+pub(super) fn pointers(
+    store: &Store,
+    drive: Drive,
+    trusted: &FileCache,
+    handles: &mut Handles,
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+) -> Result<(), SaveError> {
+    let mut count = 0;
+    let mut paths = Vec::new();
+    each_file_with_saved(store, drive, folders, old, |rel, c, saved| {
+        let small = c
+            .meta
+            .is_some_and(|m| m.size <= MAX_LFS_POINTER_BYTES as u64);
+        if let Some(was) = saved
+            && small
+            && vouched_by(trusted, c, saved).is_none()
+            && stands_in(was, handles.folder(rel)?, c)?
+        {
+            count += 1;
+            if paths.len() < NAMED {
+                paths.push(c.rel.clone());
+            }
+        }
+        Ok(())
+    })?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(SaveError::LfsPointersInFolder { paths, count })
+    }
+}
+
+/// Whether the small file `c`, in `dir`, is a Git LFS pointer to a file of `was`'s size, and not
+/// `was` itself.
+fn stands_in(was: &Entry, dir: &Dir, c: &Child) -> Result<bool, SaveError> {
+    let bytes = read_scanned(dir, &c.name, &c.rel, c.meta.as_ref())?;
+    let pointer = lfs_pointer(&bytes).is_some_and(|p| p.size == was.size);
+    Ok(pointer && hash_content(&bytes) != was.id)
+}
 
 /// How many saved bytes are held up against the file at a time.
 const PIECE: usize = 64 << 10;
@@ -160,7 +211,7 @@ mod tests {
     use crate::listing::EntryKind;
     use crate::listing::SaveLimits;
     use crate::snapshot::tests::{project, save_now, saved_root, this_drive, walk_project, write};
-    use crate::test_support::{add_listing, plant_root, plant_save};
+    use crate::test_support::{add_listing, noise, plant_root, plant_save};
     use proptest::prelude::*;
 
     /// `saved` with every LF turned into CRLF.
@@ -408,6 +459,164 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SaveError::Repo(_)), "{err:?}");
+    }
+
+    fn pointer(contents: &[u8]) -> Vec<u8> {
+        crate::git::craft::lfs_pointer_to(contents).0.into_bytes()
+    }
+
+    /// What `pointers` says when the last save held `f.psd` as `saved` and the folder holds
+    /// `disk`, with nothing in the file-state cache.
+    fn pointers_checked(saved: &[u8], disk: &[u8]) -> Result<(), SaveError> {
+        let (dir, mut repo) = project();
+        write(dir.path(), "f.psd", saved);
+        saved_root(save_now(&mut repo).unwrap());
+        write(dir.path(), "f.psd", disk);
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        pointers(
+            repo.store(),
+            this_drive(),
+            &FileCache::default(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        )
+    }
+
+    fn pointers_found(result: Result<(), SaveError>) -> (u64, Vec<String>) {
+        match result {
+            Err(SaveError::LfsPointersInFolder { paths, count }) => (count, paths),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pointer_to_a_file_of_the_saved_files_size_is_found() {
+        let picture = noise(1, 5000);
+        let one = (1, vec!["f.psd".to_owned()]);
+        assert_eq!(
+            pointers_found(pointers_checked(&picture, &pointer(&picture))),
+            one
+        );
+        // Only the size is compared: the oid is a SHA-256, which a save doesn't keep.
+        let other = pointer(&noise(2, 5000));
+        assert_eq!(pointers_found(pointers_checked(&picture, &other)), one);
+        // Git LFS's parser takes up to 1,024 bytes, blank lines and all.
+        let mut padded = pointer(&picture);
+        padded.resize(MAX_LFS_POINTER_BYTES, b'\n');
+        assert_eq!(pointers_found(pointers_checked(&picture, &padded)), one);
+        // A pointer of size 0 stands for an empty file.
+        assert_eq!(pointers_found(pointers_checked(b"", &pointer(b""))), one);
+        // A 128-byte file's pointer is 128 bytes long too.
+        let short = [b'x'; 128];
+        assert_eq!(pointer(&short).len(), 128);
+        assert_eq!(
+            pointers_found(pointers_checked(&short, &pointer(&short))),
+            one
+        );
+    }
+
+    #[test]
+    fn anything_else_is_not_a_pointer_left_in_the_folder() {
+        let picture = noise(1, 5000);
+        let mut long = pointer(&picture);
+        long.resize(MAX_LFS_POINTER_BYTES + 1, b'\n');
+        let text = String::from_utf8(pointer(&picture)).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines.swap(1, 2);
+        let out_of_order = lines.join("\n").into_bytes();
+        // Saved as a pointer to a file of its own length, and still that pointer.
+        let own = pointer(&[b'x'; 128]);
+        for (what, saved, disk) in [
+            ("unchanged", picture.clone(), picture.clone()),
+            ("another size", picture.clone(), pointer(&noise(2, 4999))),
+            ("over 1,024 bytes", picture.clone(), long),
+            ("refused by Git LFS's parser", picture.clone(), out_of_order),
+            ("edited", picture.clone(), b"edited".to_vec()),
+            ("unchanged pointer text", own.clone(), own),
+        ] {
+            pointers_checked(&saved, &disk).expect(what);
+        }
+        // A new file has no saved version to stand in for.
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        saved_root(save_now(&mut repo).unwrap());
+        write(dir.path(), "f.psd", &pointer(&picture));
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        pointers(
+            repo.store(),
+            this_drive(),
+            &FileCache::default(),
+            &mut scan.handles,
+            &scan.folders,
+            &scan.old,
+        )
+        .unwrap();
+    }
+
+    /// The cache vouches only for the saved file, so a file it vouches for is no pointer; and a
+    /// save doesn't read it, so neither does the check.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_the_cache_vouches_for_is_not_read() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "f.psd", b"kept");
+        saved_root(save_now(&mut repo).unwrap());
+        let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+        let seen = scan.folders[""].iter().find(|c| c.name == "f.psd");
+        let mut trusted = FileCache::default();
+        trusted.record("f.psd", &seen.unwrap().meta.unwrap(), hash_content(b"kept"));
+        crate::fsio::fault::unreadable(Some("f.psd"));
+        let mut check_with = |trusted: &FileCache| {
+            pointers(
+                repo.store(),
+                this_drive(),
+                trusted,
+                &mut scan.handles,
+                &scan.folders,
+                &scan.old,
+            )
+        };
+        let vouched = check_with(&trusted);
+        let read = check_with(&FileCache::default());
+        crate::fsio::fault::unreadable(None);
+        vouched.unwrap();
+        assert!(
+            matches!(read, Err(SaveError::Unreadable { .. })),
+            "{read:?}"
+        );
+    }
+
+    /// A file over 1,024 bytes can't be a pointer, so it isn't opened, however it changed; one of
+    /// 1,024 bytes is.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_over_1024_bytes_is_not_opened() {
+        let picture = noise(1, 5000);
+        for (len, opened) in [
+            (MAX_LFS_POINTER_BYTES, true),
+            (MAX_LFS_POINTER_BYTES + 1, false),
+        ] {
+            let (dir, mut repo) = project();
+            write(dir.path(), "f.psd", &picture);
+            saved_root(save_now(&mut repo).unwrap());
+            let mut disk = pointer(&picture);
+            disk.resize(len, b'\n');
+            write(dir.path(), "f.psd", &disk);
+            let mut scan = walk_project(&repo, SaveLimits::default()).unwrap();
+            crate::fsio::fault::unreadable(Some("f.psd"));
+            let checked = pointers(
+                repo.store(),
+                this_drive(),
+                &FileCache::default(),
+                &mut scan.handles,
+                &scan.folders,
+                &scan.old,
+            );
+            crate::fsio::fault::unreadable(None);
+            let refused = matches!(checked, Err(SaveError::Unreadable { .. }));
+            assert_eq!(refused, opened, "{len}: {checked:?}");
+        }
     }
 
     /// Whether `Compare`, given `saved` in pieces of the lengths in `cuts` (round and round), and
