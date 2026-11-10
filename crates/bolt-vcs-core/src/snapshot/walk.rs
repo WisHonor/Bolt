@@ -23,7 +23,7 @@ use crate::names::{
     Listed, holdable_here, is_bolt_alias, is_git_alias, listed_hints, own_folder, validate_name,
 };
 use crate::repo::RepoError;
-use crate::store::{Store, StoreError};
+use crate::store::{Peeked, Store, StoreError};
 use crate::text::{escape, escape_all};
 use crate::warning::{self, Warning};
 use crate::{fsio, safe_fs};
@@ -418,10 +418,10 @@ impl<'a> Base<'a> {
         }
     }
 
-    /// The listing `id`, read ahead if it is ready, else read now.
+    /// The listing `id`, through what was read ahead of it if that is ready.
     fn read(&self, id: &Id) -> Result<Listing, StoreError> {
         match self.ahead.and_then(|ahead| ahead.take(id)) {
-            Some(listing) => Ok(listing),
+            Some(peeked) => self.store.listing_after(id, peeked),
             None => self.store.listing(id),
         }
     }
@@ -474,9 +474,10 @@ pub(super) fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String
 }
 
 /// The most listings read ahead of the walk and not taken yet, and the most bytes they may take
-/// as stored.
+/// as stored: 1 MiB, or one listing as big as `AHEAD_LISTING`, which an empty buffer always
+/// takes. Decoded, a listing takes a few times what it takes stored.
 const AHEAD_MOST: usize = 256;
-const AHEAD_BYTES: usize = 8 << 20;
+const AHEAD_BYTES: usize = 1 << 20;
 /// Reading ahead stops for good at a listing bigger than this as stored, more than this many
 /// levels down, or with more folders than this still to read: it would hold too much.
 const AHEAD_LISTING: usize = 1 << 20;
@@ -500,16 +501,16 @@ pub(super) struct Ahead {
 
 #[derive(Default)]
 struct Ready {
-    /// Each with its ID and its size as stored.
-    listings: VecDeque<(Id, Listing, usize)>,
+    /// Each with its ID.
+    listings: VecDeque<(Id, Peeked)>,
     bytes: usize,
     /// Whether the walk has ended.
     done: bool,
 }
 
 impl Ahead {
-    /// The listing `id` if it is ready. Those before it go too: the walk has passed them by.
-    fn take(&self, id: &Id) -> Option<Listing> {
+    /// What was read of `id`, if it is ready. Those before it go too: the walk has passed them by.
+    fn take(&self, id: &Id) -> Option<Peeked> {
         // A lock poisoned leaves the walk to read everything itself.
         let taken = self.ready.lock().ok().and_then(|mut ready| {
             let at = ready
@@ -518,9 +519,9 @@ impl Ahead {
                 .position(|(ready_id, ..)| ready_id == id)?;
             let mut found = None;
             for _ in 0..=at {
-                let (_, listing, size) = ready.listings.pop_front()?;
-                ready.bytes = ready.bytes.saturating_sub(size);
-                found = Some(listing);
+                let (_, peeked) = ready.listings.pop_front()?;
+                ready.bytes = ready.bytes.saturating_sub(peeked.size);
+                found = Some(peeked);
             }
             found
         });
@@ -539,14 +540,14 @@ impl Ahead {
         taken
     }
 
-    /// Adds `listing`, waiting for room; `false` once the walk has ended.
-    fn put(&self, id: Id, listing: Listing, size: usize) -> bool {
+    /// Adds `peeked`, waiting for room; `false` once the walk has ended.
+    fn put(&self, id: Id, peeked: Peeked) -> bool {
         let Ok(mut ready) = self.ready.lock() else {
             return false;
         };
         while !ready.done
             && (ready.listings.len() >= AHEAD_MOST
-                || ready.bytes.saturating_add(size) > AHEAD_BYTES)
+                || ready.bytes.saturating_add(peeked.size) > AHEAD_BYTES)
         {
             ready = match self.room.wait(ready) {
                 Ok(ready) => ready,
@@ -556,8 +557,8 @@ impl Ahead {
         if ready.done {
             return false;
         }
-        ready.bytes = ready.bytes.saturating_add(size);
-        ready.listings.push_back((id, listing, size));
+        ready.bytes = ready.bytes.saturating_add(peeked.size);
+        ready.listings.push_back((id, peeked));
         true
     }
 
@@ -573,8 +574,10 @@ impl Ahead {
 
 /// Reads the listings of the save whose top listing is `top` into `ahead`, depth first, each
 /// folder's subfolders in its listing's order, as the walk goes into them. It stops for good at
-/// the first listing it can't read quietly and tells nothing: the walk reads that one itself.
+/// the first listing it can't read quietly and tells nothing: the walk reads that one itself. It
+/// reads through a second handle on `store`, so the walk's store notes only the walk's reads.
 fn read_ahead(store: &Store, top: Id, ahead: &Ahead) {
+    let store = store.second();
     // The folders still to read, a level each, the next last.
     let mut levels = vec![vec![top]];
     let mut pending = 1usize;
@@ -584,17 +587,17 @@ fn read_ahead(store: &Store, top: Id, ahead: &Ahead) {
             continue;
         };
         pending = pending.saturating_sub(1);
-        let Some((listing, size)) = store.peek_listing(&id) else {
+        let Some(peeked) = store.peek_listing(&id) else {
             return;
         };
-        if size > AHEAD_LISTING {
+        if peeked.size > AHEAD_LISTING {
             return;
         }
-        let below: Vec<Id> = (listing.entries().iter().rev())
+        let below: Vec<Id> = (peeked.listing.entries().iter().rev())
             .filter(|e| e.kind == EntryKind::Folder)
             .map(|e| e.id)
             .collect();
-        if !ahead.put(id, listing, size) {
+        if !ahead.put(id, peeked) {
             return;
         }
         if below.is_empty() {
@@ -2065,13 +2068,16 @@ mod tests {
     use crate::id::hash_content;
     use crate::listing::{MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES};
     use crate::names::MAX_PATH_BYTES;
+    use crate::pack::ObjectKind;
     use crate::repo::Repository;
     use crate::snapshot::SaveOutcome;
     use crate::snapshot::tests::{
         damage_the_only_copy_of, newest, project, save_now, save_with, saved_root, saved_tree,
         this_drive, walk_project, write,
     };
-    use crate::test_support::{add_link, add_listing, plant_root, plant_save};
+    use crate::test_support::{
+        add_link, add_listing, plant_damaged_copies, plant_root, plant_save,
+    };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
     use std::fs;
@@ -4858,27 +4864,36 @@ mod tests {
     }
 
     /// What a walk of the project at `root` gives within `most` entries, on a store opened afresh,
-    /// with the listings read ahead or not: its shape or its error, the store's warnings, and what
-    /// came of reading ahead.
+    /// with the listings read ahead or not: its shape or its error, the store's warnings and all
+    /// it remembers, and what came of reading ahead.
     fn scanned(
         root: &Path,
         ahead: bool,
         most: u64,
-    ) -> (Result<String, String>, Vec<Warning>, ahead_seen::Seen) {
+    ) -> (
+        Result<String, String>,
+        Vec<Warning>,
+        String,
+        ahead_seen::Seen,
+    ) {
         let repo = Repository::open(root).unwrap();
         ahead_seen::turn_off(repo.root(), !ahead);
         let scan = walk_project(&repo, SaveLimits::new(MAX_SAVE_DEPTH, most));
         ahead_seen::turn_off(repo.root(), false);
         let shaped = scan.map(|s| shape(&s)).map_err(|e| format!("{e:?}"));
-        (shaped, repo.store().warnings(), ahead_seen::at(repo.root()))
+        let store = repo.store();
+        let seen = ahead_seen::at(repo.root());
+        assert_eq!(seen.started, ahead, "{seen:?}");
+        (shaped, store.warnings(), store.remembered(), seen)
     }
 
     /// `scanned` with the listings read ahead equals it without.
     fn same_either_way(root: &Path, most: u64) -> ahead_seen::Seen {
-        let (off, off_warned, _) = scanned(root, false, most);
-        let (on, on_warned, seen) = scanned(root, true, most);
+        let (off, off_warned, off_remembered, _) = scanned(root, false, most);
+        let (on, on_warned, on_remembered, seen) = scanned(root, true, most);
         assert_eq!(on, off);
         assert_eq!(on_warned, off_warned);
+        assert_eq!(on_remembered, off_remembered);
         seen
     }
 
@@ -4911,7 +4926,7 @@ mod tests {
         let b = repo.store().listing(&saved).unwrap().get("b").unwrap().id;
         damage_the_only_copy_of(&repo, &b);
         drop(repo);
-        let (on, warned, _) = scanned(root, true, MAX_SAVE_ENTRIES);
+        let (on, warned, _, _) = scanned(root, true, MAX_SAVE_ENTRIES);
         assert!(on.is_err(), "{on:?}");
         assert!(!warned.is_empty());
         same_either_way(root, MAX_SAVE_ENTRIES);
@@ -4941,10 +4956,108 @@ mod tests {
         }
         save_now(&mut repo).unwrap();
         // The walk stops at the top folder, too full for these limits.
-        let (on, _, seen) = scanned(root, true, 10);
+        let (on, _, _, seen) = scanned(root, true, 10);
         assert!(on.is_err(), "{on:?}");
         assert!(seen.started && seen.ended, "{seen:?}");
         same_either_way(root, 10);
+    }
+
+    /// Waits until `ahead` holds `n` listings, and gives what they take as stored.
+    fn holds(ahead: &Ahead, n: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            {
+                let ready = ahead.ready.lock().unwrap();
+                if ready.listings.len() == n {
+                    return ready.bytes;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "never held {n}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A helper that puts `count` listings of `size` bytes, each named by its number, and gives
+    /// how many went in.
+    fn putting(ahead: &Ahead, count: u8, size: usize) -> usize {
+        (0..count)
+            .take_while(|&i| ahead.put(hash_content(&[i]), Peeked::of(Listing::empty(), size)))
+            .count()
+    }
+
+    #[test]
+    fn a_helper_waiting_for_room_ends_when_the_walk_does() {
+        let ahead = Ahead::default();
+        let put = std::thread::scope(|scope| {
+            let helper = scope.spawn(|| {
+                assert_eq!(putting(&ahead, 255, 1), 255);
+                putting(&ahead, 10, 1)
+            });
+            holds(&ahead, AHEAD_MOST);
+            ahead.stop();
+            helper.join().unwrap()
+        });
+        // 255, then one more before the buffer is full, and none after.
+        assert_eq!(put, 1);
+        assert_eq!(holds(&ahead, AHEAD_MOST), AHEAD_MOST);
+    }
+
+    #[test]
+    fn the_listings_held_ahead_stay_within_their_bytes() {
+        let ahead = Ahead::default();
+        let size = 74_000;
+        let fit = AHEAD_BYTES / size;
+        std::thread::scope(|scope| {
+            let helper = scope.spawn(|| putting(&ahead, 40, size));
+            assert_eq!(holds(&ahead, fit), fit * size);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert_eq!(holds(&ahead, fit), fit * size);
+            // Taking the third lets three more in, and no more.
+            assert!(ahead.take(&hash_content(&[2])).is_some());
+            assert_eq!(holds(&ahead, fit), fit * size);
+            ahead.stop();
+            assert_eq!(helper.join().unwrap(), fit + 3);
+        });
+        // One as big as a listing may be still goes into an empty buffer.
+        let alone = Ahead::default();
+        assert!(alone.put(
+            hash_content(b"big"),
+            Peeked::of(Listing::empty(), AHEAD_LISTING)
+        ));
+    }
+
+    #[test]
+    fn a_folder_left_out_reads_the_same_ahead_or_not() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        for name in ["skip/a/f", "skip/b/c/f", "keep/f", "keep/d/f"] {
+            write(root, name, b"x");
+        }
+        save_now(&mut repo).unwrap();
+        write(root, ".boltignore", b"skip/\n");
+        let seen = same_either_way(root, MAX_SAVE_ENTRIES);
+        assert!(seen.started && seen.ended, "{seen:?}");
+    }
+
+    #[test]
+    fn a_bad_second_copy_of_a_listing_reads_the_same_ahead_or_not() {
+        for name in ["00.pack", "zz.pack"] {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            for path in ["a/x", "b/y/z", "c/w"] {
+                write(root, path, b"x");
+            }
+            let saved = saved_root(save_now(&mut repo).unwrap());
+            let b = repo.store().listing(&saved).unwrap().get("b").unwrap().id;
+            let bytes = repo.store().listing(&b).unwrap().encode();
+            let packs = repo.packs_dir();
+            plant_damaged_copies(packs, &[(ObjectKind::FolderListing, &bytes)]);
+            fs::rename(packs.join("00.pack"), packs.join(name)).unwrap();
+            drop(repo);
+            for _ in 0..3 {
+                same_either_way(root, MAX_SAVE_ENTRIES);
+            }
+        }
     }
 
     /// A change to a project: what it does, to which folder of those on disk.

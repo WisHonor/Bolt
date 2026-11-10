@@ -92,6 +92,67 @@ impl Copy {
     }
 }
 
+/// A folder listing a second handle on the store read: its length as stored, and the pack and
+/// index line it was read from.
+#[derive(Debug)]
+pub(crate) struct Peeked {
+    pub(crate) listing: Listing,
+    pub(crate) size: usize,
+    pack: PathBuf,
+    entry: IndexEntry,
+}
+
+#[cfg(test)]
+impl Peeked {
+    /// One that names no pack, for tests of what holds them.
+    pub(crate) fn of(listing: Listing, size: usize) -> Peeked {
+        let id = listing.id();
+        Peeked {
+            listing,
+            size,
+            pack: PathBuf::new(),
+            entry: IndexEntry {
+                id,
+                kind: ObjectKind::FolderListing,
+                offset: 0,
+                uncompressed_size: 0,
+                stored_size: 0,
+            },
+        }
+    }
+}
+
+/// What `listing_after` came to: the listing read ahead, or the bytes of a copy it read itself.
+enum Got {
+    Ready(Listing),
+    Bytes(Vec<u8>),
+}
+
+/// How many index lookups and record reads this thread's stores made, to show what
+/// `listing_after` is spared.
+#[cfg(test)]
+pub(crate) mod counted {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FINDS: Cell<usize> = const { Cell::new(0) };
+        static RECORDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn find() {
+        FINDS.set(FINDS.get() + 1);
+    }
+
+    pub(super) fn record() {
+        RECORDS.set(RECORDS.get() + 1);
+    }
+
+    /// The lookups and record reads so far.
+    pub(crate) fn now() -> (usize, usize) {
+        (FINDS.get(), RECORDS.get())
+    }
+}
+
 pub struct Store {
     dir: Arc<Dir>,
     path: PathBuf,
@@ -687,10 +748,74 @@ impl Store {
         )?)
     }
 
-    /// `listing` as it reads a good first copy, with the copy's length, or `None` on any failure.
-    /// It tries that one copy only and notes nothing about copies or packs, so a `listing` after
-    /// it tells of them as it would have.
-    pub(crate) fn peek_listing(&self, id: &Id) -> Option<(Listing, usize)> {
+    /// `listing`, given what a second handle read of `id`: the same read through the same steps,
+    /// so this store notes what `listing` would. It is spared only the lookup in the pack asked
+    /// first when that is the pack `peeked` came from, and the read of `peeked`'s own copy.
+    pub(crate) fn listing_after(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
+        let Peeked {
+            listing,
+            pack: at,
+            entry: seen,
+            ..
+        } = peeked;
+        // A pack is named by its index's checksum and never changes once named, so the pack of
+        // that name holds the same lines and bytes through any handle.
+        let first = match self.last_is(&at).filter(|_| seen.id == *id) {
+            Some(n) => Some(Copy { n, entry: seen }),
+            None => self.first_copy(id)?,
+        };
+        let mut ready = Some(listing);
+        let wanted = Wanted::Kind(ObjectKind::FolderListing);
+        let (got, _) =
+            self.first_good_from(first, Tries::default(), id, wanted, false, |pack, entry| {
+                if pack.path() == at
+                    && *entry == seen
+                    && let Some(listing) = ready.take()
+                {
+                    return Ok(Got::Ready(listing));
+                }
+                #[cfg(test)]
+                counted::record();
+                pack.read_record(entry).map(Got::Bytes)
+            })?;
+        match got {
+            Got::Ready(listing) => Ok(listing),
+            Got::Bytes(bytes) => Ok(Listing::decode(&bytes)?),
+        }
+    }
+
+    /// The pack `packs.last`, if `first_copy` would ask it first (it is listed and open) and it is
+    /// the pack at `path`. Changes nothing: reading the copy moves the pack up as before.
+    fn last_is(&self, path: &Path) -> Option<usize> {
+        let packs = self.packs();
+        let n = packs.last;
+        let (_, open) = packs.open.iter().find(|(m, _)| *m == n)?;
+        (packs.by_name.contains(&n) && open.path() == path).then_some(n)
+    }
+
+    /// A second handle on this store's packs, sharing only the folder: its own list of packs,
+    /// copied from this one, its own open packs and notes. Reads through it leave this store
+    /// exactly as it was.
+    pub(crate) fn second(&self) -> Store {
+        let names: Vec<OsString> = self.packs().names.iter().flatten().cloned().collect();
+        let mut packs = Packs::default();
+        packs.list(names, false);
+        Store {
+            dir: Arc::clone(&self.dir),
+            path: self.path.clone(),
+            packs: Mutex::new(packs),
+            checked: Mutex::default(),
+            #[cfg(test)]
+            saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            counted: Arc::default(),
+        }
+    }
+
+    /// `listing` as it reads a good first copy, with the copy's length and where it is, or `None`
+    /// on any failure. It tries that one copy only and notes nothing about copies or packs, so a
+    /// `listing` after it tells of them as it would have.
+    pub(crate) fn peek_listing(&self, id: &Id) -> Option<Peeked> {
         let mut quiet = Vec::new();
         let found = self.each_pack_in(&mut quiet, true, |n, pack| {
             let copy = match pack.find(id) {
@@ -711,7 +836,12 @@ impl Store {
             return None;
         }
         let bytes = pack.read_record(&entry).ok()?;
-        Some((Listing::decode(&bytes).ok()?, bytes.len()))
+        Some(Peeked {
+            listing: Listing::decode(&bytes).ok()?,
+            size: bytes.len(),
+            pack: pack.path().to_owned(),
+            entry,
+        })
     }
 
     pub fn save(&self, id: &Id, signatures_allowed: bool) -> Result<Save, StoreError> {
@@ -883,6 +1013,8 @@ impl Store {
     ) -> Result<Option<T>, StoreError> {
         let mut unsearched = Vec::new();
         let found = self.each_pack(skipped, |n, pack| {
+            #[cfg(test)]
+            counted::find();
             let entry = match pack.find(id) {
                 Ok(Some(entry)) => entry,
                 Ok(None) => return Ok(ControlFlow::Continue(())),
@@ -1068,6 +1200,29 @@ impl Store {
     #[cfg(test)]
     fn open_count(&self) -> usize {
         self.packs().open.len()
+    }
+
+    /// Everything this store remembers about its packs and copies, packs by name, in a fixed
+    /// order.
+    #[cfg(test)]
+    pub(crate) fn remembered(&self) -> String {
+        let packs = self.packs();
+        let names = packs.names.clone();
+        let name = |n: &usize| names.get(*n).cloned().flatten();
+        let open: Vec<_> = packs.open.iter().map(|(n, _)| name(n)).collect();
+        let failed: BTreeMap<_, _> = (packs.failed.iter())
+            .map(|(n, e)| (name(n), e.to_string()))
+            .collect();
+        let last = name(&packs.last);
+        drop(packs);
+        let c = self.checked();
+        let at = |(n, id): &At| (name(n), *id);
+        let good: std::collections::BTreeSet<_> = c.good.iter().map(at).collect();
+        let bad: BTreeMap<_, _> = c.bad.iter().map(|(a, why)| (at(a), why)).collect();
+        format!(
+            "last {last:?}\nopen {open:?}\nfailed {failed:?}\ngood {good:?}\nbad {bad:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+            c.damaged, c.unreadable, c.unreadable_packs, c.notes
+        )
     }
 
     /// Marks a copy bad and its pack damaged, and returns the problem found.
@@ -2518,58 +2673,200 @@ mod tests {
         ));
     }
 
-    /// What a store has noted about copies and packs, in a fixed order.
-    fn noted(store: &Store) -> String {
-        let c = store.checked();
-        let good: std::collections::BTreeSet<&At> = c.good.iter().collect();
-        let bad: BTreeMap<&At, _> = c.bad.iter().collect();
-        format!(
-            "{good:?} {bad:?} {:?} {:?} {:?} {:?}",
-            c.damaged, c.unreadable, c.unreadable_packs, c.notes
-        )
+    /// A listing of one file, `name`.
+    fn one_file(name: &str) -> Listing {
+        use crate::listing::{Entry, EntryKind};
+        let entry = Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id: hash_content(name.as_bytes()),
+            size: name.len() as u64,
+        };
+        Listing::new(vec![entry]).unwrap()
+    }
+
+    /// Writes a pack of `objects` into `packs` as `name`.
+    fn pack_as(packs: &Path, name: &str, objects: &[(ObjectKind, &[u8])]) {
+        let made = tempfile::tempdir().unwrap();
+        let mut w = PackWriter::create(made.path()).unwrap();
+        for (kind, bytes) in objects {
+            match kind {
+                ObjectKind::Content => w.add_content(bytes),
+                _ => w.add_record(*kind, bytes),
+            }
+            .unwrap();
+        }
+        let path = w.finish(made.path()).unwrap().unwrap();
+        std::fs::rename(path, packs.join(name)).unwrap();
+    }
+
+    /// Writes a pack of bad copies of `objects` into `packs` as `name`.
+    fn damaged_as(packs: &Path, name: &str, objects: &[(ObjectKind, &[u8])]) {
+        plant_damaged_copies(packs, objects);
+        std::fs::rename(packs.join("00.pack"), packs.join(name)).unwrap();
     }
 
     #[test]
-    fn a_peek_leaves_nothing_behind() {
-        use crate::listing::{Entry, EntryKind};
-        let (_root, tmp, packs) = dirs();
-        let bad = Listing::empty();
-        plant_damaged_copies(&packs, &[(ObjectKind::FolderListing, &bad.encode())]);
-        let good = Listing::new(vec![Entry {
-            name: "a".into(),
-            kind: EntryKind::File,
-            id: hash_content(b"data"),
-            size: 4,
-        }])
-        .unwrap();
-        let mut w = PackWriter::create(&tmp).unwrap();
-        w.add_record(ObjectKind::FolderListing, &good.encode())
-            .unwrap();
-        w.add_content(b"data").unwrap();
-        w.finish(&packs).unwrap().unwrap();
-        let fresh = || Store::open(&packs).unwrap();
-        let store = fresh();
-        let before = noted(&store);
-
-        let peeked = store.peek_listing(&good.id());
-        assert_eq!(
-            peeked,
-            Some((fresh().listing(&good.id()).unwrap(), good.encode().len()))
+    fn a_second_handle_leaves_the_first_store_as_it_was() {
+        let (_root, _tmp, packs) = dirs();
+        let (first, second, twice) = (one_file("a"), one_file("b"), one_file("c"));
+        let (first_bytes, second_bytes) = (first.encode(), second.encode());
+        let twice_bytes = twice.encode();
+        let listing = ObjectKind::FolderListing;
+        pack_as(
+            &packs,
+            "a.pack",
+            &[(listing, &first_bytes), (ObjectKind::Content, b"data")],
         );
-        let missing = hash_content(b"nowhere");
-        for id in [bad.id(), missing, hash_content(b"data")] {
-            assert_eq!(store.peek_listing(&id), None);
-        }
-        assert_eq!(noted(&store), before);
-        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+        pack_as(&packs, "b.pack", &[(listing, &second_bytes)]);
+        damaged_as(&packs, "c.pack", &[(listing, &twice_bytes)]);
+        pack_as(&packs, "d.pack", &[(listing, &twice_bytes)]);
+        std::fs::write(packs.join("zz.pack"), b"not a pack").unwrap();
 
-        // The read that counts finds the damage as it would on a fresh store.
-        let (once, again) = (fresh(), &store);
-        let said = |s: &Store| format!("{:?}", s.listing(&bad.id()).unwrap_err());
-        assert_eq!(said(again), said(&once));
-        assert_eq!(noted(again), noted(&once));
-        assert_eq!(again.warnings(), once.warnings());
-        assert!(!once.warnings().is_empty());
+        let store = Store::open(&packs).unwrap();
+        store
+            .copy_content(&hash_content(b"data"), &mut Vec::new())
+            .unwrap();
+        store.listing(&second.id()).unwrap();
+        let (before, open) = (store.remembered(), store.open_count());
+        assert!(open > 0 && before.contains("a.pack"), "{before}");
+
+        let other = store.second();
+        let peeked = other.peek_listing(&first.id()).unwrap();
+        assert_eq!(peeked.listing, first);
+        assert_eq!(peeked.size, first_bytes.len());
+        assert!(other.peek_listing(&second.id()).is_some());
+        assert!(other.peek_listing(&twice.id()).is_none());
+        assert!(other.peek_listing(&hash_content(b"nowhere")).is_none());
+        assert!(other.warnings().is_empty());
+        assert_eq!(store.remembered(), before);
+        assert_eq!(store.open_count(), open);
+        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+    }
+
+    /// What a read of `id` brought: the lookups, record reads and reads of pack files made.
+    type Spent = (usize, usize, usize);
+
+    /// Opens two stores on `packs` and brings both to one state with `prepare`; then one reads
+    /// `id` with `listing`, the other with `listing_after`, given what a second handle peeked.
+    /// Both must end alike: the same answer, the same memory of packs and copies.
+    fn alike(packs: &Path, id: Id, prepare: impl Fn(&Store)) -> Spent {
+        let (one, two) = (Store::open(packs).unwrap(), Store::open(packs).unwrap());
+        prepare(&one);
+        prepare(&two);
+        assert_eq!(one.remembered(), two.remembered());
+        let peeked = two.second().peek_listing(&id).unwrap();
+        let plain = format!("{:?}", one.listing(&id));
+        let ((finds, records), reads) = (counted::now(), open_files::reads());
+        let after = format!("{:?}", two.listing_after(&id, peeked));
+        let spent = (
+            counted::now().0 - finds,
+            counted::now().1 - records,
+            open_files::reads() - reads,
+        );
+        assert_eq!(after, plain);
+        assert_eq!(two.remembered(), one.remembered());
+        assert_eq!(two.warnings(), one.warnings());
+        spent
+    }
+
+    #[test]
+    fn listing_after_leaves_the_store_as_listing_does() {
+        let listing = one_file("a");
+        let bytes = listing.encode();
+        let kind = ObjectKind::FolderListing;
+        let data = (ObjectKind::Content, &b"data"[..]);
+        let read_data = |s: &Store| {
+            s.copy_content(&hash_content(b"data"), &mut Vec::new())
+                .unwrap();
+        };
+        // Opens every pack, the last first in the list of open ones.
+        let open_all = |s: &Store| {
+            s.listing(&hash_content(b"nowhere")).unwrap_err();
+        };
+
+        // One copy, in the pack asked first: nothing is looked up or read again.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[(kind, &bytes), data]);
+        assert_eq!(alike(&packs, listing.id(), read_data), (0, 0, 0));
+
+        // One copy, in another pack than the one asked first: the store's own search runs.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[(kind, &bytes)]);
+        pack_as(&packs, "b.pack", &[data]);
+        let (finds, records, _) = alike(&packs, listing.id(), read_data);
+        assert!(finds > 0);
+        assert_eq!(records, 0);
+
+        // Two copies, the store's first damaged and the second's the good one.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[data]);
+        pack_as(&packs, "g.pack", &[(kind, &bytes)]);
+        damaged_as(&packs, "z.pack", &[(kind, &bytes)]);
+        alike(&packs, listing.id(), open_all);
+        let store = Store::open(&packs).unwrap();
+        open_all(&store);
+        store.listing(&listing.id()).unwrap();
+        assert!(!store.warnings().is_empty());
+
+        // The second's copy is the store's first, which it knows to be bad.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "g.pack", &[(kind, &bytes)]);
+        pack_as(&packs, "h.pack", &[(kind, &bytes)]);
+        let known_bad = |s: &Store| {
+            let reason = (packs.join("g.pack"), "planted".to_owned());
+            s.checked().bad.insert((0, listing.id()), reason);
+        };
+        let (_, records, _) = alike(&packs, listing.id(), known_bad);
+        assert_eq!(records, 1);
+
+        // The store's first copy isn't a folder listing.
+        let (_root, _tmp, packs) = dirs();
+        pack_as(&packs, "a.pack", &[data]);
+        pack_as(&packs, "g.pack", &[(kind, &bytes)]);
+        plant_lying(&packs, "z.pack", ObjectKind::Content, &listing.id(), &bytes);
+        alike(&packs, listing.id(), open_all);
+    }
+
+    #[test]
+    fn a_peeked_copy_that_isnt_the_stores_is_never_used() {
+        let (_root, _tmp, packs) = dirs();
+        let listing = one_file("a");
+        let bytes = listing.encode();
+        pack_as(&packs, "a.pack", &[(ObjectKind::FolderListing, &bytes)]);
+        pack_as(&packs, "b.pack", &[(ObjectKind::FolderListing, &bytes)]);
+        let peek = || {
+            let mut peeked = Store::open(&packs)
+                .unwrap()
+                .second()
+                .peek_listing(&listing.id())
+                .unwrap();
+            peeked.listing = Listing::empty();
+            peeked
+        };
+        let in_another_pack = || Peeked {
+            pack: packs.join("b.pack"),
+            ..peek()
+        };
+        let moved = || {
+            let mut peeked = peek();
+            peeked.entry.offset += 1;
+            peeked
+        };
+        // A store that has read from `a.pack` asks it first, and takes a line of its index
+        // unlooked-up only from a peek of that pack, which only `peek_listing` makes.
+        let warm = Store::open(&packs).unwrap();
+        warm.listing(&listing.id()).unwrap();
+        let cold = || Store::open(&packs).unwrap();
+        for (store, peeked) in [
+            (cold(), in_another_pack()),
+            (warm, in_another_pack()),
+            (cold(), moved()),
+        ] {
+            let records = counted::now().1;
+            assert_eq!(store.listing_after(&listing.id(), peeked).unwrap(), listing);
+            assert_eq!(counted::now().1, records + 1);
+        }
     }
 
     #[test]
