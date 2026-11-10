@@ -832,10 +832,10 @@ fn git_path(
     ))
 }
 
-/// Whether Git puts the home folder at the start of `value`: `~` alone or before a separator.
+/// Whether Git puts the home folder at the start of `value`: `~` alone or before a `/`. Git takes
+/// `~\x` as a user's name even on Windows, and stops there.
 fn from_home(value: &[u8]) -> bool {
-    let separator = |&c: &u8| std::path::is_separator(char::from(c));
-    value.first() == Some(&b'~') && value.get(1).is_none_or(separator)
+    value.first() == Some(&b'~') && value.get(1).is_none_or(|&c| c == b'/')
 }
 
 /// The home folder Git v2.56.0 takes `~` and its own files from: `HOME`, whatever it is set to;
@@ -2059,6 +2059,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(said.contains("%(prefix)/ stands for the folder"), "{said}");
+    }
+
+    /// Only `~/` is the home folder: Git for Windows 2.50.1 says "failed to expand user dir in:
+    /// '~\ign'", as it says for `~user/`.
+    #[test]
+    fn tilde_backslash_stops_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let gitconfig = home.join(".gitconfig");
+        excludes_file_set(&gitconfig, "~\\\\ign");
+        let said = excludes(home, &home.join("xdg"), home, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.contains("~\\ign") && said.contains("full path"),
+            "{said}"
+        );
+        std::fs::write(&gitconfig, "[include]\n\tpath = ~\\\\inc\n").unwrap();
+        let said = excludes(home, &home.join("xdg"), home, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.contains("~\\inc") && said.contains("full path"),
+            "{said}"
+        );
     }
 
     #[test]
