@@ -48,7 +48,6 @@ fn imported_with_branches(commits: usize, branches: usize) -> Env {
 /// the amend is committed.
 #[cfg(unix)]
 #[test]
-#[ignore = "RT12-1: an amend among many lines copies every line's saves and aborts out of memory"]
 fn rt12_1_an_amend_among_many_lines_stays_within_memory() {
     let env = imported_with_branches(1_000, 10_000);
     std::fs::write(env.root().join("f"), "changed\n").unwrap();

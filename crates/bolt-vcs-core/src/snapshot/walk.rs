@@ -164,7 +164,8 @@ pub(super) mod ahead_seen {
     static HELD: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
     /// Has the scan of the project at `root` wait until its helper has ended, a few seconds at
-    /// most.
+    /// most. On a tree whose listings overflow the helper's buffer the helper is still waiting
+    /// for room, so the hold always runs to its limit.
     pub(in crate::snapshot) fn hold(root: &Path, held: bool) {
         let mut set = HELD.lock().unwrap_or_else(|e| e.into_inner());
         if held {
@@ -1431,7 +1432,7 @@ pub(super) fn walk(
                         #[cfg(test)]
                         ahead
                             .ended
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                            .store(true, std::sync::atomic::Ordering::Release);
                     })
                     .ok()
             })
@@ -1443,7 +1444,7 @@ pub(super) fn walk(
             #[cfg(test)]
             if ahead_seen::is_held(root) {
                 let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !ahead.ended.load(std::sync::atomic::Ordering::SeqCst)
+                while !ahead.ended.load(std::sync::atomic::Ordering::Acquire)
                     && std::time::Instant::now() < until
                 {
                     thread::sleep(std::time::Duration::from_millis(5));
@@ -1478,7 +1479,7 @@ pub(super) fn walk(
                     &mut *ahead.handed.lock().unwrap_or_else(|e| e.into_inner()),
                 ),
                 started,
-                ended: ahead.ended.load(std::sync::atomic::Ordering::Relaxed),
+                ended: ahead.ended.load(std::sync::atomic::Ordering::Acquire),
             },
         );
         scanned

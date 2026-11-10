@@ -1243,6 +1243,73 @@ mod tests {
             })
     }
 
+    #[test]
+    fn an_amend_asks_each_line_without_building_it_a_list() {
+        let starts: Vec<String> = (0..29u8)
+            .map(|n| format!("{}{}", char::from(b'k' + n / 16), char::from(b'k' + n % 16)))
+            .collect();
+        let starts: Vec<&str> = starts.iter().map(String::as_str).collect();
+        let (_dir, mut repo, ids) = project_with(&starts);
+        let tip = ids[29];
+        let mut side_saves = 0;
+        for n in 0..11 {
+            name_line(&mut repo, &format!("at{n:02}"), ids[n * 2]);
+        }
+        for n in 0..5 {
+            name_line(&mut repo, &format!("amended{n}"), tip);
+        }
+        // Lines of a few saves of their own on a save of main, and two that share one.
+        for (n, &on) in ids.iter().take(20).enumerate() {
+            let mut top = on;
+            for _ in 0..=n % 3 {
+                top = plant(&mut repo, &[top], "pppp", None);
+                side_saves += 1;
+            }
+            name_line(&mut repo, &format!("side{n:02}"), top);
+        }
+        let shared = plant(&mut repo, &[ids[4]], "qqqq", Some("shared"));
+        plant(&mut repo, &[shared], "rrrr", Some("shared2"));
+        side_saves += 2;
+        // A history that never meets main's.
+        let alone = plant(&mut repo, &[], "ssss", None);
+        plant(&mut repo, &[alone], "tttt", Some("alone"));
+        side_saves += 2;
+        // Another save with the amended save's change ID, as an undone amend leaves.
+        plant(&mut repo, &[ids[6]], starts[28], Some("twin"));
+        side_saves += 1;
+        let state = repo.current().unwrap().1.state;
+        assert_eq!(state.lines.len(), 41);
+        let save = repo.store().save(&tip, false).unwrap();
+        let expected: Vec<String> = state
+            .lines
+            .iter()
+            .filter(|(name, _)| *name != "main")
+            .filter(|&(_, &other)| {
+                other == tip
+                    || chain(&repo, other).any(|s| s.unwrap().1.change_id == save.change_id)
+            })
+            .map(|(name, _)| format!("line {name}"))
+            .collect();
+        assert!(expected.contains(&"line twin".to_owned()));
+        assert!(expected.contains(&"line amended0".to_owned()));
+        cached_line(&repo);
+        let mut cache = ChangeIds::load(&repo);
+        let before = repo.store().saves_read();
+        let by = crate::snapshot::shown_elsewhere(&repo, &mut cache, &state, "main", tip, &save)
+            .unwrap();
+        let read = repo.store().saves_read() - before;
+        assert_eq!(by, expected);
+        // Only the saves on no line's list are read, each at most once.
+        assert!(
+            read <= side_saves,
+            "{read} saves read, {side_saves} on no list"
+        );
+        assert!(cache.get("main").is_some());
+        for name in state.lines.keys().filter(|name| *name != "main") {
+            assert!(cache.get(name).is_none(), "{name}");
+        }
+    }
+
     /// Puts the project at `position`, as `goto` would, without touching the folder.
     fn set_position(repo: &mut Repository, position: Position) {
         let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();

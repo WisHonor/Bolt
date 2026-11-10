@@ -46,6 +46,12 @@ impl Writer {
         }
     }
 
+    /// A writer that appends to `buf`, using any room already reserved in it.
+    #[must_use]
+    pub fn from_vec(buf: Vec<u8>) -> Writer {
+        Writer { buf }
+    }
+
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }

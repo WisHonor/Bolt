@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 
 use crate::diary::{Position, State};
-use crate::encoding::{DecodeError, Reader, Writer};
+use crate::encoding::{DecodeError, Reader, Writer, varint_len};
 use crate::fsio;
 use crate::id::{ChangeId, Id};
 use crate::keyed;
@@ -34,19 +34,18 @@ pub struct ChangeIds {
     lines: BTreeMap<String, Vec<(Id, ChangeId)>>,
     /// Whether it differs from the file it was read from.
     changed: bool,
-    /// The body this handle last wrote.
-    written: Option<Vec<u8>>,
+    /// The fingerprint of the file this handle last wrote.
+    written: Option<blake3::Hash>,
 }
 
 impl ChangeIds {
     /// The cache's body, without its seal.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        self.encode_kept(|_| true)
+        self.encode_kept(Writer::new(), |_| true)
     }
 
-    fn encode_kept(&self, keep: impl Fn(&str) -> bool) -> Vec<u8> {
-        let mut w = Writer::new();
+    fn encode_kept(&self, mut w: Writer, keep: impl Fn(&str) -> bool) -> Vec<u8> {
         for b in MAGIC {
             w.u8(*b);
         }
@@ -129,6 +128,10 @@ impl ChangeIds {
     /// `state` has and, at a save, the position's list; nothing when the handle has no key. A
     /// cache that can't be written is just not there next time, so a failure is ignored.
     pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
+        self.store_within(repo, state, MAX_BYTES);
+    }
+
+    fn store_within(&mut self, repo: &Repository, state: &State, cap: u64) {
         let Some(key) = repo.cache_key() else {
             return;
         };
@@ -136,19 +139,80 @@ impl ChangeIds {
         if !self.changed && self.lines.keys().all(|name| keep(name)) {
             return;
         }
-        let body = self.encode_kept(keep);
-        if self.written.as_ref() == Some(&body) {
+        let Some(sealed) = self.sealed(key, state, cap) else {
             return;
-        }
-        let sealed = keyed::seal(key, &body);
-        if sealed.len() as u64 > MAX_BYTES {
+        };
+        let fingerprint = blake3::hash(&sealed);
+        if self.written == Some(fingerprint) {
             return;
         }
         // Readers don't hold the lock, so another command may clear `tmp/` under this write; it
         // then fails, which is fine.
         let _ = fsio::write_cache(repo.tmp_folder(), repo.cache_folder(), FILE, &sealed);
         self.changed = false;
-        self.written = Some(body);
+        self.written = Some(fingerprint);
+    }
+
+    /// The file to write for `state`, sealed with `key`, of at most `cap` bytes: the position's
+    /// list first, then the other lists `state` keeps, in order of name, while they fit; the rest
+    /// stay in memory only. `None` if the position's list alone doesn't fit, or the memory for
+    /// the file can't be had: the size is worked out before anything is built.
+    fn sealed(&self, key: &[u8; keyed::KEY_LEN], state: &State, cap: u64) -> Option<Vec<u8>> {
+        let keep = kept(state);
+        let position = match &state.position {
+            Position::OnLine(name) => name.as_str(),
+            Position::AtSave(_) => AT_SAVE,
+        };
+        // The magic, the version and the seal.
+        let fixed = (MAGIC.len() as u64)
+            .saturating_add(1)
+            .saturating_add(keyed::KEY_LEN as u64);
+        let line_bytes = |name: &str, saves: &[(Id, ChangeId)]| {
+            let (name_len, count) = (name.len() as u64, saves.len() as u64);
+            varint_len(name_len)
+                .saturating_add(name_len)
+                .saturating_add(varint_len(count))
+                .saturating_add(count.saturating_mul(SAVE_BYTES as u64))
+        };
+        let (mut count, mut bytes) = (0u64, 0u64);
+        let mut fits = |name: &str, saves: &[(Id, ChangeId)]| {
+            let more = bytes.saturating_add(line_bytes(name, saves));
+            let total = fixed
+                .saturating_add(varint_len(count.saturating_add(1)))
+                .saturating_add(more);
+            let fit = total <= cap;
+            if fit {
+                count = count.saturating_add(1);
+                bytes = more;
+            }
+            fit
+        };
+        let own = self.lines.get(position).filter(|_| keep(position));
+        if let Some(saves) = own
+            && !fits(position, saves)
+        {
+            return None;
+        }
+        let mut last: Option<&str> = None;
+        for (name, saves) in &self.lines {
+            if name == position || !keep(name) {
+                continue;
+            }
+            if !fits(name, saves) {
+                break;
+            }
+            last = Some(name);
+        }
+        let total = fixed
+            .saturating_add(varint_len(count))
+            .saturating_add(bytes);
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(usize::try_from(total).ok()?).ok()?;
+        let within =
+            |name: &str| keep(name) && (name == position || last.is_some_and(|last| name <= last));
+        let mut buf = self.encode_kept(Writer::from_vec(buf), within);
+        keyed::seal_in_place(key, &mut buf);
+        Some(buf)
     }
 
     /// The saves from `tip` back along first parents, newest first, each with its change ID.
@@ -402,6 +466,55 @@ mod tests {
         ids.add("main", Id([2; 32]), Id([3; 32]), ChangeId([3; 16]));
         ids.store(&repo, &state);
         assert!(file.exists());
+    }
+
+    #[test]
+    fn a_cache_past_its_cap_keeps_the_position_s_list_then_others_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let person = crate::save::Person {
+            name: "Ada".into(),
+            email: "a@example.com".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let mut repo = Repository::init(dir.path(), &person).unwrap();
+        repo.set_cache_key([7; 32]);
+        let names = ["a", "b", "c", "d"];
+        let state = State {
+            lines: names
+                .iter()
+                .map(|n| ((*n).to_owned(), Id([1; 32])))
+                .collect(),
+            tags: None,
+            position: Position::OnLine("c".into()),
+            shelves: vec![],
+            server_lines: None,
+        };
+        let file = dir.path().join(".bolt/cache/change-ids");
+        let fill = || with(&names.map(|n| (n, vec![save(1)])));
+        // The magic, version, count and seal, then 51 bytes a line of one save.
+        let (fixed, line) = (8 + 1 + 1 + 32, 1 + 1 + 1 + SAVE_BYTES as u64);
+        assert_eq!(fill().encode().len() as u64 + 32, fixed + 4 * line);
+        // Room for three lines: `c`, then `a` and `b`.
+        let cap = fixed + 3 * line;
+        let mut ids = fill();
+        ids.store_within(&repo, &state, cap);
+        let written = std::fs::read(&file).unwrap();
+        assert!(written.len() as u64 <= cap);
+        let back = ChangeIds::load(&repo);
+        assert_eq!(back.lines.keys().collect::<Vec<_>>(), ["a", "b", "c"]);
+        // The line left out stays in memory.
+        assert!(ids.get("d").is_some());
+        // Room for less than `c`'s list: nothing written, nothing fails.
+        std::fs::remove_file(&file).unwrap();
+        fill().store_within(&repo, &state, fixed + line - 1);
+        assert!(!file.exists());
+        // Room for `c` alone.
+        fill().store_within(&repo, &state, fixed + line);
+        assert_eq!(
+            ChangeIds::load(&repo).lines.keys().collect::<Vec<_>>(),
+            ["c"]
+        );
     }
 
     #[test]

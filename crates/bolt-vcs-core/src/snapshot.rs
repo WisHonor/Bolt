@@ -702,7 +702,7 @@ pub fn save_folder(
 
 /// Who else shows `id`, the newest save of `line`, as `AmendShared` names them: a line that holds
 /// it or reaches its change ID along first parents, a server line or a tag that names it.
-fn shown_elsewhere(
+pub(crate) fn shown_elsewhere(
     repo: &Repository,
     cache: &mut ChangeIds,
     state: &State,
@@ -710,18 +710,10 @@ fn shown_elsewhere(
     id: Id,
     save: &Save,
 ) -> Result<Vec<String>, SaveError> {
-    let mut by = Vec::new();
-    for (name, &tip) in &state.lines {
-        if name != line
-            && (tip == id
-                || cache
-                    .chain(repo, Some(name), tip)?
-                    .iter()
-                    .any(|(_, c)| *c == save.change_id))
-        {
-            by.push(format!("line {name}"));
-        }
-    }
+    let mut by: Vec<String> = lines_reaching(repo, cache, state, line, id, &save.change_id)?
+        .into_iter()
+        .map(|name| format!("line {name}"))
+        .collect();
     for (server, lines) in &repo.server_lines(state)?.servers {
         for (name, &tip) in lines {
             if tip == id {
@@ -735,6 +727,79 @@ fn shown_elsewhere(
         }
     }
     Ok(by)
+}
+
+/// The lines of `state` other than `line`, in order of name, that hold `id`, the newest save of
+/// `line`, or reach a save with `change_id` along first parents. Only `line` gets a list in
+/// `cache`: each other line is walked until it meets that list or a save an earlier walk passed,
+/// so lines that share a history cost it once.
+fn lines_reaching<'s>(
+    repo: &Repository,
+    cache: &mut ChangeIds,
+    state: &'s State,
+    line: &str,
+    id: Id,
+    change_id: &ChangeId,
+) -> Result<Vec<&'s str>, StoreError> {
+    let mut others = state
+        .lines
+        .iter()
+        .filter(|(name, _)| *name != line)
+        .peekable();
+    if others.peek().is_none() {
+        return Ok(vec![]);
+    }
+    // Where each save of `line` is on its list, and the last place `change_id` is. A list that
+    // can't be read just isn't used: the walks read what they need and say what fails.
+    let (places, last) = match cache.chain(repo, Some(line), id) {
+        Ok(saves) => (
+            saves
+                .iter()
+                .enumerate()
+                .map(|(at, (save, _))| (*save, at))
+                .collect(),
+            saves.iter().rposition(|(_, c)| c == change_id),
+        ),
+        Err(_) => (HashMap::new(), None),
+    };
+    let mut known: HashMap<Id, bool> = HashMap::new();
+    let mut found = Vec::new();
+    for (name, &tip) in others {
+        let listed = cache
+            .get(name)
+            .filter(|saves| saves.first().is_some_and(|(first, _)| *first == tip));
+        let reaches = if tip == id {
+            true
+        } else if let Some(saves) = listed {
+            saves.iter().any(|(_, c)| c == change_id)
+        } else {
+            let mut passed = Vec::new();
+            let mut next = Some(tip);
+            let reaches = loop {
+                let Some(at) = next else { break false };
+                // From here on this line is `line`'s list, so it reaches the change ID if the
+                // list has it here or further back.
+                if let Some(&p) = places.get(&at) {
+                    break last.is_some_and(|last| last >= p);
+                }
+                if let Some(&answer) = known.get(&at) {
+                    break answer;
+                }
+                let save = repo.store().save(&at, repo.signatures_allowed())?;
+                passed.push(at);
+                if save.change_id == *change_id {
+                    break true;
+                }
+                next = save.parents.first().copied();
+            };
+            known.extend(passed.into_iter().map(|at| (at, reaches)));
+            reaches
+        };
+        if reaches {
+            found.push(name.as_str());
+        }
+    }
+    Ok(found)
 }
 
 /// The base save's file named `name` in a folder it lists as `before`, if it holds a file there.
@@ -2946,7 +3011,7 @@ mod tests {
     }
 
     #[test]
-    fn an_amend_that_goes_no_further_keeps_what_it_read_of_the_other_lines() {
+    fn an_amend_that_goes_no_further_keeps_its_line_s_list_and_no_other() {
         const KEY: [u8; 32] = [7; 32];
         let (dir, mut repo) = project();
         repo.set_cache_key(KEY);
@@ -2963,13 +3028,15 @@ mod tests {
             matches!(same, Ok(SaveOutcome::NothingChanged { .. })),
             "{same:?}"
         );
-        assert!(cached(&repo, "b"));
+        assert!(cached(&repo, "main"));
+        assert!(!cached(&repo, "b"));
         // A line from this save: refused.
         plant_line(&mut repo, "c", save_id);
         let refused = save_as(&mut repo, None, true);
         let by_c = matches!(&refused, Err(SaveError::AmendShared { by }) if by == &["line c"]);
         assert!(by_c, "{refused:?}");
-        assert!(cached(&repo, "c"));
+        assert!(cached(&repo, "main"));
+        assert!(!cached(&repo, "c"));
     }
 
     #[test]

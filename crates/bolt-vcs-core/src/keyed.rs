@@ -31,8 +31,14 @@ pub fn cache_key() -> Result<Option<[u8; KEY_LEN]>, RepoError> {
 pub fn seal(key: &[u8; KEY_LEN], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len().saturating_add(KEY_LEN));
     out.extend_from_slice(body);
-    out.extend_from_slice(blake3::keyed_hash(key, body).as_bytes());
+    seal_in_place(key, &mut out);
     out
+}
+
+/// Adds to `buf` the seal of what it holds, as `seal` does without a copy.
+pub fn seal_in_place(key: &[u8; KEY_LEN], buf: &mut Vec<u8>) {
+    let tag = blake3::keyed_hash(key, buf);
+    buf.extend_from_slice(tag.as_bytes());
 }
 
 /// The body of `bytes` if `key` sealed it, else `None`.
