@@ -34,6 +34,8 @@ pub struct ChangeIds {
     lines: BTreeMap<String, Vec<(Id, ChangeId)>>,
     /// Whether it differs from the file it was read from.
     changed: bool,
+    /// The body this handle last wrote.
+    written: Option<Vec<u8>>,
 }
 
 impl ChangeIds {
@@ -99,6 +101,7 @@ impl ChangeIds {
         Ok(ChangeIds {
             lines,
             changed: false,
+            written: None,
         })
     }
 
@@ -129,12 +132,15 @@ impl ChangeIds {
         let Some(key) = repo.cache_key() else {
             return;
         };
-        let at_save = matches!(state.position, Position::AtSave(_));
-        let keep = |name: &str| state.lines.contains_key(name) || (at_save && name == AT_SAVE);
+        let keep = kept(state);
         if !self.changed && self.lines.keys().all(|name| keep(name)) {
             return;
         }
-        let sealed = keyed::seal(key, &self.encode_kept(keep));
+        let body = self.encode_kept(keep);
+        if self.written.as_ref() == Some(&body) {
+            return;
+        }
+        let sealed = keyed::seal(key, &body);
         if sealed.len() as u64 > MAX_BYTES {
             return;
         }
@@ -142,6 +148,7 @@ impl ChangeIds {
         // then fails, which is fine.
         let _ = fsio::write_cache(repo.tmp_folder(), repo.cache_folder(), FILE, &sealed);
         self.changed = false;
+        self.written = Some(body);
     }
 
     /// The saves from `tip` back along first parents, newest first, each with its change ID.
@@ -261,6 +268,14 @@ impl ChangeIds {
     }
 }
 
+/// Which lists are written for `state`: its lines and, at a save, the position's, unless that
+/// would take the file past the number of lines a reader accepts.
+fn kept(state: &State) -> impl Fn(&str) -> bool + '_ {
+    let at_save =
+        matches!(state.position, Position::AtSave(_)) && (state.lines.len() as u64) < MAX_LINES;
+    move |name| state.lines.contains_key(name) || (at_save && name == AT_SAVE)
+}
+
 /// Where `id` is in `saves`.
 fn at(saves: &[(Id, ChangeId)], id: &Id) -> Option<usize> {
     saves.iter().position(|(s, _)| s == id)
@@ -343,6 +358,50 @@ mod tests {
         let mut version = body;
         version[8] = 1;
         assert!(ChangeIds::decode(&version).is_err());
+    }
+
+    #[test]
+    fn the_position_s_list_is_left_out_rather_than_pass_the_line_limit() {
+        let at = |lines: u32| State {
+            lines: (0..lines).map(|n| (format!("l{n}"), Id([1; 32]))).collect(),
+            tags: None,
+            position: Position::AtSave(Id([1; 32])),
+            shelves: vec![],
+            server_lines: None,
+        };
+        assert!(kept(&at(1))(AT_SAVE));
+        assert!(kept(&at(99_999))(AT_SAVE));
+        let full = at(100_000);
+        assert!(!kept(&full)(AT_SAVE));
+        assert!(kept(&full)("l7"));
+        let mut on_line = at(1);
+        on_line.position = Position::OnLine("l0".into());
+        assert!(!kept(&on_line)(AT_SAVE));
+    }
+
+    #[test]
+    fn what_was_written_isn_t_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let person = crate::save::Person {
+            name: "Ada".into(),
+            email: "a@example.com".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let mut repo = Repository::init(dir.path(), &person).unwrap();
+        repo.set_cache_key([7; 32]);
+        let state = repo.current().unwrap().1.state;
+        // A list the state has no line for is left out of the file, but stays in memory.
+        let mut ids = with(&[("gone", vec![save(1)]), ("main", vec![save(2)])]);
+        let file = dir.path().join(".bolt/cache/change-ids");
+        ids.store(&repo, &state);
+        assert!(file.exists());
+        std::fs::remove_file(&file).unwrap();
+        ids.store(&repo, &state);
+        assert!(!file.exists());
+        ids.add("main", Id([2; 32]), Id([3; 32]), ChangeId([3; 16]));
+        ids.store(&repo, &state);
+        assert!(file.exists());
     }
 
     #[test]
