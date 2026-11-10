@@ -123,13 +123,31 @@ fn add_save(env: &Env, n: usize, made: &mut Vec<(Id, String)>) {
 
 /// Two copies of the project: the first with no change-ID cache, the second with `planted` as
 /// its cache.
-fn with_and_without(env: &Env, planted: &[u8]) -> (tempfile::TempDir, tempfile::TempDir) {
+fn with_and_without(env: &Env, planted: &[u8]) -> Copies {
     let (without, with) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     copy_dir(env.root(), without.path());
     copy_dir(env.root(), with.path());
-    fs::remove_file(change_ids_cache(without.path())).unwrap();
-    fs::write(change_ids_cache(with.path()), planted).unwrap();
-    (without, with)
+    Copies {
+        without,
+        with,
+        planted: planted.to_vec(),
+    }
+}
+
+/// Two copies of a project, and the change-ID cache planted in the second.
+struct Copies {
+    without: tempfile::TempDir,
+    with: tempfile::TempDir,
+    planted: Vec<u8>,
+}
+
+impl Copies {
+    /// Takes the first copy's cache away and puts the plant back in the second, so each command
+    /// meets the plant itself, not a cache an earlier command wrote.
+    fn reset(&self) {
+        let _ = fs::remove_file(change_ids_cache(self.without.path()));
+        fs::write(change_ids_cache(self.with.path()), &self.planted).unwrap();
+    }
 }
 
 /// `undo --list`'s lines without the diary entries' own IDs, which hold the time each was made.
@@ -145,8 +163,10 @@ fn without_entry_ids(said: &str) -> String {
 }
 
 /// Runs each command in both projects, which must say the same.
-fn same_in_both(env: &Env, without: &Path, with: &Path, commands: &[&[&str]]) {
+fn same_in_both(env: &Env, copies: &Copies, commands: &[&[&str]]) {
+    let (without, with) = (copies.without.path(), copies.with.path());
     for args in commands {
+        copies.reset();
         let run = |dir: &Path| {
             let out = env.bolt_in(dir).args(*args).output().unwrap();
             (
@@ -199,24 +219,19 @@ fn a_planted_cache_is_never_trusted() {
     lying[n..n + 16].copy_from_slice(&oldest);
     lying[o..o + 16].copy_from_slice(&newest);
     let planted = keyed::seal(&[0x5a; KEY_LEN], &lying);
-    let (without, with) = with_and_without(&env, &planted);
-    goes_to_each(
-        &env,
-        without.path(),
-        with.path(),
-        &[&made[0], &made[3], &made[1]],
-    );
+    let copies = with_and_without(&env, &planted);
+    goes_to_each(&env, &copies, &[&made[0], &made[3], &made[1]]);
 }
 
 /// From `main`, `goto` each save by its change ID, in both projects, which must say the same
 /// before and after each, and must get to it.
-fn goes_to_each(env: &Env, without: &Path, with: &Path, saves: &[&(Id, String)]) {
+fn goes_to_each(env: &Env, copies: &Copies, saves: &[&(Id, String)]) {
     let looks: &[&[&str]] = &[&["status"], &["history"], &["undo", "--list"]];
-    same_in_both(env, without, with, looks);
+    same_in_both(env, copies, looks);
     for (id, letters) in saves {
-        same_in_both(env, without, with, &[&["goto", "main"], &["goto", letters]]);
-        assert_eq!(current_save(with), *id);
-        same_in_both(env, without, with, looks);
+        same_in_both(env, copies, &[&["goto", "main"], &["goto", letters]]);
+        assert_eq!(current_save(copies.with.path()), *id);
+        same_in_both(env, copies, looks);
     }
 }
 
@@ -227,13 +242,8 @@ fn a_stale_change_id_cache_gives_what_the_store_gives() {
     let old = fs::read(change_ids_cache(env.root())).unwrap();
     add_save(&env, 3, &mut made);
     add_save(&env, 4, &mut made);
-    let (without, with) = with_and_without(&env, &old);
-    goes_to_each(
-        &env,
-        without.path(),
-        with.path(),
-        &[&made[4], &made[0], &made[3]],
-    );
+    let copies = with_and_without(&env, &old);
+    goes_to_each(&env, &copies, &[&made[4], &made[0], &made[3]]);
 }
 
 #[test]
@@ -305,11 +315,13 @@ fn cache_of(env: &Env) -> std::path::PathBuf {
 
 #[test]
 fn a_file_changed_within_two_seconds_is_read_again() {
-    // Written and saved at once: the cache the save leaves doesn't vouch for it.
+    // Its time a minute ahead, so it is too new to trust however slowly the save runs: the cache
+    // the save leaves doesn't vouch for it.
     let env = Env::empty();
     env.bolt().arg("start").assert().success();
     let a = env.root().join("a.txt");
     fs::write(&a, "one").unwrap();
+    set_time(&a, SystemTime::now() + Duration::from_secs(60));
     fs::write(env.root().join("old.txt"), "old").unwrap();
     set_time(
         &env.root().join("old.txt"),
@@ -332,10 +344,23 @@ fn status_after_goto_reads_what_goto_wrote() {
     let first = main_tip(&env);
     fs::write(env.root().join("a.txt"), "two").unwrap();
     env.bolt().args(["save", "Two"]).assert().success();
+    let started = std::time::Instant::now();
     env.bolt()
         .args(["goto", &first.to_hex()])
         .assert()
         .success();
+    // A status at once leaves a cache that doesn't vouch for what the switch just wrote.
+    assert!(changed(&env).is_empty());
+    let within = started.elapsed() < Duration::from_secs(2);
+    let sealed = fs::read(cache_of(&env)).unwrap();
+    let body = keyed::open_sealed(&user_key(&env), &sealed).unwrap();
+    let cache = FileCache::decode(body).unwrap();
+    let vouched = cache.matches("a.txt", &look(&env, "a.txt")).is_some();
+    // Past 2 s, the file is old enough to trust; only a slow machine gets there.
+    assert!(
+        !(within && vouched),
+        "the cache vouches for a file written just now"
+    );
     // Changed right after the switch wrote it, with the same size and time.
     rewrite_keeping_time(&env.root().join("a.txt"), "uno");
     assert_eq!(changed(&env), ["a.txt"]);
@@ -363,6 +388,8 @@ fn a_damaged_second_copy_of_a_listing_reads_the_same_every_time() {
     fs::write(path, pack).unwrap();
     assert_eq!(support::copies_of(env.root(), &b).len(), 2);
 
+    // Which copy is read first rests on the packs' names, so this pins only that every run prints
+    // the same.
     let status = || {
         let out = env.bolt().arg("status").output().unwrap();
         (out.status.code(), text(&out.stdout), text(&out.stderr))
@@ -478,7 +505,7 @@ mod mid_walk {
     }
 
     #[test]
-    fn a_folder_swapped_for_a_link_mid_walk_is_refused() {
+    fn a_folder_swapped_for_a_link_mid_walk_is_refused_when_a_file_there_is_read() {
         // A save that reads a file of the swapped folder, through the cache's key or without it.
         for (more, keyed) in [(&[("sub/new.txt", "new")][..], true), (&[][..], false)] {
             let (env, _elsewhere, swap) = swap_for_a_link(more);
@@ -490,19 +517,19 @@ mod mid_walk {
             assert_eq!(Repository::open(env.root()).unwrap().head().unwrap(), head);
             after_the_swap(&env);
         }
-        // With every file of it vouched for, nothing is read there: the status answers for the
-        // folder as it was listed, never a mix of the two, and the next one lists the link.
+        // When the cache vouches for every file there, nothing is read: the scan answers for the
+        // folder as it was listed, and the next command sees the link.
         let (env, _elsewhere, swap) = swap_for_a_link(&[]);
-        match changing(&env, true, swap, status_here) {
-            Ok(found) => assert!(found.changes.is_empty(), "{:?}", found.changes),
-            Err(e) => assert!(matches!(e, SaveError::ChangedDuringSave { .. }), "{e:?}"),
-        }
+        let found = changing(&env, true, swap, status_here).unwrap();
+        assert!(found.changes.is_empty(), "{:?}", found.changes);
         after_the_swap(&env);
     }
 
     #[test]
     fn a_git_folder_made_mid_walk_is_seen_by_the_next_command() {
-        let env = project(&[("sub/a.txt", "one"), ("b.txt", "bee")]);
+        // No file at the top: the first job, `sub`'s, goes out when the walk meets `z`, after it
+        // listed `sub`. So this scan never sees the `.git`.
+        let env = project(&[("sub/a.txt", "one"), ("sub/z/c.txt", "c")]);
         let git = env.root().join("sub/.git");
         let make = move || {
             fs::create_dir(&git).unwrap();
@@ -510,6 +537,12 @@ mod mid_walk {
         };
         let found = changing(&env, true, make, status_here).unwrap();
         assert!(found.changes.is_empty(), "{:?}", found.changes);
+        let nested = bolt_core::warning::NESTED_PROJECTS_LEFT_OUT;
+        assert!(
+            found.warnings.iter().all(|w| w.kind != nested),
+            "{:?}",
+            found.warnings
+        );
         // Left out from now on, as a project of its own, with what was saved of it kept.
         let out = env.bolt().args(["--json", "status"]).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));

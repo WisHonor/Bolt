@@ -4771,7 +4771,7 @@ mod tests {
         handles.dir(Path::new(deep)).unwrap();
         assert!(handles.down.len() > 100);
         handles.lend(32);
-        // The top, those held, and those lent.
+        // The top and the folders held, with room kept for the 32 the jobs hold open.
         assert!(
             1 + handles.down.len() + 32 <= MOST_HELD,
             "{}",
@@ -4989,7 +4989,25 @@ mod tests {
         String,
         ahead_seen::Seen,
     ) {
+        scanned_after(root, ahead, most, None)
+    }
+
+    /// `scanned`, the walk's store first reading the content `first`, if given.
+    fn scanned_after(
+        root: &Path,
+        ahead: bool,
+        most: u64,
+        first: Option<&Id>,
+    ) -> (
+        Result<String, String>,
+        Vec<Warning>,
+        String,
+        ahead_seen::Seen,
+    ) {
         let repo = Repository::open(root).unwrap();
+        if let Some(id) = first {
+            repo.store().copy_content(id, &mut Vec::new()).unwrap();
+        }
         ahead_seen::turn_off(repo.root(), !ahead);
         let scan = walk_project(&repo, SaveLimits::new(MAX_SAVE_DEPTH, most));
         ahead_seen::turn_off(repo.root(), false);
@@ -5170,6 +5188,73 @@ mod tests {
             for _ in 0..3 {
                 same_either_way(root, MAX_SAVE_ENTRIES);
             }
+        }
+    }
+
+    #[test]
+    fn a_bad_copy_the_walk_meets_while_the_helper_holds_a_good_one_reads_the_same() {
+        use crate::pack::{ENTRY_HEADER_LEN, PackReader};
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        for path in ["a/x", "b/y/z", "c/w"] {
+            write(root, path, b"x");
+        }
+        let saved = saved_root(save_now(&mut repo).unwrap());
+        let top = repo.store().listing(&saved).unwrap();
+        let b = top.get("b").unwrap().id;
+        let a_bytes = repo
+            .store()
+            .listing(&top.get("a").unwrap().id)
+            .unwrap()
+            .encode();
+        let b_bytes = repo.store().listing(&b).unwrap().encode();
+        let (head, entry) = repo.current().unwrap();
+        let record = |id: &Id, kind| repo.store().read_record(id, kind).unwrap();
+        let head_bytes = record(&head, ObjectKind::DiaryEntry);
+        let save_bytes = record(&entry.state.lines["main"], ObjectKind::Save);
+        let packs = repo.packs_dir().to_owned();
+        drop(repo);
+        // Last by name: good copies of what the walk's store reads before `b`'s listing (the
+        // diary's head, the save, the top's listing and `a`'s), a bad `b`, and content no other
+        // pack holds. The walk's store reads that content first, so it asks this pack first for
+        // each; the helper starts from the first pack by name, and finds good copies elsewhere.
+        let only_here = b"only in zz";
+        let listing = ObjectKind::FolderListing;
+        let objects = [
+            (ObjectKind::DiaryEntry, &head_bytes[..]),
+            (ObjectKind::Save, &save_bytes[..]),
+            (listing, &top.encode()[..]),
+            (listing, &a_bytes[..]),
+            (listing, &b_bytes[..]),
+            (ObjectKind::Content, &only_here[..]),
+        ];
+        plant_damaged_copies(&packs, &objects);
+        let path = packs.join("00.pack");
+        let mut bytes = fs::read(&path).unwrap();
+        for e in PackReader::open(&path).unwrap().entries() {
+            let e = e.unwrap();
+            if e.id != b {
+                bytes[usize::try_from(e.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
+            }
+        }
+        fs::remove_file(&path).unwrap();
+        fs::write(packs.join("zz.pack"), bytes).unwrap();
+        let first = hash_content(only_here);
+        for _ in 0..3 {
+            let (off, off_warned, off_remembered, _) =
+                scanned_after(root, false, MAX_SAVE_ENTRIES, Some(&first));
+            let (on, on_warned, on_remembered, seen) =
+                scanned_after(root, true, MAX_SAVE_ENTRIES, Some(&first));
+            assert_eq!(on, off);
+            assert_eq!(on_warned, off_warned);
+            assert_eq!(on_remembered, off_remembered);
+            // The walk met the bad copy, and the helper had read past it.
+            let bad = on_remembered
+                .lines()
+                .find(|l| l.starts_with("bad "))
+                .unwrap();
+            assert!(bad.contains("zz.pack"), "{on_remembered}");
+            assert!(seen.taken >= 3, "{seen:?}");
         }
     }
 
