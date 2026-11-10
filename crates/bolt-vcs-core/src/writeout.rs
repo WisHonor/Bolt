@@ -1192,15 +1192,21 @@ impl Run<'_> {
     ) -> Result<Outcome, RepoError> {
         let tmp = self.repo.tmp_folder();
         let temp = bolt_platform::temp_name();
-        let mut file = tmp.create_new(&temp, executable)?;
+        let file = tmp.create_new(&temp, executable)?;
         let written = (|| -> Result<(), RepoError> {
-            self.repo.store().copy_content(&c.id, &mut file)?;
+            let mut early = fsio::EarlyFlush::new();
+            let mut out = Counted {
+                file: &file,
+                early: &mut early,
+            };
+            self.repo.store().copy_content(&c.id, &mut out)?;
             if file.metadata()?.len() != c.size {
                 return Err(damaged(format!(
                     "the content {} isn't the size the switch expects",
                     c.id.to_hex()
                 )));
             }
+            early.finish()?;
             file.sync_all()?;
             fsio::fault_point("switch:written")?;
             fsio::act_point("switch:written");
@@ -2098,6 +2104,24 @@ pub(crate) fn changed_warning(paths: &[String]) -> Warning {
             first(paths)
         ),
     )
+}
+
+/// A file being written, its bytes counted so a big one is flushed along the way.
+struct Counted<'a> {
+    file: &'a File,
+    early: &'a mut fsio::EarlyFlush,
+}
+
+impl Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.early.wrote(self.file, n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
 }
 
 #[cfg(test)]

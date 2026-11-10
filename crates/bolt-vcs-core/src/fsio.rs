@@ -6,6 +6,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use bolt_platform::dir::Dir;
@@ -112,6 +114,148 @@ fn flush_dir(dir: &Dir) -> io::Result<()> {
     dir.sync()
 }
 
+/// How much of a file is written between two of its early flushes.
+const EARLY_FLUSH_STEP: u64 = 16 << 20;
+
+/// Flushes a file's data from another thread while it is written, so the last flush has little
+/// left to do. The last flush is still the caller's.
+pub(crate) struct EarlyFlush {
+    /// Bytes written since the helper was last woken.
+    since: u64,
+    helper: Option<Helper>,
+}
+
+struct Helper {
+    shared: Arc<Shared>,
+    thread: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct Shared {
+    state: Mutex<State>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct State {
+    /// A flush is asked for; one at most is ever pending.
+    wanted: bool,
+    done: bool,
+    made: u64,
+    error: Option<io::Error>,
+}
+
+impl EarlyFlush {
+    pub(crate) fn new() -> EarlyFlush {
+        EarlyFlush {
+            since: 0,
+            helper: None,
+        }
+    }
+
+    /// Notes `n` more bytes written to `file`. Past 16 MiB it starts the helper, which flushes
+    /// through its own handle (`try_clone`); every further 16 MiB wakes it.
+    pub(crate) fn wrote(&mut self, file: &File, n: u64) {
+        self.since = self.since.saturating_add(n);
+        if self.since < EARLY_FLUSH_STEP {
+            return;
+        }
+        self.since = 0;
+        if self.helper.is_none() {
+            self.helper = Helper::start(file);
+        }
+        if let Some(helper) = &self.helper
+            && let Ok(mut state) = helper.shared.state.lock()
+        {
+            state.wanted = true;
+            helper.shared.wake.notify_one();
+        }
+    }
+
+    /// Stops the helper and gives the first error one of its flushes met.
+    pub(crate) fn finish(&mut self) -> io::Result<()> {
+        let Some(Helper { shared, thread }) = self.helper.take() else {
+            return Ok(());
+        };
+        // Told to stop even past a poisoned lock, so the join below can't wait forever.
+        shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .done = true;
+        shared.wake.notify_one();
+        let joined = thread.join();
+        let stopped = || io::Error::other("the thread flushing a file stopped unexpectedly");
+        let mut state = shared.state.lock().map_err(|_| stopped())?;
+        joined.map_err(|_| stopped())?;
+        #[cfg(feature = "fault-injection")]
+        fault::flushed_early(state.made);
+        state.error.take().map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for EarlyFlush {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+impl Helper {
+    /// `None` if the handle can't be cloned or the thread can't be started: the last flush then
+    /// does all the work.
+    fn start(file: &File) -> Option<Helper> {
+        #[cfg(feature = "fault-injection")]
+        let fails = match fault::early() {
+            fault::Early::Off => return None,
+            how => how == fault::Early::Fails,
+        };
+        #[cfg(not(feature = "fault-injection"))]
+        let fails = false;
+        let own = file.try_clone().ok()?;
+        let shared = Arc::new(Shared::default());
+        let theirs = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("bolt-flush".into())
+            .spawn(move || flush_loop(&own, &theirs, fails))
+            .ok()?;
+        Some(Helper { shared, thread })
+    }
+}
+
+/// Flushes `file` each time it is asked to, until told to stop or a flush fails. A flush asked
+/// for before the stop is still made.
+fn flush_loop(file: &File, shared: &Shared, fails: bool) {
+    loop {
+        let Ok(mut state) = shared.state.lock() else {
+            return;
+        };
+        while !state.wanted && !state.done {
+            state = match shared.wake.wait(state) {
+                Ok(state) => state,
+                Err(_) => return,
+            };
+        }
+        if !state.wanted {
+            return;
+        }
+        state.wanted = false;
+        drop(state);
+        let flushed = if fails {
+            Err(io::Error::other("injected fault at flush:early"))
+        } else {
+            file.sync_data()
+        };
+        let Ok(mut state) = shared.state.lock() else {
+            return;
+        };
+        state.made = state.made.saturating_add(1);
+        if let Err(e) = flushed {
+            state.error = Some(e);
+            return;
+        }
+    }
+}
+
 /// A change made in a folder: flushed to the disk after it, or not.
 #[derive(Debug)]
 pub(crate) enum Done {
@@ -214,8 +358,9 @@ pub fn open_point(path: &str) -> io::Result<()> {
 
 /// Fault injection for crash tests: per-thread errors (`arm`), a process abort
 /// (`BOLT_FAULT_AT=N`), an error at one named point (`BOLT_FAULT_FAIL=label`), a test's own
-/// change to the disk at one named point (`act_at`), or a project file that can't be opened
-/// (`unreadable`, `BOLT_FAULT_UNREADABLE=path`).
+/// change to the disk at one named point (`act_at`), a project file that can't be opened
+/// (`unreadable`, `BOLT_FAULT_UNREADABLE=path`), or early flushes that fail or never start
+/// (`early_flush`).
 #[cfg(feature = "fault-injection")]
 pub mod fault {
     use std::cell::{Cell, RefCell};
@@ -232,6 +377,8 @@ pub mod fault {
         static ACTION: RefCell<Option<Action>> = const { RefCell::new(None) };
         static UNREADABLE: RefCell<Option<String>> = const { RefCell::new(None) };
         static FLUSHES: Cell<u64> = const { Cell::new(0) };
+        static EARLY_FLUSHES: Cell<u64> = const { Cell::new(0) };
+        static EARLY: Cell<Early> = const { Cell::new(Early::On) };
     }
 
     /// How many flushes this thread has made through `fsio`.
@@ -241,6 +388,38 @@ pub mod fault {
 
     pub(super) fn flushed() {
         FLUSHES.set(FLUSHES.get().saturating_add(1));
+    }
+
+    /// How many flushes the helpers of the files this thread finished made while they were
+    /// written. Never a fault point, so crash tests stop at the same places with them or without.
+    pub fn early_flushes() -> u64 {
+        EARLY_FLUSHES.get()
+    }
+
+    pub(super) fn flushed_early(n: u64) {
+        EARLY_FLUSHES.set(EARLY_FLUSHES.get().saturating_add(n));
+    }
+
+    /// What the helper that flushes a big file along the way does.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Early {
+        On,
+        /// Its flushes fail, as `BOLT_FAULT_FAIL=flush:early` makes them.
+        Fails,
+        /// It is never started.
+        Off,
+    }
+
+    /// Sets what the helpers of the files this thread writes from now on do.
+    pub fn early_flush(how: Early) {
+        EARLY.set(how);
+    }
+
+    pub(super) fn early() -> Early {
+        if fails_at() == Some("flush:early") {
+            return Early::Fails;
+        }
+        EARLY.get()
     }
 
     /// Makes this thread's opens of the project file at `path` fail, until called with `None`.
@@ -255,6 +434,7 @@ pub mod fault {
         unreadable: Option<String>,
         armed: Option<u64>,
         count: u64,
+        early: Early,
     }
 
     pub(crate) fn hooks() -> Hooks {
@@ -262,6 +442,7 @@ pub mod fault {
             unreadable: UNREADABLE.with_borrow(Clone::clone),
             armed: ARMED.get(),
             count: COUNT.get(),
+            early: EARLY.get(),
         }
     }
 
@@ -269,6 +450,7 @@ pub mod fault {
         UNREADABLE.set(hooks.unreadable.clone());
         ARMED.set(hooks.armed);
         COUNT.set(hooks.count);
+        EARLY.set(hooks.early);
     }
 
     /// `unreadable` for a command run in a process of its own.
@@ -497,5 +679,81 @@ mod tests {
         fault::disarm();
         assert_eq!(err.to_string(), "injected fault at write:before-rename");
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    /// Writes `mib` MiB to a new file through an `EarlyFlush`, a MiB at a time, and finishes it;
+    /// the result and how many early flushes were made.
+    #[cfg(feature = "fault-injection")]
+    fn written_early(mib: u64) -> (io::Result<()>, u64) {
+        let root = tempfile::tempdir().unwrap();
+        let mut file = File::create(root.path().join("big")).unwrap();
+        let before = fault::early_flushes();
+        let mut early = EarlyFlush::new();
+        let piece = vec![7u8; 1 << 20];
+        for _ in 0..mib {
+            file.write_all(&piece).unwrap();
+            early.wrote(&file, piece.len() as u64);
+        }
+        let started = early.helper.is_some();
+        let finished = early.finish();
+        assert!(early.helper.is_none());
+        assert_eq!(started, mib >= 16);
+        (finished, fault::early_flushes() - before)
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_small_file_starts_no_helper() {
+        let (finished, flushes) = written_early(15);
+        finished.unwrap();
+        assert_eq!(flushes, 0);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_big_file_is_flushed_along_the_way() {
+        let before = fault::flushes();
+        let (finished, flushes) = written_early(40);
+        finished.unwrap();
+        assert!(flushes >= 1, "{flushes}");
+        // The last flush is still the caller's.
+        assert_eq!(fault::flushes(), before);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_failed_early_flush_fails_finish() {
+        fault::early_flush(fault::Early::Fails);
+        let (finished, _) = written_early(40);
+        fault::early_flush(fault::Early::On);
+        assert_eq!(
+            finished.unwrap_err().to_string(),
+            "injected fault at flush:early"
+        );
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_helper_turned_off_never_starts() {
+        fault::early_flush(fault::Early::Off);
+        let root = tempfile::tempdir().unwrap();
+        let file = File::create(root.path().join("big")).unwrap();
+        let mut early = EarlyFlush::new();
+        early.wrote(&file, 40 << 20);
+        fault::early_flush(fault::Early::On);
+        assert!(early.helper.is_none());
+    }
+
+    #[test]
+    fn a_dropped_early_flush_lets_its_file_go() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("big");
+        let file = File::create(&path).unwrap();
+        let mut early = EarlyFlush::new();
+        early.wrote(&file, 16 << 20);
+        drop(early);
+        drop(file);
+        // On Windows a handle the helper kept would stop this.
+        fs::remove_file(&path).unwrap();
     }
 }

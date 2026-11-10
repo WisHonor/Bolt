@@ -190,6 +190,7 @@ pub struct PackWriter {
     index: BTreeMap<Id, IndexEntry>,
     /// Set when a failed entry could not be undone; the pack can then not be finished.
     broken: bool,
+    early: fsio::EarlyFlush,
 }
 
 impl PackWriter {
@@ -208,6 +209,7 @@ impl PackWriter {
             end: PACK_HEADER_LEN,
             index: BTreeMap::new(),
             broken: false,
+            early: fsio::EarlyFlush::new(),
         };
         w.file.write_all(&PACK_MAGIC)?;
         w.file.write_all(&PACK_VERSION.to_le_bytes())?;
@@ -353,6 +355,7 @@ impl PackWriter {
         self.file.write_all(checksum.as_bytes())?;
         self.file.write_all(&PACK_END_MAGIC)?;
         self.file.flush()?;
+        self.early.finish()?;
         self.file.get_ref().sync_all()?;
         fsio::fault_point("pack:before-rename")?;
         let dest = OsString::from(format!("{}.pack", checksum.to_hex()));
@@ -415,6 +418,8 @@ impl PackWriter {
         match result {
             Ok(entry) => {
                 self.end = entry.offset + ENTRY_HEADER_LEN + entry.stored_size;
+                self.early
+                    .wrote(self.file.get_ref(), ENTRY_HEADER_LEN + entry.stored_size);
                 self.index.insert(id, entry);
                 Ok(entry)
             }
@@ -435,6 +440,8 @@ impl PackWriter {
 
 impl Drop for PackWriter {
     fn drop(&mut self) {
+        // The helper's handle goes first, so nothing holds the file being removed.
+        let _ = self.early.finish();
         // After a successful finish the temp file is gone, and this fails harmlessly.
         let _ = fsio::remove_file(&self.tmp, &self.name);
     }
