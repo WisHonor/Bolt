@@ -1,0 +1,97 @@
+# Milestone 6, speed and space: attack surface (red-team sessions RT12 and RT13, decision 024)
+
+Milestone 6's speed work makes `status`, `save` and `goto` faster without changing what they do. Nothing a user sees is new. What is new is every place where Bolt now skips work it used to do, on the strength of something it already knows. Each of those is a place where it could be wrong.
+
+- **The file cache.** `cache/files` is loaded as one block with slots that point into it, on a helper thread while the walk runs. It is asked once for each file, found by looking first at the slot after the last one answered, written only when what would be written differs from what was read, and never flushed to the disk. `state/lock-info` and the drive test's rename are no longer flushed either.
+- **The walk.** A folder is listed before it is asked for anything by name. Its ignore files are opened only when the listing could hold them; on Windows the same goes for `.git` and `.bolt` (short names included), and on Linux and macOS every folder is still asked for those two by name. Each name's path is built once, and facts about a folder are worked out once when the walk enters it. The files of folders deeper than the walk holds open are read top down, so each folder is opened once.
+- **Ignore rules.** Lines without wildcards are found by a hash lookup. A line with one `*` is matched by the name's two ends. A file the last save holds is not matched at all during the walk: it is matched later, and only if it changed.
+- **Listings.** A folder whose entries all equal the last save's listing takes that listing's ID without building one. The scan hands the last save's listings on, so later comparisons don't read them again. And the last save's listings are read ahead of the walk by a helper thread, through a second handle on the store with its own open packs and its own notes; the walk takes each one through its own store's normal read, which is spared only the index lookup (when the pack it asks first is the pack the helper read from) and the read of the record (when the copy it comes to is the copy the helper read).
+- **The store.** A record is found in the index with one read of up to 128 IDs, and an entry stored in at most 1 MiB is read whole and, if it is a single ordinary zstd frame, decoded in one call. Small reads of a pack's entries and of its index are answered from the last 64 KiB block read of each. The pack that held the last object is asked first.
+- **Big files.** A pack, or a file a switch writes, is flushed by a helper thread every 16 MiB while it is written; the last flush is where it was. A switch reads each chunk whole and keeps the chunks it has checked, up to 8 MiB, while it writes one file.
+- **Long histories.** `cache/change-ids` (version 2) keeps each line's saves in order, and `goto`, `status` at a save and `undo --list` answer from it instead of reading the line. Wherever a save is read anyway it is checked against the list (its change ID, its first parent), and a list that doesn't match is dropped and the answer taken from the store.
+- **The import** keeps 96 MiB of rebuilt objects where it kept 256 MiB.
+
+Threat list: `docs/security.md` §4 (T1–T32; T32 is new: a speed-up that skips a check). Decisions 099 to 110 in `docs/decisions/` give the rules. `docs/benchmarks.md` §7 says what was slow and why, and §8 what it costs now. `docs/storage-format.md` §10 has the two caches' bytes.
+
+Your goals:
+- **A change that is missed:** make `status` say nothing changed when something did, or make `save` leave a change out, or make `goto`, `discard`, `undo` or `shelf` write over a file without keeping what it held.
+- **A wrong tree:** make a save record a folder under a listing that isn't the folder's (an ID taken from the last save for a folder that did change, or a listing read ahead and handed to the wrong folder).
+- **Wrong bytes or the wrong save:** make a command read, write or go to something other than what it names.
+- **A repository swallowed:** make a save take the files of a folder that holds a `.git` or a `.bolt` of its own, or save a name the drive takes for `.git` or `.bolt`.
+- **Ignore rules misread:** make Bolt take a file Git's rules keep out, or keep out one they take, or lose or invent one of the two warnings about saved files that rules match.
+- **Durability:** after a crash or a failed flush, find a pack in the store, a file in the folder, a `head` or a journal that isn't whole; or a cache that is torn and still trusted.
+- **An answer that depends on timing:** a command that prints one thing on one run and another on the next, with nothing changed in between (a warning that comes and goes, an error only some runs give).
+- **Resources:** crash, hang, leave a thread behind, or use memory, disk or time past what the docs state; build a project that makes a new fast path slower than the old slow one.
+- **The person at the terminal:** a wrong message, a short ID that names another save.
+
+## Where the code is
+
+- **The file cache:** `crates/bolt-vcs-core/src/filecache.rs` (`decode_owned`, slots and `find` with its hint, `trusted`, `matches`, `vouch_if`, `record`, `store` and its two tests for "nothing to write", `load_during`, `drive_now`); `keyed.rs` (the seal); `fsio.rs` (`write_cache`, `write_unflushed`, `rename_plain`); its callers in `snapshot.rs` (`Reading`, `Storing`), `snapshot/endings.rs` and `writeout.rs` (`look`).
+- **The walk:** `snapshot/walk.rs` (`judged` and `judged_at`, `saved_before`, `Within`, `InFolder`, `walk_folders`, `walk_and_look`, `Handles`, `Scan`); `names.rs` (`listed_hints`, `is_git_alias`, `is_bolt_alias`, `validate_name`); `snapshot/only.rs` (partial saves).
+- **Ignore rules:** `ignore.rs` (`Rules::parse` and its index, `last_match`, `last_fit`, `folded_hash`, `Ends`, `takes`, `wildmatch`, `Matcher`, and the rules kept per folder for the late verdict); `build_with` in `snapshot.rs`, where a changed file is matched late.
+- **Listings:** `snapshot.rs` (`build_reading`, `build_with`, the comparison of a folder's entries with the base listing, `FolderNow.listings`); `walk.rs` (`Base::read`, `Base::listing`, `Base::gone_listing`, `without_git_names`, `old` and `old_ids`; the helper: `Ahead` with `take`, `put` and `stop`, `read_ahead`, and `walk`, which starts and joins it); `store.rs` (the second handle, `peek_listing`, and the read that takes what the helper read); `writeout.rs` (`planned`, `Tree`); `diff.rs`.
+- **The store:** `pack.rs` (`read_small`, `one_plain_frame`, `check_header`, the thread-local decompressor, `Window` and its two blocks), `pack/v2.rs` (`find` and its short range), `store.rs` (`each_pack`, `first_copy`, `first_good_from`, `attempt`, `copy`, `copy_chunks` and the kept chunks).
+- **Big files:** `fsio.rs` (`EarlyFlush`, `Helper`, `flush_loop`), `pack.rs` (`PackWriter::finish_into`, `Drop`), `writeout.rs` (`write_file`).
+- **Long histories:** `changeids.rs` (version 2), `history.rs` (`chain`, `short_change_id`, `LineIds`, `links_hold`, `checked`, `by_change_prefix`, `by_fingerprint_prefix`).
+- **The import:** `git/odb.rs` (`DELTA_BASE_CACHE`, `BaseCache`).
+- **Tests that pin today's answers:** `crates/bolt-vcs/tests/speed_shortcuts.rs`, `early_flush.rs`, the property tests in `ignore.rs`, `names.rs`, `filecache.rs`, `snapshot.rs`, `walk.rs` and `history.rs`, and the model test (`crates/bolt-vcs/tests/model.rs`).
+
+## Places worth attacking
+
+- **A planted, stale or torn file cache** (T25, T32). The cache is sealed with a key in the user's own settings folder, which the sandbox gives you: you can write a correctly sealed cache. Try:
+  - a cache from an older state of the project put back (entries that were right then);
+  - entries for files that changed with the same size, within the same second, within two seconds of the cache's writing, or with times set back by hand;
+  - a cache cut short, zeroed, two caches spliced, a slot whose path offset points outside the block or into another slot's path, paths out of order or twice, a path that isn't UTF-8, a huge count;
+  - a cache that is valid but was written for another folder;
+  - whether "written only when it changed" can keep a wrong entry alive across many commands: an entry that should have been dropped or turned untrusted but wasn't, because nothing "changed";
+  - the hint: an order of questions that makes a lookup answer from the wrong slot (a file trusted on another file's entry);
+  - the helper that loads the cache: a cache file replaced, removed or made unreadable while the walk runs; a `cache` folder swapped for a link.
+- **Files changed while a command runs** (T9, T20). Use the act points the tests use (`BOLT_ACT_AT`, see `fsio.rs` and `crates/bolt-vcs/tests/support/`) or your own timing:
+  - a file changed, replaced or removed between its folder's listing and the look at it, between the look and the read, during the read;
+  - a folder swapped for a link or for another folder between its listing and the looks at its files, or between the walk and the build's reads;
+  - a `.git` or `.bolt` made in a folder after it was listed; an ignore file made, changed or removed after its folder was listed;
+  - on Windows, a short name that is `.git` in some letter case, a name with trailing dots or spaces, an alternate stream name.
+- **A folder that takes the last save's listing.** Make a folder differ from the last save in exactly one thing and get the old ID anyway:
+  - same size and new bytes with the cache vouching (combine with the cache attacks above);
+  - a kind change alone (the executable bit, a file swapped for a link to the same bytes);
+  - a rename that only changes letter case or Unicode form, on drives that fold and drives that don't;
+  - an entry carried over from the last save by a partial save (`bolt save <paths>`), a file the computer can't hold, a folder that vanished and came back;
+  - a last save whose listing holds a `.git` spelling (planted: Bolt never writes one): the listing is rebuilt without it, and must never lend its stored ID;
+  - a planted last save with two folders that share a listing, with entries out of order, or with a listing stored under another listing's ID.
+- **Listings read ahead of the walk** (T3, T32). The helper and the walk race on purpose; nothing a command says may depend on who wins. Plant stores and compare every command's output, errors and exit code with a `bolt` built from `main`, and with itself over 50 runs:
+  - a listing with two or three copies in different packs, one good and the others damaged in different ways (a changed byte, a wrong recorded size, the wrong kind, cut short), with the damaged copy's pack sorting before the good one's and after it, and being the pack that held the object read just before;
+  - a pack that can't be opened (not a pack, no permission, removed while the command runs, replaced under its name by another file while the command runs);
+  - a last save whose folders all share one listing, whose listings are just under and over 1 MiB, that is 2,048 levels deep, that has 70,000 folders in one folder, or whose listing names as a folder the ID of a file's content, of a save, or of nothing in the store;
+  - a folder tree where the walk doesn't go where the helper goes: folders deleted from disk, turned into files, left out by a new ignore rule, a nested repository where a saved folder was; hundreds of such folders, so the helper fills its buffer with listings nobody takes;
+  - a walk that ends early (an unreadable folder, a name it refuses, a limit passed) while the helper waits for room: does the command end, and does any thread or open pack outlive it?
+  - memory: the same commands under `ulimit -v`, as `crates/bolt-vcs/tests/cli.rs` runs them (`bolt_capped`), and with the widest and deepest saves the limits allow;
+  - more than 16 packs, so both handles open and close packs all the time: the number of open files, and whether the walk's own pack order (which copy it reads first) is what it is on `main`.
+- **The ignore rules.** Rule files built to make the lookup and the scan disagree: thousands of lines that share a hash; plain lines beside `!` lines and wildcard lines in every order; lines with escapes, trailing spaces, NUL bytes, bytes outside ASCII; names and paths that differ only in letter case, on drives that fold case and drives that don't. One-star lines: classes, `?`, escaped capitals, a `/` or a NUL in the name, heads and tails that overlap. The late verdict: change an ignore file between two commands, during the walk, or only below a folder; a saved file that became a folder and back; a file inside a folder Git ignores and Bolt keeps, inside a nested repository kept for what was saved, inside an ignored folder; a partial save. Compare every warning with a `bolt` built from `main` (the sandbox has both).
+- **The store's new read paths** (T3, T7). Plant packs:
+  - an index whose fan-out or ID order lies, so the short range holds the wrong IDs, or more than 128;
+  - entries whose header disagrees with the index line in each field;
+  - zstd frames at the edges of `one_plain_frame`: a window just under and over 2^27, a single-segment frame with a lying content size, two frames, a skippable frame first or last, a legacy frame, a frame with a dictionary ID, a frame that decodes to more or fewer bytes than recorded, trailing bytes;
+  - an entry just under and over 1 MiB stored, and content just under and over 1 MiB uncompressed;
+  - records and index lines that straddle a 64 KiB block's end, sit in the pack's last, short block, or lie where the entries end and the index begins; a pack shorter than one block; reads of 4,096 and 4,097 bytes;
+  - the same object in several packs, good in one and damaged in another, with the damaged one in the pack asked first.
+  The rule: whatever the old streamed path refused, the new path refuses with the same message; whatever it read, the new path reads to the same bytes.
+- **Flushing while writing** (T32). Make the helper's flush fail (`BOLT_FAULT_FAIL=flush:early` in a test build), fill the disk, pull write permission, or stop the process (`BOLT_FAULT_ABORT`) at every point of a save of a 40 MiB file and of a `goto` that writes one: is a pack ever named, a file ever renamed into place, or `head` ever moved, on the strength of a flush that failed or never happened? Does a thread or a temporary file outlive a failed command?
+- **Kept chunks.** A planted chunk list that names one chunk many times, with a wrong size the second time, with the chunk damaged in the pack that is asked first, with 8 MiB of distinct small chunks and then a repeat of the first. A list of 8,388,608 one-byte chunks used to take 82 s to write out: measure it now, and find the list that is slowest now.
+- **`cache/change-ids`.** A correctly sealed cache that lies: a line's list that names saves of another line, that skips a save, that holds the right saves with wrong change IDs, that is the right list for an older tip, or a list under the empty name that isn't the project's position. Make `goto <change ID>`, `goto <64 digits>`, `undo --list`, `status` at a save, `history` or an amend name the wrong save, show a short ID that fits two saves, or refuse a line's name as "a line or a save?". Also: a version 1 file, a count past the file's end, names out of order, 100,000 lines. And the cost of the checks: a lookup that reads the whole line of a long history every time.
+- **Deep folders.** A chain of folders as deep as the limits allow with a file in each, a file swapped for a link or a folder swapped for another between the walk and the read of its files, with the file cache empty and with it planted: every file read must be the one the walk saw.
+- **Projects built to be slow.** A folder where every name is outside ASCII (every lookup comes back); a tree 2,048 levels deep with a file in each folder; one folder with a million names; a rules file with a million one-star lines; a history of a million saves on one line with the cache removed; a store of ten thousand small packs. Each must cost no more than `main` costs, or what the docs state.
+- **Resources.** The memory a hostile save inside the limits can cost a reader (the follow-ups list says about 1.5 to 4 GB, for a save with very wide folders, and for comparing two such saves): measure `status`, `goto` and `changes` on the widest folders the limits allow, on this build, in the sandbox's 4 GB.
+
+## Limits already known (not findings unless you show more)
+
+`docs/security.md` lists the known limits for T1–T32, and `docs/plans/2026-11-01-milestone-1-follow-ups.md` the deferred items. Among them:
+- **Flushes take time Git doesn't spend.** A `goto` that writes one file flushes ten times (the drive clock's file, the diary's pack and its folder, the journal and its folder, the file and its folder, `head` and its folder, the folder again once the journal is gone); on a disk whose flushes stall, a `goto` stalls with them.
+- **The drive's clock is read with a flush** at the start of every scan (the 2-second rule rests on it), so `status` waits on the disk once.
+- **A FAT or NTFS drive on Linux or macOS** answers to an entry's short name that its listing doesn't show. Every folder is still asked for `.git` and `.bolt` by name there (decision 106); the ignore files' names can't be short names.
+- **The import's memory grows with the repository:** Linux's history (1.5 million commits) peaked at 3.3 GB, and its `.bolt` took 64.6 GB where Git's pack takes 6.2 GB (no deltas yet).
+- **A cache lost in a crash** costs one slow command: every file is read once.
+- **Tiny chunks:** a list of distinct tiny chunks still costs a read for each chunk; only repeats are free.
+- **Reading ahead gives up easily.** The helper stops for good at the first listing it can't read, at a listing over 1 MiB, past 2,048 levels or 65,536 folders waiting; and a saved folder with over 256 folders under it that the walk no longer goes into fills its buffer for the rest of that scan. From then on the walk reads every listing itself, as `main` does: slower, never wrong.
+- **A pack is taken not to change once it is named** (its name is its index's checksum). A pack replaced under its name while a command runs may be read partly from the old file and partly from the new: every record is still checked against its ID, but which copy is noted as good or damaged can then be either's.
+- **A wrong `cache/change-ids` under a good seal** can still hide a second save of a line that shares a change ID's first letters with the one asked for: the list is checked from the line's newest save down to the match, not to its end. The short IDs Bolt prints rest on the same trust, as they did with the version 1 file.
+- **Many small packs** make every lookup slow (each pack is searched), and more so with two handles; `bolt tidy` merges them.
