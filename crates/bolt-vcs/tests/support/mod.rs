@@ -153,6 +153,32 @@ pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// A `--json` document with what changes from run to run redacted, for a snapshot: every
+/// fingerprint (64 hex digits), and the change IDs, times and time zones of saves and entries.
+pub fn masked(mut doc: serde_json::Value) -> serde_json::Value {
+    fn mask(value: &mut serde_json::Value) {
+        let id = value
+            .as_str()
+            .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if id {
+            *value = "[redacted]".into();
+        } else if let Some(list) = value.as_array_mut() {
+            list.iter_mut().for_each(mask);
+        } else if let Some(fields) = value.as_object_mut() {
+            for (key, value) in fields {
+                match key.as_str() {
+                    "change_id" | "change_id_short" | "time_ms" | "tz_offset_min" => {
+                        *value = "[redacted]".into()
+                    }
+                    _ => mask(value),
+                }
+            }
+        }
+    }
+    mask(&mut doc);
+    doc
+}
+
 /// The Git commit a save was imported from.
 pub fn git_commit(repo: &Repository, save: &Id) -> String {
     let save = repo.store().save(save, false).unwrap();

@@ -11,7 +11,7 @@ use bolt_core::repo::Repository;
 use bolt_core::text::escape;
 
 mod support;
-use support::{Env, changed, files, head, holding, main_tip, saved_files, text, write};
+use support::{Env, changed, files, head, holding, main_tip, masked, saved_files, text, write};
 
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
@@ -1135,4 +1135,32 @@ fn undo_writes_back_the_placeholders_its_steps_removed() {
         holding(&[("one", "../one"), ("x", "x\n")])
     );
     assert!(changed(&env).is_empty());
+}
+
+#[test]
+fn undo_and_redo_json_match_their_snapshots() {
+    let env = project(ONE);
+    let (files_saved, one) = (head(&env).0, main_tip(&env));
+    for (path, bytes) in TWO {
+        write(&env, path, bytes);
+    }
+    ok(&env, &["save", "Two"]);
+    // A goto, so the steps move where the project is and write files.
+    ok(&env, &["goto", &one.to_hex()]);
+    let doc = |args: &[&str]| -> serde_json::Value {
+        let out = env.bolt().args(args).arg("--json").output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stdout)
+        );
+        masked(serde_json::from_slice(&out.stdout).unwrap())
+    };
+    insta::assert_json_snapshot!("undo", doc(&["undo"]));
+    insta::assert_json_snapshot!("redo", doc(&["redo"]));
+    insta::assert_json_snapshot!("undo_list", doc(&["undo", "--list"]));
+    insta::assert_json_snapshot!("undo_list_all", doc(&["undo", "--list", "--all"]));
+    let to = files_saved.to_hex();
+    insta::assert_json_snapshot!("undo_to", doc(&["undo", "--to", &to[..8]]));
 }

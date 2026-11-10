@@ -1,0 +1,19 @@
+---
+source: crates/bolt-vcs/tests/shelf.rs
+expression: "doc(&[\"shelf\", \"Mine\"])"
+---
+{
+  "bolt_json": 1,
+  "changed_again": false,
+  "files_in_use": [],
+  "not_written": [],
+  "placeholders": [],
+  "removed": 3,
+  "shelf": {
+    "files": 5,
+    "label": "1",
+    "save": "[redacted]"
+  },
+  "warnings": [],
+  "written": 3
+}

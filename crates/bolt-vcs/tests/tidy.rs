@@ -295,3 +295,18 @@ fn a_bad_undo_window_stops_tidy_naming_the_settings_file() {
     let (said, _) = ok(&env, &["tidy"]);
     assert!(said.contains("written)\n"), "{said}");
 }
+
+#[test]
+fn tidy_json_matches_its_snapshot() {
+    let env = with_garbage();
+    age(&env, 48);
+    let out = env.bolt().args(["tidy", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let mut doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Sizes on disk depend on the times in the records, which differ from run to run.
+    for key in ["to_free", "bytes_before", "bytes_after"] {
+        assert!(doc[key].is_u64(), "{doc}");
+        doc[key] = "[redacted]".into();
+    }
+    insta::assert_json_snapshot!(doc);
+}

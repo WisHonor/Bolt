@@ -1261,10 +1261,7 @@ fn save_json_output() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(
-        json,
-        serde_json::json!({"bolt_json": 1, "result": "nothing_changed", "paths": [], "warnings": []})
-    );
+    insta::assert_json_snapshot!("save_nothing_changed_json_output", json);
 }
 
 #[cfg(feature = "fault-injection")]

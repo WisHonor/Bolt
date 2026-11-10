@@ -11,7 +11,7 @@ use bolt_core::pack::PackReader;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, head, text, write};
+use support::{Env, head, masked, text, write};
 
 fn read(env: &Env, path: &str) -> Vec<u8> {
     fs::read(env.root().join(path)).unwrap()
@@ -822,4 +822,18 @@ fn undo_list_with_a_lost_head_goes_on_past_a_parent_that_is_no_entry() {
     let ends = doc["ends"].as_array().unwrap();
     let listed = ends.iter().find(|e| e["entry"] == odd.to_hex()).unwrap();
     assert_eq!(listed["effects"], serde_json::json!([]), "{doc}");
+}
+
+#[test]
+fn undo_list_json_with_a_lost_head_matches_its_snapshot() {
+    let (env, _) = project();
+    fs::remove_file(head_file(&env)).unwrap();
+    let out = env
+        .bolt()
+        .args(["undo", "--list", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    insta::assert_json_snapshot!(masked(doc));
 }

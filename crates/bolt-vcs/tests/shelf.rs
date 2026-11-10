@@ -11,7 +11,9 @@ use bolt_core::listing::EntryKind;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, Files, changed, files, head, holding, main_tip, saved_files, text, write};
+use support::{
+    Env, Files, changed, files, head, holding, main_tip, masked, saved_files, text, write,
+};
 
 /// `files` with `changes` made: a path set to what it holds, or removed with `None`.
 fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
@@ -932,4 +934,22 @@ fn a_shelf_or_unshelf_stopped_at_every_write_is_finished_by_the_next_command() {
         |env, n| assert!(labels(env).is_empty(), "unshelf {n}"),
         |env, n| assert_eq!(labels(env), ["1"], "unshelf {n}"),
     );
+}
+
+#[test]
+fn shelf_and_unshelf_json_match_their_snapshots() {
+    let (env, _, _) = with_unsaved_work();
+    let doc = |args: &[&str]| -> serde_json::Value {
+        let out = env.bolt().args(args).arg("--json").output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stdout)
+        );
+        masked(serde_json::from_slice(&out.stdout).unwrap())
+    };
+    insta::assert_json_snapshot!("shelf", doc(&["shelf", "Mine"]));
+    insta::assert_json_snapshot!("shelf_list", doc(&["shelf", "--list"]));
+    insta::assert_json_snapshot!("unshelf", doc(&["unshelf"]));
 }

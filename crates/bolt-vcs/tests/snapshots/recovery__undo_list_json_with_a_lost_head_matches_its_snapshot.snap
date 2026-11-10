@@ -1,0 +1,27 @@
+---
+source: crates/bolt-vcs/tests/recovery.rs
+expression: masked(doc)
+---
+{
+  "bolt_json": 1,
+  "ends": [
+    {
+      "action": "command",
+      "command": "save",
+      "effects": [
+        {
+          "from": "[redacted]",
+          "kind": "line",
+          "name": "main",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    }
+  ],
+  "head_lost": true,
+  "warnings": []
+}
