@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6, speed and space)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 006](006-save-object.md) (how a change ID is shortened without reading the line) and [decision 053](053-file-state-cache.md) (the seal every cache carries); it gives `cache/change-ids` its version 2
+- **Refined by:** [decision 109](109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md) (how a save is found by its whole ID as built, and that a list is never the reason a save is shown or gone to unchecked)
 
 ## Context
 

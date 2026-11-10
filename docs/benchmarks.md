@@ -8,7 +8,7 @@
 
 - **Memory:** saving a 10 GiB file of incompressible bytes peaks at no more than 500,000,000 bytes of memory.
 - **Status:** `bolt status` on an unchanged 100,000-file project takes under 2 s.
-- **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Bolt at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which fails when a step is over.
+- **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Bolt at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which compares the medians and fails when a step is over ([decision 108](decisions/108-the-third-gate-compares-medians.md): a flush now and then stalls for 60 ms or more on GitHub's Linux runner, and Git never flushes); each step's mean, best and worst run are printed beside the medians.
 
 Before milestone 6's speed work the third gate fails five of its six checks (§2's tables, 2026-11-09):
 

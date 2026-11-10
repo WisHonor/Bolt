@@ -560,3 +560,13 @@ One test for each thing speed puts at risk ([security.md](../security.md) T32), 
 ## Task 16: Red team, review, benchmarks and the pull request
 
 The controller's: the attack-surface file (`redteam/attack-surface-m6-speed.md`), two sessions in the no-network sandbox (RT12 and RT13; `redteam/attacks11` and `attacks12`; tests `redteam12*.rs` and `redteam13*.rs`; reports `docs/redteam/<date>-milestone-6-speed.md` and `-session-2.md`; CI branches `redteam/m6b-*`), every proven finding fixed or ruled on in a decision record; a whole-branch review; the whole benchmark and the three gates run again on the final code; `benchmarks.md` with the numbers before and after; the rulings file; the pull request.
+
+## As built (2026-11-10)
+
+The tasks above are the plan as it was set out. This is where the build left it, for a reader who compares the plan with the code. Every ruling made on the way is in the [rulings file](2026-11-10-milestone-6-speed-rulings.md).
+
+- **Task 8e was added:** the last save's folder listings are read ahead of the walk by a helper thread ([decision 110](../decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md)). Its first form, a helper reading through the walk's own store into a buffer of 8 MiB, was replaced after its review: the helper reads through a second handle on the store, the walk takes each listing through its own store's read, and the buffer holds 1 MiB.
+- **Task 11 ends differently from its text.** A list of a line's saves gives the short forms and finds a save by its change ID, but the history listing follows each save's own first parent, one save at a time, and `goto <the start of a change ID>` checks the list link by link down to the save it names ([decision 109](../decisions/109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md)).
+- **Task 12 was not built.** It is the row "A switch that rewrites thousands of files" of the [follow-ups](2026-11-01-milestone-1-follow-ups.md).
+- **Task 13's second row** was done by keeping every 48th deep folder open, not by reading files top down: that would have changed the order objects enter packs.
+- **The three memory tests of `cli.rs`** run under a cap of 64,000 KB where they ran under 100,000 (decision 110).
