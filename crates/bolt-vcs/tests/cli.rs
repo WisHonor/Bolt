@@ -46,6 +46,14 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 }
 
 #[test]
+fn version_is_0_1_0() {
+    let env = Env::new();
+    let out = env.bolt().arg("--version").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "bolt 0.1.0\n");
+}
+
+#[test]
 fn start_creates_a_project() {
     let env = Env::new();
     let out = env
