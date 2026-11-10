@@ -4,6 +4,7 @@
 - **Date:** 2026-11-09
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
+- **Refined by:** [decision 125](125-a-safe-folders-entry-is-judged-by-one-look.md) (items 5 and 13: a `safe-folders` entry is judged by one look, and `switch_dropped` is told even when the pick-up fails)
 - **Refines:** [decision 039](039-first-save-after-import.md) (the line-ending hint); [decision 043](043-red-team-m2-rulings.md) (sparse checkouts Bolt can't see); [decision 049](049-writing-files-one-at-a-time.md) (which Windows errors mean a file is in use); [decision 060](060-user-git-settings-includes-and-paths.md) (paths in the user's Git settings); [decision 075](075-crash-recovery.md) (picking up after a lost `head`; the hint of a switch that stopped); [decision 077](077-tidy-and-the-undo-window.md) and [decision 079](079-red-team-m4-rulings.md) and [decision 080](080-red-team-m4-session-2-rulings.md) (what `tidy` does when something it would keep can't be read); decisions [026](026-ownership-check-details.md) and [042](042-trust-hint-skips-folders-anyone-can-write-to.md) (`safe-folders`); [decision 040](040-import-once-catch-up-later.md) (catching up with Git); [decision 017](017-commands-and-output.md) (`--debug` waits)
 
 ## Context
