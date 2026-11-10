@@ -14,6 +14,10 @@ jobs:
     if: "!startsWith(github.ref, 'refs/heads/redteam/')"
     uses: ./.github/workflows/memory-gate.yml
 
+  speed-gate:
+    if: "!startsWith(github.ref, 'refs/heads/redteam/')"
+    uses: ./.github/workflows/speed-gate.yml
+
   # Bolt, Git, and Git with Git LFS through the same steps on the same data, and the speeds of
   # the parts (bench/README.md). docs/benchmarks.md holds the results.
   against-git:

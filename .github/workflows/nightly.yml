@@ -143,3 +143,9 @@ jobs:
   memory-gate:
     if: github.event_name != 'push'
     uses: ./.github/workflows/memory-gate.yml
+
+  # Bolt's status, small save and goto on Git's source, at most twice Git's time.
+  # Nightly and by hand, not on pushes.
+  speed-gate:
+    if: github.event_name != 'push'
+    uses: ./.github/workflows/speed-gate.yml

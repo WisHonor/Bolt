@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Times Bolt, Git, and Git with Git LFS through the same steps on each data set (bench/README.md).
 #   run.sh sets <folder for the data> <folder for the results>
+#   run.sh gate <folder for the data> <folder for the results>
 #   run.sh summary <folder for the results>
 #   run.sh import <Git repository> <bolt> <another bolt>
 # Needs bolt, git, git-lfs, hyperfine, jq, curl and openssl on the PATH.
@@ -19,11 +20,12 @@ trap 'rm -rf "$BOLT_CONFIG_DIR"' EXIT
 if command -v cygpath >/dev/null; then shell="'$(cygpath -m "$BASH")'"; else shell=bash; fi
 count=0
 
-# step <name> <prepare> <command>: one warm-up run, then 5 timed runs, or 3 if the warm-up took
-# over a minute. Before each, untimed: Git's background housekeeping is waited for, the prepare
-# command runs, and everything written is flushed to the disk, so no run pays for an earlier one.
+# step <name> <prepare> <command>: one warm-up run, then 5 timed runs (or BENCH_RUNS), or 3 if
+# the warm-up took over a minute. Before each, untimed: Git's background housekeeping is waited
+# for, the prepare command runs, and everything written is flushed to the disk, so no run pays
+# for an earlier one.
 step() {
-	local name=$1 prepare began runs=5 out command=$3
+	local name=$1 prepare began runs=${BENCH_RUNS:-5} out command=$3
 	prepare="bash '$here/data.sh' settle .${2:+ && $2} && sync"
 	eval "$prepare" >/dev/null
 	began=$(date +%s)
@@ -89,6 +91,22 @@ steps() {
 	cd "$work" && rm -rf "$dir" "$n"
 }
 
+# gate_check <results>: Bolt's mean against Git's for the gate's three steps; fails over 2 times.
+gate_check() {
+	local failed=0 step bolt git
+	echo "== The gate: Bolt's time, Git's time, times Git's (at most 2)"
+	for step in status small-change back-to-first; do
+		bolt=$(jq -r '.results[0].mean' "$1"/*-code-bolt-"$step".json)
+		git=$(jq -r '.results[0].mean' "$1"/*-code-git-"$step".json)
+		awk -v s="$step" -v b="$bolt" -v g="$git" 'BEGIN {
+			r = b / g
+			printf "%-14s %8.1f ms %8.1f ms %5.2f %s\n", s, b * 1000, g * 1000, r, (r > 2 ? "OVER" : "ok")
+			exit (r > 2)
+		}' || failed=1
+	done
+	return "$failed"
+}
+
 # imported <name>: times bolt import of the Git repository in the current folder, then sizes both.
 imported() {
 	step "$1-import" 'rm -rf .bolt' 'bolt import'
@@ -115,6 +133,17 @@ sets)
 	cd "$work/history" && imported history
 	cd "$work" && rm -rf "$work/history"
 	;;
+gate)
+	# The speed gate against Git: the code set alone, Bolt and Git, 10 timed runs.
+	work=$2 results=$3
+	export BENCH_RUNS=10
+	mkdir -p "$work" "$results"
+	[ -d "$work/code" ] || bash "$here/data.sh" code "$work/code"
+	find "$work/code" -type f -exec touch -d '1 hour ago' {} +
+	for t in bolt git; do steps code "$t"; done
+	rm -rf "${work:?}/code"
+	gate_check "$results"
+	;;
 summary)
 	echo "== Times in seconds: step, mean, standard deviation, min, max, runs"
 	for f in "$2"/*.json; do
@@ -140,7 +169,8 @@ import)
 	done
 	;;
 *)
-	echo "usage: run.sh sets <data folder> <results folder>, run.sh summary <results folder>," >&2
+	echo "usage: run.sh sets <data folder> <results folder>, run.sh gate <data folder> <results folder>," >&2
+	echo "       run.sh summary <results folder>," >&2
 	echo "       or run.sh import <repository> <bolt> <another bolt>" >&2
 	exit 2
 	;;
