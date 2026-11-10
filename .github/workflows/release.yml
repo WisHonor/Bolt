@@ -1,12 +1,15 @@
 name: Release
 
-# Started by hand only. A pull request that changes this file runs everything but the last job,
-# so a change to it is tried before anyone starts it for real.
+# Started by hand only. A pull request that changes this file, the notices' settings or the
+# release notes runs everything but the last job, so a change is tried before the real start.
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - about.toml
+      - about.hbs
+      - "docs/releases/**"
 
 permissions:
   contents: read
@@ -154,7 +157,20 @@ jobs:
             (cd "$stage" && 7z a -tzip -bd "$RUNNER_TEMP/$archive" "${files[@]}" > /dev/null)
             listing=$(7z l -ba -slt "$RUNNER_TEMP/$archive" | sed -n 's/^Path = //p' | tr '\\' /)
           else
-            COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/$archive" -C "$stage" "${files[@]}"
+            # Owner 0/0 by number, so the archive names no runner's account.
+            if tar --version | grep -q GNU; then
+              owner=(--owner=0 --group=0 --numeric-owner)
+            else
+              owner=(--uid 0 --gid 0 --numeric-owner)
+            fi
+            COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/$archive" "${owner[@]}" -C "$stage" "${files[@]}"
+            tar -tvzf "$RUNNER_TEMP/$archive"
+            # GNU tar lists the owner as 0/0, bsdtar as 0 0.
+            if ! tar -tvzf "$RUNNER_TEMP/$archive" \
+                | awk '{ if (!($2 == "0/0" || ($3 == "0" && $4 == "0"))) bad = 1 } END { exit bad }'; then
+              echo "::error::$archive names an owner other than 0/0"
+              exit 1
+            fi
             listing=$(tar -tzf "$RUNNER_TEMP/$archive")
           fi
           echo "$archive holds:"
@@ -170,10 +186,9 @@ jobs:
           path: ${{ runner.temp }}/${{ env.ARCHIVE }}
           if-no-files-found: error
 
-  # The only job that may write, and only when started by hand: a draft release, which makes
-  # no tag until the owner publishes it.
+  # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
   release:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
