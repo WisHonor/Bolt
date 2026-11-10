@@ -370,9 +370,10 @@ impl SaveError {
             SaveError::LineEndingsChanged { .. } => {
                 return Some(
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
-                     run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git \
-                     reset --hard`, and save again. To save the files with CRLF anyway, run the \
-                     same command again with --accept-crlf."
+                     run `git config core.autocrlf false`, `git rm --cached -r -q :/` and `git \
+                     reset --hard`, and save again. Files `.gitattributes` marks `eol=crlf` stay \
+                     CRLF after those steps, and --accept-crlf then saves just those. To save the \
+                     files with CRLF anyway, run the same command again with --accept-crlf."
                         .to_owned(),
                 );
             }

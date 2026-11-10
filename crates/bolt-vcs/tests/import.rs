@@ -767,9 +767,10 @@ fn import_json_output() {
 }
 
 const CRLF_HINT: &str = "To keep history as Git stored it, commit or stash your changes in Git, \
-    then run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git reset --hard`, \
-    and save again. To save the files with CRLF anyway, run the same command again with \
-    --accept-crlf.";
+    then run `git config core.autocrlf false`, `git rm --cached -r -q :/` and `git reset --hard`, \
+    and save again. Files `.gitattributes` marks `eol=crlf` stay CRLF after those steps, and \
+    --accept-crlf then saves just those. To save the files with CRLF anyway, run the same \
+    command again with --accept-crlf.";
 
 /// A repository as Git for Windows leaves it: stored with LF, written out with CRLF.
 fn converted_by_git() -> Env {
@@ -918,7 +919,7 @@ fn following_the_line_ending_hint_saves_what_git_stored() {
     // What the hint says, in its order: the change committed first, which Git stores with LF.
     crlf(&["commit", "-q", "-a", "-m", "Add a line"]);
     env.git(&["config", "core.autocrlf", "false"]);
-    env.git(&["rm", "--cached", "-r", "-q", "."]);
+    env.git(&["rm", "--cached", "-r", "-q", ":/"]);
     env.git(&["reset", "--hard"]);
     let read = |file: &str| std::fs::read(env.root().join(file)).unwrap();
     assert_eq!(read("a.txt"), b"one\ntwo\nthree\n");
@@ -934,6 +935,48 @@ fn following_the_line_ending_hint_saves_what_git_stored() {
     let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(json["changes"][0]["path"], "a.txt");
     assert_eq!(json["changes"][0]["new_size"], 14);
+}
+
+/// The hint's steps run from a subfolder still reach the whole repository, and leave only the
+/// files `.gitattributes` keeps CRLF for `--accept-crlf`.
+#[test]
+fn the_line_ending_hint_names_the_whole_repository_and_eol_crlf_files() {
+    let env = Env::new();
+    env.commit(".gitattributes", "*.bat eol=crlf\n", "Attributes");
+    env.commit("a.txt", "one\ntwo\n", "First");
+    env.commit("src/b.txt", "three\nfour\n", "Second");
+    env.commit("run.bat", "@echo off\n", "Third");
+    env.import();
+    for file in ["a.txt", "src/b.txt", "run.bat"] {
+        std::fs::remove_file(env.root().join(file)).unwrap();
+    }
+    env.git(&["-c", "core.autocrlf=true", "checkout", "--", "."]);
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("error: 3 files differ"), "{err}");
+    assert!(err.contains(&format!("hint: {CRLF_HINT}\n")), "{err}");
+
+    let src = env.root().join("src");
+    git(&src, &["config", "core.autocrlf", "false"]);
+    git(&src, &["rm", "--cached", "-r", "-q", ":/"]);
+    git(&src, &["reset", "--hard"]);
+    let read = |file: &str| std::fs::read(env.root().join(file)).unwrap();
+    assert_eq!(read("a.txt"), b"one\ntwo\n");
+    assert_eq!(read("run.bat"), b"@echo off\r\n");
+
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("error: 1 file differs"), "{err}");
+    assert!(err.contains("  run.bat\n"), "{err}");
+    let out = env.save(&["--accept-crlf", "Keep the batch file"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(1 file)"),
+        "{}",
+        text(&out.stdout)
+    );
 }
 
 /// Not bytes the tests wrote: a file as Git itself writes it out with `core.autocrlf`.
