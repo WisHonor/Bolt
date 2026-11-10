@@ -9,6 +9,7 @@ expression: doc
   "position": {
     "line": "feature"
   },
+  "recorded": true,
   "removed": 2,
   "safety_copies": 0,
   "save": {

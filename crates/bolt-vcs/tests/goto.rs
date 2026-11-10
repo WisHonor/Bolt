@@ -391,6 +391,8 @@ fn goto_json_matches_its_snapshot() {
         }
     }
     insta::assert_json_snapshot!(doc);
+    // Going where the project already is records no step.
+    assert_eq!(goto_json(&env, "feature")["recorded"], false);
 }
 
 /// A project whose line `main` holds `second`, on the save before, which holds `first`.

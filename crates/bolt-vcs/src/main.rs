@@ -1553,6 +1553,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
             "safety_copies": done.safety_copies,
+            "recorded": done.recorded,
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")

@@ -198,6 +198,7 @@ Saving gives one of two documents, told apart by `result`.
 | `not_written` | list of string | The paths of the save's entries this computer can't hold, left unwritten (see `not_written_here` in §4). `[]` if none. |
 | `placeholders` | list of string | The paths of links written as plain files holding their targets (see `placeholders_written` in §4). `[]` if none. |
 | `safety_copies` | number | How many safety copies of unsaved work the switch kept. `goto` never overwrites unsaved work, so it is `0` for now. |
+| `recorded` | boolean | Whether the command recorded a step, which `bolt undo` takes back. `false` when the project already was there and there was nothing to write, so nothing changed. |
 | `warnings` | list | See §4. |
 
 **Files in use.** When another program holds files the switch must write (Windows), `goto` writes the rest and then fails (exit code 1) with the files named in `error`, and the failure document's warnings include `files_in_use` (§4). The switch isn't finished then: `head` and `.bolt/state/journal` stay, `status` gives `switch_unfinished`, and the next command that changes the project finishes it. `discard`, `shelf` and `unshelf` fail the same way. A document of a switch that succeeded never names files in use.
