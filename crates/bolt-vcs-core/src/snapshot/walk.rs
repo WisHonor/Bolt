@@ -3,13 +3,13 @@
 //! too. Each folder is opened from the one above it, a name at a time, never through a link
 //! (decision 048).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 
 use bolt_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
@@ -110,6 +110,52 @@ pub(super) mod verdicts {
 
     pub(in crate::snapshot) fn every_name(root: &Path) -> bool {
         let set = EVERY_NAME.lock().unwrap_or_else(|e| e.into_inner());
+        set.contains(root)
+    }
+}
+
+/// What came of reading the last save's listings ahead in the latest walk of a project, by the
+/// project's folder, and the projects whose walks don't read ahead.
+#[cfg(test)]
+pub(super) mod ahead_seen {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<BTreeMap<PathBuf, Seen>> = Mutex::new(BTreeMap::new());
+    static OFF: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(in crate::snapshot) struct Seen {
+        /// Listings the walk took from those read ahead, and those it read itself.
+        pub(in crate::snapshot) taken: usize,
+        pub(in crate::snapshot) read: usize,
+        /// Whether a helper was started, and had ended when the walk returned.
+        pub(in crate::snapshot) started: bool,
+        pub(in crate::snapshot) ended: bool,
+    }
+
+    pub(in crate::snapshot) fn note(root: &Path, seen: Seen) {
+        let mut all = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        all.insert(root.to_owned(), seen);
+    }
+
+    pub(in crate::snapshot) fn at(root: &Path) -> Seen {
+        let all = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        all.get(root).copied().unwrap_or_default()
+    }
+
+    pub(in crate::snapshot) fn turn_off(root: &Path, off: bool) {
+        let mut set = OFF.lock().unwrap_or_else(|e| e.into_inner());
+        if off {
+            set.insert(root.to_owned());
+        } else {
+            set.remove(root);
+        }
+    }
+
+    pub(in crate::snapshot) fn is_off(root: &Path) -> bool {
+        let set = OFF.lock().unwrap_or_else(|e| e.into_inner());
         set.contains(root)
     }
 }
@@ -356,6 +402,8 @@ pub(super) struct Base<'a> {
     limits: SaveLimits,
     /// Whether the search of gone folders has passed `limits`, and so reads nothing more.
     spent: bool,
+    /// Listings read ahead of the walk, if a helper reads them.
+    ahead: Option<&'a Ahead>,
 }
 
 impl<'a> Base<'a> {
@@ -366,11 +414,20 @@ impl<'a> Base<'a> {
             root,
             limits,
             spent: false,
+            ahead: None,
+        }
+    }
+
+    /// The listing `id`, read ahead if it is ready, else read now.
+    fn read(&self, id: &Id) -> Result<Listing, StoreError> {
+        match self.ahead.and_then(|ahead| ahead.take(id)) {
+            Some(listing) => Ok(listing),
+            None => self.store.listing(id),
         }
     }
 
     fn listing(&mut self, id: Id) -> Result<(Listing, Vec<String>), SaveError> {
-        let listing = self.store.listing(&id)?;
+        let listing = self.read(&id)?;
         self.limits
             .add(listing.entries().len())
             .map_err(|detail| StoreError::SaveTooLarge { detail })?;
@@ -392,7 +449,7 @@ impl<'a> Base<'a> {
             self.spent = true;
             return Ok(None);
         }
-        let listing = self.store.listing(&id)?;
+        let listing = self.read(&id)?;
         let long = |e: &Entry| self.limits.check_path(prefix + e.name.len()).is_err();
         if listing.entries().iter().any(long) || self.limits.add(listing.entries().len()).is_err() {
             self.spent = true;
@@ -414,6 +471,152 @@ pub(super) fn without_git_names(listing: Listing) -> Result<(Listing, Vec<String
         .partition(|e| is_git_alias(&e.name));
     let rest = Listing::new(rest).map_err(StoreError::from)?;
     Ok((rest, git.into_iter().map(|e| e.name).collect()))
+}
+
+/// The most listings read ahead of the walk and not taken yet, and the most bytes they may take
+/// as stored.
+const AHEAD_MOST: usize = 256;
+const AHEAD_BYTES: usize = 8 << 20;
+/// Reading ahead stops for good at a listing bigger than this as stored, more than this many
+/// levels down, or with more folders than this still to read: it would hold too much.
+const AHEAD_LISTING: usize = 1 << 20;
+const AHEAD_DEPTH: usize = 2048;
+const AHEAD_PENDING: usize = 1 << 16;
+
+/// The last save's listings a helper has read ahead of the walk, in the order the walk asks for
+/// them. The walk never waits on it: what isn't ready it reads itself.
+#[derive(Default)]
+pub(super) struct Ahead {
+    ready: Mutex<Ready>,
+    /// Wakes the helper when the walk takes listings or ends.
+    room: Condvar,
+    #[cfg(test)]
+    taken: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    read: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    ended: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct Ready {
+    /// Each with its ID and its size as stored.
+    listings: VecDeque<(Id, Listing, usize)>,
+    bytes: usize,
+    /// Whether the walk has ended.
+    done: bool,
+}
+
+impl Ahead {
+    /// The listing `id` if it is ready. Those before it go too: the walk has passed them by.
+    fn take(&self, id: &Id) -> Option<Listing> {
+        // A lock poisoned leaves the walk to read everything itself.
+        let taken = self.ready.lock().ok().and_then(|mut ready| {
+            let at = ready
+                .listings
+                .iter()
+                .position(|(ready_id, ..)| ready_id == id)?;
+            let mut found = None;
+            for _ in 0..=at {
+                let (_, listing, size) = ready.listings.pop_front()?;
+                ready.bytes = ready.bytes.saturating_sub(size);
+                found = Some(listing);
+            }
+            found
+        });
+        if taken.is_some() {
+            self.room.notify_one();
+        }
+        #[cfg(test)]
+        {
+            let counted = if taken.is_some() {
+                &self.taken
+            } else {
+                &self.read
+            };
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        taken
+    }
+
+    /// Adds `listing`, waiting for room; `false` once the walk has ended.
+    fn put(&self, id: Id, listing: Listing, size: usize) -> bool {
+        let Ok(mut ready) = self.ready.lock() else {
+            return false;
+        };
+        while !ready.done
+            && (ready.listings.len() >= AHEAD_MOST
+                || ready.bytes.saturating_add(size) > AHEAD_BYTES)
+        {
+            ready = match self.room.wait(ready) {
+                Ok(ready) => ready,
+                Err(_) => return false,
+            };
+        }
+        if ready.done {
+            return false;
+        }
+        ready.bytes = ready.bytes.saturating_add(size);
+        ready.listings.push_back((id, listing, size));
+        true
+    }
+
+    /// Ends reading ahead, waking the helper if it waits for room.
+    fn stop(&self) {
+        self.ready
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .done = true;
+        self.room.notify_all();
+    }
+}
+
+/// Reads the listings of the save whose top listing is `top` into `ahead`, depth first, each
+/// folder's subfolders in its listing's order, as the walk goes into them. It stops for good at
+/// the first listing it can't read quietly and tells nothing: the walk reads that one itself.
+fn read_ahead(store: &Store, top: Id, ahead: &Ahead) {
+    // The folders still to read, a level each, the next last.
+    let mut levels = vec![vec![top]];
+    let mut pending = 1usize;
+    while let Some(level) = levels.last_mut() {
+        let Some(id) = level.pop() else {
+            levels.pop();
+            continue;
+        };
+        pending = pending.saturating_sub(1);
+        let Some((listing, size)) = store.peek_listing(&id) else {
+            return;
+        };
+        if size > AHEAD_LISTING {
+            return;
+        }
+        let below: Vec<Id> = (listing.entries().iter().rev())
+            .filter(|e| e.kind == EntryKind::Folder)
+            .map(|e| e.id)
+            .collect();
+        if !ahead.put(id, listing, size) {
+            return;
+        }
+        if below.is_empty() {
+            continue;
+        }
+        pending = pending.saturating_add(below.len());
+        if levels.len() >= AHEAD_DEPTH || pending > AHEAD_PENDING {
+            return;
+        }
+        levels.push(below);
+    }
+}
+
+/// Whether a walk of the project at `root` reads listings ahead; tests turn it off.
+#[cfg(test)]
+fn reads_ahead(root: &Path) -> bool {
+    !ahead_seen::is_off(root)
+}
+
+#[cfg(not(test))]
+fn reads_ahead(_: &Path) -> bool {
+    true
 }
 
 /// Paths a warning names: the first few by path, and how many.
@@ -1160,8 +1363,8 @@ impl InFolder {
 /// a debug build, more than some callers have. Unused stack costs address space only.
 const WALK_STACK_BYTES: usize = 1 << 20;
 
-/// Scans the project folder on a thread of its own, so callers don't need a deep stack; see
-/// `scan_folder`.
+/// Scans the project folder on a thread of its own, so callers don't need a deep stack, while a
+/// helper reads the last save's listings ahead of it; see `scan_folder`.
 pub(super) fn walk(
     root: &Path,
     base: Base,
@@ -1169,15 +1372,56 @@ pub(super) fn walk(
     drive: Drive,
     own_list: Option<&Path>,
 ) -> Result<Scan, SaveError> {
+    let ahead = Ahead::default();
+    let mut base = base;
+    let (store, top) = (base.store, base.root);
     thread::scope(|scope| {
-        let scan = thread::Builder::new()
+        // One that can't start leaves the walk to read every listing itself.
+        let helper = reads_ahead(root)
+            .then(|| {
+                thread::Builder::new()
+                    .spawn_scoped(scope, || {
+                        read_ahead(store, top, &ahead);
+                        #[cfg(test)]
+                        ahead
+                            .ended
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    })
+                    .ok()
+            })
+            .flatten();
+        if helper.is_some() {
+            base.ahead = Some(&ahead);
+        }
+        let scanned = thread::Builder::new()
             .stack_size(WALK_STACK_BYTES)
             .spawn_scoped(scope, || scan_folder(root, base, limits, drive, own_list))
-            .map_err(|e| SaveError::Repo(e.into()))?;
-        scan.join().unwrap_or_else(|_| {
-            let stopped = io::Error::other("the scan of the project folder stopped unexpectedly");
-            Err(SaveError::Repo(stopped.into()))
-        })
+            .map_err(|e| SaveError::Repo(e.into()))
+            .and_then(|scan| {
+                scan.join().unwrap_or_else(|_| {
+                    let stopped =
+                        io::Error::other("the scan of the project folder stopped unexpectedly");
+                    Err(SaveError::Repo(stopped.into()))
+                })
+            });
+        ahead.stop();
+        #[cfg(test)]
+        let started = helper.is_some();
+        // It tells nothing, so how it ended doesn't matter.
+        if let Some(helper) = helper {
+            let _ = helper.join();
+        }
+        #[cfg(test)]
+        ahead_seen::note(
+            root,
+            ahead_seen::Seen {
+                taken: ahead.taken.load(std::sync::atomic::Ordering::Relaxed),
+                read: ahead.read.load(std::sync::atomic::Ordering::Relaxed),
+                started,
+                ended: ahead.ended.load(std::sync::atomic::Ordering::Relaxed),
+            },
+        );
+        scanned
     })
 }
 
@@ -1828,6 +2072,8 @@ mod tests {
         this_drive, walk_project, write,
     };
     use crate::test_support::{add_link, add_listing, plant_root, plant_save};
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
     use std::fs;
 
     #[test]
@@ -4569,5 +4815,196 @@ mod tests {
         let saved = saved_root(save_now(&mut repo).unwrap());
         let tree = saved_tree(repo.store(), saved);
         assert_eq!(tree["l"], (EntryKind::Symlink, b"dir\\target.txt".to_vec()));
+    }
+
+    fn kind_of(kind: Kind) -> String {
+        match kind {
+            Kind::File => "file".to_owned(),
+            Kind::Symlink => "link".to_owned(),
+            Kind::Folder => "folder".to_owned(),
+            Kind::Kept { kind, id, size } => format!("kept {kind:?} {id:?} {size}"),
+            Kind::Back { id, kept } => format!("back {id:?} {kept}"),
+            Kind::Left { kind, id, size } => format!("left {kind:?} {id:?} {size}"),
+        }
+    }
+
+    /// Everything of `scan` that can be compared, in a fixed order.
+    fn shape(scan: &Scan) -> String {
+        let folders: Vec<_> = scan
+            .folders
+            .iter()
+            .map(|(rel, children)| {
+                let children: Vec<_> = children
+                    .iter()
+                    .map(|c| (&c.name, &c.rel, kind_of(c.kind), c.meta))
+                    .collect();
+                (rel, children)
+            })
+            .collect();
+        let old: BTreeMap<_, _> = scan.old.iter().collect();
+        let old_ids: BTreeMap<_, _> = scan.old_ids.iter().collect();
+        let noted = &scan.noted;
+        let ignored: BTreeSet<_> = noted.ignored.iter().collect();
+        let gitignored: BTreeSet<_> = noted.gitignored.iter().collect();
+        let late: BTreeMap<_, _> = noted
+            .late
+            .iter()
+            .map(|(rel, l)| (rel, (l.git_held, l.nested_held)))
+            .collect();
+        format!(
+            "{folders:?}\n{old:?}\n{old_ids:?}\n{:?}\n{:?}\n{ignored:?}\n{gitignored:?}\n{late:?}\n{:?}",
+            scan.rebuilt, scan.gone_kept, scan.warnings
+        )
+    }
+
+    /// What a walk of the project at `root` gives within `most` entries, on a store opened afresh,
+    /// with the listings read ahead or not: its shape or its error, the store's warnings, and what
+    /// came of reading ahead.
+    fn scanned(
+        root: &Path,
+        ahead: bool,
+        most: u64,
+    ) -> (Result<String, String>, Vec<Warning>, ahead_seen::Seen) {
+        let repo = Repository::open(root).unwrap();
+        ahead_seen::turn_off(repo.root(), !ahead);
+        let scan = walk_project(&repo, SaveLimits::new(MAX_SAVE_DEPTH, most));
+        ahead_seen::turn_off(repo.root(), false);
+        let shaped = scan.map(|s| shape(&s)).map_err(|e| format!("{e:?}"));
+        (shaped, repo.store().warnings(), ahead_seen::at(repo.root()))
+    }
+
+    /// `scanned` with the listings read ahead equals it without.
+    fn same_either_way(root: &Path, most: u64) -> ahead_seen::Seen {
+        let (off, off_warned, _) = scanned(root, false, most);
+        let (on, on_warned, seen) = scanned(root, true, most);
+        assert_eq!(on, off);
+        assert_eq!(on_warned, off_warned);
+        seen
+    }
+
+    #[test]
+    fn the_walk_takes_listings_read_ahead() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        for a in 0..6 {
+            for b in 0..9 {
+                write(root, &format!("d{a}/e{b}/f.txt"), b"x");
+            }
+        }
+        save_now(&mut repo).unwrap();
+        write(root, "d3/e4/f.txt", b"changed");
+        let seen = same_either_way(root, MAX_SAVE_ENTRIES);
+        assert!(seen.started && seen.ended, "{seen:?}");
+        // 61 listings: the top's, 6 and 54 more.
+        assert_eq!(seen.taken + seen.read, 61, "{seen:?}");
+        assert!(seen.taken > seen.read, "{seen:?}");
+    }
+
+    #[test]
+    fn a_listing_the_helper_could_not_read_is_reported_by_the_walk() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        for name in ["a/x", "b/y/z", "c/w"] {
+            write(root, name, b"x");
+        }
+        let saved = saved_root(save_now(&mut repo).unwrap());
+        let b = repo.store().listing(&saved).unwrap().get("b").unwrap().id;
+        damage_the_only_copy_of(&repo, &b);
+        drop(repo);
+        let (on, warned, _) = scanned(root, true, MAX_SAVE_ENTRIES);
+        assert!(on.is_err(), "{on:?}");
+        assert!(!warned.is_empty());
+        same_either_way(root, MAX_SAVE_ENTRIES);
+    }
+
+    #[test]
+    fn a_folder_gone_from_disk_does_not_stall_the_walk() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        for i in 0..300 {
+            write(root, &format!("gone/s{i:03}/f.txt"), b"x");
+        }
+        write(root, "kept/f.txt", b"x");
+        write(root, "kept/inner/f.txt", b"x");
+        save_now(&mut repo).unwrap();
+        fs::remove_dir_all(root.join("gone")).unwrap();
+        let seen = same_either_way(root, MAX_SAVE_ENTRIES);
+        assert!(seen.started && seen.ended, "{seen:?}");
+    }
+
+    #[test]
+    fn no_helper_outlives_the_walk() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        for i in 0..300 {
+            write(root, &format!("s{i:03}/f.txt"), b"x");
+        }
+        save_now(&mut repo).unwrap();
+        // The walk stops at the top folder, too full for these limits.
+        let (on, _, seen) = scanned(root, true, 10);
+        assert!(on.is_err(), "{on:?}");
+        assert!(seen.started && seen.ended, "{seen:?}");
+        same_either_way(root, 10);
+    }
+
+    /// A change to a project: what it does, to which folder of those on disk.
+    fn change() -> impl Strategy<Value = (u8, prop::sample::Index)> {
+        (0..4u8, any::<prop::sample::Index>())
+    }
+
+    /// The project's folders below the top, by path.
+    fn folders_below(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut next = vec![root.to_owned()];
+        while let Some(dir) = next.pop() {
+            for e in fs::read_dir(&dir).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() && !path.ends_with(".bolt") {
+                    found.push(path.clone());
+                    next.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn reading_ahead_changes_no_walk(
+            files in prop::collection::vec(
+                prop::collection::vec(prop::sample::select(vec!["a", "b", "c"]), 1..5),
+                1..16,
+            ),
+            changes in prop::collection::vec(change(), 0..6),
+        ) {
+            let (dir, mut repo) = project();
+            let root = dir.path();
+            for names in &files {
+                let path = names.iter().fold(root.to_path_buf(), |p, n| p.join(n)).join("f.txt");
+                // A path already used as a file in another shape is skipped.
+                if fs::create_dir_all(path.parent().unwrap()).is_ok() {
+                    let _ = fs::write(&path, b"first");
+                }
+            }
+            save_now(&mut repo).unwrap();
+            drop(repo);
+            for (i, (what, at)) in changes.iter().enumerate() {
+                let folders = folders_below(root);
+                if folders.is_empty() {
+                    break;
+                }
+                let folder = at.get(&folders);
+                let _ = match what {
+                    0 => fs::remove_dir_all(folder),
+                    1 => fs::create_dir_all(folder.join(format!("n{i}")))
+                        .and_then(|()| fs::write(folder.join(format!("n{i}/f.txt")), b"new")),
+                    2 => fs::rename(folder, folder.with_file_name(format!("r{i}"))),
+                    _ => fs::write(folder.join("f.txt"), b"changed"),
+                };
+            }
+            same_either_way(root, MAX_SAVE_ENTRIES);
+        }
     }
 }

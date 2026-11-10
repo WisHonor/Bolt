@@ -687,6 +687,33 @@ impl Store {
         )?)
     }
 
+    /// `listing` as it reads a good first copy, with the copy's length, or `None` on any failure.
+    /// It tries that one copy only and notes nothing about copies or packs, so a `listing` after
+    /// it tells of them as it would have.
+    pub(crate) fn peek_listing(&self, id: &Id) -> Option<(Listing, usize)> {
+        let mut quiet = Vec::new();
+        let found = self.each_pack_in(&mut quiet, true, |n, pack| {
+            let copy = match pack.find(id) {
+                Ok(Some(entry)) => Some((n, Arc::clone(pack), entry)),
+                Ok(None) => return Ok::<_, StoreError>(ControlFlow::Continue(())),
+                Err(_) => None,
+            };
+            Ok(ControlFlow::Break(copy))
+        });
+        let Ok(Some(Some((n, pack, entry)))) = found else {
+            return None;
+        };
+        // Only a copy `first_good_from` reads first, so one that passes is the one it returns.
+        if entry.kind != ObjectKind::FolderListing
+            || entry.uncompressed_size > NEAR
+            || self.checked().bad.contains_key(&(n, entry.id))
+        {
+            return None;
+        }
+        let bytes = pack.read_record(&entry).ok()?;
+        Some((Listing::decode(&bytes).ok()?, bytes.len()))
+    }
+
     pub fn save(&self, id: &Id, signatures_allowed: bool) -> Result<Save, StoreError> {
         #[cfg(test)]
         self.saves_read
@@ -905,6 +932,17 @@ impl Store {
     fn each_pack<T, E: From<StoreError>>(
         &self,
         skipped: &mut Vec<PackError>,
+        f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
+    ) -> Result<Option<T>, E> {
+        self.each_pack_in(skipped, false, f)
+    }
+
+    /// `each_pack`, or, when `quiet`, one that ends at the first pack it can't open, noting
+    /// nothing and listing nothing again.
+    fn each_pack_in<T, E: From<StoreError>>(
+        &self,
+        skipped: &mut Vec<PackError>,
+        quiet: bool,
         mut f: impl FnMut(usize, &Arc<PackReader>) -> Result<ControlFlow<T>, E>,
     ) -> Result<Option<T>, E> {
         let mut done = HashSet::new();
@@ -945,6 +983,7 @@ impl Store {
                 }
                 let pack = match self.pack(n) {
                     Ok(pack) => pack,
+                    Err(_) if quiet => return Ok(None),
                     Err(PackError::Io(e))
                         if e.kind() == io::ErrorKind::NotFound && !listed_again =>
                     {
@@ -2477,6 +2516,60 @@ mod tests {
             store.copy_content(&id, &mut Vec::new()),
             Err(StoreError::Missing(m)) if m == id
         ));
+    }
+
+    /// What a store has noted about copies and packs, in a fixed order.
+    fn noted(store: &Store) -> String {
+        let c = store.checked();
+        let good: std::collections::BTreeSet<&At> = c.good.iter().collect();
+        let bad: BTreeMap<&At, _> = c.bad.iter().collect();
+        format!(
+            "{good:?} {bad:?} {:?} {:?} {:?} {:?}",
+            c.damaged, c.unreadable, c.unreadable_packs, c.notes
+        )
+    }
+
+    #[test]
+    fn a_peek_leaves_nothing_behind() {
+        use crate::listing::{Entry, EntryKind};
+        let (_root, tmp, packs) = dirs();
+        let bad = Listing::empty();
+        plant_damaged_copies(&packs, &[(ObjectKind::FolderListing, &bad.encode())]);
+        let good = Listing::new(vec![Entry {
+            name: "a".into(),
+            kind: EntryKind::File,
+            id: hash_content(b"data"),
+            size: 4,
+        }])
+        .unwrap();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        w.add_record(ObjectKind::FolderListing, &good.encode())
+            .unwrap();
+        w.add_content(b"data").unwrap();
+        w.finish(&packs).unwrap().unwrap();
+        let fresh = || Store::open(&packs).unwrap();
+        let store = fresh();
+        let before = noted(&store);
+
+        let peeked = store.peek_listing(&good.id());
+        assert_eq!(
+            peeked,
+            Some((fresh().listing(&good.id()).unwrap(), good.encode().len()))
+        );
+        let missing = hash_content(b"nowhere");
+        for id in [bad.id(), missing, hash_content(b"data")] {
+            assert_eq!(store.peek_listing(&id), None);
+        }
+        assert_eq!(noted(&store), before);
+        assert!(store.warnings().is_empty(), "{:?}", store.warnings());
+
+        // The read that counts finds the damage as it would on a fresh store.
+        let (once, again) = (fresh(), &store);
+        let said = |s: &Store| format!("{:?}", s.listing(&bad.id()).unwrap_err());
+        assert_eq!(said(again), said(&once));
+        assert_eq!(noted(again), noted(&once));
+        assert_eq!(again.warnings(), once.warnings());
+        assert!(!once.warnings().is_empty());
     }
 
     #[test]
