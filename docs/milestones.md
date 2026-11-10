@@ -1,6 +1,6 @@
 # Bolt Milestones
 
-> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). **Milestone 3 is done** (2026-11-06): both its red-team sessions and its whole-branch review are done, and it was merged into `main` after the owner approved its `unsafe` code. **Milestone 4 was planned on 2026-11-06** after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md); its steps are below and its plan is [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). **Milestone 4 is done** (2026-11-08): built on 2026-11-07, both its red-team sessions and its whole-branch review are done, and it was merged into `main` (pull request #15); rulings: [plans/2026-11-06-milestone-4-rulings.md](plans/2026-11-06-milestone-4-rulings.md). The OneDrive "Free up space" check of decision 069 is still to be tried. **Milestone 5 was planned on 2026-11-08** after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md); its steps are below and its plan is [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). **Milestone 5 is done** (2026-11-09): built on 2026-11-08 and 2026-11-09, with decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) made while building it; both its red-team sessions are done and their findings fixed (decisions [094](decisions/094-red-team-m5-rulings.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)), its whole-branch review is done, and it was merged into `main` (pull request #21); rulings: [plans/2026-11-08-milestone-5-rulings.md](plans/2026-11-08-milestone-5-rulings.md). Items milestone 1's reviews deferred, and the ones milestones 2 to 5 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
+> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). **Milestone 3 is done** (2026-11-06): both its red-team sessions and its whole-branch review are done, and it was merged into `main` after the owner approved its `unsafe` code. **Milestone 4 was planned on 2026-11-06** after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md); its steps are below and its plan is [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). **Milestone 4 is done** (2026-11-08): built on 2026-11-07, both its red-team sessions and its whole-branch review are done, and it was merged into `main` (pull request #15); rulings: [plans/2026-11-06-milestone-4-rulings.md](plans/2026-11-06-milestone-4-rulings.md). The OneDrive "Free up space" check of decision 069 is still to be tried. **Milestone 5 was planned on 2026-11-08** after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md); its steps are below and its plan is [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). **Milestone 5 is done** (2026-11-09): built on 2026-11-08 and 2026-11-09, with decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) made while building it; both its red-team sessions are done and their findings fixed (decisions [094](decisions/094-red-team-m5-rulings.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)), its whole-branch review is done, and it was merged into `main` (pull request #21); rulings: [plans/2026-11-08-milestone-5-rulings.md](plans/2026-11-08-milestone-5-rulings.md). **Milestone 6 was planned on 2026-11-10**: two sessions build it at once, one for presets and polish (decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md), plan [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md)) and one for speed and space; each lists its steps below. Items milestone 1's reviews deferred, and the ones milestones 2 to 5 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
 
 ## v0.1: solo, local, games first
 
@@ -259,4 +259,56 @@ Planned on 2026-11-08, after decisions [082](decisions/082-how-big-files-are-cut
 
 **9. Red team, review and merge** ✅ (Tasks 14–15)
 - Two red-team sessions from the sandbox (decision 024), a whole-branch review, then a pull request whose checks all pass.
+- *Done when:* every proven finding is fixed or ruled on, and every document matches the code.
+
+## Milestone 6: Presets and polish → v0.1
+
+Two sessions build this milestone at the same time, each on a branch of its own, and each lists its steps under its own heading. Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+
+### Presets and polish
+
+Planned on 2026-11-10, after decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md).
+
+**0. What a terminal can show** (Tasks 1–2)
+- Bolt finds out, for stdout and stderr each, whether it has colour, symbols and a width; errors, hints and warnings are laid out by it; progress is a bar or a turning mark (decision 120). Colour works on Windows.
+- *Done when:* with a terminal faked, each role has its colour and each symbol its plain form; without one, Bolt's own words are as plain as before.
+
+**1. Change IDs in Jujutsu's letters** (Task 3)
+- *Done when:* an imported save shows the letters its commit's `change-id` header has (decision 122).
+
+**2. `bolt.toml`** (Task 4)
+- The chunk threshold and the large-save question's numbers are read from the folder's `bolt.toml`; what Bolt can't use is passed over with a warning (decision 114).
+- *Done when:* the vectors of storage-format.md §12 pass, a hostile file never stops a save, and a project without the file saves byte for byte as before.
+
+**3. Presets** (Tasks 5–7)
+- The presets' rules as data, a look at the folder to suggest one, the `setup` step that writes the two rule files, `bolt start`'s question and `--preset`, and `bolt setup` (decisions 113 and 115).
+- *Done when:* each preset writes its vector byte for byte, `bolt undo` after a start gives the folder back, and a preset switch can be undone and redone.
+
+**4. Git's words** (Task 8)
+- *Done when:* each shortcut runs its Bolt command, each explained word changes nothing, and the hint shows once (decision 116).
+
+**5. `bolt verify`** (Task 9)
+- Every pack and object, then everything the project needs; `tidy` records the window it used (decisions 118 and 123).
+- *Done when:* every kind of damage the pack tests make is found, a deleted pack shows as what the project lacks, and a command running beside it never makes it report damage.
+
+**6. Every command in the new design** (Tasks 10–12)
+- *Done when:* each command's output follows terminal.md at 60, 80 and 120 columns, and every place the canvas and Bolt's facts disagree is written down.
+
+**7. Follow-ups** (Task 13)
+- The rows decision 123 marks "done in milestone 6".
+- *Done when:* each has a test, and the tests of RT6-3 and RT7-2 run again.
+
+**8. The JSON formats, before they freeze** (Task 14)
+- *Done when:* every document has been read against json.md once, and a test fails on a field json.md doesn't list (decision 117).
+
+**9. Proof** (Task 15)
+- Hostile rule files, and project text with colour on.
+- *Done when:* both pass on all three systems.
+
+**10. The guide and packaging** (Tasks 16–17)
+- The user guide, the README, `SECURITY.md`, version 0.1.0 and the release workflow (decision 119).
+- *Done when:* every command in the guide runs in a test, and the workflow builds four archives that each pass their smoke test.
+
+**11. Docs, red team, review and merge** (Tasks 18–20)
+- The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, and every document matches the code.
