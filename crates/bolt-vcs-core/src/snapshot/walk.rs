@@ -359,6 +359,8 @@ struct WalkState {
     /// The base save's listing of each folder the walk has noted, by project path, or `None`
     /// where the base save has no such folder. A folder not here hasn't been noted.
     old: HashMap<String, Option<Listing>>,
+    /// The stored ID of each listing in `old` nothing was dropped from.
+    old_ids: HashMap<String, Id>,
     /// Ignored folders the walk goes into only for the base save's entries in them.
     held: HashSet<String>,
     /// Files and links an ignore rule matches, kept because the base save holds them.
@@ -426,6 +428,7 @@ impl WalkState {
             nested_held: HashSet::new(),
             saved_git_names: HashSet::new(),
             old: HashMap::new(),
+            old_ids: HashMap::new(),
             held: HashSet::new(),
             ignored: HashSet::new(),
             git_held: HashSet::new(),
@@ -448,10 +451,13 @@ impl WalkState {
         let (up, name) = rel.rsplit_once('/').unwrap_or(("", rel));
         let above = self.old.get(up).ok_or_else(|| unnoted(rel))?;
         let saved = match above.as_ref().and_then(|l| l.get(name)) {
-            Some(e) if e.kind == EntryKind::Folder => Some(base.listing(e.id)?),
+            Some(e) if e.kind == EntryKind::Folder => Some((e.id, base.listing(e.id)?)),
             _ => None,
         };
-        let listing = saved.map(|(listing, dropped)| {
+        let listing = saved.map(|(id, (listing, dropped))| {
+            if dropped.is_empty() {
+                self.old_ids.insert(rel.to_owned(), id);
+            }
             self.drop_saved(rel, dropped);
             self.note_untouched(rel, &listing);
             listing
@@ -940,6 +946,9 @@ pub(super) struct Scan {
     pub(super) folders: Folders,
     /// The base save's listing of each folder in `folders`, if it has that folder.
     pub(super) old: HashMap<String, Option<Listing>>,
+    /// The stored ID of each of those nothing was dropped from: a folder whose entries are all
+    /// still its listing's has that ID.
+    pub(super) old_ids: HashMap<String, Id>,
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
     /// The paths of the entries kept as they were in those folders.
@@ -1045,7 +1054,11 @@ fn scan_folder(
     let too_large = |detail| SaveError::TooLarge { detail };
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
     let (top, dropped) = base.listing(base.root)?;
+    let whole = dropped.is_empty();
     let mut rules = WalkState::new(root, drive, top, dropped, own_list)?;
+    if whole {
+        rules.old_ids.insert(String::new(), base.root);
+    }
     let mut folders = walk_and_look(root, &mut base, &mut limits, drive, &mut rules, &look_at)?;
     // Sorted, so a name the walk found can be looked up.
     for children in folders.values_mut() {
@@ -1118,6 +1131,7 @@ fn scan_folder(
         handles: rules.handles,
         folders,
         old: rules.old,
+        old_ids: rules.old_ids,
         rebuilt,
         gone_kept,
         ignored: rules.ignored,

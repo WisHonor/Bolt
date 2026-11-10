@@ -491,6 +491,7 @@ pub fn save_folder(
         mut handles,
         mut folders,
         mut old,
+        old_ids,
         mut rebuilt,
         ignored,
         gitignored,
@@ -544,12 +545,16 @@ pub fn save_folder(
         packs: &mut packs,
         cache,
     };
+    let last = Last {
+        listings: &old,
+        ids: &old_ids,
+    };
     let built = build_reading(
         &mut storing,
         Some(repo.store()),
         &mut handles,
         &folders,
-        &old,
+        last,
         &ignored,
         &gitignored,
     )?;
@@ -1022,14 +1027,14 @@ fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Res
 /// cache doesn't vouch for and each link.
 trait Contents {
     /// The ID and size the file-state cache gives the file `c`, which the base save holds as
-    /// `was`, if it vouches for it: then it isn't read.
-    fn vouched(&self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)>;
-    /// The ID and size of the file `c`, which the base save holds as `was`.
+    /// `was`, if it vouches for it: then it isn't read, and the cache keeps it.
+    fn vouched(&mut self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)>;
+    /// The ID and size of the file `c`: `known`, what `vouched` gave, or what was read.
     fn file(
         &mut self,
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
-        was: Option<&Entry>,
+        known: Option<(Id, u64)>,
     ) -> Result<(Id, u64), SaveError>;
     /// The ID and size of the link `c`'s target.
     fn link(
@@ -1059,20 +1064,21 @@ fn vouched_by(trusted: &FileCache, c: &Child, was: Option<&Entry>) -> Option<(Id
 }
 
 impl Contents for Storing<'_> {
-    fn vouched(&self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
-        vouched_by(&self.cache, c, was)
+    fn vouched(&mut self, c: &Child, was: Option<&Entry>) -> Option<(Id, u64)> {
+        let known = vouched_by(&self.cache, c, was)?;
+        if let Some(meta) = &c.meta {
+            self.cache.vouch(&c.rel, meta);
+        }
+        Some(known)
     }
 
     fn file(
         &mut self,
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
-        was: Option<&Entry>,
+        known: Option<(Id, u64)>,
     ) -> Result<(Id, u64), SaveError> {
-        if let Some(known) = self.vouched(c, was) {
-            if let Some(meta) = &c.meta {
-                self.cache.vouch(&c.rel, meta);
-            }
+        if let Some(known) = known {
             return Ok(known);
         }
         let (id, size) = self.store_read(read, &c.rel)?;
@@ -1311,6 +1317,14 @@ pub(crate) fn ingest_failed(e: IngestError, rel: &str) -> SaveError {
     }
 }
 
+/// The base save's listing of each folder the walk found, if it has that folder, and the stored
+/// ID of each nothing was dropped from.
+#[derive(Clone, Copy)]
+struct Last<'a> {
+    listings: &'a HashMap<String, Option<Listing>>,
+    ids: &'a HashMap<String, Id>,
+}
+
 /// `build_with`, its files and links read on the workers. For a save (`store` given) a small file
 /// is read whole and made ready for a pack there, and a big one is stored by this thread with
 /// its chunks on workers of their own; for a status every file is only hashed. Only this thread
@@ -1320,18 +1334,22 @@ fn build_reading(
     store: Option<&Store>,
     handles: &mut Handles,
     folders: &Folders,
-    old: &HashMap<String, Option<Listing>>,
+    last: Last,
     ignored: &HashSet<String>,
     gitignored: &HashSet<String>,
 ) -> Result<Built, SaveError> {
     let mut todo = Vec::new();
+    // What the cache said of each file, for `build_with`, which meets them in this same order.
+    let mut known = Vec::new();
     for rel in build_order(folders) {
-        let before = old.get(rel).and_then(Option::as_ref);
+        let before = last.listings.get(rel).and_then(Option::as_ref);
         for c in folders.get(rel).into_iter().flatten() {
             let read = match c.kind {
-                Kind::File => contents
-                    .vouched(c, before.and_then(|l| l.get(&c.name)))
-                    .is_none(),
+                Kind::File => {
+                    let vouched = contents.vouched(c, before.and_then(|l| l.get(&c.name)));
+                    known.push((c.rel.as_str(), vouched));
+                    vouched.is_none()
+                }
                 Kind::Symlink => true,
                 _ => false,
             };
@@ -1354,7 +1372,10 @@ fn build_reading(
             WINDOW,
             |job| job.cost(storing),
             |job| job.run(store),
-            |read| build_with(contents, read, folders, old, ignored, gitignored),
+            |read| {
+                let known = &mut known.into_iter();
+                build_with(contents, read, known, folders, last, ignored, gitignored)
+            },
         );
         handles.lend(0);
         built
@@ -1392,12 +1413,16 @@ fn build(
         packs,
         cache: FileCache::default(),
     };
+    let last = Last {
+        listings: old,
+        ids: &HashMap::new(),
+    };
     let b = build_reading(
         &mut storing,
         Some(store),
         handles,
         folders,
-        old,
+        last,
         ignored,
         gitignored,
     )?;
@@ -1418,13 +1443,21 @@ fn build_order(folders: &Folders) -> Vec<&String> {
     order
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many listings `build_with` has made on this thread.
+    static LISTINGS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The listings of `folders`, in `build_order`, with each file, link and listing handed to
-/// `contents`, and what was read of the files and links in `read`.
-fn build_with(
+/// `contents`, what the cache said of each file in `known`, and what was read of the files and
+/// links in `read`. A folder whose entries are all its last listing's has that listing's ID.
+fn build_with<'a>(
     contents: &mut dyn Contents,
     read: &mut dyn Iterator<Item = Done>,
-    folders: &Folders,
-    old: &HashMap<String, Option<Listing>>,
+    known: &mut dyn Iterator<Item = (&'a str, Option<(Id, u64)>)>,
+    folders: &'a Folders,
+    last: Last,
     ignored: &HashSet<String>,
     gitignored: &HashSet<String>,
 ) -> Result<Built, SaveError> {
@@ -1434,7 +1467,7 @@ fn build_with(
     let (mut kept, mut kept_below_gone) = (Vec::new(), 0);
     let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
     for rel in order {
-        let before = old.get(rel).and_then(Option::as_ref);
+        let before = last.listings.get(rel).and_then(Option::as_ref);
         let mut entries = Vec::new();
         for c in folders.get(rel).into_iter().flatten() {
             let was = before.and_then(|l| l.get(&c.name));
@@ -1444,7 +1477,11 @@ fn build_with(
                     (EntryKind::Folder, id, 0)
                 }
                 Kind::File => {
-                    let (id, size) = contents.file(read, c, was)?;
+                    let vouched = match known.next() {
+                        Some((of, vouched)) if std::ptr::eq(of, c.rel.as_str()) => vouched,
+                        _ => return Err(out_of_order()),
+                    };
+                    let (id, size) = contents.file(read, c, vouched)?;
                     // Git writes a link it can't make as a file holding its target: the link
                     // stays (decision 039).
                     let links_target =
@@ -1493,6 +1530,14 @@ fn build_with(
                 size,
             });
         }
+        // The store holds that listing: the walk just read it and checked it.
+        let unchanged = before.is_some_and(|l| l.entries() == entries.as_slice());
+        if let Some(&id) = last.ids.get(rel).filter(|_| unchanged) {
+            built.insert(rel, id);
+            continue;
+        }
+        #[cfg(test)]
+        LISTINGS_BUILT.set(LISTINGS_BUILT.get() + 1);
         let listing = Listing::new(entries).map_err(StoreError::from)?;
         built.insert(rel, contents.listing(listing)?);
     }
@@ -1694,7 +1739,7 @@ fn hash_scanned(
 pub(crate) struct FolderNow {
     /// Its top listing.
     pub(crate) root: Id,
-    /// Its listings, which the store may not hold, by ID.
+    /// Its listings, which the store may not hold, and the base save's the walk read, by ID.
     pub(crate) listings: HashMap<Id, Listing>,
     /// The entries kept as the save has them because this computer can't hold them as they are,
     /// by path.
@@ -1704,12 +1749,14 @@ pub(crate) struct FolderNow {
 
 /// Reads the project folder as a save on top of the save whose top listing is `base` would, by
 /// the same rules, but stores nothing. A file the file-state cache vouches for isn't opened,
-/// unless `full`; the cache is then written again, and failing to is only a warning.
+/// unless `full`; the cache is then written again, and failing to is only a warning. `drive` is
+/// what `drive::probe` found, if the caller has tested it already.
 pub(crate) fn read_folder(
     repo: &Repository,
     base: Id,
     full: bool,
     git_excludes: Option<&Path>,
+    drive: Option<Drive>,
 ) -> Result<FolderNow, SaveError> {
     // Taken before the walk, so a file changed during it is too new to trust next time. Without
     // it no time can be trusted, so every file is read and nothing cached.
@@ -1718,11 +1765,15 @@ pub(crate) fn read_folder(
         Some(_) if !full => FileCache::load(repo),
         _ => FileCache::default(),
     };
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let drive = match drive {
+        Some(drive) => drive,
+        None => drive::probe(repo.tmp_folder()).map_err(RepoError::from)?,
+    };
     let Scan {
         mut handles,
         folders,
-        old,
+        mut old,
+        old_ids,
         rebuilt,
         gone_kept,
         ignored,
@@ -1742,12 +1793,16 @@ pub(crate) fn read_folder(
     for listing in rebuilt {
         reading.listing(listing)?;
     }
+    let last = Last {
+        listings: &old,
+        ids: &old_ids,
+    };
     let built = build_reading(
         &mut reading,
         None,
         &mut handles,
         &folders,
-        &old,
+        last,
         &ignored,
         &gitignored,
     )?;
@@ -1755,9 +1810,16 @@ pub(crate) fn read_folder(
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
     not_written_here.sort_unstable();
+    // So the comparisons that follow find the base save's listings without reading them again.
+    let mut listings = reading.listings;
+    for (rel, id) in old_ids {
+        if let Some(Some(listing)) = old.remove(&rel) {
+            listings.entry(id).or_insert(listing);
+        }
+    }
     Ok(FolderNow {
         root: built.root,
-        listings: reading.listings,
+        listings,
         not_written_here,
         warnings,
     })
@@ -1771,9 +1833,9 @@ struct Reading {
 }
 
 impl Contents for Reading {
-    fn vouched(&self, c: &Child, _was: Option<&Entry>) -> Option<(Id, u64)> {
+    fn vouched(&mut self, c: &Child, _was: Option<&Entry>) -> Option<(Id, u64)> {
         let meta = c.meta.as_ref()?;
-        let known = self.cache.matches(&c.rel, meta)?;
+        let known = self.cache.vouch(&c.rel, meta)?;
         Some((known.id, meta.size))
     }
 
@@ -1781,12 +1843,10 @@ impl Contents for Reading {
         &mut self,
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
-        _was: Option<&Entry>,
+        known: Option<(Id, u64)>,
     ) -> Result<(Id, u64), SaveError> {
-        if let Some(meta) = &c.meta
-            && let Some(known) = self.cache.vouch(&c.rel, meta)
-        {
-            return Ok((known.id, meta.size));
+        if let Some(known) = known {
+            return Ok(known);
         }
         let (id, size) = hashed_read(read, &c.rel)?;
         // The walk's details, which the read found the file still had.
@@ -3751,7 +3811,7 @@ mod tests {
         for count in [1, 8] {
             crate::workers::set_test_workers(Some(count));
             // Without the cache, so every file is read.
-            let now = read_folder(&repo, base, true, None);
+            let now = read_folder(&repo, base, true, None, None);
             crate::workers::set_test_workers(None);
             let now = now.unwrap();
             let mut listings: Vec<Id> = now.listings.keys().copied().collect();
@@ -3761,5 +3821,113 @@ mod tests {
         assert_eq!(seen[0], seen[1]);
         // The same answer a save gives.
         assert_eq!(saved_root(save_now(&mut repo).unwrap()), seen[0].0);
+    }
+
+    /// The ID of the folder `path` in the saved tree whose top listing is `root`.
+    fn saved_folder(store: &Store, root: Id, path: &str) -> Id {
+        path.split('/')
+            .filter(|n| !n.is_empty())
+            .fold(root, |id, name| {
+                store.listing(&id).unwrap().get(name).unwrap().id
+            })
+    }
+
+    /// The ID of the listing of the folder at `dir`, built here from what it holds on disk.
+    fn listing_on_disk(dir: &Path) -> Id {
+        let mut entries = Vec::new();
+        for e in fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().into_string().unwrap();
+            if name == ".bolt" {
+                continue;
+            }
+            entries.push(if e.file_type().unwrap().is_dir() {
+                Entry {
+                    name,
+                    kind: EntryKind::Folder,
+                    id: listing_on_disk(&e.path()),
+                    size: 0,
+                }
+            } else {
+                let bytes = fs::read(e.path()).unwrap();
+                Entry {
+                    name,
+                    kind: EntryKind::File,
+                    id: hash_content(&bytes),
+                    size: bytes.len() as u64,
+                }
+            });
+        }
+        Listing::new(entries).unwrap().id()
+    }
+
+    /// A project of three folders below the top one, saved.
+    fn three_folders() -> (tempfile::TempDir, Repository) {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "top.txt", b"top");
+        write(root, "a/one.txt", b"one");
+        write(root, "a/b/two.txt", b"two");
+        write(root, "a/b/three.txt", b"three");
+        write(root, "c/four.txt", b"four");
+        save_now(&mut repo).unwrap();
+        (dir, repo)
+    }
+
+    fn newest_root(repo: &Repository) -> Id {
+        let (_, entry) = repo.current().unwrap();
+        let id = entry.state.lines["main"];
+        repo.store().save(&id, false).unwrap().root
+    }
+
+    #[test]
+    fn an_unchanged_folders_listing_is_the_one_a_build_would_make() {
+        let (dir, mut repo) = three_folders();
+        let root = dir.path();
+        write(root, "a/one.txt", b"one, changed");
+        let id = saved_root(save_now(&mut repo).unwrap());
+        for unchanged in ["a/b", "c"] {
+            assert_eq!(
+                saved_folder(repo.store(), id, unchanged),
+                listing_on_disk(&root.join(unchanged)),
+                "{unchanged}"
+            );
+        }
+        assert_eq!(id, listing_on_disk(root));
+    }
+
+    #[test]
+    fn an_unchanged_folder_is_not_rebuilt() {
+        let (dir, repo) = three_folders();
+        let base = newest_root(&repo);
+        let built = |repo: &Repository| {
+            LISTINGS_BUILT.set(0);
+            let now = read_folder(repo, base, false, None, None).unwrap();
+            (LISTINGS_BUILT.get(), now.root)
+        };
+        assert_eq!(built(&repo), (0, base));
+        write(dir.path(), "a/b/two.txt", b"two, changed");
+        let (count, root) = built(&repo);
+        // `a/b`, `a` and the top one.
+        assert_eq!(count, 3);
+        assert_eq!(root, listing_on_disk(dir.path()));
+    }
+
+    #[test]
+    fn status_reads_no_listing_twice() {
+        let (dir, repo) = three_folders();
+        let base = newest_root(&repo);
+        write(dir.path(), "a/b/two.txt", b"two, changed");
+        let now = read_folder(&repo, base, false, None, None).unwrap();
+        let before = crate::pack::open_files::reads();
+        let mut changed = Vec::new();
+        crate::diff::for_each_change_in(repo.store(), &now.listings, Some(base), now.root, |c| {
+            changed.push(c.path.to_owned());
+            Ok::<(), SaveError>(())
+        })
+        .unwrap();
+        assert_eq!(changed, ["a/b/two.txt"]);
+        // The walk read the last save's listings; the comparison finds them in memory.
+        assert_eq!(crate::pack::open_files::reads() - before, 0);
     }
 }

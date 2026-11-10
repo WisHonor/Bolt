@@ -131,7 +131,7 @@ fn planned(
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
-    let now = read_folder(repo, from_root, false, git_excludes)
+    let now = read_folder(repo, from_root, false, git_excludes, Some(drive))
         .map_err(|e| e.in_save(from, is_current(repo, from)))?;
     let mut unsaved = BTreeSet::new();
     for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
