@@ -5079,8 +5079,9 @@ mod tests {
         }
         save_now(&mut repo).unwrap();
         write(root, "d3/e4/f.txt", b"changed");
-        // Held until the helper ends, so who is first can't change the counts.
-        let held = repo.root().to_owned();
+        // Held until the helper ends, so who is first can't change the counts. Keyed by the root
+        // as a newly opened handle spells it, which is the one the scan gets.
+        let held = Repository::open(root).unwrap().root().to_owned();
         ahead_seen::hold(&held, true);
         let seen = same_either_way(root, MAX_SAVE_ENTRIES);
         ahead_seen::hold(&held, false);
