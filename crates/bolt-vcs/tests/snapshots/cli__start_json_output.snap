@@ -8,7 +8,9 @@ expression: json
     "engines": [],
     "languages": []
   },
-  "line": "main",
+  "position": {
+    "line": "main"
+  },
   "preset": "custom",
   "root": "[redacted]",
   "rules_written": [],

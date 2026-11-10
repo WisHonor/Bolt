@@ -49,7 +49,7 @@
 |---|---|---|
 | `bolt_json` | number | `1` |
 | `root` | string | The project's folder: an absolute path in the system's own form, with `\` between names on Windows (it can start with `\\?\`), and each byte sequence that isn't UTF-8 shown as U+FFFD. It is the only path in any document that isn't a project path with `/`. |
-| `line` | string | The line the project starts on: always `"main"`. |
+| `position` | object | Where the project is, as in `status`: always `{"line": "main"}`, the line it starts on. |
 | `save` | save or `null` | The first save, "Start project". **`null` means Bolt made the project but couldn't read the save back.** The command still succeeds, and a `first_save_not_read` warning says why. |
 | `preset` | string or `null` | The preset the project started with: `"code"`, `"game"` or `"custom"` ([decision 113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md)). `null` when the folder already had a `bolt.toml`, which stays as it is. |
 | `found` | object | What Bolt saw in the folder: `engines`, a list of `"unity"`, `"unreal"` and `"godot"`, and `languages`, a list of `"node"`, `"python"`, `"rust"`, `"go"`, `"dart"`, `"dotnet"`, `"maven"` and `"gradle"`. The preset's rule files are written for these. |

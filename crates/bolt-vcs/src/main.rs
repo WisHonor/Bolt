@@ -526,7 +526,7 @@ fn start(
         let document = json!({
             "bolt_json": BOLT_JSON,
             "root": root.display().to_string(),
-            "line": "main",
+            "position": output::position_json(&Position::OnLine("main".into())),
             "save": save,
             "preset": preset.map(Preset::name),
             "found": setup_output::found_json(&looked.found),

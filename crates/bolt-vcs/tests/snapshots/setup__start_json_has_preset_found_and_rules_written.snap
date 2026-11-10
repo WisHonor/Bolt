@@ -10,7 +10,9 @@ expression: doc
     ],
     "languages": []
   },
-  "line": "main",
+  "position": {
+    "line": "main"
+  },
   "preset": "game",
   "root": "[redacted]",
   "rules_written": [

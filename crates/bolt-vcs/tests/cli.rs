@@ -728,7 +728,7 @@ fn start_reports_success_when_its_first_save_cannot_be_read_back() {
         if json {
             let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
             assert_eq!(doc.get("save"), Some(&serde_json::Value::Null), "{doc}");
-            assert_eq!(doc["line"], "main");
+            assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
             assert!(
                 warning_kinds(&doc).contains(&"first_save_not_read"),
                 "{doc}"
