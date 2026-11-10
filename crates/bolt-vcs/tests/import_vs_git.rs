@@ -475,7 +475,7 @@ fn a_real_repository_matches_git() {
         &mut ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: None,
+            git_settings: None,
             progress: &mut |_, _, _| {},
         },
         &mut None,

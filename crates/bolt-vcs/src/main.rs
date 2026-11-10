@@ -22,7 +22,7 @@ use std::process::ExitCode;
 
 use bolt_core::changes::{Lines, save_changes, unsaved_changes};
 use bolt_core::config::{
-    ConfigError, Identity, git_excludes_file, git_lfs_storage, ignored_identity_note,
+    ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
 };
 use bolt_core::diary::{Action, DiaryEntry, Position};
@@ -689,14 +689,14 @@ fn ask_apply() -> bool {
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
     let who = now_person(&load_identity(Some(&root))?);
-    let lfs_storage = git_lfs_storage(&root)?;
+    let git_settings = git_import_settings(&root)?;
     let mut bar = progress::Bar::new("Reading Git's history");
     let imported = import_git(
         &root,
         &mut ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: Some(&lfs_storage),
+            git_settings: Some(&git_settings),
             progress: &mut |pass, done, total| {
                 bar.set_label(match pass {
                     ImportPass::ReadingHistory => "Reading Git's history",

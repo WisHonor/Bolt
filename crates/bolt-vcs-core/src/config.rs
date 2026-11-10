@@ -257,18 +257,18 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
     git_excludes_file_in(&UserGit::from_env(project_root))
 }
 
-/// The `lfs.storage` the user's own Git settings set, for `bolt import` in `top`, which reads it
-/// only to tell whether Git LFS keeps its files elsewhere, and their `core.sparseCheckout`.
-pub fn git_lfs_storage(top: &Path) -> Result<UserLfsStorage, ConfigError> {
-    git_lfs_storage_in(&UserGit::from_env(top))
+/// What the user's own Git settings set that `bolt import` in `top` reads: `lfs.storage`, only to
+/// tell whether Git LFS keeps its files elsewhere, and `core.sparseCheckout`, which it refuses.
+pub fn git_import_settings(top: &Path) -> Result<UserImportSettings, ConfigError> {
+    git_import_settings_in(&UserGit::from_env(top))
 }
 
-/// The last `lfs.storage` in the user's own Git settings files, which the repository's own
-/// setting overrides, and the last the environment gives through `GIT_CONFIG_COUNT`, which
-/// overrides that in turn, as in Git: each with where it is set, and empty for one with no value.
-/// The last `core.sparseCheckout` in each, which an import refuses, comes alike.
+/// The user's own Git settings an import reads. The last `lfs.storage` in the user's own Git
+/// settings files, which the repository's own setting overrides, and the last the environment
+/// gives through `GIT_CONFIG_COUNT`, which overrides that in turn, as in Git: each with where it is
+/// set, and empty for one with no value. The last `core.sparseCheckout` in each comes alike.
 #[derive(Debug, Default)]
-pub struct UserLfsStorage {
+pub struct UserImportSettings {
     pub files: Option<(Vec<u8>, String)>,
     pub variables: Option<(Vec<u8>, String)>,
     pub sparse_files: Option<bool>,
@@ -510,9 +510,9 @@ fn optional(value: &[u8]) -> (&[u8], bool) {
     }
 }
 
-/// `git_lfs_storage` with the places given, so tests can choose them.
-fn git_lfs_storage_in(git: &UserGit) -> Result<UserLfsStorage, ConfigError> {
-    let mut found = UserLfsStorage::default();
+/// `git_import_settings` with the places given, so tests can choose them.
+fn git_import_settings_in(git: &UserGit) -> Result<UserImportSettings, ConfigError> {
+    let mut found = UserImportSettings::default();
     let mut refused = None;
     let (files, sparse) = (&mut found.files, &mut found.sparse_files);
     git.read_files(&mut |setting, place| last(files, sparse, &mut refused, setting, place))?;
@@ -1566,7 +1566,7 @@ mod tests {
         };
         let xdg = home.join("xdg");
         let find = |vars: &[(&str, &str)]| {
-            as_git_finds((home, &xdg, home), vars, git_lfs_storage_in).unwrap()
+            as_git_finds((home, &xdg, home), vars, git_import_settings_in).unwrap()
         };
         let system = set(&home.join("system"), "/system");
         let gitconfig = set(&home.join(".gitconfig"), "/home");

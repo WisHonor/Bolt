@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::config::UserLfsStorage;
+use crate::config::UserImportSettings;
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{
@@ -44,9 +44,10 @@ pub struct ImportRequest<'a> {
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
-    /// The `lfs.storage` the user's own Git settings set (`config::git_lfs_storage`), around
-    /// which the repository's own setting comes, as in Git.
-    pub lfs_storage: Option<&'a UserLfsStorage>,
+    /// What the user's own Git settings set that an import reads, `lfs.storage` and
+    /// `core.sparseCheckout` (`config::git_import_settings`), around which the repository's own
+    /// settings come, as in Git.
+    pub git_settings: Option<&'a UserImportSettings>,
     /// Called as each pass goes: with how many commits it has done, and how many there are once
     /// that is known.
     pub progress: &'a mut dyn FnMut(ImportPass, u64, Option<u64>),
@@ -339,7 +340,10 @@ pub enum LfsElsewhere {
 /// then what the environment gives (`users` holds the first and last), set to anything but nothing
 /// or `lfs`, Git LFS's own place. A path is never resolved, since Bolt never reads there. The links
 /// `LfsRules` looks for wait for the first Git LFS file.
-fn lfs_storage_elsewhere(git: &git::Repo, users: Option<&UserLfsStorage>) -> Option<LfsElsewhere> {
+fn lfs_storage_elsewhere(
+    git: &git::Repo,
+    users: Option<&UserImportSettings>,
+) -> Option<LfsElsewhere> {
     let files = users.and_then(|u| u.files.as_ref());
     let variables = users.and_then(|u| u.variables.as_ref());
     let (value, file) = match (variables, git.lfs_storage(), files) {
@@ -438,7 +442,7 @@ pub fn import_git(
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
     let root = &repo::resolved(root);
-    let plan = plan(root, req.lfs_storage, req.progress)?;
+    let plan = plan(root, req.git_settings, req.progress)?;
     let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);
     carry_out(plan, repo, &lock, req).map_err(|e| after_begin(root, e))
@@ -500,21 +504,21 @@ struct Plan {
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
-/// `lfs_storage` is what the user's own Git settings set; `progress` hears how many commits the
+/// `users` is what the user's own Git settings set; `progress` hears how many commits the
 /// first pass has read.
 fn plan(
     root: &Path,
-    lfs_storage: Option<&UserLfsStorage>,
+    users: Option<&UserImportSettings>,
     progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
     // As in Git: the environment's, then the repository's, then the user's own files.
-    let users = lfs_storage.map_or((None, None), |u| (u.sparse_variables, u.sparse_files));
-    if users.0.or(git.sparse_checkout()).or(users.1) == Some(true) {
+    let sparse = users.map_or((None, None), |u| (u.sparse_variables, u.sparse_files));
+    if sparse.0.or(git.sparse_checkout()).or(sparse.1) == Some(true) {
         return Err(GitError::Refused(Refusal::SparseCheckout).into());
     }
-    let lfs_storage = lfs_storage_elsewhere(&git, lfs_storage);
+    let lfs_storage = lfs_storage_elsewhere(&git, users);
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
     let mut tag_budget = TagBudget::new();
@@ -1429,7 +1433,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
+                git_settings: None,
                 progress: &mut |_, _, _| {},
             },
             &mut None,
@@ -1933,7 +1937,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
+                git_settings: None,
                 progress: &mut progress,
             },
             &mut opened,
@@ -2204,7 +2208,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
+                git_settings: None,
                 progress: &mut |pass, done, total| heard.push((pass, done, total)),
             },
             &mut None,
@@ -2238,7 +2242,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
+                git_settings: None,
                 progress: &mut |pass, done, total| heard.push((pass, done, total)),
             },
             &mut None,

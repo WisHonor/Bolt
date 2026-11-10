@@ -224,7 +224,7 @@ fn an_import_reads_each_big_blob_once() {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
-        lfs_storage: None,
+        git_settings: None,
         progress: &mut |_, _, _| {},
     };
     import_git(env.root(), &mut req, &mut None).unwrap();
@@ -276,7 +276,7 @@ fn a_long_history_of_a_big_file_imports_within_the_allowance() {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
-        lfs_storage: None,
+        git_settings: None,
         progress: &mut |_, _, _| {},
     };
     let imported = import_git(env.root(), &mut req, &mut None);
@@ -315,7 +315,7 @@ fn a_history_past_the_allowance_imports_once_git_stores_big_files_whole() {
         let mut req = ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: None,
+            git_settings: None,
             progress: &mut |_, _, _| {},
         };
         set_test_delta_limits(Some((4 * MIB, DELTA_BASE_CACHE)));

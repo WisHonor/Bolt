@@ -105,7 +105,7 @@ fn import_here(dir: &Path) -> Result<ImportReport, ImportError> {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
-        lfs_storage: None,
+        git_settings: None,
         progress,
     };
     import_git(dir, &mut req, &mut None)
