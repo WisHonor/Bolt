@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-08
 - **Agenda topic:** none (milestone 4's red-team gate, [decision 024](024-red-team-gate.md))
+- **Refined by:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (RT7-2 is fixed)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 079](079-red-team-m4-rulings.md) (the second look before write-out changes a file)
 

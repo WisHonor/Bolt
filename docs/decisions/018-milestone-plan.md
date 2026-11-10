@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 18
+- **Refined by:** [decision 119](119-packaging-v0.1.md) (what milestone 6's packaging is)
 
 ## Context
 

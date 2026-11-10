@@ -3,7 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 16
-- **Refined by:** [decision 056](056-question-before-large-saves.md) (a large save asks first from milestone 3); [decision 082](082-how-big-files-are-cut-into-chunks.md) (the chunking threshold is 1 MiB until the presets make it a `bolt.toml` setting)
+- **Refined by:** [decision 056](056-question-before-large-saves.md) (a large save asks first from milestone 3); [decision 082](082-how-big-files-are-cut-into-chunks.md) (the chunking threshold is 1 MiB until the presets make it a `bolt.toml` setting); [decision 113](113-presets-what-each-writes-and-how-start-picks-one.md) (what each preset writes, detection and the question); [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (the keys of `bolt.toml`); [decision 115](115-bolt-setup.md) (`bolt setup`)
+- **Superseded in part by:** [decision 113](113-presets-what-each-writes-and-how-start-picks-one.md) (an existing `.gitignore` is not offered for import: Bolt reads it as it is)
 
 ## Context
 
