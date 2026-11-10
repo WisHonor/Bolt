@@ -281,7 +281,7 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
 pub fn rules_json(read: &RulesRead, block_lines: Option<usize>) -> Value {
     let rules = &read.rules;
     json!({
-        "rules_file": read.file,
+        "has_rules_file": read.file,
         "preset": rules.preset,
         "chunk_files_over": rules.chunk_files_over,
         "ask_before_saving_over": rules.ask_over_bytes,
@@ -291,7 +291,7 @@ pub fn rules_json(read: &RulesRead, block_lines: Option<usize>) -> Value {
             "lockable": r.lockable,
             "conflict_markers": r.conflict_markers,
         })).collect::<Vec<_>>(),
-        "ignore_lines": block_lines,
+        "ignore_block_lines": block_lines,
     })
 }
 

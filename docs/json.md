@@ -59,13 +59,13 @@ A folder that already has a `bolt.toml` is judged first: there `bolt start` need
 | Field | Type | Meaning |
 |---|---|---|
 | `bolt_json` | number | `1` |
-| `rules_file` | boolean | Whether the folder has a `bolt.toml` Bolt could read. `false` means Bolt's own values below apply, and a `rules_file_skipped` warning says why when a file is there. |
+| `has_rules_file` | boolean | Whether the folder has a `bolt.toml` Bolt could read. `false` means Bolt's own values below apply, and a `rules_file_skipped` warning says why when a file is there. |
 | `preset` | string or `null` | The file's `preset` label. `null` when it has none. |
 | `chunk_files_over` | number | A file of this many bytes or more is stored in chunks. |
 | `ask_before_saving_over` | number | A save that adds more new bytes than this asks first. |
 | `ask_before_saving_files_over` | number | A save that adds more new files than this asks first. |
 | `rules` | list | The file's `[[rule]]` tables that Bolt could read, in order: `files` (list of string), and `lockable` and `conflict_markers`, each `true`, `false`, or `null` where the rule doesn't say. |
-| `ignore_lines` | number or `null` | How many lines the preset's block of `.boltignore` holds, its two mark lines not counted. `null` when the file has no block. |
+| `ignore_block_lines` | number or `null` | How many lines the preset's block of `.boltignore` holds, its two mark lines not counted. `null` when the file has no block. |
 | `warnings` | list | See §4: `rules_file_skipped` and `rules_ignored` tell what in `bolt.toml` Bolt passed over. |
 
 `bolt setup --preset <name>` works out what the preset's rule files would be, and with `--yes` writes them as one step that `bolt undo` takes back:

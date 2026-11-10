@@ -337,14 +337,14 @@ fn setup_shows_the_rules_as_bolt_reads_them() {
     assert_eq!(command_of_head(&env), "setup");
     let (code, doc) = json(&env, &["setup"]);
     assert_eq!(code, Some(0));
-    assert_eq!(doc["rules_file"], true);
+    assert_eq!(doc["has_rules_file"], true);
     assert_eq!(doc["preset"], "game");
     assert_eq!(doc["chunk_files_over"], 1 << 20);
     assert_eq!(doc["ask_before_saving_over"], 1_u64 << 30);
     assert_eq!(doc["ask_before_saving_files_over"], 10_000);
     let block = vector("game-unity").1;
     assert_eq!(
-        doc["ignore_lines"],
+        doc["ignore_block_lines"],
         presets::block_lines(block.as_bytes()).unwrap()
     );
     assert_eq!(doc["rules"][0]["lockable"], true);
@@ -359,10 +359,10 @@ fn setup_without_a_rules_file_shows_bolts_own_values() {
     assert!(said.contains("Bolt's own values"), "{said}");
     assert!(said.contains("over 100 MB or 10,000 new files"), "{said}");
     let (_, doc) = json(&env, &["setup"]);
-    assert_eq!(doc["rules_file"], false);
+    assert_eq!(doc["has_rules_file"], false);
     assert_eq!(doc["preset"], serde_json::Value::Null);
     assert_eq!(doc["ask_before_saving_over"], 100_000_000);
-    assert_eq!(doc["ignore_lines"], serde_json::Value::Null);
+    assert_eq!(doc["ignore_block_lines"], serde_json::Value::Null);
     assert_eq!(doc["rules"], serde_json::json!([]));
 }
 
@@ -379,7 +379,7 @@ fn setup_shows_what_in_the_rules_file_was_passed_over() {
     assert_eq!(doc["warnings"][0]["kind"], "rules_ignored");
     fs::write(env.root().join("bolt.toml"), "not toml [").unwrap();
     let (_, doc) = json(&env, &["setup"]);
-    assert_eq!(doc["rules_file"], false);
+    assert_eq!(doc["has_rules_file"], false);
     assert_eq!(doc["warnings"][0]["kind"], "rules_file_skipped");
     let said = ok(&env, &["setup"]);
     assert!(
