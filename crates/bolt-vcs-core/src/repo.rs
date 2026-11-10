@@ -266,12 +266,22 @@ impl RepoError {
                      then records the folder as it is at that time."
                 }
                 RepoError::SwitchStopped { source, .. } => {
-                    let damage = if matches!(**source, RepoError::Damaged { .. }) {
-                        " Bolt's copy of it looks damaged: ask for help before trying to repair \
-                         the project."
-                    } else {
-                        ""
+                    // Damage stops every later try too, so name the way on without that data.
+                    let copy = match **source {
+                        RepoError::Damaged { .. }
+                        | RepoError::Store(StoreError::WrongKind { .. } | StoreError::Decode(_)) => {
+                            Some("looks damaged")
+                        }
+                        RepoError::Store(StoreError::Missing(_)) => Some("is missing"),
+                        _ => None,
                     };
+                    let damage = copy.map_or(String::new(), |copy| {
+                        format!(
+                            " Bolt's copy of it {copy}: ask for help before trying to repair the \
+                             project. To go on without it, delete .bolt/state/journal: your files \
+                             stay as they are, and the next command goes on from there."
+                        )
+                    });
                     return Some(format!(
                         "The switch isn't finished: what it already wrote stays, and the next \
                          command that changes the project finishes it once that is fixed.{damage}"
@@ -3799,5 +3809,32 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&head).unwrap(), format!("{b}\n"));
         let tmp = std::fs::read_dir(dir.path().join(".bolt").join("tmp")).unwrap();
         assert_eq!(tmp.count(), 0);
+    }
+
+    #[test]
+    fn a_switch_stopped_by_damage_or_a_missing_object_names_the_way_on() {
+        let stopped = |source| RepoError::SwitchStopped {
+            path: "a.txt".into(),
+            source: Box::new(source),
+        };
+        let damaged = stopped(damaged("bad copy".to_owned()));
+        let missing = stopped(RepoError::Store(StoreError::Missing(Id([9; 32]))));
+        for (e, copy) in [(damaged, "looks damaged"), (missing, "is missing")] {
+            let hint = e.hint().unwrap();
+            assert!(
+                hint.contains(&format!("Bolt's copy of it {copy}")),
+                "{hint}"
+            );
+            assert!(
+                hint.contains(
+                    "To go on without it, delete .bolt/state/journal: your files stay as they \
+                     are, and the next command goes on from there."
+                ),
+                "{hint}"
+            );
+        }
+        // Another stop is fixed where it is, so the switch can still finish.
+        let other = stopped(RepoError::Io(std::io::Error::other("no space")));
+        assert!(!other.hint().unwrap().contains("state/journal"));
     }
 }
