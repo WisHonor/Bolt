@@ -76,7 +76,7 @@ Bolt draws no boxes, banners or rules beyond that separator.
 - **`error:`** then the message; **`hint:`** after one empty line. Their words are Bolt's own, from the code that found the problem; this page only lays them out.
 - **`warning:`** lines come after the answer, one per warning, in the order met, never merged into a count.
 - **`Next:`** names the most likely next command: at most one per command, last. **`Changed your mind? bolt undo`** ends `discard`, `goto`, `unshelf` and `setup --preset`. Both, and the hint the first time a Git word is used ([decision 116](decisions/116-gits-words-as-shortcuts.md)), are printed **only when stderr is a terminal** and `--json` wasn't given. Without a terminal, stderr holds only errors, their hints and warnings, as before milestone 6.
-- **Wrapping** happens only on a terminal: a message longer than the smaller of the width and 100 columns breaks at a space, and the lines after the first start under the message's text: 7 spaces in for `error:`, 9 for `warning:`, 6 for `hint:` and `Next:`, and as §5 says for a detail. A line with no space to break at is left long. A message that already has several lines keeps its own line breaks, each line wrapped the same way. Without a terminal nothing wraps.
+- **Wrapping** happens only on a terminal: a message longer than the smaller of the width and 100 columns breaks at a space, the spaces at the break dropped, and the lines after the first start under the message's text: 7 spaces in for `error:`, 9 for `warning:`, 6 for `hint:` and `Next:`, and as §5 says for a detail. A line with no space to break at is left long. A message that already has several lines keeps its own line breaks, each line wrapped the same way. Without a terminal nothing wraps.
 - **Exit codes:** 0 done, or nothing to do; 1 failed; 2 a command line Bolt couldn't use. Nothing else.
 
 ## 7. Cutting what doesn't fit
@@ -469,5 +469,6 @@ error: Bolt can't tidy this project: pack <pack> holds a conflict record, which 
 hint: Nothing was removed, and the project works as before. A version of Bolt that follows them can tidy it.
 ```
 
+- What it freed is how much smaller storage got, measured before and after. Its figure beforehand is an estimate, so a `tidy` that found something to free, removed a pack and wrote one can still leave storage no smaller: then the outcome line reads `Freed 0 B  (1 pack removed, 1 written)`.
 - It keeps what lines, shelves, the diary and every step in the undo window need, and leaves packs changed in the last 24 hours as they are. It isn't a step, so undo doesn't take it back.
 - **Colour:** `Freed` green and bold, the bracket dim.

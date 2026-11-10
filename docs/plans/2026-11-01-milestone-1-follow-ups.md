@@ -181,7 +181,7 @@ What the presets-and-polish half of milestone 6 put off: its task reviews, rulin
 | Known limit | `bolt.toml` has no cap on how many rules it holds, and the `rules_ignored` warning names at most 20 of those passed over; neither bounds the work of reading a file full of rules that are passed over. The file's size cap (1 MiB) bounds that: about 350,000 empty rules, read in bounded time (`a_rules_file_with_a_million_rules_under_the_size_limit`). |
 | Should do | `read_rules` opens the project's top folder again by its path rather than through a handle the repository already holds. |
 | After the merge | The `parse_rules` fuzz target runs for the first time in the nightly job after milestone 6 is merged. |
-| Should do | `tidy` can print `Freed 0 B  (1 pack removed, 1 written)` when it removed a pack and wrote one and storage didn't shrink: what it frees is an estimate ([terminal.md](../terminal.md) §12). |
+| Should do | `tidy` can print `Freed 0 B  (1 pack removed, 1 written)` when it found something to free, removed a pack and wrote one, and storage didn't shrink: its figure beforehand is only an estimate ([terminal.md](../terminal.md) §12). |
 | Should do | In `verify`, an object that only the walk of what is needed finds damaged shows under "objects are damaged" just below a check mark for the stored objects, because that first line counts only the pack check's own failures. |
 | Known limit | An explanation of a Git word runs long on a terminal narrower than the command it names: commands are never broken. |
 | For the owner to rule | `bolt` alone prints the overview on stdout and exits with 2 (before, it was clap's help on stderr). 0 may be friendlier. |
