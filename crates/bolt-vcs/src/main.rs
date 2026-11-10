@@ -1519,6 +1519,8 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
     let target = resolve_target(repo, text)?;
+    // A goto to where the project already is records no step: `head` stays.
+    let head_before = repo.head().ok();
     let done = {
         let _working = progress::Working::start("Writing files");
         goto(
@@ -1530,6 +1532,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             &mut waiting,
         )
     }?;
+    let stepped = head_before.is_none() || repo.head().ok() != head_before;
     let mut warnings = done.applied.warnings.clone();
     // The switch has happened, so a save that can't be read back only goes unnamed.
     let save = repo
@@ -1571,6 +1574,16 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             None => s.paint(style::Role::Fingerprint, &short),
         };
         let switched = s.paint(style::Role::Ok, "Switched");
+        if !stepped {
+            let already = match &done.position {
+                Position::OnLine(line) => {
+                    let line = s.paint(style::Role::Line, &escape(line, false));
+                    format!("Already on line {line}, at save {at}.\n")
+                }
+                Position::AtSave(_) => format!("Already at save {at}.\n"),
+            };
+            return output::print_done(&already, &warnings);
+        }
         let mut text = match &done.position {
             Position::OnLine(line) => {
                 let line = s.paint(style::Role::Line, &escape(line, false));
@@ -1838,10 +1851,19 @@ fn undo_command(
         None => {
             warnings.extend(repo.store().warnings());
             output::print_done(&text, &told_once(warnings))?;
-            // The shelf `--shelve` made is the newest, which `bolt unshelf` brings back.
-            if !shelved.is_empty() {
-                let unshelf = style::err().paint(style::Role::Command, "bolt unshelf");
-                style::next(&format!("bring your changes back with: {unshelf}"));
+            // One shelf made is the newest, which `bolt unshelf` brings back; each step of
+            // several can make one.
+            let e = style::err();
+            match shelved.len() {
+                0 => {}
+                1 => style::next(&format!(
+                    "bring your changes back with: {}",
+                    e.paint(style::Role::Command, "bolt unshelf")
+                )),
+                _ => style::next(&format!(
+                    "see the shelves with: {}",
+                    e.paint(style::Role::Command, "bolt shelf --list")
+                )),
             }
             Ok(())
         }

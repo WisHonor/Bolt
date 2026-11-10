@@ -1058,11 +1058,13 @@ pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
 pub fn tidied(report: &TidyReport) -> String {
     let s = style::out();
     let freed = report.bytes_before.saturating_sub(report.bytes_after);
-    let mut text = if report.packs_removed == 0 && report.packs_written == 0 {
-        format!(
-            "Nothing to free: storage holds {}.\n",
-            bytes(report.bytes_after)
-        )
+    let held = bytes(report.bytes_after);
+    let mut text = if report.to_free == 0 && report.packs_removed == 0 && report.packs_written == 0
+    {
+        format!("Nothing to free: storage holds {held}.\n")
+    } else if report.packs_removed == 0 {
+        // The warnings that follow say why each pack stayed.
+        format!("Nothing could be freed: storage still holds {held}.\n")
     } else {
         let packs = counted(report.packs_removed as u64, "pack", "packs");
         let packs = format!("({packs} removed, {} written)", report.packs_written);
@@ -1654,6 +1656,16 @@ mod tests {
             ..nothing
         };
         assert_eq!(tidied(&merged), "Freed 0 B  (2 packs removed, 1 written)\n");
+        // Something to free, but no pack could be removed.
+        let stuck = TidyReport {
+            to_free: 1024,
+            packs_written: 1,
+            ..nothing
+        };
+        assert_eq!(
+            tidied(&stuck),
+            "Nothing could be freed: storage still holds 2.0 KiB.\n"
+        );
     }
 
     #[test]

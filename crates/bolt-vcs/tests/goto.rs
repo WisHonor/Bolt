@@ -504,7 +504,7 @@ fn goto_where_the_project_is_carries_nothing_along() {
     );
     let before = env.standing();
     let said = goto(&env, "main");
-    assert!(said.starts_with("Switched to line main at save "), "{said}");
+    assert!(said.starts_with("Already on line main, at save "), "{said}");
     assert!(!said.contains("came along"), "{said}");
     assert_eq!(env.standing(), before);
 }

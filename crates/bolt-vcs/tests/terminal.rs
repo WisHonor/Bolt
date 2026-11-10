@@ -1261,3 +1261,101 @@ fn help_reads_the_same_at_every_width_with_only_its_titles_bold() {
         let _ = titles;
     }
 }
+
+/// The project's `state/head`, which changes when a command records a step.
+fn head_file(env: &Env) -> Vec<u8> {
+    std::fs::read(env.root().join(".bolt/state/head")).unwrap()
+}
+
+#[test]
+fn goto_where_the_project_already_is_says_so_and_offers_no_undo() {
+    let (env, _, second) = two_saves();
+    let before = head_file(&env);
+    for width in widths() {
+        let (shown, said) = run_at(&env, width, &["goto", "main"]);
+        assert_eq!(
+            shown,
+            format!("Already on line main, at save {second} \"Second\".\n")
+        );
+        assert!(!said.contains("Changed your mind"), "{said:?}");
+        // No step was recorded, so there was nothing to offer to undo.
+        assert_eq!(head_file(&env), before);
+    }
+    let width = *widths().last().unwrap();
+    // At a save: the same, at the save.
+    let tip = support::main_tip(&env).to_hex();
+    run_at(&env, None, &["goto", &tip[..12]]);
+    let at = head_file(&env);
+    let (shown, said) = run_at(&env, width, &["goto", &tip[..12]]);
+    assert!(
+        shown.starts_with("Already at save ") && shown.ends_with(" \"Second\".\n"),
+        "{shown}"
+    );
+    assert!(!said.contains("Changed your mind"), "{said:?}");
+    assert_eq!(head_file(&env), at);
+    // From the save to the line whose newest it is, only the position changes: a step all the
+    // same, which undo takes back.
+    let (shown, said) = run_at(&env, width, &["goto", "main"]);
+    assert_eq!(
+        shown,
+        format!(
+            "Switched to line main at save {second} \"Second\".\n\n    No file needed changing.\n"
+        )
+    );
+    assert_eq!(offers_undo(&said), width.is_some(), "{said:?}");
+    assert_ne!(head_file(&env), at);
+    run_at(&env, None, &["undo"]);
+    let (shown, _) = run_at(&env, None, &["goto", &tip[..12]]);
+    assert!(shown.starts_with("Already at save "), "{shown}");
+}
+
+#[test]
+fn undo_that_shelves_more_than_once_points_at_the_shelf_list() {
+    let (env, _, _) = two_saves();
+    // Two discards, then unsaved work: undoing each discard writes over work in the way.
+    put(&env, "a.txt", "mine 1\n");
+    run_at(&env, None, &["discard"]);
+    put(&env, "a.txt", "mine 2\n");
+    run_at(&env, None, &["discard"]);
+    put(&env, "a.txt", "mine 3\n");
+    let width = *widths().last().unwrap();
+    let (shown, said) = run_at(&env, width, &["undo", "2", "--shelve"]);
+    assert!(
+        shown.starts_with(
+            "Shelved your unsaved changes in the way on shelf 1.\nShelved your unsaved changes in \
+             the way on shelf 2.\nUndid 2 steps:\n"
+        ),
+        "{shown}"
+    );
+    assert_eq!(
+        said.ends_with("\nNext: see the shelves with: bolt shelf --list\n"),
+        width.is_some(),
+        "{said:?}"
+    );
+    assert!(!said.contains("bolt unshelf"), "{said:?}");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn unshelf_that_only_finishes_a_stopped_switch_offers_no_undo() {
+    let (env, _, _) = two_saves();
+    put(&env, "a.txt", "mine\n");
+    run_at(&env, None, &["shelf"]);
+    let stopped = env
+        .bolt()
+        .arg("unshelf")
+        .env("BOLT_FAULT_FAIL", "switch:changed")
+        .output()
+        .unwrap();
+    assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
+    let (before, _) = support::head(&env);
+    let (shown, said) = run_at(&env, Some(80), &["unshelf"]);
+    assert!(shown.starts_with("Finished the unshelf"), "{shown}");
+    assert!(!said.contains("Changed your mind"), "{said:?}");
+    // It recorded no step of its own: `head` moved only to the entry the stopped unshelf wrote.
+    let (_, now) = support::head(&env);
+    assert_eq!(
+        (now.command.as_str(), now.parent),
+        ("unshelf", Some(before))
+    );
+}

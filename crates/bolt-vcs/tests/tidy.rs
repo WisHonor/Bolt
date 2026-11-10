@@ -125,6 +125,31 @@ fn tidy_says_freed_and_how_many_packs() {
     );
 }
 
+/// Something to free, but every pack it would remove stays: it says nothing could be freed, never
+/// that there was nothing to free, and the warnings say why.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn tidy_that_frees_nothing_it_found_says_nothing_could_be_freed() {
+    let env = with_garbage();
+    age(&env, 48);
+    let out = env
+        .bolt()
+        .arg("tidy")
+        .env("BOLT_FAULT_FAIL", "tidy:removing")
+        .output()
+        .unwrap();
+    let (said, told) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{told}");
+    assert!(
+        said.starts_with("Nothing could be freed: storage still holds ") && said.ends_with(".\n"),
+        "{said}"
+    );
+    assert!(
+        told.starts_with("warning: Bolt couldn't remove pack "),
+        "{told}"
+    );
+}
+
 #[test]
 fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
     let env = with_garbage();
@@ -139,15 +164,22 @@ fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
     assert_eq!(text(&out.stdout), "");
     let said = text(&out.stderr);
     let (error, hint) = said.split_once("\n\n").unwrap();
+    // Every word of the error but the pack's path, which is the system's own spelling of it.
+    let pack = error
+        .strip_prefix("error: Bolt can't tidy this project: pack ")
+        .and_then(|rest| rest.strip_suffix(" is damaged (the file does not start with BOLTPACK)."))
+        .unwrap_or_else(|| panic!("{said}"));
+    let named = std::path::Path::new(pack);
     assert!(
-        error.starts_with("error: ") && error.contains("zz.pack") && !error.contains('\n'),
+        named.ends_with(".bolt/store/packs/zz.pack") && named.is_absolute(),
         "{said}"
     );
-    assert!(
-        hint.starts_with("hint: ") && hint.contains(".bolt/store/packs"),
-        "{said}"
+    assert_eq!(
+        hint,
+        "hint: Nothing was removed. Check the pack's permissions. If it is damaged for good, \
+         moving it out of .bolt/store/packs lets `bolt tidy` run, losing what only it holds, and \
+         the chunks only its chunk lists name.\n"
     );
-    assert_eq!(hint.lines().count(), 1, "{said}");
 }
 
 #[test]
