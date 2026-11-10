@@ -12,7 +12,6 @@ use std::sync::Arc;
 use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
-use crate::chunks::is_too_long_to_cut;
 use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
@@ -1620,7 +1619,7 @@ pub(crate) fn store_file(
     let changed = || SaveError::ChangedDuringSave {
         path: rel.to_owned(),
     };
-    if seen.is_some_and(|seen| is_too_long_to_cut(seen.size)) {
+    if seen.is_some_and(|seen| store.is_streamed(seen.size)) {
         // Hashed first, then stored whole unless the store holds it already.
         let (mut file, id, size) = hash_scanned(dir, name, rel, seen, after_read)?;
         let again = || {

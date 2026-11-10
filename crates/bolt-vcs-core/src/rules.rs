@@ -10,7 +10,7 @@ use toml::{Table, Value};
 
 use crate::chunks::{CHUNK_FROM, CHUNK_UP_TO};
 use crate::safe_fs;
-use crate::text::escape;
+use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 
 /// The longest `bolt.toml` Bolt reads.
@@ -273,7 +273,15 @@ pub fn read(top: &Dir) -> RulesRead {
     let shown = Path::new("bolt.toml");
     let bytes = match safe_fs::read_capped_in(top, name, shown, MAX_RULES_FILE_BYTES) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return RulesRead::default(),
+        // A link to nothing is there all the same, and is passed over as a link.
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                && top
+                    .metadata(name)
+                    .is_err_and(|m| m.kind() == io::ErrorKind::NotFound) =>
+        {
+            return RulesRead::default();
+        }
         Err(e) => return skipped(unusable(top, name, &e)),
     };
     match parse(&bytes) {
@@ -313,7 +321,7 @@ impl RulesRead {
                  remove the file to use its rules.",
                 size_text(own.chunk_files_over),
                 size_text(own.ask_over_bytes),
-                own.ask_over_files
+                thousands(own.ask_over_files)
             );
             return vec![Warning::new(warning::RULES_FILE_SKIPPED, message)];
         }
@@ -434,6 +442,11 @@ mod tests {
         assert!(read.skipped.is_some());
         assert_eq!(read.rules, Rules::default());
         assert_eq!(kinds(&read), [warning::RULES_FILE_SKIPPED]);
+        let message = &read.warnings()[0].message;
+        assert!(
+            message.contains("over 100 MB or 10,000 new files"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -532,6 +545,13 @@ mod tests {
             "{}",
             warnings[0].message
         );
+        // A link to nothing is no missing file: it is passed over, and said so.
+        let dangling = tempfile::tempdir().unwrap();
+        let nowhere = dangling.path().join("nowhere.toml");
+        assert!(symlink(&nowhere, &dangling.path().join("bolt.toml")));
+        let read = read_in(dangling.path());
+        assert_eq!(kinds(&read), [warning::RULES_FILE_SKIPPED]);
+        assert!(read.warnings()[0].message.contains("a link"));
     }
 
     #[cfg(unix)]
@@ -719,6 +739,42 @@ mod tests {
                     assert_eq!(root.get(name).unwrap().id, hash_content(bytes), "{name}");
                 }
             }
+        }
+
+        #[test]
+        fn only_files_under_1_mib_are_read_whole_whatever_the_threshold() {
+            use crate::ingest::{IngestError, store_bytes};
+            use crate::pack::PackError;
+            let (dir, repo) = project();
+            let store = repo.store();
+            store.set_chunk_from(8 << 20);
+            assert!(store.is_small((1 << 20) - 1));
+            for size in [1 << 20, 3 << 20, (8 << 20) - 1, (128 << 30) + 1] {
+                assert!(!store.is_small(size), "{size}");
+            }
+            assert!(!store.is_cut((8 << 20) - 1) && store.is_cut(8 << 20));
+            // Bytes that aren't small are never read whole into memory...
+            let mut packs = repo.new_packs().unwrap();
+            let data = noise(6, 3 << 20);
+            let refused = store_bytes(&mut packs, store, &mut &*data, data.len() as u64);
+            let too_large = matches!(refused, Err(IngestError::Pack(PackError::TooLarge)));
+            assert!(too_large, "{refused:?}");
+            // ...so a save streams such a file, and stores it whole.
+            fs::write(dir.path().join("mid"), &data).unwrap();
+            let top = Dir::open_top(dir.path()).unwrap();
+            let seen = top.metadata(OsStr::new("mid")).unwrap();
+            let stored = crate::snapshot::store_file(
+                &mut packs,
+                store,
+                &top,
+                "mid",
+                "mid",
+                Some(&seen),
+                &mut || {},
+            );
+            let id = hash_content(&data);
+            assert_eq!(stored.unwrap(), (id, data.len() as u64));
+            assert_eq!(packs.kind_of(&id), Some(ObjectKind::Content));
         }
 
         #[test]

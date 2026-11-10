@@ -9,7 +9,7 @@ use bolt_core::repo::FORMAT_TEXT;
 use std::path::Path;
 
 mod support;
-use support::{add_listing, plant_save, text};
+use support::{add_listing, main_tip, plant_save, text};
 
 /// An empty folder to work in, and one for the user's config.
 struct Env(support::Env);
@@ -784,7 +784,7 @@ fn only_save_shows_the_rules_warnings() {
             && err.contains("\n  zebra: Bolt doesn't know this key"),
         "{err}"
     );
-    let first = text(&out.stdout)[6..10].to_owned();
+    let first = main_tip(&env).to_hex();
     std::fs::write(&rules, "this is not = = toml\n").unwrap();
     let json = |args: &[&str]| -> serde_json::Value {
         let out = env.bolt().args(args).output().unwrap();

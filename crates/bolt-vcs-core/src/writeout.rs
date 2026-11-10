@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
-use crate::chunks::is_too_long_to_cut;
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
@@ -544,7 +543,7 @@ fn copy_in(
     let Some(mut file) = open_to_copy(dir, name, path)? else {
         return Ok(false);
     };
-    if is_too_long_to_cut(e.size) {
+    if store.is_streamed(e.size) {
         // Stored whole, and compared with the plan's ID as it is read.
         return ingest::store_long(packs, store, e.id, e.size, || Ok(file));
     }

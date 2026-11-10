@@ -157,6 +157,50 @@ fn discard_and_shelf_keep_a_big_file_as_chunks() {
     assert_eq!(id_of(&big), edited);
 }
 
+/// A project whose `bolt.toml` cuts files from 8 MiB, having saved `big.bin`, 3 MiB made from
+/// `seed`, and the file's ID.
+fn with_a_file_under_a_raised_threshold(seed: u64) -> (Env, Id) {
+    let env = Env::empty();
+    ok(&env, &["start"]);
+    write(&env, "bolt.toml", "chunk-files-over = \"8 MiB\"\n");
+    let id = write_noise(&env.root().join("big.bin"), seed, 3 * MIB);
+    ok(&env, &["save", "Big"]);
+    (env, id)
+}
+
+#[test]
+fn a_file_between_1_mib_and_a_raised_threshold_is_stored_whole_and_reads_back() {
+    let (env, first) = with_a_file_under_a_raised_threshold(31);
+    let one = main_tip(&env);
+    let big = env.root().join("big.bin");
+    let second = edit(&big);
+    ok(&env, &["save", "Edited"]);
+    let two = main_tip(&env);
+    for id in [first, second] {
+        assert_eq!(copies_of(env.root(), &id), [ObjectKind::Content]);
+    }
+    ok(&env, &["goto", &one.to_hex()]);
+    assert_eq!(id_of(&big), first);
+    ok(&env, &["goto", &two.to_hex()]);
+    assert_eq!(id_of(&big), second);
+}
+
+#[test]
+fn safety_copies_stream_such_a_file_too() {
+    let (env, saved) = with_a_file_under_a_raised_threshold(32);
+    let big = env.root().join("big.bin");
+    let edited = edit(&big);
+    ok(&env, &["discard", "big.bin"]);
+    assert_eq!(id_of(&big), saved);
+    assert_eq!(copies_of(env.root(), &edited), [ObjectKind::Content]);
+    ok(&env, &["undo"]);
+    assert_eq!(id_of(&big), edited);
+    ok(&env, &["shelf"]);
+    assert_eq!(id_of(&big), saved);
+    ok(&env, &["unshelf"]);
+    assert_eq!(id_of(&big), edited);
+}
+
 /// What this thread has read from files so far, in bytes.
 #[cfg(target_os = "linux")]
 fn bytes_read() -> u64 {

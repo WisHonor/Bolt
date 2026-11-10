@@ -262,9 +262,15 @@ impl Store {
         chunks::is_cut_from(self.chunk_from.load(Ordering::Relaxed), size)
     }
 
-    /// Whether a file of `size` bytes is read whole: neither cut nor too long to cut.
+    /// Whether a file of `size` bytes is read whole into memory: under 1 MiB, whatever the
+    /// project's rules say.
     pub(crate) fn is_small(&self, size: u64) -> bool {
-        !self.is_cut(size) && !chunks::is_too_long_to_cut(size)
+        !chunks::is_cut(size) && !chunks::is_too_long_to_cut(size)
+    }
+
+    /// Whether a file of `size` bytes is stored whole by streaming it: neither small nor cut.
+    pub(crate) fn is_streamed(&self, size: u64) -> bool {
+        !self.is_small(size) && !self.is_cut(size)
     }
 
     /// Adds the pack at `pack_path`, which this process has just moved into the store. An object

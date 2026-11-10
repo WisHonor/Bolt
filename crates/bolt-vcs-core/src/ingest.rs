@@ -4,7 +4,7 @@
 
 use std::io::{self, Read};
 
-use crate::chunks::{Chunk, ChunkList, Cutter, is_too_long_to_cut};
+use crate::chunks::{Chunk, ChunkList, Cutter};
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::pack::{self, ObjectKind, PackError, PackSet, Prepared};
 use crate::store::{Store, StoreError};
@@ -44,7 +44,7 @@ pub(crate) fn store_bytes(
     if store.is_cut(size) {
         return cut(packs, store, reader, size);
     }
-    if is_too_long_to_cut(size) {
+    if !store.is_small(size) {
         return Err(PackError::TooLarge.into());
     }
     let bytes = read_whole(reader, size)?;
@@ -234,7 +234,7 @@ fn cut(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::chunks::{MAX_CHUNK, is_cut, set_test_cut_sizes};
+    use crate::chunks::{MAX_CHUNK, is_cut, is_too_long_to_cut, set_test_cut_sizes};
     use crate::pack::{IndexEntry, PackReader, WRITER_PACK_OBJECTS};
     use crate::test_support::noise;
     use bolt_platform::dir::Dir;

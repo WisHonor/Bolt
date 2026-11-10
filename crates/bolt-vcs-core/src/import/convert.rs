@@ -13,7 +13,6 @@ use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest as _, Sha256};
 
 use super::{ImportError, LfsElsewhere};
-use crate::chunks::is_too_long_to_cut;
 use crate::diary::{
     self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
 };
@@ -1135,7 +1134,7 @@ impl<'r> Converter<'r> {
             inner: file,
             hasher: Sha256::new(),
         };
-        let long = is_too_long_to_cut(p.size);
+        let long = self.store.is_streamed(p.size);
         let content = if long {
             let mut hasher = ContentHasher::new();
             let read = io::copy(&mut reading, &mut Hashing(&mut hasher));
@@ -1167,7 +1166,7 @@ impl<'r> Converter<'r> {
     }
 
     /// Stores a blob too big to read whole, of the `size` its header gives, reading it once, and
-    /// gives its first bytes too, as `Start` keeps them. One too long to cut is read twice: once
+    /// gives its first bytes too, as `Start` keeps them. One that isn't cut is read twice: once
     /// to learn its content ID, then again to store it unless a good copy is stored already.
     fn stream(
         &mut self,
@@ -1175,7 +1174,7 @@ impl<'r> Converter<'r> {
         size: u64,
         place: &dyn Fn() -> String,
     ) -> Result<(Id, u64, Vec<u8>), ImportError> {
-        if !is_too_long_to_cut(size) {
+        if self.store.is_cut(size) {
             let mut blob = Start::new(self.git.blob_reader(id).map_err(|e| at(e, place))?);
             let stored = ingest::store_bytes(self.packs, self.store, &mut blob, size);
             return Ok((
