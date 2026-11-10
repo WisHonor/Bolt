@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 4 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 010](010-operation-log.md) (a command takes effect when `head` moves) and [decision 049](049-writing-files-one-at-a-time.md) (finishing a switch a crash stopped)
-- **Refined by:** [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built)
+- **Refined by:** [decision 081](081-what-building-milestone-4-refined.md) (edits made while milestone 4 was built); [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (a pick-up removes a stopped switch's journal and reads tags and server lines; a stopped switch's hint names the way on)
 
 ## Context
 

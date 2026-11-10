@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-06
 - **Agenda topic:** none (milestone 3, the docs pass)
+- **Refined by:** [decision 118](118-bolt-verify.md) (`bolt verify` checks every pack)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 061](061-pack-copy-order-and-lazy-opening.md) (a pack that can't be opened or searched is reported as damaged)
 - **Superseded in part by:** [decision 078](078-a-pack-bolt-cant-open-gets-its-own-warning.md) (such a pack now gets a `pack_unreadable` warning)

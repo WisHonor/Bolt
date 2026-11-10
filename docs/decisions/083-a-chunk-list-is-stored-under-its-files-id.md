@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-08
 - **Agenda topic:** none (milestone 5 planning)
+- **Refined by:** [decision 118](118-bolt-verify.md) (`bolt verify` rebuilds each chunked file); [decision 121](121-format-1-freezes-at-v0.1.md) (`feature chunks` stays a feature line)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Supersedes:** [decision 019](019-review-clarifications.md) #10 (finding a chunk list through an index in `cache/`)
 - **Refines:** [decision 005](005-object-identity.md) (how a chunk list is linked to its file's ID), [decision 008](008-layout-and-settings.md) (a feature line added without `bolt setup`), [decision 028](028-red-team-m1-session-2-rulings.md) #1 (when a stored chunk list counts as a good copy), decisions [057](057-pack-index-on-disk-and-merging.md) and [062](062-when-packs-are-merged.md) (what merging checks and copies, and which packs are small) and [decision 077](077-tidy-and-the-undo-window.md) (`tidy` follows chunk lists, and stops at a pack it can't read)

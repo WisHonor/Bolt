@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 2)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 010](010-operation-log.md) (folder rewrites are journaled, and finished or rolled back) and [decision 011](011-status-and-write-out.md) (plan, re-check, temp file and rename)
-- **Refined by:** [decision 075](075-crash-recovery.md) (every milestone 4 command survives a crash; a lost `head`); [decision 076](076-renames-reach-the-disk-on-windows.md) (renames and removals written through on Windows)
+- **Refined by:** [decision 075](075-crash-recovery.md) (every milestone 4 command survives a crash; a lost `head`); [decision 076](076-renames-reach-the-disk-on-windows.md) (renames and removals written through on Windows); [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (Windows error 303 counts as a file in use)
 
 ## Context
 

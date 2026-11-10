@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-02
 - **Refined by:** [decision 043](043-red-team-m2-rulings.md) (a change-id header is used only once per import); [decision 085](085-importing-git-lfs-files.md) (a commit holding Git LFS files can give back its Git ID only if an export turns them back into pointers)
+- **Superseded in part by:** [decision 122](122-change-ids-in-jujutsus-letters.md) (change IDs are written in Jujutsu's letters, so one ID looks the same in both tools)
 - **Agenda topic:** none (milestone 2 planning, question 2)
 - **Refines:** [decision 006](006-save-object.md) (change IDs of imported saves) and [decision 019](019-review-clarifications.md) #6–7 (what an imported save holds)
 

@@ -1,6 +1,6 @@
 # Bolt Storage Format — Draft
 
-> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes at the v0.1 release. Until then anything here may change, and repositories made by development builds are disposable (decision 019).
+> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes when v0.1 is released ([decision 121](decisions/121-format-1-freezes-at-v0.1.md) says what that covers and what it promises). Until then anything here may change, and repositories made by development builds are disposable (decision 019).
 
 **In plain words.** This document says exactly which bytes Bolt writes, so any program, or a future version of Bolt, can read a Bolt repository without guessing. Everything Bolt stores is either a piece of file content or a small structured record (a folder listing, a save, a diary entry…). Each one is named by its fingerprint, packed into pack files, and checked against its fingerprint every time it is read.
 
@@ -118,11 +118,11 @@ person:
 - A save imported from Git takes its change ID from its commit, so importing a repository again gives the same saves (decision 032): the commit's first `change-id` header, written by Jujutsu, if it decodes to 16 bytes in Jujutsu's letters (`z` for 0 down to `k` for 15, in either letter case, as Jujutsu reads them); otherwise the last 16 bytes of the commit ID, in reverse order, with the bits of each byte reversed (Jujutsu's rule for commits without that header).
 - A header's change ID goes to one save of an import only, so no two imported saves share one (decision 043): to the first commit in the import's fixed order with that header, and to none if the rule for commits without the header gives that ID to any commit of the import. Every other commit with the header gets the change ID that rule gives it.
 - The import's fixed order is a depth-first walk from the commits the imported branches, server branches and tags and a detached `HEAD` point to, taken smallest Git ID first. From each commit it goes into its parents smallest Git ID first, skipping commits it has met already, and it puts each commit after its parents. The same repository always gives the same order.
-- **Display:** each half-byte (value 0–15) becomes the letter `k` plus that value, so change IDs use only the letters `k` to `z` and never look like hex fingerprints. Screens show the shortest unique prefix, at least 4 letters.
+- **Display:** each half-byte (value 0–15) becomes the letter `z` minus that value, high half first: 0 is `z` and 15 is `k`, as Jujutsu writes them ([decision 122](decisions/122-change-ids-in-jujutsus-letters.md)). So change IDs use only the letters `k` to `z` and never look like hex fingerprints, and an imported save shows the letters Jujutsu shows for its commit. Screens show the shortest unique prefix, at least 4 letters.
 
 ## 6. Big files and chunk lists
 
-A file may be stored as a single content object or as chunks plus a chunk list: the record that lists, in order, the chunks that make the file. Either way, the folder listing refers to the **file ID**, the plain BLAKE3 hash of the whole file, so IDs never depend on chunking (decision 005). Each chunk is a content object (§11's kind 1), its ID the plain BLAKE3 hash of its bytes. Bolt itself cuts a file of at least 1 MiB (1,048,576 bytes) and at most 128 GiB into chunks, as below, and stores any other file whole ([decision 082](decisions/082-how-big-files-are-cut-into-chunks.md)); the 1 MiB becomes a project setting with the presets of milestone 6 (`chunk-files-over`, §12).
+A file may be stored as a single content object or as chunks plus a chunk list: the record that lists, in order, the chunks that make the file. Either way, the folder listing refers to the **file ID**, the plain BLAKE3 hash of the whole file, so IDs never depend on chunking (decision 005). Each chunk is a content object (§11's kind 1), its ID the plain BLAKE3 hash of its bytes. Bolt itself cuts a file of at least 1 MiB (1,048,576 bytes) and at most 128 GiB into chunks, as below, and stores any other file whole ([decision 082](decisions/082-how-big-files-are-cut-into-chunks.md)); the 1 MiB is the project setting `chunk-files-over` (§12), which a project can raise, never lower.
 
 ```text
 u8      version = 1
@@ -209,9 +209,11 @@ bool    has a folder change; if true:
 
 **Kept saves.** A save made only for a folder change is an ordinary save (§4). What `discard` and `shelf` throw away (the safety copies of decision 050) is one: its parent is the save the folder was on, its folder listings are that save's with the folder's own version of each path thrown away (a changed, new or deleted file or link, or a new folder). Every kept save's parent is the save the folder was on; its message names the command and the paths or shelf it was given (`discard art/hero.psd`), or is the shelf's message; its author and saver are the user, its change ID is new, and it has a `line` field when it was made on a line. Only the entry's folder change names it, or the state's shelves for a shelf.
 
+**The `setup` step** ([decision 115](decisions/115-bolt-setup.md)). `bolt setup --preset`, and a `bolt start` that writes a preset's files, record one entry whose command is `setup` and whose folder change is about two paths only, `bolt.toml` and `.boltignore` at the top: the "from" save holds each as the folder held it just before (a file, or nothing), and the "to" save as the command wrote it (a file, or nothing where it removed one). Each is a kept save on the save the folder was on, or that save itself where they are equal. The state doesn't change.
+
 **Undo and redo** (decision 070): an entry with action 2 or 3 names its target, a command entry (action 1) earlier on the diary. Its lines, position, tags and server lines are the target's parent's for an undo and the target's own for a redo. Its shelves are the ones before it, except that undoing a step takes off a shelf that step added (a `shelf`, or a jump made with `--shelve`) and puts back one it removed (an `unshelf`) (keeping its label unless another shelf has it, else the smallest number free), redoing them does the opposite, and `--shelve` adds the shelf it made, first. An entry made by `undo --to` for an entry outside the undo order is a command entry (action 1): its lines, position, tags and server lines are that entry's, and its shelves the ones before it, with the shelf `--shelve` made first if it set work aside.
 
-Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case: a reader compares the two names after Unicode's lowercase mapping (Rust's `str::to_lowercase`, which also lowercases a final capital sigma as `ς`), not after full case folding, so `ß` and `SS` are two different names, and so are `ΑΣ` and `ασ`. A position "on a line" must name one of the lines. Shelf labels are unique.
+Line names follow decision 012's rules: Unicode letters and digits, `-`, `_`, `.` and `/` only; not empty; no leading or trailing `/`, no `//`, and no `.` or `..` part. Two line names may not differ only by letter case: a reader compares the two names after Unicode's lowercase mapping (Rust's `str::to_lowercase`, which also lowercases a final capital sigma as `ς`), not after full case folding, so `ß` and `SS` are two different names, and so are `ΑΣ` and `ασ`. Which characters are letters and digits, and what their lowercase forms are, is Unicode's answer as the reading Bolt knows it (Unicode 17.0 in v0.1), and this stays the rule when format 1 freezes ([decision 121](decisions/121-format-1-freezes-at-v0.1.md)). A position "on a line" must name one of the lines. Shelf labels are unique.
 
 - **Limits:** line and shelf names at most 255 bytes; the recorded command at most 64 KiB; the Bolt version at most 256 bytes. At most 100,000 lines and 10,000 shelves. A folder change whose two saves are the same is rejected.
 - **Shelf labels** are the numbers Bolt gives shelves, written in decimal: the smallest from 1 that no other shelf has ([decision 073](decisions/073-shelves.md)). A reader accepts any unique label.
@@ -254,6 +256,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock` | Lock file for changing commands | Yes |
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
+| `state/tidied` | The start of the undo window the last `bolt tidy` used, so a longer window later doesn't ask for what it freed (§11): a whole number of milliseconds since 1970-01-01 UTC in decimal digits, then an LF. Read with a cap of 32 bytes; a file that is anything else, or names a time later than now, counts as absent. Written whole through `tmp/` and a rename. A reader that ignores it only stops a `tidy` that could have gone on | No |
 | `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Bolt didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), and `change-ids`, each line's change IDs (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
@@ -267,7 +270,7 @@ bolt-repository 1
 hash blake3
 ```
 
-Further lines of the form `feature <name>` list features the repository uses (for example `feature conflicts` or `feature deltas`). `feature chunks` says the store may hold chunk lists (§6): from milestone 5, `bolt start` and `bolt import` write it, and every command that changes a repository whose `format` lacks it adds it first, right after taking the lock, writing `format` whole through `tmp/` and a rename, before it stores anything ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). A reader must refuse to open a repository whose first line, `hash` line or any `feature` line it doesn't understand, and say that a newer Bolt is needed (decision 008). A `format` that doesn't end in an LF, or holds a CR, a blank line, a feature named twice or any other line, is damaged.
+Further lines of the form `feature <name>` list features the repository uses (for example `feature conflicts` or `feature deltas`). `feature chunks` says the store may hold chunk lists (§6): from milestone 5, `bolt start` and `bolt import` write it, and every command that changes a repository whose `format` lacks it adds it first, right after taking the lock, writing `format` whole through `tmp/` and a rename, before it stores anything ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). The line stays when format 1 freezes: every repository v0.1 makes carries it, and a reader of format 1 must know it ([decision 121](decisions/121-format-1-freezes-at-v0.1.md)). A reader must refuse to open a repository whose first line, `hash` line or any `feature` line it doesn't understand, and say that a newer Bolt is needed (decision 008). A `format` that doesn't end in an LF, or holds a CR, a blank line, a feature named twice or any other line, is damaged.
 
 **`state/head`** holds the lowercase hex ID of the newest diary entry followed by a newline. It is always replaced whole: written to `tmp/`, flushed to disk, then renamed.
 
@@ -298,6 +301,8 @@ bytes[32] BLAKE3 of everything before it
 A journal drives writes into the user's folder, so a reader checks the checksum before anything else and refuses the whole journal if any rule here is broken. Every name in a path follows §3's always-on name rules (so a path has no empty name, no `.` or `..`, and no `.bolt` under any spelling, and doesn't start or end with `/`). Removing a file needs an expected entry of kind 1, 2 or 3, and removing a folder one of kind 4, so that what is removed is re-checked first. An expected link is still there where the path holds that link, or a regular file holding exactly its target (the same content ID and size): the placeholder Bolt writes for a link it can't make there, which a save reads as that link too ([decision 039](decisions/039-first-save-after-import.md), [052](decisions/052-links-and-executable-bit-on-windows.md)). The other way round, a link where a file was expected is a change. A command that changes anything reads it whole, with a cap of 4 GiB, checksum included; a bigger journal is not written and the command stops before changing anything. A command that only reads reads just its first 73 bytes (magic, version, target and `from`), enough to say a switch is unfinished and between which entries, and checks nothing past them ([decision 079](decisions/079-red-team-m4-rulings.md)).
 
 **The cache key and the seal** ([decision 053](decisions/053-file-state-cache.md)). Every file in `cache/` is sealed: its body followed by 32 bytes, the keyed BLAKE3 hash of the body under the user's cache key. A file whose seal doesn't match (another account's, a copied project's from someone else, or edited) is ignored and rebuilt, never trusted and never an error. The key is the file `cache-key` in the folder of the user's own `config.toml` (`BOLT_CONFIG_DIR` if set): exactly 32 random bytes, nothing else. Bolt makes it on first use, writing a file of its own name there, readable only by the user on Unix (0600), and linking it in as `cache-key`, which never replaces a key already there, so two Bolts making it at once end with one key; only on a drive that has no hard links (the link fails with "not supported", or EPERM as Linux's FAT gives it) is it made in place, and any other failure counts as a key Bolt can't use. A key file that can't be read or isn't 32 bytes long is never replaced, since it is the user's own and replacing it silently could hide that someone changed it: the command goes on without its caches, none trusted or written, and a `cache_key_unusable` warning names the file and says to delete it. It is the user's own, so a link there is followed. With no settings folder at all, the command goes without its caches too, without a warning. Only the command line reads the key; the engine is handed it, and reads and writes no cache when it isn't, so a program using the engine never touches the user's settings, and no cache sealed with a key for one run (which no later run trusts) replaces a good one.
+
+**Git words already explained** ([decision 116](decisions/116-gits-words-as-shortcuts.md)). `git-words`, in the same folder as `cache-key`, lists the Git words whose hint Bolt has shown this user: text, one word per line, each line ending in an LF. Bolt reads at most 4,096 bytes of it and counts only lines that are exactly one of its shortcut words (`init`, `commit`, `diff`, `log`, `checkout`, `switch`, `restore`, `stash`, `branch`, `fsck`, `gc`); every other line is skipped. After it shows a word's hint it writes the file again with that word added, through a file of its own name and a rename. A file it can't read or write is never an error: the hint just shows again. It is the user's own, so a link there is followed, and nothing in it is trusted: a word it lists only silences a hint.
 
 **`cache/files`** (not normative) is the file-state cache: what each file in the folder was when Bolt last read it, so that a file whose kind, size, modified time, change time and file ID still match needn't be read again. Sealed as above; read with a 256 MiB cap, seal included, and a bigger one is not written (the command warns instead).
 
@@ -411,13 +416,208 @@ Uncompressed sizes are at most 2^40 bytes (1 TiB); structured records are at mos
 
 **Merging.** A pack is small when it is a regular file under 64 MiB on disk and the uncompressed sizes its index records total at most 256 MiB, counting each chunk list at its stored size ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)), which is judged from the index alone, without decompressing anything. Once a command has committed (moved `state/head`, and for `start` and `import` written `.bolt/format`) and more than 32 packs are small, it merges the small ones, still under the change lock ([decisions 057](decisions/057-pack-index-on-disk-and-merging.md) and [062](decisions/062-when-packs-are-merged.md)). Every other pack is left as it is, and isn't counted. The packs are taken in order of name, and each object in order of ID; each is read and checked as a reader checks it (header, size, fingerprint; a chunk list by its structure, §6, without rebuilding its file), and then its stored bytes and compression are copied as they are into new version 2 packs, written as any command writes its packs (so a merge rewrites version 1 packs as version 2). A pack holds one entry per ID, so chunk lists are copied last, after every other object: a chunk list whose ID the pack being written already holds as content stored whole is left out, since that content, checked as it was copied, is the file itself; one whose ID it already holds as another, different chunk list starts a new pack, so both survive; an identical one is left out ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). So a chunk list, which merging checks only by its structure, never takes the place of a checked copy. A pack with a copy that fails its check, or that can't be opened or read (damage, an I/O error, too little memory), is left as it is, a `pack_not_merged` warning names it, and the merge carries on; only a failure to write the new packs stops it. Once more than 32 packs are under 64 MiB on disk, each one's index is read to judge whether it is small, and one that can't be judged is named so too, even when 32 or fewer of the rest are small and nothing is merged. A damaged pack that is kept is read again at each merge, and the 256 MiB bound limits that cost. Only once every new pack is durable and renamed into the store are the old packs removed, one at a time, never one whose name is a new pack's, compared ignoring letter case. A pack that can't be removed stays as a second copy of its objects, with a warning. A stop at any point leaves every object readable: before the rename, the old packs are untouched; after it, objects in two packs are one object. A merge that fails doesn't fail the command, which has happened; it is a warning, and the next command that commits tries again.
 
-**Tidying** ([decision 077](decisions/077-tidy-and-the-undo-window.md)). `bolt tidy`, under the change lock, first marks what must be kept: everything the current diary entry's state reaches (lines, the save the project is at, shelves, tags and server lines, each save with all its parents, its folder listings, contents, project links and the records those name), every diary entry from `state/head` back along parents and, for every diary end (an entry no other names as its parent) whose `who` time is within the undo window, that end and its diary back along parents ([decision 079](decisions/079-red-team-m4-rulings.md)), and, for every such entry whose `who` time is within the undo window, everything the states of that entry and of its parent reach and both saves of its folder change, and for an undo or redo entry the same for its target (the states of the target and of its parent, and the target's folder change). A pack whose file was modified less than 24 hours ago is left as it is, though its index is read too. Every pack's index is checked against its checksum before tidying judges what it holds (a version 2 reader skips that check, since every object it reads is checked anyway, but tidying decides what to delete from the index alone); a pack that can't be opened, or whose index can't be read or fails its checksum, stops tidying before it removes anything, since it could hold the only chunk list that names chunks in other packs ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). If any pack holds a conflict record, which this version doesn't follow, tidying stops too. Marking follows chunk lists: for every file it keeps, each chunk list stored under the file's ID is read and checked by its structure (§6), and every chunk it names is kept; so is every chunk that a chunk list in a pack modified less than 24 hours ago names. Of the others, a pack with nothing to keep is removed without being read, first, before anything is written, so tidying frees space even on a full disk; a version 2 pack that isn't small and holds only what is kept stays; every other pack (one holding something not kept, a small one, or one in version 1) is rewritten: each kept object in it is read and checked as merging checks it and its stored bytes copied as they are into new version 2 packs, written as any command writes its packs, chunk lists last as merging copies them. The copy reads the index again, so a pack whose copy doesn't take as many kept objects as its checked index named (a failing disk can read it differently) is left as it is, with a `pack_not_tidied` warning. Only once every new pack is durable and renamed into the store are the old packs it rewrote removed, one at a time, never one whose name is a new pack's, compared ignoring letter case. Marking reads only records and chunk lists, never content, which it keeps by ID: if a record or chunk list it must read can't be read, tidying stops before it removes anything.
+**Tidying** ([decision 077](decisions/077-tidy-and-the-undo-window.md)). `bolt tidy`, under the change lock, first marks what must be kept: everything the current diary entry's state reaches (lines, the save the project is at, shelves, tags and server lines, each save with all its parents, its folder listings, contents, project links and the records those name), every diary entry from `state/head` back along parents and, for every diary end (an entry no other names as its parent) whose `who` time is within the undo window, that end and its diary back along parents ([decision 079](decisions/079-red-team-m4-rulings.md)), and, for every such entry whose `who` time is within the undo window, everything the states of that entry and of its parent reach and both saves of its folder change, and for an undo or redo entry the same for its target (the states of the target and of its parent, and the target's folder change). A pack whose file was modified less than 24 hours ago is left as it is, though its index is read too. Every pack's index is checked against its checksum before tidying judges what it holds (a version 2 reader skips that check, since every object it reads is checked anyway, but tidying decides what to delete from the index alone); a pack that can't be opened, or whose index can't be read or fails its checksum, stops tidying before it removes anything, since it could hold the only chunk list that names chunks in other packs ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)). If any pack holds a conflict record, which this version doesn't follow, tidying stops too. Marking follows chunk lists: for every file it keeps, each chunk list stored under the file's ID is read and checked by its structure (§6), and every chunk it names is kept; so is every chunk that a chunk list in a pack modified less than 24 hours ago names. Of the others, a pack with nothing to keep is removed without being read, first, before anything is written, so tidying frees space even on a full disk; a version 2 pack that isn't small and holds only what is kept stays; every other pack (one holding something not kept, a small one, or one in version 1) is rewritten: each kept object in it is read and checked as merging checks it and its stored bytes copied as they are into new version 2 packs, written as any command writes its packs, chunk lists last as merging copies them. The copy reads the index again, so a pack whose copy doesn't take as many kept objects as its checked index named (a failing disk can read it differently) is left as it is, with a `pack_not_tidied` warning. Only once every new pack is durable and renamed into the store are the old packs it rewrote removed, one at a time, never one whose name is a new pack's, compared ignoring letter case. Marking reads only records and chunk lists, never content, which it keeps by ID: if a record or chunk list it must read can't be read, tidying stops before it removes anything. Two rules keep that from stopping it for good ([decision 123](decisions/123-follow-ups-done-or-moved-past-v0.1.md)). **The window never reaches back past an earlier `tidy`.** Once marking is done and before anything is removed, tidying writes the start of the undo window it used (now minus the window) into `state/tidied` (§10); the next tidying takes the later of that time and its own window's start, so making the window longer doesn't ask for what the earlier one freed. **A diary end that can't be read back is passed over.** An end other than `state/head`'s own whose diary names an entry that isn't in the store no longer stops tidying: what marking reached from it is kept, and a `diary_end_unreadable` warning names the end. Everything else that marking can't read, the current state's saves first of all, still stops it.
 
 **Index limits.** A pack holds at most 16,777,216 (2^24) objects, and a writer must not put more in one pack ([decision 028](decisions/028-red-team-m1-session-2-rulings.md)). A command that needs more writes several; Bolt's writer starts a new pack once one holds 2^20 objects, which keeps the index it holds in memory near 100 MB ([decision 041](decisions/041-several-packs-per-command.md)). In version 2 the index of a pack with `count` objects is exactly `1,032 + 57 × count` bytes. In version 1 an index line is 43 to 61 bytes (its two sizes are varints of 1 to 10 bytes), so the index is the count's own varint followed by 43 × `count` to 61 × `count` bytes, with nothing after the last line.
 
 ## 12. Project files (outside `.bolt/`)
 
-- **`bolt.toml`** (TOML; decisions 008 and 016). Draft keys: `preset`, `chunk-files-over`, `ask-before-saving-over`, and `[[rule]]` tables with `files`, `lockable`, `conflict-markers` and `moves-with-asset`. Unknown keys produce a warning. Final key names are settled when presets are built (milestone 6).
+- **`bolt.toml`** (TOML 1.1.0, of which every TOML 1.0 file is one; decisions 008 and 016, and [decision 114](decisions/114-bolt-toml-keys-and-how-bolt-reads-it.md) for the keys): the project's rules, in the project's top folder.
+  - **Keys.** `preset`: text of at most 64 bytes, a label Bolt shows and never acts on. `chunk-files-over`: a size from 1 MiB to 128 GiB, `1 MiB` when absent; a file of at least that size, and at most 128 GiB, is stored in chunks (§6). `ask-before-saving-over`, a size (`100 MB` when absent), and `ask-before-saving-files-over`, a whole number from 0 (10,000 when absent): a save that adds more new bytes than the one, or more new files than the other, asks first (decision 056). And any number of `[[rule]]` tables, each with `files`, a list of one or more patterns in `.boltignore` syntax, none of them empty, and optionally `lockable` and `conflict-markers`, each `true` or `false`. Rules are read top to bottom: for a file, each of the two settings is what the last rule that matches the file and gives that setting says, and otherwise `lockable` is false and `conflict-markers` true. v0.1 records the rules and shows them; nothing uses `conflict-markers` before v0.2 or `lockable` before v0.3.
+  - **A size** is text: one or more digits, then any number of spaces, then one of `B`, `KB`, `MB`, `GB`, `TB` (1,000 bytes to the `KB`) or `KiB`, `MiB`, `GiB`, `TiB` (1,024 to the `KiB`), spelled exactly so, and nothing before, between or after. Its value in bytes must fit 64 bits.
+  - **Reading.** The file is read through the handle of the project's top folder, never through a link, and must be a regular file of at most 1 MiB. With no file, the values above for an absent key all apply. A file that is something else (a link, a folder, a special file, a longer file), that can't be read, or that isn't TOML (a key given twice included) is passed over whole, with a `rules_file_skipped` warning. A key whose value is of the wrong type or out of range, a rule without a usable `files`, and a key this Bolt doesn't know (which a newer Bolt may have written) are each passed over while the rest counts, and one `rules_ignored` warning names them: top-level keys in byte order, then rules in file order, `rule[N]` for a rule passed over whole and `rule[N].key` for one key of it (a rule's keys in byte order), counting rules from 1. A rule is passed over whole when `files` is absent, isn't a list, is empty, or holds anything but non-empty text. A `preset` is measured in bytes of UTF-8. Nothing in the file ever stops a command, and nothing in it names a program (decision 008).
+  - **When.** A command that stores files reads it once, right after taking the change lock, and uses its `chunk-files-over` for all it stores; `bolt save` also takes the two question numbers from it. The copy read is the one in the folder, saved or not (decision 016).
+  - **What a preset writes** ([decision 113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md)). Custom writes no file. Code and Game write `bolt.toml` whole and one block of lines in `.boltignore`, each ending every line in an LF.
+
+  The Code preset writes this `bolt.toml`, byte for byte:
+
+  ```toml
+  # Bolt project rules, written by the Code preset (version 1).
+  # This file is the project's rules: edit it freely. `bolt setup` shows how Bolt reads it.
+  preset = "code"
+
+  # A file of this size or more is stored in chunks, so a changed part is stored once.
+  chunk-files-over = "1 MiB"
+
+  # A save that adds more than this, in new bytes or in new files, asks first.
+  ask-before-saving-over = "100 MB"
+  ask-before-saving-files-over = 10000
+  ```
+
+  The Game preset writes the one below. The art rule always comes first; then the rules of each engine found, in the order Unity, Unreal, Godot, and none for an engine that wasn't found (here all three were):
+
+  ```toml
+  # Bolt project rules, written by the Game preset (version 1).
+  # This file is the project's rules: edit it freely. `bolt setup` shows how Bolt reads it.
+  preset = "game"
+
+  # A file of this size or more is stored in chunks, so a changed part is stored once.
+  chunk-files-over = "1 MiB"
+
+  # A save that adds more than this, in new bytes or in new files, asks first.
+  ask-before-saving-over = "1 GiB"
+  ask-before-saving-files-over = 10000
+
+  # Art and audio that can't be merged. Marked lockable; locking arrives with syncing.
+  [[rule]]
+  files = ["*.psd", "*.png", "*.tga", "*.tif", "*.tiff", "*.exr", "*.jpg", "*.jpeg", "*.fbx", "*.blend", "*.max", "*.mb", "*.wav", "*.ogg", "*.mp3", "*.mp4", "*.mov"]
+  lockable = true
+
+  # Unity scenes and prefabs.
+  [[rule]]
+  files = ["*.unity", "*.prefab"]
+  lockable = true
+  conflict-markers = false
+
+  # Unity's .meta files never get conflict markers.
+  [[rule]]
+  files = ["*.meta"]
+  conflict-markers = false
+
+  # Unreal assets and maps.
+  [[rule]]
+  files = ["*.uasset", "*.umap"]
+  lockable = true
+
+  # Godot's binary scenes and resources.
+  [[rule]]
+  files = ["*.scn", "*.res"]
+  lockable = true
+  ```
+
+  The block for `.boltignore` starts with a mark line that names the preset and what was found, and ends with the end mark. Code, with every language found (a language that wasn't found leaves its lines out; the last four lines are always there):
+
+  ```text
+  # >>> Bolt preset: code (node, python, rust, go, dart, dotnet, maven, gradle), version 1. `bolt setup` rewrites the lines down to the end mark.
+  # Node
+  node_modules/
+  .npm/
+  .next/
+  .nuxt/
+  .cache/
+  .parcel-cache/
+  .svelte-kit/
+  .turbo/
+  coverage/
+  npm-debug.log*
+  yarn-debug.log*
+  yarn-error.log*
+  *.tsbuildinfo
+  # Python
+  __pycache__/
+  *.py[cod]
+  .venv/
+  venv/
+  dist/
+  *.egg-info/
+  .pytest_cache/
+  .mypy_cache/
+  .ruff_cache/
+  .tox/
+  .ipynb_checkpoints/
+  # Rust
+  target/
+  # Go
+  *.test
+  *.coverprofile
+  # Dart and Flutter
+  .dart_tool/
+  /build/
+  .flutter-plugins
+  .flutter-plugins-dependencies
+  # .NET
+  [Bb]in/
+  [Oo]bj/
+  .vs/
+  *.user
+  *.suo
+  # Maven
+  target/
+  # Gradle
+  .gradle/
+  **/build/
+  !**/src/**/build/
+  # Settings that hold secrets.
+  .env
+  .env.*
+  !.env.example
+  # <<< Bolt preset
+  ```
+
+  Game, with every engine found (with none found, the block is its two mark lines):
+
+  ```text
+  # >>> Bolt preset: game (unity, unreal, godot), version 1. `bolt setup` rewrites the lines down to the end mark.
+  # Unity: caches, generated project files, build output and crash files.
+  .utmp/
+  /[Ll]ibrary/
+  /[Tt]emp/
+  /[Oo]bj/
+  /[Bb]uild/
+  /[Bb]uilds/
+  /[Ll]ogs/
+  /[Uu]ser[Ss]ettings/
+  /[Mm]emory[Cc]aptures/
+  /[Rr]ecordings/
+  .vs/
+  .gradle/
+  ExportedObj/
+  .consulo/
+  /*.csproj
+  /*.unityproj
+  /*.sln
+  /*.slnx
+  /*.booproj
+  *.suo
+  *.user
+  *.userprefs
+  *.pidb
+  *.svd
+  *.pdb
+  *.mdb
+  *.opendb
+  *.VC.db
+  *.pidb.meta
+  *.pdb.meta
+  *.mdb.meta
+  sysinfo.txt
+  mono_crash.*
+  /*_BackUpThisFolder_ButDontShipItWithYourGame/
+  /*_BurstDebugInformation_DoNotShip/
+  crashlytics-build.properties
+  /[Aa]ssets/_Recovery/
+  /[Aa]ssets/_Recovery.meta
+  /[Aa]ssets/Addressables_Temp/
+  /[Aa]ssets/Addressables_Temp.meta
+  /UIElementsSchema/
+  # Unreal: caches, generated project files and build output.
+  .vs/
+  /Binaries/
+  /Saved/
+  /Intermediate/
+  Plugins/**/Intermediate/
+  /DerivedDataCache/
+  *_BuiltData.uasset
+  /*.sln
+  /*.slnx
+  *.suo
+  *.opensdf
+  *.sdf
+  *.VC.db
+  *.VC.opendb
+  *.xcodeproj
+  *.xcworkspace
+  # Godot: caches, export settings and crash files.
+  .godot/
+  .import/
+  export.cfg
+  export_credentials.cfg
+  .mono/
+  mono_crash.*.json
+  # <<< Bolt preset
+  ```
+
+  - **The block in `.boltignore`.** Its first line starts with `# >>> Bolt preset`, and its last line is exactly `# <<< Bolt preset`; a CR at the end of either line is overlooked, and so is a UTF-8 byte order mark at the very start of the file, which always stays first. A start line with no end line after it is an ordinary comment. Writing a preset replaces the first block, from its start line to its end line (to the end of the file, when the end line has no LF after it), and touches no other byte; with no block, the new one goes in at the top (after a byte order mark, if the file has one), followed by one empty line when the file already holds anything else. Switching to Custom removes the first block's lines; a file that then holds nothing but empty lines (and perhaps a byte order mark) is removed. The `setup` step (§9) writes both files.
 - **`.boltignore`** files work like `.gitignore` files: one at the project root, and optionally more in subfolders, each using the `.gitignore` pattern syntax relative to its own folder. `.bolt/` and `.git/` are always ignored (decision 019); where the drive ignores letter case (as Windows' and macOS's do by default) that includes `.git` in any letter case (`.GIT`), because there it is Git's folder too. Any `.bolt` spelling other than the project's own folder is left out the same way, named in the same warning ([decision 059](decisions/059-bolt-spellings-left-out-like-git-spellings.md)). Any other entry whose name Git treats as `.git`, as the import judges it (a `.git` file, `.GIT` where letter case counts, `git~1`, spellings with a character macOS ignores), is left out too, in every folder and on every system. A `git_names_left_out` warning names what was left out: the ones in the folder that no ignore rule keeps out, and those the save it builds on held, each once (decision 043). A folder below the top that holds an entry named `.git` (a folder, or a worktree's or submodule's file; `.GIT` too where the drive ignores letter case) or a folder named `.bolt` is a repository or project of its own, and is left out as if an ignore rule kept it out: only what the save it builds on holds there is kept, and a `nested_projects_left_out` warning names those no ignore rule keeps out (decision 046). A `.boltignore` must be a regular file of at most 1 MiB; a link, pipe or larger file stops the save with an error (decision 025). Decisions 028, 029 and 038 add:
   - **`.gitignore` files are read too** (decision 038), as if each were a `.boltignore` in its folder, with that folder's `.boltignore` lines after its `.gitignore` lines, so they can add to Git's rules or undo them. The limits below count both kinds. A `.gitignore` that isn't a regular file (a link, folder or special file) is skipped with a `gitignore_skipped` warning and its rules don't apply, as Git skips a linked one; any other problem with it (over 1 MiB, past a limit, or unreadable) stops the save, as for a `.boltignore`. Git's personal lists apply too (decision 047), as if their lines came first in the top folder's `.gitignore`: the user's own list, then `.git/info/exclude`, so the project's own lines win, as in Git, and both count as Git's rules wherever a save asks what Git alone would leave out. The user's own list is the file `core.excludesFile` names in the user's own Git settings, read where Git reads them, the last one found winning ([decision 094](decisions/094-red-team-m5-rulings.md)), with `~` the home folder Git uses: `HOME` on Unix, and on Windows `HOME`, else `HOMEDRIVE` followed by `HOMEPATH` when that names a folder, else `USERPROFILE`; with no home folder no `~/` file is read, an include whose path starts with `~/` stops the save as it is read, and once everything is read the first `~/` `core.excludesFile` stops it, even where a later one overrides it, as Git stops in that order ([decision 097](decisions/097-red-team-m5-session-2-rulings.md)): the file `GIT_CONFIG_SYSTEM` names, tidied first as Git tidies it, a value whose tidying fails (a `..` above its start) stopping the save ([decision 096](decisions/096-git-config-system-is-tidied-as-git-tidies-it.md)), unless `GIT_CONFIG_NOSYSTEM` is true; then the file `GIT_CONFIG_GLOBAL` names, or when that isn't set `$XDG_CONFIG_HOME/git/config` and then `~/.gitconfig`; then the settings `GIT_CONFIG_COUNT` gives through `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>`, with a value Git would refuse stopping the save (`~/` expanded; a relative path from the project's top; set to nothing, it names no list, as in Git; the exact text `/dev/null`, and on Windows `nul` in any case, names no list, and no file when it is the value of `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_GLOBAL` or an include, judged before the value is joined to any folder, [decision 095](decisions/095-a-git-setting-naming-dev-null-names-no-file.md); the file `GIT_CONFIG_GLOBAL` names, `$XDG_CONFIG_HOME/git/config` or `~/.gitconfig`, when the system refuses Bolt permission to read it (EACCES), is skipped, as Git skips it, but on Windows stops the save, as it stops Git there, while the system's file or an include that can't be read stops it everywhere; a `%(prefix)/` path given through a variable stops the save too, since where it leads depends on how Git was installed), else `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore` when that variable isn't set); a link to it is followed, since it is the user's own file, and `core.excludesFile` is never taken from the repository's `.git/config`. Plain `[include]` sections of the user's settings, and an `include.path` given through `GIT_CONFIG_COUNT`, are followed as Git follows them (at most 10 deep); `[includeIf]` sections aren't, and nor is the system's own Git settings file when `GIT_CONFIG_SYSTEM` doesn't name it (where it is depends on how Git was installed), so a list named only there doesn't apply; a list that lands inside the project is read there like a `.gitignore`, without following a link; a path starting `~user/` stops the save ([decision 060](decisions/060-user-git-settings-includes-and-paths.md)). `.git/info/exclude` is read only where the top folder holds a real `.git` folder, and like a `.gitignore`: a link or special file is skipped with a `gitignore_skipped` warning, and so is the list when `.git` or `.git/info` is a link (decision 060). Both count toward the limits below; a list that isn't there is none, and any other problem reading one stops the save.
   - **Rules keep out only what isn't saved yet** (decision 038). A file or link in the save the new one builds on is saved again even when a rule matches it, as in Git; it leaves history only when it is deleted from the folder. A save that takes a change to one, to its contents or its kind, warns (`ignored_changes_saved`, decision 043). The name must match exactly, and the entry must still be a folder if it was saved as one and not a folder if it wasn't. So a save looks inside an ignored folder where that save holds the folder, keeps only the names saved there, at every depth, and reads no ignore file inside it. Before any rule applies, a save keeps exactly as they were the project links, names this system can't hold and names that are one file on the drive, without looking at what the folder holds there, and a link Git wrote as a file holding exactly its target ([design.md](design.md) §5.2, decisions 036 and 039). Neither rule keeps a name Git treats as `.git`: a save drops any the save it builds on holds (decision 043), except inside a folder kept as it was, which keeps what that save holds in it; writing files out (milestone 3) checks every name again.
@@ -470,10 +670,14 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `pack_chunked.json`: a version 2 pack holding the two chunks of `hello world`, stored raw, and its chunk list, stored under the file's ID, which the writer must write byte for byte.
   - The code was then written to match them, and none of them changed. The tests in `chunks.rs` check the table's three numbers and the context string against `chunking.json`, and that each of `chunk_list.json`'s ten lists reads as a stream exactly as it decodes. `crates/bolt-vcs-core/tests/vectors.rs` checks the four inputs' cut sizes, that the inserted byte changes only the 12th chunk, each valid list's bytes both ways, the eight refusals, and the chunked pack, which the writer writes byte for byte and which reads back as `hello world`.
   - `format.json`, added once the code was built: a `.bolt/format` (§10) listing `feature chunks`, as `bolt start` and `bolt import` write it since milestone 5 ([decision 083](decisions/083-a-chunk-list-is-stored-under-its-files-id.md)), which the writer must write byte for byte and a reader must accept. `vectors.rs` checks what `start` writes against it, and that a project whose `format` holds it opens.
+- **Milestone 6** (written from §12's text before the code, [decisions 113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) and [114](decisions/114-bolt-toml-keys-and-how-bolt-reads-it.md)):
+  - `rules.json`: `bolt.toml` texts and what a reader must make of each: the four settings in bytes and files, the rules it keeps (`null` where a rule doesn't give a setting), the names it passes over in `rules_ignored`'s order, and `skipped` for a text that isn't TOML. It covers both families of units, the limits of `chunk-files-over` on both sides, sizes that don't fit, each wrong type, unknown keys, a `preset` measured in bytes, rules with and without a usable `files`, the order names are given in, and an inline table written over several lines, which TOML 1.1 allows and 1.0 didn't.
+  - `presets.json`: under `presets`, the `bolt.toml` and the `.boltignore` block each preset writes, byte for byte, for nothing found, one thing found and everything found; under `boltignore_edits`, a `.boltignore` before, the block written (`null` when switching to Custom) and the file after (`null` when it is removed), for a new file, lines of the user's own, a block replaced in place, marks ending in CR LF, a start mark with no end, an end mark with no LF after it, two blocks, a file that starts with a byte order mark, and each way a removal ends.
+  - Change IDs keep their bytes; only their letters change ([decision 122](decisions/122-change-ids-in-jujutsus-letters.md)), which no vector pins.
 
 ## 14. Open points
 
-- Final `bolt.toml` key names (milestone 6).
+- `bolt.toml`'s move hints (the draft's `moves-with-asset`), with move notes (v0.2).
 - Conflict record details (before v0.2).
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
