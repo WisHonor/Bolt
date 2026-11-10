@@ -1683,3 +1683,14 @@ fn an_earlier_entrys_problem_comes_before_a_later_ones() {
         "{said}"
     );
 }
+
+/// A file deleted while another program still holds it (on FAT or exFAT, say) is in use too.
+#[cfg(windows)]
+#[test]
+fn error_303_counts_as_a_file_in_use() {
+    let error = |code| io::Error::from_raw_os_error(code);
+    for code in [32, 33, 303] {
+        assert!(in_use(&error(code)), "{code}");
+    }
+    assert!(!in_use(&error(5)));
+}

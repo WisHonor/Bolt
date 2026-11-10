@@ -1831,8 +1831,9 @@ fn cant_link(e: &io::Error) -> bool {
 
 /// Whether another program holds the file open: a sharing or lock violation on Windows.
 fn in_use(e: &io::Error) -> bool {
-    // A project file in use (32) or locked (33) is left for the next run; a refusal (5) may be real.
-    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+    // A project file in use (32), locked (33) or deleted while still held open (303, on FAT and
+    // exFAT) is left for the next run; a refusal (5) may be real.
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33 | 303))
 }
 
 /// `act`, tried again while another program holds the file.
