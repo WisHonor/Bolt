@@ -412,7 +412,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | Field | Type | Meaning |
 |---|---|---|
 | `bolt_json` | number | `1` |
-| `current` | string or `null` | The line the project is on. `null` if it is at a save instead of on a line. |
+| `position` | object | Where the project is, as in `status`: `{"line": …}`, or `{"save": …}` (64 hex digits) when it is at a save instead of on a line. |
 | `lines` | list of string | Every line's name, in byte order. |
 | `server_lines` | list of string | Every server line as `line@server`, by server and then line, in byte order. `[]` if none. |
 | `warnings` | list | See §4. |
@@ -422,7 +422,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | Field | Type | Meaning |
 |---|---|---|
 | `bolt_json` | number | `1` |
-| `line` | string or `null` | The line the project is on. `null` if it is at a save instead of on a line. |
+| `position` | object | Where the project is, as in `status`: `{"line": …}`, or `{"save": …}` (64 hex digits) when it is at a save instead of on a line. |
 | `saves` | list of save | The saves of the line, newest first, following first parents back to the start. |
 | `warnings` | list | See §4. |
 
@@ -523,7 +523,7 @@ Stdout itself may not take what a command prints there, its document included: a
 The exit code is the command's own: 0 when it succeeded and only the reader went, 1 when it failed or a write failed. A line stderr can't take is lost, and never stops Bolt: its reader may have gone too (`bolt status 2>&1 | true`).
 
 ```text
-{"bolt_json":1,"line":"main","saves":[ …the saves read so far… ],"error":{"hint":null,"message":"…"},"warnings":[]}
+{"bolt_json":1,"position":{"line":"main"},"saves":[ …the saves read so far… ],"error":{"hint":null,"message":"…"},"warnings":[]}
 ```
 
 `undo` and `redo` can fail after taking some of the steps asked for, and `undo --to` after some of the steps on its way. Their error document then also has `undone`, `redone` or `steps`, and `shelved`, listing what was done before the failure.

@@ -214,7 +214,7 @@ fn line_lists_lines_and_server_lines() {
     );
     let out = env.bolt().args(["line", "--json"]).output().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["current"], "main");
+    assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
     assert_eq!(doc["lines"], serde_json::json!(["b", "main", "zz"]));
     assert_eq!(doc["server_lines"], serde_json::json!(["x@origin"]));
     // At a save, no line is current.
@@ -234,7 +234,7 @@ fn line_lists_lines_and_server_lines() {
     );
     let out = env.bolt().args(["line", "--json"]).output().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["current"], serde_json::Value::Null);
+    assert_eq!(doc["position"], serde_json::json!({"save": first.to_hex()}));
 }
 
 /// Wherever a save away from a line stops, the project is either where it was or on the new
@@ -296,4 +296,20 @@ fn a_partial_save_at_a_save_needs_a_line_name_too() {
         .map(|e| e.name.clone())
         .collect();
     assert_eq!(names, ["a.txt"]);
+}
+
+#[test]
+fn line_json_matches_its_snapshots() {
+    let (env, first) = at_first_save();
+    let line = |env: &Env| -> serde_json::Value {
+        let out = env.bolt().args(["line", "--json"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let mut doc = line(&env);
+    assert_eq!(doc["position"]["save"], first.to_hex(), "{doc}");
+    doc["position"]["save"] = "[redacted]".into();
+    insta::assert_json_snapshot!("line_at_a_save", doc);
+    env.bolt().args(["goto", "main"]).assert().success();
+    insta::assert_json_snapshot!("line_on_a_line", line(&env));
 }

@@ -1468,7 +1468,7 @@ mod tests {
         (String::from_utf8(out).unwrap(), ended)
     }
 
-    const SAVES: &str = r#"{"bolt_json":1,"line":"main","saves":["#;
+    const SAVES: &str = r#"{"bolt_json":1,"position":{"line":"main"},"saves":["#;
     const CHANGES: &str = r#"{"bolt_json":1,"changes":["#;
 
     #[test]

@@ -1488,7 +1488,7 @@ fn history_and_show_json_output() {
     let env = project_with_two_saves();
     let mut history: serde_json::Value =
         serde_json::from_str(&stdout_of(&env, &["--json", "history"])).unwrap();
-    assert_eq!(history["line"], "main");
+    assert_eq!(history["position"], serde_json::json!({"line": "main"}));
     for save in history["saves"].as_array_mut().unwrap() {
         redact_save(save);
     }
@@ -1540,7 +1540,7 @@ fn history_json_is_the_one_compact_line_serde_json_would_write() {
     let raw = stdout_of(&env, &["--json", "history"]);
     let history: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(raw, format!("{history}\n"));
-    assert_eq!(history["line"], "main");
+    assert_eq!(history["position"], serde_json::json!({"line": "main"}));
     let messages: Vec<&str> = history["saves"]
         .as_array()
         .unwrap()

@@ -1310,14 +1310,11 @@ fn history_to(
     unfinished: Option<Warning>,
 ) -> Result<Vec<Warning>, Failure> {
     if json {
-        let line = match &repo.current()?.1.state.position {
-            bolt_core::diary::Position::OnLine(name) => json!(name),
-            bolt_core::diary::Position::AtSave(_) => json!(null),
-        };
+        let position = output::position_json(&repo.current()?.1.state.position);
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         return output::stream_document(
             out,
-            &format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":["),
+            &format!("{{\"bolt_json\":{BOLT_JSON},\"position\":{position},\"saves\":["),
             |each| {
                 for_each_on_line(repo, |id, save, short| {
                     each(&output::save_json(id, save, short))
@@ -1463,7 +1460,7 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         let lines: Vec<&String> = entry.state.lines.keys().collect();
         let document = json!({
             "bolt_json": BOLT_JSON,
-            "current": current,
+            "position": output::position_json(&entry.state.position),
             "lines": lines,
             "server_lines": server_lines,
             "warnings": output::warnings_json(&warnings),
