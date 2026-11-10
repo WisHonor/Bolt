@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.99.1 and the crates already in the workspace (`blake3`, `zstd`, std threads). No new dependency. `hyperfine` is installed only on CI runners.
 
-**Spec:** decisions [099](../decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [105](../decisions/105-the-change-id-cache-keeps-each-lines-saves-in-order.md), with 006, 009, 011, 023, 028, 038, 046, 048, 049, 053, 057, 061, 067, 069, 083, 084 and 088; [design.md](../design.md) §5.7 and §5.9; [storage-format.md](../storage-format.md) §10 and §11; [security.md](../security.md) T9, T20, T25 and T32; [testing.md](../testing.md) §4 and §5; [benchmarks.md](../benchmarks.md) §1 and §7; the speed session's rows of [the follow-ups](2026-11-01-milestone-1-follow-ups.md).
+**Spec:** decisions [099](../decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [106](../decisions/106-on-linux-and-macos-a-folder-is-still-asked-for-git-and-bolt-by-name.md), with 006, 009, 011, 023, 028, 038, 046, 048, 049, 053, 057, 061, 067, 069, 083, 084 and 088; [design.md](../design.md) §5.7 and §5.9; [storage-format.md](../storage-format.md) §10 and §11; [security.md](../security.md) T9, T20, T25 and T32; [testing.md](../testing.md) §4 and §5; [benchmarks.md](../benchmarks.md) §1 and §7; the speed session's rows of [the follow-ups](2026-11-01-milestone-1-follow-ups.md).
 
 **Rulings made while building:** `2026-11-10-milestone-6-speed-rulings.md`, kept as the build goes, verbatim.
 
@@ -38,7 +38,7 @@
   | Caches (100) | `cache/files` and `cache/change-ids`: written through `tmp/` and a rename, never flushed (neither the file nor `cache/`) |
   | When `cache/files` is written (100) | only if the bytes to write differ from the bytes read |
   | `state/lock-info`, the drive test's rename (100) | not flushed |
-  | A folder is asked for `.git` and `.bolt` by name (101) | only if a name in its listing (or a Windows short name) is `.git` or `.bolt` in any ASCII letter case, or any name holds a byte outside ASCII |
+  | A folder is asked for `.git` and `.bolt` by name (101, 106) | on Windows, only if a name in its listing or a short name is `.git` or `.bolt` in any ASCII letter case, or any name holds a byte outside ASCII; on Linux and macOS, always (decision 106, made while Task 4 was reviewed) |
   | A folder's ignore file is opened (101) | only if a name in its listing is `.gitignore` (or `.boltignore`) in any ASCII letter case, or any name holds a byte outside ASCII |
   | A file flushed while written (102) | past 16 MiB (16,777,216 bytes), every further 16 MiB, by a helper thread through a second handle; then the whole file once more before the rename |
   | zstd level, the 95% rule, chunk sizes (103) | unchanged |
@@ -136,6 +136,54 @@ Every line `last_match` returns has passed `fits`, and a plain line can only fit
 - [ ] **Step 5: Unit tests by hand** for the orders that matter: a later wildcard line beats an earlier plain one and the other way round; `!name` after `*.ext`; a `dir/` plain line doesn't fit a file; `/a/b` in a nested folder's file fits only below that folder; `Makefile` against `MAKEFILE` with and without `casefold`.
 - [ ] **Step 6: Run** the whole `ignore` module's tests, `ignore_vs_git` (`cargo test -j 1 -p bolt-vcs --test ignore_vs_git -- --test-threads=2`), and the fuzz crate's build if `cargo fuzz` is installed (it needn't be). Expected: all pass.
 - [ ] **Step 7: Commit** `Find plain ignore lines by lookup instead of trying each one`.
+
+## Task 2b: A line with one `*` is matched by its two ends
+
+> Added while building (2026-11-10): the gate showed Task 2's index took 2.4 ms off a 54 ms `status`, not the 15 ms the first profile seemed to promise. The matcher's time was the general matcher's, on a handful of lines with one `*`. The rulings file has the ruling.
+
+**Files:** modify `crates/bolt-vcs-core/src/ignore.rs` only (the matcher and its tests).
+
+**Why:** the index of Task 2 took 2.4 ms off a 54 ms `status` on Git's source, not the 15 ms the profile seemed to promise. A standalone benchmark of the matcher on Git's source (4,851 files, 227 folders) shows where the matcher's time really goes: of 8.1 ms spent on verdicts, 5.6 ms is 13,115 calls of the general `wildmatch`, for five lines: `*.py[co]` and `*.[aos]` (tried on every name), `*.[1-8]`, `cmds-*.adoc` and `mergetools-*.adoc` (on every name in `Documentation/`). On Godot's demos it is `mono_crash.*.json` and `data_*`. `wildmatch` allocates three vectors on every call and walks a table a byte at a time; these lines need neither. Git itself has the same kind of shortcut for `*` followed by plain text (`ends_with`, which this file already has).
+
+**What:** a line that matches names (it has no `/`) and whose pieces are one-byte pieces, then one `*`, then one-byte pieces, is matched by comparing the name's two ends, with no table and no allocation:
+
+- A one-byte piece is what `wildmatch` reads as exactly one byte of text: a plain byte, an escaped byte (`\x`), `?`, or a bracket class (`[...]`).
+- When `Pattern::parse` reads a line with `any_depth` that is neither plain nor `ends_with`, it reads the text's pieces with the same reader `wildmatch` uses (`Pieces::next_piece`). If they are `head` (zero or more one-byte pieces), exactly one `Token::Star`, then `tail` (zero or more one-byte pieces), and nothing else (no second `*`, no `Stars`, no `StarsSlash`, no `Never`), the pattern keeps where its head ends and its tail starts in its own text, and how many pieces each has:
+
+  ```rust
+  /// A line of one-byte pieces around a single `*`: where the pieces before the `*` end and
+  /// those after it start in `text`, and how many bytes of a name each side takes.
+  struct Ends {
+      head: usize,       // text[..head] holds the pieces before the `*`
+      tail: usize,       // text[tail..] holds the pieces after it
+      head_width: usize, // pieces before the `*`, one byte of a name each
+      tail_width: usize, // pieces after it
+  }
+  ```
+
+  `Pattern` gains `ends: Option<Ends>`.
+- Matching, in `match_basename`, in place of the call to `wildmatch` when `ends` is there:
+  1. the name is cut at its first NUL (`until_nul`), as `wildmatch` cuts its text;
+  2. it must have at least `head_width + tail_width` bytes;
+  3. its first `head_width` bytes must match the head's pieces one by one, and its last `tail_width` bytes the tail's pieces one by one, by the very rules `advance` applies: a plain byte equals the text byte with letter case folded when `casefold` (an escaped byte is not folded, the text byte is); `?` takes any byte but `/`; a class takes the byte `class(body, folded byte, casefold)` says it takes;
+  4. the bytes between the two ends must hold no `/` (a `*` never matches one).
+- The pieces are read again from the pattern's text at match time with `Pieces` (its `casefold` is only known then); nothing is allocated: read them with `next_piece`, never through `get`.
+- Every other line still goes through `wildmatch`, which doesn't change. `match_pathname` doesn't change.
+
+**A cheaper hash for the index.** A function-level profile of `status` on Git's source (callgrind, GitHub's Linux runner) puts `wildmatch` at 31.6% of the walk's work and `folded_hash` at another 7.7%: it feeds SipHash one byte at a time, twice for every name and every rules file. `folded_hash` becomes FNV-1a, 64 bits, over the lowered bytes: start from `0xcbf2_9ce4_8422_2325`; for each byte, XOR it in, then multiply by `0x0000_0100_0000_01b3`, wrapping. Nothing rests on the hash: a line found by it is still tested in full, and names that share a hash only cost the scan they cost before the index.
+
+**The result must be `wildmatch`'s on every input.** That is the whole of the review.
+
+- [ ] **Step 1: Write the failing tests** in `ignore.rs`:
+  - `a_line_with_one_star_matches_as_wildmatch_does`: a proptest (5,000 cases) over lines built from pieces drawn from: lower and upper case letters, `.`, `-`, `_`, a byte outside ASCII, `?`, `*`, `**`, classes (`[ab]`, `[!ab]`, `[^a]`, `[a-c]`, `[]a]`, `[[:digit:]]`, `[[:upper:]]`, `[A-C]`), escapes (`\a`, `\A`, `\*`, `\?`, `\[`, `\\`), an unclosed `[`, and a `\` at the end; and names of 0 to 12 bytes drawn from the same letters plus `/`, NUL and a byte outside ASCII. For both values of `casefold`: `match_basename(name, &Pattern::parse(line), casefold)` equals what the old code gave, which the test spells out: the plain compare for a plain line, the `ends_with` compare for an `ends_with` line, and `wildmatch(text, name, casefold)` for every other line. Lines that hold a `/` are skipped (they aren't matched by name).
+  - `git_and_godot_lines_take_the_two_ends`: for each of `*.py[co]`, `*.[aos]`, `*.[1-8]`, `cmds-*.adoc`, `mergetools-*.adoc`, `mono_crash.*.json`, `data_*`, `?*`, `a?*[bc]` and `a**b` (a run of stars inside a name is read as one `*`): `Pattern::parse` gives `ends`, with the head, tail and widths the test spells out for each. And none for `*a*` (two `*`), `**` and `***` (a whole-name `**`), `[a` and `a\` (nothing matches past them), `a/*b` (it holds a `/`), `abc` (plain) and `*` and `*.o` (`ends_with` already).
+  - `the_two_ends_fill_no_table`: with the existing test-only cell counter of `wildmatch` (`CELLS`): matching 1,000 names against a `Rules` holding `*.py[co]` and `*.[aos]` leaves the counter at 0.
+  - Git's own table still passes (`gits_wildmatch_table_passes`, unchanged), and gains a sibling, `gits_table_passes_through_match_basename`: every row of `WILDMATCH_CASES` whose pattern holds no `/` gives the same answer through `match_basename(text, &Pattern::parse(pattern), casefold)` as its row says for `wildmatch`, for rows where the two are comparable (say in a comment which rows are left out and why, if any).
+- [ ] **Step 2: Run them.** `cargo test -j 1 -p bolt-vcs-core ignore:: -- --test-threads=2`. Expected: `git_and_godot_lines_take_the_two_ends` and `the_two_ends_fill_no_table` fail (or don't compile); the proptest passes trivially before the change and must pass after it.
+- [ ] **Step 3: Build it.**
+- [ ] **Step 4: Run** the core suite, `ignore_vs_git` (`cargo test -j 1 -p bolt-vcs --test ignore_vs_git -- --test-threads=2`), the whole workspace, fmt and clippy. Expected: all pass.
+- [ ] **Step 5: Also widen Task 2's property test** (its review asked): add the bodies `a\*`, `a?` and `a\ ` to `LINE_BODIES`, and the empty name to `PATH_NAMES` if the test's shape allows an empty name (say so if it doesn't).
+- [ ] **Step 6: Commit** `Match a line with one star by the name's two ends`.
 
 ## Task 3: Caches and flushes (decision 100)
 
