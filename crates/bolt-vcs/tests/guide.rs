@@ -35,6 +35,25 @@ fn blocks(doc: &str, lang: &str) -> Vec<Vec<(usize, String)>> {
     found
 }
 
+/// Fails unless every fenced block is marked `sh`, `text` or `toml`, so a block marked anything
+/// else can't be passed over unrun.
+fn assert_fences_known(doc: &str) {
+    let mut open = false;
+    for (n, line) in doc.lines().enumerate() {
+        let Some(lang) = line.trim_start().strip_prefix("```") else {
+            continue;
+        };
+        if !open {
+            assert!(
+                ["sh", "text", "toml"].contains(&lang.trim()),
+                "guide.md line {}: a fence marked {lang:?}; use sh, text or toml",
+                n + 1
+            );
+        }
+        open = !open;
+    }
+}
+
 /// A command line's words: split at spaces, with double quotes keeping a word together.
 fn words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
@@ -96,6 +115,7 @@ fn commands(env: &Env) -> BTreeSet<String> {
 fn every_command_in_the_guide_runs() {
     let guide = read_doc("docs/guide.md");
     let env = Env::empty();
+    assert_fences_known(&guide);
 
     // The guide's first step tells Bolt who you are in the settings file; this run's own one.
     let settings = blocks(&guide, "toml");
@@ -160,7 +180,12 @@ fn every_command_in_the_guide_runs() {
     );
 
     // Every command but import, which needs a Git repository, is shown running.
-    let missing: Vec<String> = commands(&env)
+    let known = commands(&env);
+    assert!(
+        known.len() >= 17,
+        "bolt help lists only {known:?}, so this check would check little"
+    );
+    let missing: Vec<String> = known
         .into_iter()
         .filter(|c| c != "import" && !used.contains(c))
         .collect();
@@ -216,7 +241,7 @@ fn every_link_in_the_guide_the_readme_and_security_md_leads_somewhere() {
         let doc = read_doc(rel);
         let folder = repo_root().join(rel).parent().unwrap().to_owned();
         for target in link_targets(&doc) {
-            if target.starts_with("https://") {
+            if target.starts_with("https://") || target.starts_with("http://") {
                 continue;
             }
             let (file, anchor) = target.split_once('#').unwrap_or((&target, ""));
