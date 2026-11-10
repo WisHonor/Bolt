@@ -261,13 +261,15 @@ impl ImportError {
         }
     }
 
-    /// Whether running the import again as things are may get past this stop: Git was busy, or
-    /// reading or writing failed. Any other stop comes again until its cause is fixed.
+    /// Whether running the import again as things are may get past this stop: Git was busy,
+    /// reading or writing failed, or memory ran out. Any other stop comes again until its cause
+    /// is fixed.
     fn may_pass_when_run_again(&self) -> bool {
         matches!(
             self,
-            ImportError::Git(GitError::Changed { .. } | GitError::Io { .. })
-                | ImportError::Repo(_)
+            ImportError::Git(
+                GitError::Changed { .. } | GitError::OutOfMemory { .. } | GitError::Io { .. }
+            ) | ImportError::Repo(_)
                 | ImportError::Store(_)
                 | ImportError::Pack(_)
         )

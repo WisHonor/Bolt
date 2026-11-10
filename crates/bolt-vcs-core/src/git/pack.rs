@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 
 use super::id::Hasher;
 use super::odb::{Input, MAX_IN_MEMORY_OBJECT};
-use super::{GitError, GitId, HashKind, ObjectType, Refusal, broken, read_error, real_dir, shrank};
+use super::{
+    GitError, GitId, HashKind, ObjectType, Refusal, broken, out_of_memory, read_error, real_dir,
+    shrank,
+};
 use crate::safe_fs;
 
 /// Entries `objects/pack` may hold, of any kind: room for tens of thousands of packs.
@@ -652,13 +655,6 @@ fn is_old_index(head: &[u8], len: u64, hash_len: u64) -> bool {
             .saturating_add(1024)
             .saturating_add(hash_len.saturating_mul(2))
     })
-}
-
-fn out_of_memory(path: &Path) -> GitError {
-    GitError::Io {
-        path: path.to_owned(),
-        source: io::ErrorKind::OutOfMemory.into(),
-    }
 }
 
 /// An index read in order, a buffer at a time, hashing what it reads for the checksum at its

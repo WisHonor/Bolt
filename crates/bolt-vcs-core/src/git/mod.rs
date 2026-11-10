@@ -205,6 +205,12 @@ pub enum GitError {
         escape(what, false)
     )]
     Changed { what: String },
+    /// Too little free memory to read what `path` holds.
+    #[error(
+        "Bolt ran out of memory while reading {}.",
+        escape(&path.display().to_string(), false)
+    )]
+    OutOfMemory { path: PathBuf },
     #[error(
         "Bolt couldn't read {}: {}",
         escape(&path.display().to_string(), false),
@@ -266,6 +272,10 @@ impl GitError {
                 }
                 GitError::Changed { .. } => {
                     "Nothing was changed. Run bolt import again once Git has finished."
+                }
+                GitError::OutOfMemory { .. } => {
+                    "Nothing was changed. Close other programs to free memory, then run bolt \
+                     import again."
                 }
                 GitError::Io { .. } => {
                     "Nothing was changed. Check that your account may read it and that no other \
@@ -348,7 +358,8 @@ fn trim_start(mut text: &[u8]) -> &[u8] {
 
 /// `safe_fs`'s refusal of anything but the plain file or real folder Git keeps there (a link, a
 /// special file, a folder for a file or a file for a folder) is `NotPlain`, and of a file past its
-/// cap `Broken`; a file gone while Bolt read is `Changed`, anything else `Io`. Each names `path`.
+/// cap `Broken`; a file gone while Bolt read is `Changed`, running out of memory `OutOfMemory`,
+/// anything else `Io`. Each names `path`.
 fn read_error(path: &Path, e: io::Error) -> GitError {
     match e.kind() {
         io::ErrorKind::InvalidInput => GitError::NotPlain {
@@ -358,11 +369,19 @@ fn read_error(path: &Path, e: io::Error) -> GitError {
         io::ErrorKind::NotFound => GitError::Changed {
             what: format!("{} went away", path.display()),
         },
+        io::ErrorKind::OutOfMemory => GitError::OutOfMemory {
+            path: path.to_owned(),
+        },
         _ => GitError::Io {
             path: path.to_owned(),
             source: e,
         },
     }
+}
+
+/// Running out of memory while reading `path`.
+fn out_of_memory(path: &Path) -> GitError {
+    read_error(path, io::ErrorKind::OutOfMemory.into())
 }
 
 /// A file that ended before the length Bolt measured when it opened it.
@@ -1064,6 +1083,27 @@ mod tests {
         }
     }
 
+    /// Running out of memory says so and how to free some, not that the file may be locked.
+    #[test]
+    fn running_out_of_memory_says_so() {
+        let path = Path::new("objects/pack/pack-1.pack");
+        for e in [
+            read_error(path, io::ErrorKind::OutOfMemory.into()),
+            out_of_memory(path),
+        ] {
+            assert!(matches!(e, GitError::OutOfMemory { .. }), "{e:?}");
+            assert_eq!(
+                e.to_string(),
+                "Bolt ran out of memory while reading objects/pack/pack-1.pack."
+            );
+            let hint = e.hint().unwrap();
+            assert!(
+                hint.contains("Close other programs to free memory") && !hint.contains("locked"),
+                "{hint}"
+            );
+        }
+    }
+
     #[test]
     fn messages_show_repository_text_escaped() {
         let refused = GitError::Refused(Refusal::UnknownExtension(HOSTILE.to_owned()));
@@ -1109,6 +1149,9 @@ mod tests {
             },
             GitError::Changed {
                 what: HOSTILE.into(),
+            },
+            GitError::OutOfMemory {
+                path: HOSTILE.into(),
             },
             GitError::Io {
                 path: HOSTILE.into(),

@@ -20,7 +20,9 @@ use super::id::Hasher;
 use super::pack::{
     self, DeltaError, Entry, EntryKind, Pack, PackFolder, build_delta, delta_sizes, delta_start,
 };
-use super::{GitError, GitId, ObjectType, Repo, broken, read_error, real_dir, shrank};
+use super::{
+    GitError, GitId, ObjectType, Repo, broken, out_of_memory, read_error, real_dir, shrank,
+};
 use crate::safe_fs;
 
 /// The most an object read whole into memory may hold, and so the most a delta may build or
@@ -300,10 +302,7 @@ impl Repo {
                 let Some((delta_at, entry)) = deltas.next() else {
                     let mut data = Vec::new();
                     data.try_reserve_exact(base.data.len())
-                        .map_err(|_| GitError::Io {
-                            path: pack.path.clone(),
-                            source: io::ErrorKind::OutOfMemory.into(),
-                        })?;
+                        .map_err(|_| out_of_memory(&pack.path))?;
                     data.extend_from_slice(&base.data);
                     return Ok(Object {
                         kind: base.kind,
@@ -940,10 +939,8 @@ impl<'p, F: Borrow<File>> Inflater<'p, F> {
         }
         let len = usize::try_from(size).unwrap_or(usize::MAX);
         let mut data = Vec::new();
-        data.try_reserve_exact(len).map_err(|_| GitError::Io {
-            path: self.input.path.to_path_buf(),
-            source: io::ErrorKind::OutOfMemory.into(),
-        })?;
+        data.try_reserve_exact(len)
+            .map_err(|_| out_of_memory(&self.input.path))?;
         let mut chunk = [0u8; CHUNK];
         while data.len() < len {
             let want = chunk.len().min(len.saturating_sub(data.len()));
