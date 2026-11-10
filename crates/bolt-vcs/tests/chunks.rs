@@ -186,6 +186,51 @@ fn a_file_between_1_mib_and_a_raised_threshold_is_stored_whole_and_reads_back() 
 }
 
 #[test]
+fn files_on_either_side_of_both_cuts_come_back_byte_for_byte() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    write(&env, "bolt.toml", "chunk-files-over = \"4 MiB\"\n");
+    let sizes = [MIB - 1, MIB, 2 * MIB, 4 * MIB - 1, 4 * MIB];
+    let files: Vec<(String, Id)> = (0u64..)
+        .zip(sizes)
+        .map(|(seed, size)| {
+            let name = format!("f{size}.bin");
+            (
+                name.clone(),
+                write_noise(&env.root().join(&name), 40 + seed, size),
+            )
+        })
+        .collect();
+    ok(&env, &["save", "Sizes"]);
+    let first = main_tip(&env);
+    for ((name, id), size) in files.iter().zip(sizes) {
+        let kind = if size >= 4 * MIB {
+            ObjectKind::ChunkList
+        } else {
+            ObjectKind::Content
+        };
+        assert_eq!(copies_of(env.root(), id), [kind], "{name}");
+    }
+    let edited: Vec<Id> = files
+        .iter()
+        .map(|(name, _)| edit(&env.root().join(name)))
+        .collect();
+    ok(&env, &["save", "Edited"]);
+    ok(&env, &["goto", &first.to_hex()]);
+    for (name, id) in &files {
+        assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
+    }
+    ok(&env, &["goto", "main"]);
+    for ((name, _), id) in files.iter().zip(&edited) {
+        assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
+    }
+    let out = env.bolt().args(["--json", "verify"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["problems"], serde_json::json!([]), "{doc}");
+}
+
+#[test]
 fn safety_copies_stream_such_a_file_too() {
     let (env, saved) = with_a_file_under_a_raised_threshold(32);
     let big = env.root().join("big.bin");
