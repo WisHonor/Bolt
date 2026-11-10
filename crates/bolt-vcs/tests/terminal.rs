@@ -23,11 +23,14 @@ fn bolt_in_a_log(env: &Env, dir: &Path) -> assert_cmd::Command {
     cmd
 }
 
-/// `bolt` in `dir` on a terminal 80 columns wide that shows colour and symbols.
+/// `bolt` in `dir` on a terminal 80 columns wide that shows colour and symbols. Progress waits
+/// ten minutes, so it never comes in first on a slow machine; a test about progress sets its own.
 #[cfg(feature = "fault-injection")]
 fn bolt_on_a_terminal(env: &Env, dir: &Path) -> assert_cmd::Command {
     let mut cmd = bolt_in_a_log(env, dir);
-    cmd.env("BOLT_FAKE_TERMINAL", "80").env_remove("BOLT_ASCII");
+    cmd.env("BOLT_FAKE_TERMINAL", "80")
+        .env("BOLT_PROGRESS_QUIET_MS", "600000")
+        .env_remove("BOLT_ASCII");
     cmd
 }
 
@@ -297,9 +300,7 @@ fn no_progress_reaches_stderr_without_a_terminal() {
 fn tidy_tells_its_estimate_only_to_a_person() {
     let env = project_with_a_change();
     let said = |args: &[&str]| {
-        // The turning mark never comes in first, however slow the machine.
         let out = bolt_on_a_terminal(&env, env.root())
-            .env("BOLT_PROGRESS_QUIET_MS", "600000")
             .args(args)
             .output()
             .unwrap();
