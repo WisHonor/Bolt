@@ -70,7 +70,7 @@ On Linux:
 grep bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c
 ```
 
-`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was uploaded: don't run the program, delete it and download it again.
+`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was uploaded: don't run the program, delete it and download it again. Anything other than the file's name followed by `OK` means the same, whatever else it says (a complaint that it found no checksum lines, for example, means the name you typed isn't in `SHA256SUMS`).
 
 The fingerprints prove that the download wasn't damaged and matches what was uploaded. They don't prove who made it, because v0.1 isn't signed (below).
 
@@ -93,7 +93,7 @@ Your PATH is the list of folders your terminal looks in when you type a command'
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
   ```
 
-  That is macOS; on Linux, write `~/.bashrc` in its place. Then close the terminal and open a new one. The other way, if you have administrator rights, is `sudo mv bolt /usr/local/bin/`, a folder that is already on the PATH.
+  That is macOS; on Linux, write `~/.bashrc` in its place. Then close the terminal and open a new one. The other way, if you have administrator rights, is to put it in `/usr/local/bin`, a folder that is already on the PATH: `sudo mkdir -p /usr/local/bin`, then `sudo mv bolt /usr/local/bin/`.
 
 Check that it works, in a new terminal:
 
@@ -114,7 +114,7 @@ v0.1 is not signed. Signing means a company or a developer buys a certificate an
 The warning means only "nobody we know vouched for this program". It doesn't mean something bad was found. Check the download against `SHA256SUMS` first, as above; that is the check you can make yourself.
 
 - **Windows** (SmartScreen) may show "Windows protected your PC". Choose "More info", then "Run anyway". Or, in PowerShell, in the folder that holds it, mark the file as one you trust: `Unblock-File .\bolt.exe`.
-- **macOS** (Gatekeeper) refuses to open a program from an unknown developer the first time you run it. Open System Settings (System Preferences before macOS 13), then Privacy & Security (Security & Privacy in System Preferences); near the bottom it names `bolt` and offers "Open Anyway". Choose it, then run `bolt --version` again and confirm. Or, in Terminal, in the folder that holds it, remove the download mark: `xattr -d com.apple.quarantine bolt`.
+- **macOS** (Gatekeeper) refuses to open a program from an unknown developer the first time you run it. Open System Settings (System Preferences before macOS 13), then Privacy & Security (Security & Privacy in System Preferences); near the bottom it names `bolt` and offers "Open Anyway". Choose it, then run `bolt --version` again and confirm. Or, in Terminal, in the folder that holds it (`~/.local/bin` if you followed the steps above), remove the download mark: `xattr -d com.apple.quarantine bolt`.
 
 ### Folders that sync (OneDrive and the like)
 
@@ -132,7 +132,7 @@ Every save records who made it, so before your first project Bolt needs your nam
 |---|---|
 | Windows | `%APPDATA%\bolt\config\config.toml`, such as `C:\Users\Ana\AppData\Roaming\bolt\config\config.toml` |
 | macOS | `~/Library/Application Support/bolt/config.toml` |
-| Linux | `~/.config/bolt/config.toml` |
+| Linux | `~/.config/bolt/config.toml` (or `$XDG_CONFIG_HOME/bolt/config.toml`, if you have set that variable) |
 
 Make the folder and the file if they aren't there, then open the file in a plain text editor. These lines do that, in a terminal:
 
@@ -157,6 +157,8 @@ Make the folder and the file if they aren't there, then open the file in a plain
   mkdir -p ~/.config/bolt
   nano ~/.config/bolt/config.toml
   ```
+
+  `nano` shows its keys along the bottom: Ctrl+O then Enter saves, Ctrl+X leaves. Any other plain-text editor does as well.
 
 Put these three lines in the file, with your own name and email, and save it:
 
@@ -527,7 +529,7 @@ Here you are already there, so nothing changes, and there is nothing to undo:
 Already on line main, at save tqwl "Eggs too".
 ```
 
-Going to an older save by its change ID writes that save's files into your folder. In the practice project, going back to the first notes would write `notes.txt` as it was then and remove `todo.txt` and `idea.txt`, which that save doesn't have:
+Going to an older save by its change ID writes that save's files into your folder. In the practice project, going back to the first notes would write `notes.txt` as it was then and remove `todo.txt` and `idea.txt`, which that save doesn't have. (If you are following along, you don't need to type this one: the examples after it assume you are still on `main`.)
 
 ```text
 bolt goto kxqm

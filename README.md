@@ -1,6 +1,6 @@
 # Bolt
 
-Bolt is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `bolt undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; `bolt tidy`, which frees space, is the one it doesn't take back). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
+Bolt is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `bolt undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `bolt tidy`, which frees space, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
 
 ## State
 
@@ -37,7 +37,7 @@ bolt undo                    Take back your last step
 
 ## Documents
 
-These documents are in Bolt's repository, <https://github.com/WisHonor/Bolt>; a release archive holds only this README and the user guide.
+These documents are in Bolt's repository, <https://github.com/WisHonor/Bolt>; of them, a release archive holds only this README and the user guide.
 
 - [docs/guide.md](docs/guide.md): the user guide, for people new to version control and people coming from Git.
 - [docs/design.md](docs/design.md): how Bolt works and why.
