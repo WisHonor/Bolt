@@ -85,7 +85,7 @@ fn a_git_settings_variable_git_refuses_stops_a_save_and_is_named() {
     assert!(
         err.starts_with(
             "error: Bolt can't read your Git settings in GIT_CONFIG_COUNT: `two` isn't a number \
-             Git reads as a count, and Git refuses it too\nhint: Fix that variable, or unset it."
+             Git reads as a count, and Git refuses it too\n\nhint: Fix that variable, or unset it."
         ),
         "{err}"
     );
@@ -784,7 +784,7 @@ fn without_a_terminal_it_stops_and_names_yes() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
     assert!(
-        err.contains("This save adds 100 MB in 1 new file, most in: art/ (100 MB)."),
+        err.contains("This save adds 95 MiB in 1 new file, most in: art/ (95 MiB)."),
         "{err}"
     );
     assert!(
@@ -1226,7 +1226,7 @@ fn show_lists_what_a_save_changed() {
             "    more",
             "",
             "  added     a.txt  (1 B)",
-            "  modified  b.txt  (1 B → 4 B)",
+            "  modified  b.txt  (1 B -> 4 B)",
             "  removed   c.txt  (1 B)"
         ],
         "{out}"
@@ -1626,7 +1626,7 @@ fn multi_line_error_prints_lines() {
     let err = text(&out.stderr);
     assert!(!err.contains("\\x0a"), "{err}");
     let lines: Vec<&str> = err.lines().collect();
-    assert_eq!(lines.len(), 4, "{err}");
+    assert_eq!(lines.len(), 5, "{err}");
     assert_eq!(
         lines[0],
         "error: Some new names would not work on every system:"
@@ -1635,7 +1635,8 @@ fn multi_line_error_prints_lines() {
         lines[1].starts_with("  ") && lines[2].starts_with("  "),
         "{err}"
     );
-    assert!(lines[3].starts_with("hint: "), "{err}");
+    assert_eq!(lines[3], "", "{err}");
+    assert!(lines[4].starts_with("hint: "), "{err}");
 }
 
 /// RT-11: a folder that can't be entered is unreadable, not a problem with a `.boltignore` in it.
@@ -2186,7 +2187,7 @@ fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_s
     let (code, said) = with_reader_gone(&env, &["history"]);
     assert_eq!(code, Some(0), "{said}");
     assert!(
-        said.starts_with("warning: A switch between saves was stopped before it was done"),
+        said.starts_with("\nwarning: A switch between saves was stopped before it was done"),
         "{said}"
     );
     env.overwrite("a.txt", "mine\n");
@@ -2196,7 +2197,7 @@ fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_s
     assert!(
         said.starts_with(
             "error: Your unsaved changes, or files Bolt ignores, are in the way, so nothing was \
-             changed:\n  a.txt\nhint: "
+             changed:\n  a.txt\n\nhint: "
         ),
         "{said}"
     );
@@ -2288,7 +2289,7 @@ fn warned_about() -> (support::Env, String) {
     (env, ids[0].to_hex())
 }
 
-const PLACEHOLDER_WARNING: &str = "warning: Wrote 1 link as plain files holding their targets: \
+const PLACEHOLDER_WARNING: &str = "\nwarning: Wrote 1 link as plain files holding their targets: \
                                    they lead out of the project, or this computer can't make \
                                    links (on Windows that takes Developer Mode):\n  out\n";
 
@@ -2332,7 +2333,7 @@ fn a_commands_warnings_come_before_the_error_when_stdout_fails() {
         ),
         "{said}"
     );
-    assert_eq!(after.lines().count(), 2, "{said}");
+    assert_eq!(after.lines().count(), 3, "{said}");
 }
 
 #[cfg(all(feature = "fault-injection", any(windows, target_os = "linux")))]

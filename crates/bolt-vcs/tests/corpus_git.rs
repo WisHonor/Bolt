@@ -671,8 +671,8 @@ fn line_names_bolt_refuses_are_renamed_and_too_many_servers_stop() {
         "{id} refs/heads/Feature\n{id} refs/heads/feature\n{id} refs/heads/feature+x\n"
     ));
     let (out, _) = env.import();
-    let renamed = "Renamed 2 names that Bolt's names don't allow:\n  feature → feature-2\n  \
-                   feature+x → feature-x\n";
+    let renamed = "Renamed 2 names that Bolt's names don't allow:\n  feature -> feature-2\n  \
+                   feature+x -> feature-x\n";
     assert!(out.contains(renamed), "{out}");
     let (_, state) = env.state();
     let lines: Vec<&str> = state.lines.keys().map(String::as_str).collect();
@@ -720,7 +720,7 @@ fn a_head_bolt_cant_follow_stops_the_import() {
 }
 
 const GIT_FILE: &str = "This .git points to a repository kept elsewhere (a linked worktree or a \
-                        submodule), which Bolt doesn't follow.\nhint: Run bolt import where the \
+                        submodule), which Bolt doesn't follow.\n\nhint: Run bolt import where the \
                         repository's own .git folder is, or in a fresh clone of it.\n";
 
 // CVE-2022-39253, CVE-2024-32021
@@ -731,26 +731,26 @@ fn repository_shapes_bolt_doesnt_follow_are_refused_saying_what_to_do() {
         (
             |git| git.file("objects/info/alternates", b"/elsewhere/objects\n"),
             "This Git repository borrows objects from another one (.git/objects/info/alternates), \
-             which Bolt doesn't follow.\nhint: Copy those objects in with `git repack -a -d`, \
+             which Bolt doesn't follow.\n\nhint: Copy those objects in with `git repack -a -d`, \
              delete .git/objects/info/alternates, then run bolt import again.\n",
         ),
         (|git| git.file("commondir", b"../..\n"), GIT_FILE),
         (
             |git| git.file("shallow", format!("{}\n", "ab".repeat(20)).as_bytes()),
             "This Git repository is a shallow clone: its older history was never downloaded, and \
-             Bolt needs all of it.\nhint: Fetch the rest with `git fetch --unshallow`, then run \
+             Bolt needs all of it.\n\nhint: Fetch the rest with `git fetch --unshallow`, then run \
              bolt import again.\n",
         ),
         (
             |git| git.config("[core]\n\trepositoryformatversion = 0\n\tsparseCheckout = true\n"),
             "Git leaves some files out of this folder on purpose (a sparse checkout), so Bolt \
-             would record them as deleted.\nhint: Turn it off with `git sparse-checkout disable`, \
+             would record them as deleted.\n\nhint: Turn it off with `git sparse-checkout disable`, \
              then run bolt import again.\n",
         ),
         (
             |git| git.file("reftable/tables.list", b""),
             "This Git repository keeps its refs in the reftable format, which Bolt can't read \
-             yet.\nhint: Convert it with `git refs migrate --ref-storage-format=files`, then run \
+             yet.\n\nhint: Convert it with `git refs migrate --ref-storage-format=files`, then run \
              bolt import again.\n",
         ),
         (
@@ -760,12 +760,12 @@ fn repository_shapes_bolt_doesnt_follow_are_refused_saying_what_to_do() {
                 )
             },
             "This Git repository is a partial clone: some of its history was never downloaded, \
-             and Bolt needs all of it.\nhint: Clone the repository again without `--filter`, and \
+             and Bolt needs all of it.\n\nhint: Clone the repository again without `--filter`, and \
              run bolt import in the new clone.\n",
         ),
         (
             |git| git.config("[core]\n\trepositoryformatversion = 1\n[extensions]\n\tx = y\n"),
-            "This Git repository uses extensions.x, a Git feature Bolt doesn't know.\nhint: \
+            "This Git repository uses extensions.x, a Git feature Bolt doesn't know.\n\nhint: \
              Import a fresh clone made with `git clone`, which usually doesn't use it, or update \
              Bolt.\n",
         ),
@@ -1347,7 +1347,7 @@ fn text_from_the_repository_is_shown_escaped() {
     git.head(&format!("ref: refs/heads/{HOSTILE_REF}\n"));
     let (out, err) = env.import();
     let shown = format!("{out}{err}");
-    let renamed = format!("Renamed 1 name that Bolt's names don't allow: {HOSTILE_REF_SHOWN} → ");
+    let renamed = format!("Renamed 1 name that Bolt's names don't allow: {HOSTILE_REF_SHOWN} -> ");
     assert_escaped(&shown, &renamed);
     assert_escaped(&shown, &format!("refs/notes/{HOSTILE_REF_SHOWN}\n"));
     let tag = format!("Didn't import 1 tag: {HOSTILE_REF_SHOWN}, as it tags");

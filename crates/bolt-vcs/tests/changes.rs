@@ -90,7 +90,7 @@ fn a_slow_diff_is_cut_at_its_deadline_and_said() {
     assert!(text(&out.stdout).contains("+x"), "{}", text(&out.stdout));
     assert_eq!(
         text(&out.stderr),
-        "warning: Bolt stopped comparing a.txt line by line after 2 seconds, so its changes \
+        "\nwarning: Bolt stopped comparing a.txt line by line after 2 seconds, so its changes \
          show in bigger pieces than they could.\n"
     );
 }
@@ -163,7 +163,11 @@ fn a_reader_that_goes_away_ends_it_quietly() {
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
     // No error: only the warnings it had found by then, such as a diff cut at its deadline.
-    assert!(said.lines().all(|l| l.starts_with("warning: ")), "{said}");
+    assert!(
+        said.lines()
+            .all(|l| l.is_empty() || l.starts_with("warning: ")),
+        "{said}"
+    );
 }
 
 #[test]

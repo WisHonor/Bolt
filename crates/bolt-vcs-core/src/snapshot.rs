@@ -3547,7 +3547,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "This save adds 100 MB in 4 new files, most in: art/ (100 MB), docs/ (5 bytes), the top folder (4 bytes)."
+            "This save adds 95 MiB in 4 new files, most in: art/ (95 MiB), docs/ (5 B), the top folder (4 B)."
         );
         assert!(err.hint().unwrap().contains("--yes"), "{err:?}");
         // A partial save counts only what it saves.

@@ -95,8 +95,8 @@ fn names_bolt_refuses_are_renamed_and_listed() {
         out.contains("Renamed 2 names that Bolt's names don't allow:\n"),
         "{out}"
     );
-    assert!(out.contains("\n  feature → feature-2\n"), "{out}");
-    assert!(out.contains("\n  feature+x → feature-x\n"), "{out}");
+    assert!(out.contains("\n  feature -> feature-2\n"), "{out}");
+    assert!(out.contains("\n  feature+x -> feature-x\n"), "{out}");
     let (_, state) = env.state();
     let lines: Vec<&str> = state.lines.keys().map(String::as_str).collect();
     assert_eq!(lines, ["Feature", "feature-2", "feature-x", "main"]);
@@ -173,7 +173,7 @@ fn renamed_names_and_skipped_tags_are_listed_up_to_100_and_counted() {
         assert_eq!(items.len(), 101, "{out}");
         assert_eq!(items[100], "  and 50 more", "{out}");
     }
-    assert!(out.contains("\n  b+000 → b-000\n"), "{out}");
+    assert!(out.contains("\n  b+000 -> b-000\n"), "{out}");
     assert!(
         out.contains("\n  t000, as it tags a folder (a Git tree), not a commit\n"),
         "{out}"
@@ -242,7 +242,7 @@ fn a_detached_head_puts_you_at_its_save() {
     let err = text(&out.stderr);
     assert!(
         err.contains(
-            "error: You're at a save, not on a line, so this save needs a new line to go on.\n\
+            "error: You're at a save, not on a line, so this save needs a new line to go on.\n\n\
              hint: Nothing was saved. Name it: bolt save --line <name> \"message\"\n"
         ),
         "{err}"
@@ -392,7 +392,7 @@ fn a_git_lfs_repository_stops_before_anything_is_written() {
         assert!(
             err.contains(&format!(
                 "error: A Git LFS file in this history isn't in .git/lfs/objects:\n  \
-                 `art/big.psd` in commit `{commit}` (12 KB)\n"
+                 `art/big.psd` in commit `{commit}` (12 KiB)\n"
             )),
             "{sign}: {err}"
         );
@@ -434,7 +434,7 @@ fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
     assert!(
         err.contains(
             "error: An import began a Bolt project here and didn't finish, and bolt start won't \
-             make an empty project over what it stored.\nhint: Run `bolt import` again to finish \
+             make an empty project over what it stored.\n\nhint: Run `bolt import` again to finish \
              the import.\n"
         ),
         "{err}"

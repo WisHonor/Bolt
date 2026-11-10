@@ -191,7 +191,7 @@ fn without_a_sign_a_missing_object_stops_the_second_pass() {
     assert!(
         err.contains(&format!(
             "error: A Git LFS file in this history isn't in .git/lfs/objects:\n  `art/big.psd` in \
-             commit `{commit}` (14 bytes)\n"
+             commit `{commit}` (14 B)\n"
         )),
         "{err}"
     );
@@ -518,7 +518,7 @@ fn the_summary_counts_commits_holding_lfs_files() {
         "{out}"
     );
     assert!(
-        out.contains("Brought in 1 Git LFS file (12 bytes) from .git/lfs/objects.\n"),
+        out.contains("Brought in 1 Git LFS file (12 B) from .git/lfs/objects.\n"),
         "{out}"
     );
     let json = imported_json(&history());

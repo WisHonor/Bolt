@@ -88,7 +88,7 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     age(&env, 48);
     let (said, told) = ok(&env, &["tidy"]);
     assert!(
-        said.starts_with("Freed ") && said.contains(" KB ("),
+        said.starts_with("Freed ") && said.contains(" KiB ("),
         "{said}"
     );
     assert!(said.ends_with(" packs removed, 1 written).\n"), "{said}");

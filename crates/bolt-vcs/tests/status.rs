@@ -434,7 +434,7 @@ fn status_says_in_its_own_words_why_it_stops() {
         text(&out.stderr),
         "error: Bolt can't show the status: deps: the last save has a folder there holding \
          deps/lib, which every save keeps as it was because this computer can't hold it as it \
-         is, and a save can't hold both under one name.\nhint: Rename or move deps.\n"
+         is, and a save can't hold both under one name.\n\nhint: Rename or move deps.\n"
     );
 }
 
@@ -466,7 +466,7 @@ fn a_save_holding_a_spelling_of_bolt_is_named() {
         text(&out.stderr),
         format!(
             "error: Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
-             writes, so it can't be used.\nhint: Bolt never makes such a save, so another program \
+             writes, so it can't be used.\n\nhint: Bolt never makes such a save, so another program \
              put it there. Nothing was changed: ask for help before trying to repair it.\n",
             planted.short_hex()
         )
