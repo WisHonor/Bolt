@@ -411,8 +411,9 @@ A step that stops it fails it with exit code 1, and its document is the error do
 |---|---|
 | `pack_damaged` | A pack isn't a pack any more, or its index can't be read or doesn't match its checksum. |
 | `pack_unreadable` | A pack couldn't be opened or read for a reason that isn't damage (no permission, say). It may be fine. |
-| `object_damaged` | An object doesn't read back as what its pack's index says: it fails its fingerprint, doesn't decode as its kind, or, for a chunked file, its chunks don't build the file. |
-| `object_missing` | Something the project needs isn't in any pack. |
+| `object_damaged` | An object doesn't read back as what its pack's index says: it fails its fingerprint, doesn't decode as its kind, or, for a chunked file, its chunks don't build the file. Also a folder listing that gives a file a size its stored contents don't have. |
+| `object_missing` | Something the project needs isn't in any pack, or is stored only as another kind of object than what needs it (a chunk held only as a chunk list, say). |
+| `save_too_big` | A save the project needs is larger than any reader takes: more than 10,000,000 files and folders counted by path, or deeper or with longer paths than [storage-format.md](storage-format.md) §3 allows. `bolt goto` refuses such a save. |
 | `head_lost` | `.bolt/state/head` is missing, can't be read, or names nothing Bolt can read, so what the project needs couldn't be worked out; the packs were still checked. `bolt undo --list` then lists where to pick up. |
 
 ### `bolt line --json`

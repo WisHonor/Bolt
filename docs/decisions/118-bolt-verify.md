@@ -4,6 +4,7 @@
 - **Date:** 2026-11-09
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
+- **Refined by:** [decision 126](126-verify-also-finds-a-save-that-cant-be-written-out.md) (a chunk counts only as a chunk, a listing's size must be the file's, and a save past the readers' limits is reported: the red team's first session on milestone 6)
 - **Refines:** [decision 019](019-review-clarifications.md) (the check behind `bolt verify` exists from milestone 1; the command ships in milestone 6); [decision 057](057-pack-index-on-disk-and-merging.md) (the index checksum is checked by `verify`); decisions [066](066-a-pack-bolt-cant-open-for-another-reason.md) and [078](078-a-pack-bolt-cant-open-gets-its-own-warning.md) (`verify` is where every pack gets checked); [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (what checking the store does with chunk lists); [decision 005](005-object-identity.md) (telling "not downloaded" from lost)
 
 ## Context
