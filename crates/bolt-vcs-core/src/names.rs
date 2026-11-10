@@ -762,24 +762,40 @@ mod tests {
     }
 
     #[test]
-    fn the_early_answers_match_the_full_ones_on_every_short_string() {
+    fn the_early_answers_match_the_full_ones_around_every_spelling() {
         let alphabet = [
-            '.', 'g', 'G', 'i', 't', 'b', 'o', 'l', '~', '1', '\\', ':', ' ', 'a',
+            '.', 'g', 'G', 'i', 't', 'b', 'o', 'l', '~', '1', '\\', ':', '/', ' ', 'a',
         ];
-        let mut names: Vec<String> = vec![String::new()];
-        let mut checked = 0;
-        for _ in 0..3 {
-            names = names
+        // Every string of 0 to 2 bytes from the alphabet.
+        let mut short = vec![String::new()];
+        let mut last = short.clone();
+        for _ in 0..2 {
+            last = last
                 .iter()
                 .flat_map(|n| alphabet.iter().map(move |c| format!("{n}{c}")))
                 .collect();
-            for name in &names {
-                assert_eq!(is_git_alias(name), git_alias_in_full(name), "{name:?}");
-                assert_eq!(is_bolt_alias(name), bolt_alias_in_full(name), "{name:?}");
-                checked += 1;
+            short.extend(last.iter().cloned());
+        }
+        // The empty core keeps every string of up to 4 bytes in the run.
+        let cores = [
+            "", ".git", ".GIT", "git~1", "GIT~1", ".bolt", ".BOLT", "bolt~1", "bolt~4",
+        ];
+        let (mut git, mut bolt) = (0, 0);
+        for core in cores {
+            for before in &short {
+                for after in &short {
+                    let name = format!("{before}{core}{after}");
+                    let (git_full, bolt_full) =
+                        (git_alias_in_full(&name), bolt_alias_in_full(&name));
+                    assert_eq!(is_git_alias(&name), git_full, "{name:?}");
+                    assert_eq!(is_bolt_alias(&name), bolt_full, "{name:?}");
+                    git += usize::from(git_full);
+                    bolt += usize::from(bolt_full);
+                }
             }
         }
-        assert_eq!(checked, 14 + 14 * 14 + 14 * 14 * 14);
+        // The names must hold look-alikes, or a wrong early `false` would go unseen.
+        assert!(git > 0 && bolt > 0, "{git} {bolt}");
     }
 
     #[test]
@@ -1019,6 +1035,7 @@ mod tests {
             "bolt",
             "bolt~5",
             "bolt~12",
+            "x\\.bolt",
         ] {
             assert_eq!(validate_name(ok), Ok(()), "{ok}");
             assert!(!is_bolt_alias(ok), "{ok}");
@@ -1323,6 +1340,8 @@ mod tests {
             "git~1 . :$DATA",
             ".g\u{200c}it",
             "\u{feff}.git",
+            "x\\.git",
+            "\\.git",
         ] {
             assert!(is_git_alias(name), "{name:?}");
         }
@@ -1369,6 +1388,7 @@ mod tests {
             "git",
             ".git2",
             "xgit~1",
+            "a.git",
             ".bolt",
             ".git x",
             ".git .x",
