@@ -46,7 +46,7 @@ steps() {
 	local set=$1 t=$2 dir=$work/$1-$2 n=$work/$1-$2.n start save status big first
 	rm -rf "$dir" "$n" && cp -a "$work/$set" "$dir" && cd "$dir"
 	if [ "$t" = bolt ]; then
-		start='rm -rf .bolt && bolt start'
+		start='rm -rf .bolt && bolt start --preset custom'
 		save="bolt save 'A save' --yes"
 		status='bolt status'
 	else

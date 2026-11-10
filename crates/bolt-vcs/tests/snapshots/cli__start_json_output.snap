@@ -4,8 +4,14 @@ expression: json
 ---
 {
   "bolt_json": 1,
+  "found": {
+    "engines": [],
+    "languages": []
+  },
   "line": "main",
+  "preset": "custom",
   "root": "[redacted]",
+  "rules_written": [],
   "save": {
     "author": {
       "email": "test@example.com",

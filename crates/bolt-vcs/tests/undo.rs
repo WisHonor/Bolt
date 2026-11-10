@@ -16,7 +16,10 @@ use support::{Env, changed, files, head, holding, main_tip, saved_files, text, w
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in entries {
         write(&env, path, bytes);
     }
@@ -315,7 +318,10 @@ fn running_undo_again_after_a_stop_finishes_it_and_takes_no_further_step() {
 #[test]
 fn undo_with_nothing_to_undo_says_so_and_succeeds() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let (at, _) = head(&env);
     assert!(ok(&env, &["undo"]).contains("Nothing to undo"));
     assert!(ok(&env, &["redo"]).contains("Nothing to redo"));

@@ -48,7 +48,11 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 #[test]
 fn start_creates_a_project() {
     let env = Env::new();
-    let out = env.bolt().arg("start").output().unwrap();
+    let out = env
+        .bolt()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let format = std::fs::read_to_string(env.root().join(".bolt/format")).unwrap();
     assert_eq!(format, FORMAT_TEXT);
@@ -61,7 +65,10 @@ fn start_creates_a_project() {
 #[test]
 fn start_and_save_work_in_a_normal_folder() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     env.bolt().args(["save", "first"]).assert().success();
     env.bolt().arg("history").assert().success();
@@ -72,7 +79,10 @@ fn start_and_save_work_in_a_normal_folder() {
 #[test]
 fn a_git_settings_variable_git_refuses_stops_a_save_and_is_named() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let out = env
         .bolt()
@@ -96,7 +106,10 @@ fn a_git_settings_variable_git_refuses_stops_a_save_and_is_named() {
 #[test]
 fn save_works_through_a_link_to_the_project_folder() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let links = tempfile::tempdir().unwrap();
     let link = links.path().join("project");
@@ -116,7 +129,10 @@ fn save_works_through_a_link_to_the_project_folder() {
 /// also a warning of the document.
 #[test]
 fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
-    for args in [&["start"][..], &["--json", "start"]] {
+    for args in [
+        &["start", "--preset", "custom"][..],
+        &["--json", "start", "--preset", "custom"],
+    ] {
         let env = Env::new();
         let out = env.bolt().args(args).output().unwrap();
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
@@ -139,8 +155,15 @@ fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
 #[test]
 fn start_twice_is_refused() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
-    let out = env.bolt().arg("start").output().unwrap();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let out = env
+        .bolt()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(
         text(&out.stderr).contains("already a Bolt project"),
@@ -153,12 +176,19 @@ fn start_twice_is_refused() {
 #[test]
 fn start_inside_a_project_is_refused() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // The last part of the project's path, which every system shows the same way.
     let project = env.root().file_name().unwrap().to_str().unwrap();
     for sub in [env.root().join("sub"), env.root().join("a/b/c")] {
         std::fs::create_dir_all(&sub).unwrap();
-        let out = env.bolt_in(&sub).arg("start").output().unwrap();
+        let out = env
+            .bolt_in(&sub)
+            .args(["start", "--preset", "custom"])
+            .output()
+            .unwrap();
         assert_eq!(out.status.code(), Some(1));
         let err = text(&out.stderr);
         let said = err.lines().next().unwrap();
@@ -175,7 +205,11 @@ fn start_refuses_another_tools_bolt_folder() {
     let bolt = env.root().join(".bolt");
     std::fs::create_dir(&bolt).unwrap();
     std::fs::write(bolt.join("prompt"), "Build me an app").unwrap();
-    let out = env.bolt().arg("start").output().unwrap();
+    let out = env
+        .bolt()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(
         text(&out.stderr).contains(
@@ -190,7 +224,10 @@ fn start_refuses_another_tools_bolt_folder() {
     // An interrupted start of Bolt's own, with only its own folders, is finished.
     std::fs::remove_file(bolt.join("prompt")).unwrap();
     std::fs::create_dir(bolt.join("store")).unwrap();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -198,7 +235,7 @@ fn start_without_a_name_explains_how_to_set_it() {
     let env = Env::new();
     let out = env
         .bolt_anonymous(env.root())
-        .arg("start")
+        .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -217,7 +254,7 @@ fn a_settings_file_that_cant_be_read_is_named_once() {
     std::fs::create_dir(&settings).unwrap();
     let out = env
         .bolt_anonymous(env.root())
-        .arg("start")
+        .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -242,7 +279,7 @@ fn start_reads_the_users_own_config_through_a_link() {
     std::os::unix::fs::symlink(&real, env.config().join("config.toml")).unwrap();
     let out = env
         .bolt_anonymous(env.root())
-        .arg("start")
+        .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -260,7 +297,7 @@ fn project_naming_mallory() -> Env {
     let env = Env::new();
     std::fs::write(env.config().join("config.toml"), REAL_USER).unwrap();
     env.bolt_anonymous(env.root())
-        .arg("start")
+        .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join(".bolt/config.toml"), MALLORY).unwrap();
@@ -416,7 +453,7 @@ fn approving_the_ignored_identity_takes_effect() {
     let other = tempfile::tempdir().unwrap();
     let out = env
         .bolt_anonymous(other.path())
-        .args(["--json", "start"])
+        .args(["--json", "start", "--preset", "custom"])
         .output()
         .unwrap();
     let started: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -437,7 +474,7 @@ fn start_uses_the_project_entry_for_its_folder() {
     )
     .unwrap();
     env.bolt_anonymous(env.root())
-        .arg("start")
+        .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let history = json_of(&env, &["--json", "history"]);
@@ -452,7 +489,10 @@ fn start_uses_the_project_entry_for_its_folder() {
 #[test]
 fn save_with_an_identity_ignores_a_fifo_project_config() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let made = std::process::Command::new("mkfifo")
         .arg(env.root().join(".bolt/config.toml"))
         .status()
@@ -483,7 +523,10 @@ fn save_with_an_identity_ignores_a_fifo_project_config() {
 #[test]
 fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     // The address space is capped at about 1.5 GB, so a read of the link that did not stop could
@@ -518,7 +561,10 @@ fn a_deep_tree_saves_within_macos_open_file_limit() {
     use bolt_platform::dir::Dir;
     use std::ffi::OsStr;
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // 600 levels, each with a file, made a name at a time: macOS takes no path that long.
     {
         let n = OsStr::new;
@@ -538,7 +584,11 @@ fn a_deep_tree_saves_within_macos_open_file_limit() {
 #[test]
 fn start_json_output() {
     let env = Env::new();
-    let out = env.bolt().args(["--json", "start"]).output().unwrap();
+    let out = env
+        .bolt()
+        .args(["--json", "start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let mut json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     // Check what the redactions hide, so a missing field can't hide behind one.
@@ -583,8 +633,15 @@ fn start_json_output() {
 #[test]
 fn json_errors_go_to_stdout() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
-    let out = env.bolt().args(["--json", "start"]).output().unwrap();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let out = env
+        .bolt()
+        .args(["--json", "start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["bolt_json"], 1);
@@ -610,7 +667,7 @@ fn interrupted_start_can_be_finished() {
         let env = Env::new();
         let out = env
             .bolt()
-            .arg("start")
+            .args(["start", "--preset", "custom"])
             .env("BOLT_FAULT_AT", n.to_string())
             .output()
             .unwrap();
@@ -626,7 +683,11 @@ fn interrupted_start_can_be_finished() {
             continue;
         }
         assert!(!env.root().join(".bolt/format").exists(), "fault {n}");
-        let out = env.bolt().arg("start").output().unwrap();
+        let out = env
+            .bolt()
+            .args(["start", "--preset", "custom"])
+            .output()
+            .unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -650,7 +711,7 @@ fn start_reports_success_when_its_first_save_cannot_be_read_back() {
             bolt.arg("--json");
         }
         let out = bolt
-            .arg("start")
+            .args(["start", "--preset", "custom"])
             .env("BOLT_FAULT_FAIL", "start:read-back")
             .output()
             .unwrap();
@@ -693,7 +754,10 @@ fn start_reports_success_when_its_first_save_cannot_be_read_back() {
 #[test]
 fn bolt_folder_is_hidden_on_windows() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     assert!(bolt_platform::is_hidden(&env.root().join(".bolt")).unwrap());
 }
 
@@ -702,7 +766,10 @@ fn bolt_folder_is_hidden_on_windows() {
 fn a_command_names_its_own_file_another_program_holds() {
     use std::os::windows::fs::OpenOptionsExt;
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let bolt = env.root().join(".bolt");
     // As a virus scanner or sync tool may hold it, for longer than Bolt tries.
@@ -728,7 +795,10 @@ fn ordinary_commands_still_write_one_pack() {
             .unwrap()
             .count()
     };
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     assert_eq!(packs(), 1);
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     env.bolt().args(["save", "Add a"]).assert().success();
@@ -738,7 +808,10 @@ fn ordinary_commands_still_write_one_pack() {
 #[test]
 fn save_then_nothing_to_save() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     std::fs::create_dir(env.root().join("src")).unwrap();
     std::fs::write(env.root().join("src/b.txt"), "b").unwrap();
@@ -772,7 +845,10 @@ fn save_then_nothing_to_save() {
 #[test]
 fn only_save_shows_the_rules_warnings() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let rules = env.root().join("bolt.toml");
     std::fs::write(&rules, "zebra = 1\n").unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
@@ -822,7 +898,10 @@ fn only_save_shows_the_rules_warnings() {
 /// A started project holding a new file of 100,000,001 zeros, made without writing them.
 fn project_adding_100_mb() -> Env {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::create_dir(env.root().join("art")).unwrap();
     let huge = std::fs::File::create(env.root().join("art/huge.bin")).unwrap();
     huge.set_len(100_000_001).unwrap();
@@ -879,7 +958,10 @@ fn yes_skips_the_question() {
 #[test]
 fn com0_and_lpt0_save_on_windows() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for name in ["COM0", "LPT0", "com0.txt", "LPT0.log"] {
         std::fs::write(env.root().join(name), name).unwrap();
         assert_eq!(
@@ -900,7 +982,10 @@ fn com0_and_lpt0_save_on_windows() {
 #[test]
 fn save_requires_a_message() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     for args in [&["save"][..], &["save", ""], &["save", "  \n"]] {
         let out = env.bolt().args(args).output().unwrap();
@@ -916,7 +1001,10 @@ fn save_requires_a_message() {
 /// A started project with a `LICENSE` to save, and a pack that holds a damaged copy of its content.
 fn project_with_a_damaged_copy_of_its_licence() -> Env {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let licence = b"Permission is hereby granted, free of charge, to any person\n";
     // The licence with one bit flipped, in a pack whose name sorts before Bolt's own.
     let made = tempfile::tempdir().unwrap();
@@ -1014,7 +1102,10 @@ fn plant_damaged_copy_of(root: &Path, id: &Id, kind: ObjectKind) {
 fn project_whose_first_save_is_damaged() -> Env {
     use bolt_core::repo::Repository;
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = Repository::open(env.root())
         .unwrap()
         .current()
@@ -1132,7 +1223,10 @@ fn show_json_carries_the_warning_about_the_id_it_couldnt_shorten() {
 #[test]
 fn save_json_output() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let out = env
         .bolt()
@@ -1178,7 +1272,10 @@ fn save_json_output() {
 fn interrupted_save_changes_nothing_until_its_head_moves() {
     use bolt_core::repo::Repository;
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = Repository::open(env.root()).unwrap().current().unwrap().1;
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     for n in 1.. {
@@ -1226,7 +1323,10 @@ fn redact_save(save: &mut serde_json::Value) {
 /// A started project with saves `one` (adds a.txt) and `two` (adds b.txt).
 fn project_with_two_saves() -> Env {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (name, msg) in [("a.txt", "one"), ("b.txt", "two")] {
         std::fs::write(env.root().join(name), name).unwrap();
         env.bolt().args(["save", msg]).assert().success();
@@ -1258,7 +1358,10 @@ fn history_lists_newest_first() {
 #[test]
 fn show_lists_what_a_save_changed() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("b.txt"), "b").unwrap();
     std::fs::write(env.root().join("c.txt"), "c").unwrap();
     env.bolt().args(["save", "base"]).assert().success();
@@ -1290,7 +1393,10 @@ fn show_lists_what_a_save_changed() {
 #[test]
 fn show_indents_the_message_so_it_cannot_fake_a_change() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("invoice.pdf"), "pdf").unwrap();
     let message = "add the invoice\n\n  removed   payroll.xlsx  (12 KB)";
     env.bolt().args(["save", message]).assert().success();
@@ -1324,7 +1430,10 @@ fn show_indents_the_message_so_it_cannot_fake_a_change() {
 #[test]
 fn show_with_no_file_changes() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     assert!(stdout_of(&env, &["show"]).ends_with("  (no file changes)\n"));
 }
 
@@ -1371,7 +1480,10 @@ fn history_and_show_json_output() {
 #[test]
 fn show_json_is_the_one_compact_line_serde_json_would_write() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // `show` writes the changes one at a time as it finds them, so it must still end up with the
     // document it wrote when it held them all: one compact line, keys in order.
     let raw = stdout_of(&env, &["--json", "show"]);
@@ -1430,7 +1542,7 @@ fn every_json_document_has_warnings() {
         );
         serde_json::from_slice(&out.stdout).unwrap()
     };
-    let started = run(&["--json", "start"]);
+    let started = run(&["--json", "start", "--preset", "custom"]);
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let saved = run(&["--json", "save", "m"]);
     let again = run(&["--json", "save", "m"]);
@@ -1519,7 +1631,10 @@ fn commands_outside_a_project_explain_what_to_do() {
 #[test]
 fn commands_work_from_a_subfolder() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let sub = env.root().join("project/sub");
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("f.txt"), "f").unwrap();
@@ -1543,7 +1658,10 @@ fn stdout_of_in(env: &Env, dir: &Path, args: &[&str]) -> String {
 #[test]
 fn hostile_text_cannot_drive_the_terminal() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let out = env
         .bolt()
@@ -1569,7 +1687,11 @@ fn folder_names_are_shown_escaped() {
     let env = Env::new();
     let folder = env.root().join("proj\u{202e}gnp.exe");
     std::fs::create_dir(&folder).unwrap();
-    let out = env.bolt_in(&folder).arg("start").output().unwrap();
+    let out = env
+        .bolt_in(&folder)
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let shown = text(&out.stdout);
     assert!(!shown.contains('\u{202e}'), "{shown:?}");
@@ -1577,7 +1699,11 @@ fn folder_names_are_shown_escaped() {
 
     let sub = folder.join("sub");
     std::fs::create_dir(&sub).unwrap();
-    let out = env.bolt_in(&sub).arg("start").output().unwrap();
+    let out = env
+        .bolt_in(&sub)
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(!shown.contains('\u{202e}'), "{shown:?}");
@@ -1587,7 +1713,10 @@ fn folder_names_are_shown_escaped() {
 #[test]
 fn boltignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // Each file is well within its own limit; together they are past the limit for one folder.
     let comment = "#".repeat(600 * 1024);
     std::fs::create_dir(env.root().join("sub")).unwrap();
@@ -1610,7 +1739,10 @@ fn boltignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
 #[test]
 fn text_quoted_in_an_error_is_shown_escaped() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // The error names a folder, and a right-to-left override in its name must not reach the
     // terminal.
     let folder = env.root().join("x\u{202e}");
@@ -1653,7 +1785,10 @@ fn plant_two_non_portable_names(root: &Path) {
 fn save_json_error_lists_the_warnings_found_before_it_failed() {
     use bolt_core::repo::Repository;
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let head = Repository::open(env.root()).unwrap().head().unwrap();
     plant_damaged_copy_of(env.root(), &head, ObjectKind::DiaryEntry);
     plant_two_non_portable_names(env.root());
@@ -1671,7 +1806,10 @@ fn save_json_error_lists_the_warnings_found_before_it_failed() {
 #[test]
 fn multi_line_error_prints_lines() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_two_non_portable_names(env.root());
     let out = env.bolt().args(["save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -1698,7 +1836,10 @@ fn multi_line_error_prints_lines() {
 fn unreadable_folder_is_reported_as_unreadable() {
     use std::os::unix::fs::PermissionsExt;
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let locked = env.root().join("locked");
     std::fs::create_dir(&locked).unwrap();
     std::fs::write(locked.join("f.txt"), "secret").unwrap();
@@ -1766,7 +1907,10 @@ fn plant_history(
 /// a file `mine.txt` to save next to it.
 fn project_with_a_save_too_deep_to_walk() -> Env {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_save(env.root(), |pack| {
         let empty = pack
             .add_record(ObjectKind::FolderListing, &Listing::empty().encode())
@@ -1935,7 +2079,10 @@ fn run_noting_peak_memory(
 #[test]
 fn show_does_not_hold_every_long_path_of_a_save_at_once() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_long_paths(env.root());
     // What `show` prints is hundreds of megabytes, so it goes nowhere.
     let out = bolt_capped(&env, &["show"])
@@ -1949,7 +2096,10 @@ fn show_does_not_hold_every_long_path_of_a_save_at_once() {
 #[test]
 fn save_does_not_hold_every_long_path_of_the_save_before_it() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_long_paths(env.root());
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     let out = bolt_capped(&env, &["save", "my work"]).output().unwrap();
@@ -1980,7 +2130,10 @@ fn shortest_unique(all: &[String]) -> Vec<String> {
 #[test]
 fn history_shows_every_save_with_the_fewest_letters_that_keep_it_unique() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // So many saves that some change IDs share their first four letters.
     let planted = plant_history(env.root(), 1500, |_| {});
     let history: serde_json::Value =
@@ -2014,7 +2167,10 @@ fn history_shows_every_save_with_the_fewest_letters_that_keep_it_unique() {
 #[test]
 fn history_show_and_save_hold_one_save_at_a_time() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let message = format!("Looks harmless\n{}", "A".repeat((1 << 20) - 15));
     let planted = plant_history(env.root(), 150, |save| save.message.clone_from(&message));
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
@@ -2048,7 +2204,7 @@ fn a_cache_key_bolt_cant_use_is_a_warning_not_a_failure() {
     let env = Env::new();
     let key = env.config().join("cache-key");
     std::fs::write(&key, b"short").unwrap();
-    let start = json_as_user(&env, &["--json", "start"]);
+    let start = json_as_user(&env, &["--json", "start", "--preset", "custom"]);
     assert_eq!(warning_kinds(&start), ["cache_key_unusable"], "{start}");
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     for args in [
@@ -2113,7 +2269,10 @@ fn json_as_user(env: &Env, args: &[&str]) -> serde_json::Value {
 #[test]
 fn paths_are_relative_to_the_current_folder() {
     let env = Env::new();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let sub = env.root().join("sub");
     std::fs::create_dir_all(sub.join("deep")).unwrap();
     for (path, bytes) in [
@@ -2206,7 +2365,10 @@ fn with_both_readers_gone(env: &support::Env, args: &[&str]) -> Option<i32> {
 #[test]
 fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
     let env = support::Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // A folder holding a Git repository of its own: `status` and `save` warn about it.
     std::fs::create_dir_all(env.root().join("inner/.git")).unwrap();
     env.overwrite("inner/x.txt", "x\n");
@@ -2222,7 +2384,10 @@ fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
 #[test]
 fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_stderr() {
     let env = support::Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = support::main_tip(&env).to_hex();
     env.overwrite("a.txt", "a\n");
     env.overwrite("b.txt", "b\n");
@@ -2265,7 +2430,10 @@ fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_s
 #[test]
 fn a_json_listing_tells_the_error_it_ended_with_when_stdout_loses_the_end() {
     let env = support::Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     env.overwrite("a.txt", "a\n");
     env.overwrite("b.txt", "b\n");
     env.bolt().args(["save", "Two files"]).assert().success();
@@ -2321,7 +2489,7 @@ fn every_command_ends_quietly_when_its_reader_has_gone() {
         git.commit("a.txt", "a\n", "First");
         quiet(&git, &with(&["import"]));
         let env = support::Env::empty();
-        quiet(&env, &with(&["start"]));
+        quiet(&env, &with(&["start", "--preset", "custom"]));
         env.overwrite("a.txt", "a\n");
         quiet(&env, &with(&["save", "Add a"]));
         quiet(&env, &with(&["save", "Nothing new"]));
@@ -2392,7 +2560,10 @@ fn a_commands_warnings_come_before_the_error_when_stdout_fails() {
 #[test]
 fn a_warning_the_store_keeps_is_told_once_when_stdout_fails() {
     let env = support::Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = support::main_tip(&env).to_hex();
     env.overwrite("a.txt", "a\n");
     env.overwrite("b.txt", "b\n");
@@ -2422,7 +2593,10 @@ fn a_warning_the_store_keeps_is_told_once_when_stdout_fails() {
 #[test]
 fn a_command_that_did_its_work_but_couldnt_print_says_so() {
     let env = support::Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     env.overwrite("a.txt", "a\n");
     let out = env
         .bolt_process_in(env.root())

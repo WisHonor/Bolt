@@ -34,7 +34,7 @@ fn ok(env: &Env, args: &[&str]) {
 /// A project that has saved `big.bin`, `size` bytes made from `seed`, and the file's ID.
 fn with_a_big_file(seed: u64, size: u64) -> (Env, Id) {
     let env = Env::empty();
-    ok(&env, &["start"]);
+    ok(&env, &["start", "--preset", "custom"]);
     let id = write_noise(&env.root().join("big.bin"), seed, size);
     write(&env, "small.txt", "small\n");
     ok(&env, &["save", "Big"]);
@@ -108,7 +108,7 @@ fn chunking_changes_no_ids() {
 #[test]
 fn a_project_without_a_rules_file_cuts_files_from_exactly_1_mib() {
     let env = Env::empty();
-    ok(&env, &["start"]);
+    ok(&env, &["start", "--preset", "custom"]);
     let cut = write_noise(&env.root().join("cut.bin"), 21, MIB);
     let whole = write_noise(&env.root().join("whole.bin"), 22, MIB - 1);
     let out = env.bolt().args(["save", "--json", "Two"]).output().unwrap();
@@ -161,7 +161,7 @@ fn discard_and_shelf_keep_a_big_file_as_chunks() {
 /// `seed`, and the file's ID.
 fn with_a_file_under_a_raised_threshold(seed: u64) -> (Env, Id) {
     let env = Env::empty();
-    ok(&env, &["start"]);
+    ok(&env, &["start", "--preset", "custom"]);
     write(&env, "bolt.toml", "chunk-files-over = \"8 MiB\"\n");
     let id = write_noise(&env.root().join("big.bin"), seed, 3 * MIB);
     ok(&env, &["save", "Big"]);

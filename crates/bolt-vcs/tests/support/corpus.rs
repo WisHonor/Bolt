@@ -109,7 +109,10 @@ impl Case {
 
     fn make(before_git: impl FnOnce(&Path), off_main: bool) -> Case {
         let env = Env::empty();
-        env.bolt().arg("start").assert().success();
+        env.bolt()
+            .args(["start", "--preset", "custom"])
+            .assert()
+            .success();
         before_git(env.root());
         let hooks = env.root().join(".git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();

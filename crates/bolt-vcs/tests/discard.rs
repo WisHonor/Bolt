@@ -16,7 +16,10 @@ use support::{Env, changed, files, holding, plant_save, saved_files, text, write
 /// A project with `entries` saved.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in entries {
         write(&env, path, bytes.as_bytes());
     }
@@ -207,7 +210,10 @@ fn discard_refuses_paths_outside_the_project_or_in_bolt() {
 #[test]
 fn discard_leaves_project_links_alone() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_save(env.root(), |pack| {
         let a = pack.add_content(b"a").unwrap();
         let link = ProjectLink::submodule(&[1; 20]);
@@ -252,7 +258,10 @@ fn discard_leaves_nested_projects_alone() {
 #[test]
 fn discard_leaves_entries_this_computer_cant_hold_unwritten() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_save(env.root(), |pack| {
         let a = pack.add_content(b"a").unwrap();
         let sub = Listing::new(vec![
@@ -335,7 +344,10 @@ fn a_discard_with_a_file_in_use_fails_and_the_next_one_finishes() {
 #[test]
 fn a_file_where_a_saved_empty_folder_was_is_reported_removed() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_save(env.root(), |pack| {
         let a = pack.add_content(b"a").unwrap();
         let empty = Listing::new(vec![]).unwrap();
@@ -491,7 +503,10 @@ fn on_a_drive_that_ignores_case_paths_match_in_any_case() {
 #[test]
 fn a_path_two_saved_names_fold_to_is_refused_with_both() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     plant_save(env.root(), |pack| {
         let a = pack.add_content(b"a").unwrap();
         let top = Listing::new(vec![

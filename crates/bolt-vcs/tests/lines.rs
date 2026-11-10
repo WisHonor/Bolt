@@ -11,7 +11,10 @@ use support::{Env, text};
 /// A started project with two saves on `main`, at its first save: returns that save.
 fn at_first_save() -> (Env, Id) {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     env.overwrite("a.txt", "a");
     env.bolt().args(["save", "A"]).assert().success();
     let first = env.state().1.lines["main"];
@@ -185,7 +188,10 @@ fn line_with_nothing_changed_says_no_line_was_made() {
 #[test]
 fn line_is_refused_on_a_line() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     env.overwrite("a.txt", "a");
     let err = refused_save(&env, &["--line", "feature", "A"]);
     assert!(err.contains("comes in v0.2"), "{err}");

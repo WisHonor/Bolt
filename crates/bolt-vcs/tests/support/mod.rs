@@ -480,7 +480,10 @@ pub fn with_bolt_spelling_under_git(pack: &mut PackSet, files: &[(&str, &[u8])])
 /// another, each holding its entries as for [`listings`]; their IDs. `bolt goto` then writes each.
 pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = main_tip(&env).to_hex();
     env.bolt().args(["goto", &first]).assert().success();
     let mut ids = Vec::new();

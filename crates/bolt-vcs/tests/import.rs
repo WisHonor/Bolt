@@ -370,7 +370,10 @@ fn import_and_start_refuse_a_project_that_lost_only_its_format() {
     env.import();
     refused_over_saves(env.root(), "import");
     let started = tempfile::tempdir().unwrap();
-    env.bolt_in(started.path()).arg("start").assert().success();
+    env.bolt_in(started.path())
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     refused_over_saves(started.path(), "start");
 }
 
@@ -428,7 +431,11 @@ fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
         "{}",
         text(&out.stderr)
     );
-    let out = env.bolt().arg("start").output().unwrap();
+    let out = env
+        .bolt()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
     assert!(
@@ -529,7 +536,10 @@ fn a_bolt_git_tracks_is_named_whatever_it_holds() {
 fn import_inside_another_project_is_refused() {
     let env = Env::new();
     let outer = tempfile::tempdir().unwrap();
-    env.bolt_in(outer.path()).arg("start").assert().success();
+    env.bolt_in(outer.path())
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let inner = outer.path().join("repo");
     std::fs::create_dir(&inner).unwrap();
     git(&inner, &["init", "-q"]);

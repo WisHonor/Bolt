@@ -55,7 +55,10 @@ fn warning_kinds(env: &Env, args: &[&str]) -> (Vec<String>, serde_json::Value) {
 /// stopped before `head` moved would leave it.
 fn stopped_switch() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = Repository::open(env.root()).unwrap().head().unwrap();
     env.overwrite("a.txt", "a");
     env.bolt().args(["save", "A"]).assert().success();
@@ -324,7 +327,10 @@ fn plant_with_change_id(root: &Path, change_id: ChangeId) {
 #[test]
 fn an_ambiguous_target_lists_the_saves() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let mut second = [0; 16];
     second[15] = 1;
     plant_with_change_id(env.root(), ChangeId([0; 16]));
@@ -384,7 +390,10 @@ fn goto_json_matches_its_snapshot() {
 /// A project whose line `main` holds `second`, on the save before, which holds `first`.
 fn on_first_of_two(first: &[(&str, &str)], second: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_all(&env, first);
     env.bolt().args(["save", "First"]).assert().success();
     let saved = env.state().1.lines["main"];

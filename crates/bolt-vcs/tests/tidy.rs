@@ -26,7 +26,10 @@ fn ok(env: &Env, args: &[&str]) -> (String, String) {
 /// nothing reaches, as a crash can leave them.
 fn with_garbage() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     fs::write(env.root().join("a.txt"), "one").unwrap();
     ok(&env, &["save", "One"]);
     let mut repo = Repository::open(env.root()).unwrap();
@@ -115,7 +118,10 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
 #[test]
 fn tidy_keeps_every_chunk_of_the_big_files_it_keeps() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let big = env.root().join("big.bin");
     let first = write_noise(&big, 1, 2 << 20);
     ok(&env, &["save", "Big"]);

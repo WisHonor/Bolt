@@ -66,7 +66,7 @@ fn packs(env: &Env) -> Vec<String> {
 /// A project whose diary is `start`, then saves `One` and `Two` of `a.txt`: the three entries.
 fn project() -> (Env, [Id; 3]) {
     let env = Env::empty();
-    ok(&env, &["start"]);
+    ok(&env, &["start", "--preset", "custom"]);
     let start = head(&env).0;
     write(&env, "a.txt", "one\n");
     ok(&env, &["save", "One"]);

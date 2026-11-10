@@ -28,7 +28,10 @@ fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in entries {
         write(&env, path, bytes);
     }

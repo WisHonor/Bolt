@@ -12,7 +12,10 @@ use support::{Env, text};
 /// A started project with `files` saved.
 fn project(files: &[(&str, &[u8])]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (name, bytes) in files {
         fs::write(env.root().join(name), bytes).unwrap();
     }
@@ -300,7 +303,10 @@ fn a_stdout_that_fails_mid_document_ends_it_with_the_error_on_stderr() {
 #[test]
 fn a_spelling_of_bolt_in_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     support::plant_save(env.root(), |pack| {
         support::with_bolt_spelling_under_git(pack, &[("a.txt", b"a\n")])
     });

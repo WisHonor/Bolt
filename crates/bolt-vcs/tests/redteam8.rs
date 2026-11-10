@@ -225,7 +225,10 @@ fn rt8_2_a_save_leaves_out_what_gits_own_ignore_list_leaves_out() {
         git_untracked(env.root(), home, &global)
     );
 
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let out = env
         .bolt()
         .args(["save", "First"])

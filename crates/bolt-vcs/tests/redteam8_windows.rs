@@ -34,7 +34,7 @@ fn put(path: &Path, bytes: &[u8]) -> Id {
 /// A project holding `big.bin`, cut into chunks, saved as `saved`.
 fn project(saved: &[u8]) -> Env {
     let env = Env::empty();
-    ok(&env, env.root(), &["start"]);
+    ok(&env, env.root(), &["start", "--preset", "custom"]);
     put(&env.root().join("big.bin"), saved);
     ok(&env, env.root(), &["save", "Big"]);
     env

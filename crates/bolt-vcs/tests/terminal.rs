@@ -38,7 +38,10 @@ fn bolt_on_a_terminal(env: &Env, dir: &Path) -> assert_cmd::Command {
 #[cfg(feature = "fault-injection")]
 fn project_with_a_change() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
     env.bolt().args(["save", "first"]).assert().success();
     std::fs::write(env.root().join("a.txt"), "abc\n").unwrap();
@@ -136,7 +139,7 @@ fn without_a_terminal_bolts_own_words_are_plain() {
         assert!(!shown.contains(SYMBOLS), "{args:?}: {shown:?}");
         shown
     };
-    run(&["start"]);
+    run(&["start", "--preset", "custom"]);
     std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
     run(&["save", "first"]);
     std::fs::write(env.root().join("a.txt"), "abc\n").unwrap();
@@ -166,7 +169,10 @@ fn without_a_terminal_bolts_own_words_are_plain() {
 /// A project whose store holds a damaged copy of the licence it is about to save.
 fn project_with_a_damaged_copy_of_its_licence() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let licence = b"Permission is hereby granted, free of charge, to any person\n";
     let made = tempfile::tempdir().unwrap();
     let mut w = PackWriter::create(made.path()).unwrap();
@@ -223,7 +229,10 @@ fn a_warning_after_the_answer_on_a_terminal_comes_after_one_empty_line() {
 fn a_failing_command_that_warns_first_starts_with_the_warning() {
     for terminal in [false, true] {
         let env = Env::empty();
-        env.bolt().arg("start").assert().success();
+        env.bolt()
+            .args(["start", "--preset", "custom"])
+            .assert()
+            .success();
         let first = support::main_tip(&env).to_hex();
         std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
         std::fs::write(env.root().join("b.txt"), "b\n").unwrap();

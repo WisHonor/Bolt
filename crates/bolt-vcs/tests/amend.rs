@@ -14,7 +14,10 @@ use support::{Env, changed, files, head, holding, main_tip, saved_files, text, w
 /// A project with `entries` saved on `main` as "Files".
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in entries {
         write(&env, path, bytes);
     }

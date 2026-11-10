@@ -16,7 +16,10 @@ use support::{Env, plant_save, text};
 /// A project with `files` saved, each last changed an hour ago so the cache can vouch for it.
 fn project(files: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (name, content) in files {
         write_old(&env.root().join(name), content.as_bytes());
     }
@@ -386,7 +389,10 @@ fn plant_links(root: &Path) {
 #[test]
 fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_old(&env.root().join("a.txt"), b"a");
     plant_links(env.root());
     // `deps` is gone from disk, and its link stays where the save has it.
@@ -423,7 +429,10 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
 #[test]
 fn status_says_in_its_own_words_why_it_stops() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_old(&env.root().join("a.txt"), b"a");
     plant_links(env.root());
     // The save keeps deps/lib as it is, so deps can't be a file.
@@ -441,7 +450,10 @@ fn status_says_in_its_own_words_why_it_stops() {
 #[test]
 fn a_save_holding_a_spelling_of_bolt_is_named() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
     plant_save(env.root(), |pack| {
         let id = pack.add_content(b"x").unwrap();
