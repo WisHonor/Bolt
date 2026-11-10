@@ -427,7 +427,7 @@ Decisions 113 and 115; json.md (`start`, `setup`); terminal.md §10.
 
 ### Task 8: Git's words
 
-Decision 116; storage-format.md §10.
+Decisions 116 and 124 (124 came out of this task's review: `restore` is explained, never run, and a shortcut runs only the Git forms that mean the same in Bolt); storage-format.md §10.
 
 **Files:**
 - Create: `crates/bolt-vcs/src/git_words.rs`; `crates/bolt-vcs/tests/git_words.rs`.
@@ -456,7 +456,11 @@ pub fn first_time(word: &str, settings_folder: Option<&Path>) -> bool;
 #[test] fn stash_pop_brings_a_shelf_back() { /* Review Focus 8: and no shelf is called "pop" */ }
 #[test] fn stash_list_lists() {}
 #[test] fn restore_without_a_path_explains_and_discards_nothing() { /* unsaved changes still there; exit 2 */ }
-#[test] fn restore_with_paths_discards_only_those() {}
+#[test] fn restore_with_paths_explains_and_discards_nothing() { /* decision 124: a changed file and a new file both stay; exit 2 */ }
+#[test] fn commit_with_a_path_and_no_message_explains_and_saves_nothing() { /* decision 124 */ }
+#[test] fn a_message_that_starts_with_a_dash_is_a_message() { /* decision 124: commit -m "--amend" saves with that message and amends nothing */ }
+#[test] fn stash_with_anything_else_explains_and_shelves_nothing() { /* decision 124: stash create, stash push -m x, stash -u, stash apply */ }
+#[test] fn branch_with_an_option_gets_lines_own_answer() { /* decision 124: branch -d x */ }
 #[test] fn add_explains_and_changes_nothing() { /* exit 2; stderr explains; the diary has no new entry */ }
 #[test] fn each_explained_word_explains() { /* rm, mv, reset, merge, rebase, push, pull, clone, clean, … */ }
 #[test] fn checkout_dash_b_and_branch_with_a_name_explain() {}
