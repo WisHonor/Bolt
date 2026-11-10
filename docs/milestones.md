@@ -15,7 +15,7 @@
 
 **Every milestone also ends with a red-team session** ([decision 024](decisions/024-red-team-gate.md)): a fresh agent attacks the milestone's code from an isolated sandbox, and every proven finding is fixed (or ruled on in writing) before the milestone is merged. Milestone 1 had two sessions, on 2026-11-01 and (on the fixes) 2026-11-02; every finding is fixed. Milestone 2 had two as well, both on 2026-11-03, the second on the fixes; every proven finding is fixed or ruled on in writing (decisions 043 and 044). Milestone 3 had two, both on 2026-11-06 (decisions 067 to 069), milestone 4 two, both on 2026-11-08 (decisions 079 and 080), and milestone 5 two, both on 2026-11-09 (decisions 094 to 098).
 
-**v0.1 ships when** every test passes on the three systems and both speed gates pass ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file uses at most about 500 MB of memory, and `status` on an unchanged 100,000-file project takes under 2 seconds on an SSD. Benchmark results against Git and Git LFS are published either way. Both gates passed when measured on 2026-11-09, and the results against Git and Git LFS are published ([benchmarks.md](benchmarks.md)).
+**v0.1 ships when** every test passes on the three systems and both speed gates pass ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file uses at most about 500 MB of memory, and `status` on an unchanged 100,000-file project takes under 2 seconds on an SSD. Benchmark results against Git and Git LFS are published either way. Both gates passed when measured on 2026-11-09, and the results against Git and Git LFS are published ([benchmarks.md](benchmarks.md)). A third gate was added on 2026-11-10 ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's own source, `status` with nothing changed, a small change saved, and going back to the first version each take at most twice Git's time, on GitHub's Linux and Windows runners. v0.1 ships when all three pass; the third failed five of its six checks before milestone 6's speed work.
 
 After v0.1: v0.2 adds combining lines (plus renaming and deleting them); v0.3 adds syncing and locking ([design.md](design.md) §1).
 
@@ -263,7 +263,7 @@ Planned on 2026-11-08, after decisions [082](decisions/082-how-big-files-are-cut
 
 ## Milestone 6: Presets and polish → v0.1
 
-Two sessions build this milestone at the same time, each on a branch of its own, and each lists its steps under its own heading. Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+Two sessions build it at once, each with its own steps, decisions and red-team sessions: presets and polish (decisions from 113), and speed and space (decisions [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to 112). Each step ends with tests passing on Windows, macOS and Linux; a plan's task numbers are in brackets. A ✅ marks a step that is done.
 
 ### Presets and polish
 
@@ -312,3 +312,47 @@ Planned on 2026-11-10, after decisions [113](decisions/113-presets-what-each-wri
 **11. Docs, red team, review and merge** (Tasks 18–20)
 - The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, and every document matches the code.
+
+### Speed and space
+
+Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [103](decisions/103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). It starts from a profile of where the time goes ([benchmarks.md](benchmarks.md) §7). The plan's task numbers are added in brackets when the plan is written.
+
+**0. Measure** ✅ (2026-11-10)
+- `status`, a small save and `goto` timed from the inside on Git's source and on Godot's demos, on GitHub's Linux and Windows runners and on the laptop; the big-file steps Git or Git LFS wins; where Godot's space goes.
+- *Done when:* [benchmarks.md](benchmarks.md) §7 says where the time and the space go.
+
+**1. The gate against Git**
+- `bench/run.sh gate` and the `speed-gate` job ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)).
+- *Done when:* the job runs on both systems and fails, as it must before the work below.
+
+**2. Caches and flushes**
+- The file cache is loaded without a copy of each path, asked once for each file, written only when it changed and never flushed; `state/lock-info` and the drive test lose their flush ([decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md)).
+- *Done when:* an unchanged `status` leaves `cache/files` untouched, and a torn cache is ignored and rebuilt.
+
+**3. The walk**
+- Ignore lines that are plain names are found by lookup, not by trying each; a folder is listed before it is asked for `.git`, `.bolt` and ignore files ([decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)); each name is handled without building its path three times.
+- *Done when:* the matcher agrees with Git and with its old self on random rules, and every walk test passes unchanged.
+
+**4. The store and the listings**
+- A record is found and read in fewer reads; a folder whose entries all match the last save's takes that save's listing instead of building its own.
+- *Done when:* every object is still checked against its fingerprint on every read, and a save writes the same packs as before.
+
+**5. The commands' own work**
+- A command tests the drive once, loads each cache once, reads the diary entry once and lists the packs once; a switch plans from one scan.
+- *Done when:* the first measurement of the gate after these steps is published, and what is still over is named.
+
+**6. Big files**
+- A big file is flushed while it is written ([decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)); a switch reads each chunk whole and keeps the chunks it has checked while it writes a file.
+- *Done when:* the first save of big files that don't compress and going back to an old version of a big file are measured again, beside Git and Git LFS.
+
+**7. Follow-ups**
+- The rows of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) about speed, memory or space: each is done, or moved past v0.1 in a decision record that says why.
+- *Done when:* each has a test, a measurement or a ruling.
+
+**8. Proof**
+- Tests for what speed puts at risk: a torn, stale or planted cache; files changed during a walk or within the cache's 2 seconds; folders swapped mid-walk; a flush that fails halfway through a big file.
+- *Done when:* each passes on all three systems, and the model test passes with the cache on.
+
+**9. Docs, red team, review, benchmarks and merge**
+- The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, the whole benchmark and all three gates run again, then a pull request whose checks all pass.
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and [benchmarks.md](benchmarks.md) gives the numbers before and after, losses included.
