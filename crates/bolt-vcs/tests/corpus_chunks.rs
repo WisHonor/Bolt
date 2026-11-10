@@ -167,7 +167,7 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
         }
         Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
-            assert_eq!(doc["restored"], json!(["big.bin"]), "{doc}");
+            assert_eq!(doc["restored_paths"], json!(["big.bin"]), "{doc}");
             read_well(&doc, &p, *named);
             assert_eq!(project_entries(&case.env), holding(&big()));
         }

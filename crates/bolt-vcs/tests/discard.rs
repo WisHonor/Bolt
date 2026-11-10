@@ -159,8 +159,12 @@ fn discard_keeps_a_safety_copy_of_everything_it_throws_away() {
     fs::remove_file(env.root().join("b.txt")).unwrap();
     let doc = discard_json(&env, &[]);
     assert_eq!(doc["safety_copies"], 3, "{doc}");
-    assert_eq!(strings(&doc["restored"]), ["a.txt", "b.txt"], "{doc}");
-    assert_eq!(strings(&doc["removed"]), ["deep/x.txt", "n.bin"], "{doc}");
+    assert_eq!(strings(&doc["restored_paths"]), ["a.txt", "b.txt"], "{doc}");
+    assert_eq!(
+        strings(&doc["removed_paths"]),
+        ["deep/x.txt", "n.bin"],
+        "{doc}"
+    );
     // The entry records a switch from a save of what the folder held to the save it is on.
     let repo = Repository::open(env.root()).unwrap();
     let (_, entry) = repo.current().unwrap();
@@ -183,8 +187,8 @@ fn discard_with_nothing_to_discard_says_so() {
     let said = discard(&env, &["dir"]);
     assert!(said.contains("Nothing to discard"), "{said}");
     let doc = discard_json(&env, &[]);
-    assert_eq!(doc["restored"], serde_json::json!([]), "{doc}");
-    assert_eq!(doc["removed"], serde_json::json!([]), "{doc}");
+    assert_eq!(doc["restored_paths"], serde_json::json!([]), "{doc}");
+    assert_eq!(doc["removed_paths"], serde_json::json!([]), "{doc}");
     assert_eq!(doc["safety_copies"], 0, "{doc}");
     // Nothing was recorded.
     assert_eq!(env.standing(), before);
@@ -232,8 +236,8 @@ fn discard_leaves_project_links_alone() {
     // What the link's folder holds belongs to the other project.
     write(&env, "lib/f.txt", b"theirs");
     let doc = discard_json(&env, &[]);
-    assert_eq!(strings(&doc["restored"]), ["a.txt"], "{doc}");
-    assert_eq!(doc["removed"], serde_json::json!([]), "{doc}");
+    assert_eq!(strings(&doc["restored_paths"]), ["a.txt"], "{doc}");
+    assert_eq!(doc["removed_paths"], serde_json::json!([]), "{doc}");
     assert_eq!(
         files(env.root()),
         holding(&[("a.txt", "a"), ("lib/f.txt", "theirs")])
@@ -283,7 +287,11 @@ fn discard_leaves_entries_this_computer_cant_hold_unwritten() {
     });
     write(&env, "a.txt", b"mine");
     let doc = discard_json(&env, &[]);
-    assert_eq!(strings(&doc["restored"]), ["a.txt", "sub/y.txt"], "{doc}");
+    assert_eq!(
+        strings(&doc["restored_paths"]),
+        ["a.txt", "sub/y.txt"],
+        "{doc}"
+    );
     assert_eq!(strings(&doc["not_written"]), ["sub/.GIT"], "{doc}");
     assert_eq!(
         files(env.root()),
@@ -386,8 +394,8 @@ fn a_file_where_a_saved_folder_was_is_counted_with_what_comes_back() {
     fs::remove_dir_all(env.root().join("dir")).unwrap();
     write(&env, "dir", b"mine");
     let doc = discard_json(&env, &[]);
-    assert_eq!(strings(&doc["removed"]), ["dir"], "{doc}");
-    assert_eq!(strings(&doc["restored"]), ["dir/c.txt"], "{doc}");
+    assert_eq!(strings(&doc["removed_paths"]), ["dir"], "{doc}");
+    assert_eq!(strings(&doc["restored_paths"]), ["dir/c.txt"], "{doc}");
     assert_eq!(doc["safety_copies"], 1, "{doc}");
     assert_eq!(files(env.root()), holding(SAVED));
 }
@@ -424,7 +432,7 @@ fn discard_removes_a_new_link() {
     let env = project(SAVED);
     std::os::unix::fs::symlink("a.txt", env.root().join("l")).unwrap();
     let doc = discard_json(&env, &[]);
-    assert_eq!(strings(&doc["removed"]), ["l"], "{doc}");
+    assert_eq!(strings(&doc["removed_paths"]), ["l"], "{doc}");
     assert_eq!(doc["safety_copies"], 1, "{doc}");
     assert!(env.root().join("l").symlink_metadata().is_err());
 }
@@ -468,7 +476,7 @@ fn discard_puts_back_an_executable_bit() {
     fs::set_permissions(&a, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(changed(&env), ["a.txt"]);
     let doc = discard_json(&env, &[]);
-    assert_eq!(strings(&doc["restored"]), ["a.txt"], "{doc}");
+    assert_eq!(strings(&doc["restored_paths"]), ["a.txt"], "{doc}");
     assert_eq!(
         fs::metadata(&a).unwrap().permissions().mode() & 0o777,
         0o644

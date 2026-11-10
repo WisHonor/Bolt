@@ -8,10 +8,10 @@ expression: "discard_json(&env, &[])"
   "folders": 0,
   "not_written": [],
   "placeholders": [],
-  "removed": [
+  "removed_paths": [
     "n.txt"
   ],
-  "restored": [
+  "restored_paths": [
     "a.txt"
   ],
   "safety_copies": 2,

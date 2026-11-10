@@ -1601,8 +1601,8 @@ fn discard_command(
     let text = if json {
         let document = json!({
             "bolt_json": BOLT_JSON,
-            "restored": done.restored,
-            "removed": done.removed,
+            "restored_paths": done.restored,
+            "removed_paths": done.removed,
             "folders": done.folders,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
