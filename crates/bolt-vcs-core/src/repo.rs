@@ -602,9 +602,10 @@ pub(crate) fn owner_allows(
         let why = if folder.components().any(|c| c == Component::ParentDir) {
             DOT_DOT
         } else {
-            match safe_fs::folder_id(folder) {
-                Ok(id) if Some(id) == project => return Ok(()),
-                Err(e) if bolt_platform::dir::is_link_refusal(&e) => A_LINK,
+            match (safe_fs::folder_id(folder), project) {
+                (Ok(id), Some(project)) if same_identity(id, project) => return Ok(()),
+                (Ok(id), Some(project)) if id.1 == 0 || project.1 == 0 => NO_IDENTITY,
+                (Err(e), _) if bolt_platform::dir::is_link_refusal(&e) => A_LINK,
                 _ => continue,
             }
         };
@@ -622,6 +623,16 @@ pub(crate) fn owner_allows(
         None => refusal,
     })
 }
+
+/// Whether two folders' identities (drive, file number) say they are one. A file number of 0 is
+/// what some shares give everything, so it never matches.
+fn same_identity(a: (u64, u128), b: (u64, u128)) -> bool {
+    a.1 != 0 && a == b
+}
+
+/// Why an entry on a drive that gives no file numbers never counts.
+const NO_IDENTITY: &str =
+    "its drive doesn't tell its folders apart, so safe-folders can't vouch for a folder on it";
 
 /// Why an entry with `..` in it never counts.
 const DOT_DOT: &str = "it has `..` in it, which the system resolves through any link before it";
@@ -4032,5 +4043,24 @@ mod tests {
             }
         }
         swapper.join().unwrap();
+    }
+
+    /// Two folders are one only by an identity the drive really gives: a file number of 0, which
+    /// some shares give everything, never matches.
+    #[test]
+    fn a_folder_identity_of_file_number_zero_never_matches() {
+        assert!(same_identity((3, 42), (3, 42)));
+        assert!(!same_identity((3, 42), (3, 43)));
+        assert!(!same_identity((3, 42), (4, 42)));
+        assert!(!same_identity((3, 0), (3, 0)));
+        assert!(!same_identity((3, 0), (3, 42)));
+        assert!(!same_identity((3, 42), (3, 0)));
+        let said = passed_over(Path::new("Z:/mine"), NO_IDENTITY);
+        assert_eq!(
+            said,
+            "Its safe-folders entry Z:/mine doesn't count: its drive doesn't tell its folders \
+             apart, so safe-folders can't vouch for a folder on it, and Bolt never trusts a \
+             folder that way."
+        );
     }
 }
