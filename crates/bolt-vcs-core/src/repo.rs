@@ -1830,7 +1830,7 @@ mod tests {
             assert!(
                 warnings
                     .iter()
-                    .any(|w| w.kind == "damaged_pack" && w.message.contains(junk_name)),
+                    .any(|w| w.kind == "pack_damaged" && w.message.contains(junk_name)),
                 "{junk_name}: {warnings:?}"
             );
             let missing = repo

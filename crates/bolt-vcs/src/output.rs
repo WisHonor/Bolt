@@ -1451,7 +1451,7 @@ mod tests {
     }
 
     fn damaged() -> Warning {
-        Warning::new("damaged_pack", "pack x is damaged.")
+        Warning::new("pack_damaged", "pack x is damaged.")
     }
 
     /// Streams a document into a buffer. `walk` is the command's walk; `more` and a damaged pack
@@ -1551,7 +1551,7 @@ mod tests {
         );
         assert_eq!(
             doc["warnings"],
-            json!([{"kind": "damaged_pack", "message": "pack x is damaged."}])
+            json!([{"kind": "pack_damaged", "message": "pack x is damaged."}])
         );
         // The failure goes on to the exit code, and says it is in the document already.
         let failure = ended.unwrap_err();
@@ -1638,7 +1638,7 @@ mod tests {
             "bolt_json": 1,
             "changes": [{"path": "a"}, {"path": "b"}],
             "save": {"id": "x"},
-            "warnings": [{"kind": "damaged_pack", "message": "pack x is damaged."}],
+            "warnings": [{"kind": "pack_damaged", "message": "pack x is damaged."}],
         });
         assert_eq!(out, format!("{expected}\n"));
         assert_eq!(ended.unwrap(), vec![damaged()]);
@@ -1660,7 +1660,7 @@ mod tests {
             json!({
                 "bolt_json": 1,
                 "error": {"message": "Can't read it.", "hint": "Try again."},
-                "warnings": [{"kind": "damaged_pack", "message": "pack x is damaged."}],
+                "warnings": [{"kind": "pack_damaged", "message": "pack x is damaged."}],
             })
         );
         // With nothing found, the list is there and empty.

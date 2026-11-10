@@ -83,15 +83,15 @@ fn refused(doc: &Value, p: &Planted, before: &str, why: &str) {
     for told in [p.pack.as_str(), file.as_str(), why] {
         assert!(said.contains(told), "{told} in {said}");
     }
-    assert_eq!(kinds(doc), ["damaged_pack"], "{doc}");
-    assert!(message(doc, "damaged_pack").contains(&p.pack), "{doc}");
+    assert_eq!(kinds(doc), ["pack_damaged"], "{doc}");
+    assert!(message(doc, "pack_damaged").contains(&p.pack), "{doc}");
 }
 
 /// The warnings of a document that read the file from a good copy.
 fn read_well(doc: &Value, p: &Planted, named: bool) {
     if named {
-        assert_eq!(kinds(doc), ["damaged_pack"], "{doc}");
-        assert!(message(doc, "damaged_pack").contains(&p.pack), "{doc}");
+        assert_eq!(kinds(doc), ["pack_damaged"], "{doc}");
+        assert!(message(doc, "pack_damaged").contains(&p.pack), "{doc}");
     } else {
         assert!(kinds(doc).is_empty(), "{doc}");
     }

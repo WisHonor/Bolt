@@ -1179,7 +1179,7 @@ mod tests {
         // The same pack, as a warning.
         let warnings = store.warnings();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].kind, "damaged_pack");
+        assert_eq!(warnings[0].kind, "pack_damaged");
         assert_eq!(warnings[0].message, format!("{}.", damaged[0]));
     }
 

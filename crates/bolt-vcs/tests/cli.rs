@@ -1030,7 +1030,7 @@ fn save_json_carries_a_damaged_pack_warning() {
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["result"], "saved", "{doc}");
-    assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{doc}");
+    assert_eq!(warning_kinds(&doc), ["pack_damaged"], "{doc}");
     let message = doc["warnings"][0]["message"].as_str().unwrap();
     assert!(message.contains("00.pack is damaged: object "), "{message}");
     assert!(
@@ -1188,7 +1188,7 @@ fn save_json_is_the_same_when_the_line_cant_be_read_to_shorten_its_id() {
     // The same words are in the document, and the damaged save's pack is named beside them.
     assert_eq!(
         warning_kinds(&json),
-        ["change_id_not_shortened", "damaged_pack"],
+        ["change_id_not_shortened", "pack_damaged"],
         "{json}"
     );
     let said = json["warnings"][0]["message"].as_str().unwrap();
@@ -1209,7 +1209,7 @@ fn show_json_carries_the_warning_about_the_id_it_couldnt_shorten() {
     let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(
         warning_kinds(&doc),
-        ["change_id_not_shortened", "damaged_pack"],
+        ["change_id_not_shortened", "pack_damaged"],
         "{doc}"
     );
     let said = doc["warnings"][0]["message"].as_str().unwrap();
@@ -1611,7 +1611,7 @@ fn history_json_stays_valid_when_a_save_is_unreadable() {
             "{doc}"
         );
         // The pack with the damaged save was noted while it was read, before the command failed.
-        assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{command}: {doc}");
+        assert_eq!(warning_kinds(&doc), ["pack_damaged"], "{command}: {doc}");
         let said = doc["warnings"][0]["message"].as_str().unwrap();
         assert!(said.contains("is damaged"), "{command}: {said}");
     }
@@ -1631,7 +1631,7 @@ fn history_and_show_json_carry_a_damaged_pack_warning() {
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(0), "{command}: {stderr}");
         let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{command}: {doc}");
+        assert_eq!(warning_kinds(&doc), ["pack_damaged"], "{command}: {doc}");
         let said = doc["warnings"][0]["message"].as_str().unwrap();
         assert!(said.contains("00.pack is damaged"), "{command}: {said}");
         assert!(stderr.contains(&format!("warning: {said}\n")), "{stderr}");
@@ -1819,7 +1819,7 @@ fn save_json_error_lists_the_warnings_found_before_it_failed() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let error = doc["error"]["message"].as_str().unwrap();
     assert!(error.contains("would not work on every system"), "{doc}");
-    assert_eq!(warning_kinds(&doc), ["damaged_pack"], "{doc}");
+    assert_eq!(warning_kinds(&doc), ["pack_damaged"], "{doc}");
     // People are shown the error alone, which the document has too.
     assert_eq!(text(&out.stderr), "");
 }
