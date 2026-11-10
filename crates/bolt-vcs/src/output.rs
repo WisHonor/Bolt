@@ -869,8 +869,12 @@ pub struct Failure {
     pub printed: bool,
 }
 
+/// The error as JSON, escaped once more as it is on screen (see [`tell_failure`]).
 fn error_json(failure: &Failure) -> Value {
-    json!({ "message": failure.message, "hint": failure.hint })
+    json!({
+        "message": escape(&failure.message, true),
+        "hint": failure.hint.as_deref().map(|hint| escape(hint, true)),
+    })
 }
 
 /// The document of a command that failed before it printed any of its own: the error, and the
@@ -1373,6 +1377,27 @@ mod tests {
             needed_by: None,
             message: message.into(),
         }
+    }
+
+    #[test]
+    fn an_error_in_json_is_escaped_as_on_screen() {
+        let failure = Failure {
+            message: "Can't read a\u{1b}[2Jb.\nSecond line.".into(),
+            hint: Some("Delete \u{202e}it.".into()),
+            printed: false,
+        };
+        let error = error_json(&failure);
+        assert_eq!(
+            error,
+            json!({"message": "Can't read a\\x1b[2Jb.\nSecond line.", "hint": "Delete \\u{202e}it."})
+        );
+        // Escaping what is escaped changes nothing.
+        let again = Failure {
+            message: error["message"].as_str().unwrap().into(),
+            hint: error["hint"].as_str().map(Into::into),
+            printed: false,
+        };
+        assert_eq!(error_json(&again), error);
     }
 
     #[test]
