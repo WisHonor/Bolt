@@ -1,8 +1,11 @@
 //! `bolt verify`: what it says when everything checks out, and when it doesn't.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::time::SystemTime;
 
 use bolt_core::pack::{ENTRY_HEADER_LEN, PackReader, PackWriter};
 
@@ -192,4 +195,81 @@ fn on_a_terminal_the_checks_have_their_marks() {
     let shown = text(&out.stdout);
     assert!(shown.starts_with("\x1b[1;32mVerified\x1b[0m "), "{shown:?}");
     assert!(shown.contains("    \x1b[1;32m✓\x1b[0m "), "{shown:?}");
+}
+
+#[test]
+fn every_problem_of_a_kind_is_counted_on_screen() {
+    let env = project();
+    let contents: Vec<Vec<u8>> = (0..1005)
+        .map(|i| format!("copy {i}").into_bytes())
+        .collect();
+    plant_damaged(&env, "00.pack", &contents);
+    let out = run(&env, &["verify"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("    x 1,005 objects are damaged:\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("        ... and 985 more (bolt verify --json lists up to 1,000)\n"),
+        "{shown}"
+    );
+}
+
+/// Every file and folder under `dir`: a file's bytes, and when each was last changed.
+fn picture(dir: &Path) -> BTreeMap<PathBuf, (Option<Vec<u8>>, SystemTime)> {
+    let mut found = BTreeMap::new();
+    let mut folders = vec![dir.to_owned()];
+    while let Some(folder) = folders.pop() {
+        let changed = fs::symlink_metadata(&folder).unwrap().modified().unwrap();
+        found.insert(folder.clone(), (None, changed));
+        for e in fs::read_dir(&folder).unwrap() {
+            let path = e.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                folders.push(path);
+            } else {
+                let bytes = fs::read(&path).unwrap();
+                found.insert(path, (Some(bytes), meta.modified().unwrap()));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn verify_leaves_every_file_as_it_was_even_bolts_leftovers() {
+    for damaged in [false, true] {
+        let env = project();
+        if damaged {
+            plant_damaged(&env, "00.pack", &[b"damaged".to_vec()]);
+            let mut content = None;
+            let gone = support::add_pack(env.root(), |p| {
+                content = Some(p.add_content(b"only here").unwrap());
+            });
+            let content = content.unwrap();
+            support::plant_save(env.root(), |p| {
+                support::top_listing(p, &[("a.txt", content, 9)])
+            });
+            fs::remove_file(&gone[0]).unwrap();
+        }
+        let leftover = env.root().join(".bolt/tmp/tmp-0123456789abcdef");
+        fs::write(&leftover, "left by a crash").unwrap();
+        let bolt = env.root().join(".bolt");
+        let before = picture(&bolt);
+        let out = run(&env, &["verify"]);
+        let code = if damaged { 1 } else { 0 };
+        assert_eq!(out.status.code(), Some(code), "{}", text(&out.stdout));
+        if damaged {
+            let shown = text(&out.stdout);
+            assert!(shown.contains("1 object is damaged:"), "{shown}");
+            assert!(
+                shown.contains("1 object the project needs is missing:"),
+                "{shown}"
+            );
+        }
+        assert!(leftover.exists());
+        assert_eq!(picture(&bolt), before, "damaged: {damaged}");
+    }
 }

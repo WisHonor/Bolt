@@ -2024,7 +2024,8 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
 
 /// `bolt verify`. Problems found end it with exit code 1, the outcome line being the error.
 fn verify_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let repo: &Repository = opened.insert(Repository::discover(&std::env::current_dir()?)?);
+    let repo: &Repository =
+        opened.insert(Repository::discover_untouched(&std::env::current_dir()?)?);
     let window = undo_window_days()?;
     let mut bar = progress::Bar::new("Checking stored objects");
     let done = verify::verify(repo, window, now_ms(), &mut |read, total| {

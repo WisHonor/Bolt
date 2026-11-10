@@ -15,7 +15,7 @@ use crate::id::Id;
 use crate::link::ProjectLink;
 use crate::listing::{EntryKind, Listing};
 use crate::pack::{ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PackError, PackReader};
-use crate::repo::{RepoError, Repository};
+use crate::repo::{RepoError, Repository, head_entry};
 use crate::save::Save;
 use crate::store::{Store, is_damage};
 use crate::text::escape;
@@ -77,15 +77,44 @@ pub struct Verified {
     pub lines: u64,
     pub shelves: u64,
     pub problems_total: u64,
+    /// How many problems of each kind were found, kept or not.
+    pub pack_damaged: u64,
+    pub pack_unreadable: u64,
+    pub object_damaged: u64,
+    pub object_missing: u64,
+    pub head_lost: u64,
     pub problems: Vec<Problem>,
+    /// Whether what the project needs was worked out: not when `head` was lost, or the check
+    /// couldn't be made.
+    pub needs_checked: bool,
     pub warnings: Vec<Warning>,
 }
 
 impl Verified {
     fn found(&mut self, problem: Problem) {
         self.problems_total = self.problems_total.saturating_add(1);
+        let count = match problem.kind {
+            ProblemKind::PackDamaged => &mut self.pack_damaged,
+            ProblemKind::PackUnreadable => &mut self.pack_unreadable,
+            ProblemKind::ObjectDamaged => &mut self.object_damaged,
+            ProblemKind::ObjectMissing => &mut self.object_missing,
+            ProblemKind::HeadLost => &mut self.head_lost,
+        };
+        *count = count.saturating_add(1);
         if self.problems.len() < PROBLEMS_KEPT {
             self.problems.push(problem);
+        }
+    }
+
+    /// How many problems of `kind` were found, kept or not.
+    #[must_use]
+    pub fn count(&self, kind: ProblemKind) -> u64 {
+        match kind {
+            ProblemKind::PackDamaged => self.pack_damaged,
+            ProblemKind::PackUnreadable => self.pack_unreadable,
+            ProblemKind::ObjectDamaged => self.object_damaged,
+            ProblemKind::ObjectMissing => self.object_missing,
+            ProblemKind::HeadLost => self.head_lost,
         }
     }
 }
@@ -112,42 +141,29 @@ pub fn verify(
         &mut v,
         progress,
     );
-    // Before anything is told missing, it is looked for once more from the start: a merge or a
-    // tidy beside this one writes its new packs before it removes an old one.
-    let mut looked = look(repo, window_days, now_ms, &damaged);
-    if !matches!(&looked, Ok(Looked::Found(look)) if look.missing.is_empty()) {
-        let again = look(repo, window_days, now_ms, &damaged);
-        looked = match (looked, again) {
-            (Ok(Looked::Found(first)), Ok(Looked::Found(mut again))) => {
-                again.missing.retain(|id| first.missing.contains(id));
-                Ok(Looked::Found(again))
+    // A problem with what the project needs is told only when two looks agree on it: a merge or
+    // a tidy beside this one writes its new packs before it removes an old one, and a save its
+    // packs before it moves `head`.
+    let (verdict, look) = agreed_needs(repo, window_days, now_ms, &damaged);
+    let (kind, message) = match verdict {
+        Verdict::Found(missing) => {
+            if let Some(look) = look {
+                v.needs_checked = true;
+                told_needs(&mut v, &look, &missing, &damaged);
+                name_needers(&mut v, &look, repo.signatures_allowed());
             }
-            (_, again) => again,
-        };
-    }
-    match looked {
-        Err(e) => v.found(Problem {
-            kind: ProblemKind::PackUnreadable,
-            pack: None,
-            object: None,
-            needed_by: None,
-            message: format!(
-                "Bolt couldn't work out what the project needs: {}.",
-                escape(e.to_string().trim_end_matches('.'), false)
-            ),
-        }),
-        Ok(Looked::Lost(e)) => v.found(Problem {
-            kind: ProblemKind::HeadLost,
-            pack: None,
-            object: None,
-            needed_by: None,
-            message: e.to_string(),
-        }),
-        Ok(Looked::Found(look)) => {
-            told_needs(&mut v, &look, &damaged);
-            name_needers(&mut v, &look, repo.signatures_allowed());
+            return v;
         }
-    }
+        Verdict::Lost(message) => (ProblemKind::HeadLost, message),
+        Verdict::Failed(kind, message) => (kind, message),
+    };
+    v.found(Problem {
+        kind,
+        pack: None,
+        object: None,
+        needed_by: None,
+        message,
+    });
     v
 }
 
@@ -493,13 +509,76 @@ fn object_problem(e: &PackError) -> (ProblemKind, String) {
     }
 }
 
-/// What one look at what the project needs found.
-enum Looked {
-    /// `state/head` names nothing Bolt can read.
-    Lost(RepoError),
-    Found(Box<Look>),
+/// What a look at what the project needs concluded, kept once its working sets are dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// What the project needs that no pack holds.
+    Found(BTreeSet<Id>),
+    /// `state/head` names nothing Bolt can read: why.
+    Lost(String),
+    /// The look couldn't be made: the kind it is told as, and why.
+    Failed(ProblemKind, String),
 }
 
+impl Verdict {
+    fn same_kind(&self, other: &Verdict) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// Two verdicts of the same kind as one: missing only what both found missing, else the later.
+    fn with(&self, later: &Verdict) -> Verdict {
+        match (self, later) {
+            (Verdict::Found(a), Verdict::Found(b)) => Verdict::Found(a & b),
+            _ => later.clone(),
+        }
+    }
+}
+
+/// What the looks so far agree on, or `None` while another is needed: two of the same kind are
+/// combined; of three, the two that share a kind, or the last when none do.
+fn agreed(looks: &[Verdict]) -> Option<Verdict> {
+    match looks {
+        [a, b] => a.same_kind(b).then(|| a.with(b)),
+        [a, b, c] => {
+            let pair = [(a, c), (b, c), (a, b)]
+                .into_iter()
+                .find(|(x, y)| x.same_kind(y));
+            Some(pair.map_or_else(|| c.clone(), |(x, y)| x.with(y)))
+        }
+        _ => looks.last().cloned(),
+    }
+}
+
+/// Looks at what the project needs until two looks agree, at most three times. A first look that
+/// finds nothing missing is enough: no problem comes from it. Gives the verdict, and the last
+/// look's working sets when it found the head.
+fn agreed_needs(
+    repo: &Repository,
+    window_days: u32,
+    now_ms: i64,
+    damaged: &HashSet<Id>,
+) -> (Verdict, Option<Box<Look>>) {
+    let mut verdicts = Vec::new();
+    let mut last: Option<Box<Look>> = None;
+    loop {
+        // Gone before the next look begins, so two looks never hold their sets at once.
+        drop(last.take());
+        let (verdict, look) = look(repo, window_days, now_ms, damaged);
+        last = look;
+        let clean = matches!(&verdict, Verdict::Found(missing) if missing.is_empty());
+        verdicts.push(verdict);
+        let done = match verdicts.as_slice() {
+            [only] if clean => Some(only.clone()),
+            [_] => None,
+            looks => agreed(looks),
+        };
+        if let Some(verdict) = done {
+            return (verdict, last);
+        }
+    }
+}
+
+/// One look's working sets, when it found the head.
 struct Look {
     /// The store the look read from, listed when it began.
     store: Store,
@@ -507,8 +586,14 @@ struct Look {
     noted: Noted,
     lines: u64,
     shelves: u64,
-    /// What it needs that no pack holds, in order.
-    missing: BTreeSet<Id>,
+}
+
+/// Why a look couldn't be made.
+enum Unmade {
+    /// `state/head` couldn't be read, though it is there.
+    Head(RepoError),
+    /// The packs, or a pack, couldn't be read.
+    Packs(RepoError),
 }
 
 /// Works out what the project needs from `state/head`, read again, as `tidy` does with the same
@@ -519,15 +604,47 @@ fn look(
     window_days: u32,
     now_ms: i64,
     damaged: &HashSet<Id>,
-) -> Result<Looked, RepoError> {
-    let store = Store::open_in(Arc::clone(repo.packs_folder()), repo.packs_dir())?;
-    let (head, entry) = match repo.current_from(&store) {
+) -> (Verdict, Option<Box<Look>>) {
+    match look_at(repo, window_days, now_ms, damaged) {
+        Ok(Ok((missing, look))) => (Verdict::Found(missing), Some(look)),
+        Ok(Err(lost)) => (Verdict::Lost(lost.to_string()), None),
+        Err(unmade) => {
+            let (kind, e) = match unmade {
+                Unmade::Head(e) => (ProblemKind::HeadLost, e),
+                Unmade::Packs(e) => (ProblemKind::PackUnreadable, e),
+            };
+            let why = escape(e.to_string().trim_end_matches('.'), false);
+            let said = format!("What the project needs couldn't be checked: {why}.");
+            (Verdict::Failed(kind, said), None)
+        }
+    }
+}
+
+/// [`look`]: what is missing and the look's sets, or a lost head, or why it couldn't be made.
+#[allow(clippy::type_complexity)]
+fn look_at(
+    repo: &Repository,
+    window_days: u32,
+    now_ms: i64,
+    damaged: &HashSet<Id>,
+) -> Result<Result<(BTreeSet<Id>, Box<Look>), RepoError>, Unmade> {
+    // `head` before the packs are listed: whatever it names was stored before the listing began.
+    let head = match repo.head() {
+        Ok(head) => head,
+        Err(e @ RepoError::HeadLost { .. }) => return Ok(Err(e)),
+        Err(e) => return Err(Unmade::Head(e)),
+    };
+    let packs_failed = |e: RepoError| Unmade::Packs(e);
+    let store = Store::open_in(Arc::clone(repo.packs_folder()), repo.packs_dir())
+        .map_err(|e| packs_failed(e.into()))?;
+    let (head, entry) = match head_entry(&store, head) {
         Ok(found) => found,
-        Err(e @ RepoError::HeadLost { .. }) => return Ok(Looked::Lost(e)),
-        Err(e) => return Err(e),
+        Err(e @ RepoError::HeadLost { .. }) => return Ok(Err(e)),
+        Err(e) => return Err(packs_failed(e)),
     };
     let now_ns = i128::from(now_ms).saturating_mul(1_000_000);
-    let packs = tidy::listed_leniently(repo.packs_folder(), now_ns)?;
+    let packs =
+        tidy::listed_leniently(repo.packs_folder(), now_ns).map_err(|e| packs_failed(e.into()))?;
     let since = tidy::window_start(repo, window_days, now_ms);
     let src = Source {
         store: &store,
@@ -539,7 +656,7 @@ fn look(
         watch: damaged.clone(),
         ..Noted::default()
     };
-    let (kept, noted) = tidy::needs(&src, &packs, head, since, watch)?;
+    let (kept, noted) = tidy::needs(&src, &packs, head, since, watch).map_err(packs_failed)?;
     let mut missing: BTreeSet<Id> = kept
         .iter()
         .filter(|id| !noted.known.contains(id))
@@ -548,30 +665,37 @@ fn look(
     let unread = noted.unread.iter();
     missing.extend(
         unread
-            .filter(|(_, why)| matches!(why, Unread::Missing))
+            .filter(|(_, why)| matches!(why, Unread::Missing | Unread::OtherKind))
             .map(|(id, _)| *id),
     );
-    Ok(Looked::Found(Box::new(Look {
+    let look = Look {
         store,
         kept,
         noted,
         lines: entry.state.lines.len() as u64,
         shelves: entry.state.shelves.len() as u64,
-        missing,
-    })))
+    };
+    Ok(Ok((missing, Box::new(look))))
 }
 
 /// Tells what `look` found the project needs but couldn't read, past the objects in `damaged`,
-/// told already, and what it found missing.
-fn told_needs(v: &mut Verified, look: &Look, damaged: &HashSet<Id>) {
+/// told already, and `missing`, which the looks agree no pack holds.
+fn told_needs(v: &mut Verified, look: &Look, missing: &BTreeSet<Id>, damaged: &HashSet<Id>) {
     v.saves = look.noted.saves.len() as u64;
     v.entries = look.noted.entries;
     v.lines = look.lines;
     v.shelves = look.shelves;
+    // Something in a pack Bolt couldn't read may be there all the same.
+    let all_read = v.pack_damaged == 0 && v.pack_unreadable == 0;
     let mut told = HashSet::new();
+    let mut other_kind = HashSet::new();
     for (id, why) in &look.noted.unread {
         let (kind, message) = match why {
             Unread::Missing => continue,
+            Unread::OtherKind => {
+                other_kind.insert(*id);
+                continue;
+            }
             Unread::Damaged(_) if damaged.contains(id) => continue,
             Unread::Damaged(why) => (
                 ProblemKind::ObjectDamaged,
@@ -592,13 +716,20 @@ fn told_needs(v: &mut Verified, look: &Look, damaged: &HashSet<Id>) {
             });
         }
     }
-    for id in &look.missing {
+    for id in missing {
+        let message = if other_kind.contains(id) {
+            "It is stored, but as another kind of object than what needs it."
+        } else if all_read {
+            "It isn't in any pack."
+        } else {
+            "It isn't in any pack Bolt could read."
+        };
         v.found(Problem {
             kind: ProblemKind::ObjectMissing,
             pack: None,
             object: Some(*id),
             needed_by: None,
-            message: "It isn't in any pack.".to_owned(),
+            message: message.to_owned(),
         });
     }
 }

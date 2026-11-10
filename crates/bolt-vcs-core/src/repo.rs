@@ -723,7 +723,7 @@ fn head_lost(detail: impl Into<String>) -> RepoError {
 
 /// The diary entry `id`, which `state/head` names, from `store`. One that can't be had is a lost
 /// head, unless it couldn't be read for a reason that isn't damage.
-fn head_entry(store: &Store, id: Id) -> Result<(Id, DiaryEntry), RepoError> {
+pub(crate) fn head_entry(store: &Store, id: Id) -> Result<(Id, DiaryEntry), RepoError> {
     let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
     let bytes = match store.read_record(&id, ObjectKind::DiaryEntry) {
         Ok(bytes) => bytes,
@@ -1161,16 +1161,31 @@ impl Repository {
         Repository::discover_with(start, &check_owner)
     }
 
+    /// [`Repository::discover`] for a command that changes nothing, `verify`: the leftovers in
+    /// `tmp/` are left as they are, and the lock file isn't touched.
+    pub fn discover_untouched(start: &Path) -> Result<Repository, RepoError> {
+        Repository::search(start, &check_owner, Repository::open_untouched)
+    }
+
     /// `discover`, with the search's owner check given (a stand-in in tests).
     fn discover_with(
         start: &Path,
         owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
+        Repository::search(start, owner_check, Repository::open)
+    }
+
+    /// `discover`, opening the project found with `open`.
+    fn search(
+        start: &Path,
+        owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
+        open: fn(&Path) -> Result<Repository, RepoError>,
+    ) -> Result<Repository, RepoError> {
         let start = resolved(start);
         let mut unfinished = None;
         for folder in start.ancestors() {
             if has_project(folder, owner_check)? {
-                return Repository::open(folder);
+                return open(folder);
             }
             if unfinished.is_none() {
                 unfinished = unfinished_here(folder);
@@ -1181,6 +1196,14 @@ impl Repository {
 
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
+        let repo = Repository::open_untouched(root)?;
+        repo.clean_tmp()?;
+        Ok(repo)
+    }
+
+    /// [`Repository::open`] without removing the leftovers in `tmp/`, and so without trying the
+    /// change lock.
+    pub fn open_untouched(root: &Path) -> Result<Repository, RepoError> {
         let bolt = root.join(".bolt");
         if !check_bolt(root, &check_owner)? {
             return Err(RepoError::NotAProject);
@@ -1228,7 +1251,7 @@ impl Repository {
             state,
             packs: packs_dir,
         };
-        let repo = Repository {
+        Ok(Repository {
             root: root.to_owned(),
             bolt,
             tmp,
@@ -1239,9 +1262,7 @@ impl Repository {
             head,
             cache_key: None,
             rules: RulesRead::default(),
-        };
-        repo.clean_tmp()?;
-        Ok(repo)
+        })
     }
 
     /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
@@ -1426,11 +1447,6 @@ impl Repository {
             None => self.head()?,
         };
         head_entry(&self.store, id)
-    }
-
-    /// [`Repository::current`], with `state/head` read again and its entry looked for in `store`.
-    pub(crate) fn current_from(&self, store: &Store) -> Result<(Id, DiaryEntry), RepoError> {
-        head_entry(store, self.head()?)
     }
 
     /// The diary entry `id`. One the store lacks, holds as another kind of record, or can't

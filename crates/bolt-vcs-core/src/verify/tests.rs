@@ -542,6 +542,7 @@ fn more_than_1000_problems_are_counted_and_1000_kept() {
     let v = checked(&repo);
     assert_eq!(v.problems_total, 1005);
     assert_eq!(v.problems.len(), PROBLEMS_KEPT);
+    assert_eq!(v.count(ProblemKind::ObjectDamaged), 1005);
 }
 
 #[cfg(unix)]
@@ -568,20 +569,21 @@ fn a_fifo_named_like_a_pack_is_refused_within_the_limit() {
     assert_eq!(v.problems[0].pack.as_deref(), Some("zz.pack"));
 }
 
-/// Every file under `dir`, with its bytes and when it was last changed, and every folder.
-fn every_file(dir: &Path) -> BTreeMap<PathBuf, Option<(Vec<u8>, SystemTime)>> {
+/// Every file and folder under `dir`: a file's bytes, and when each was last changed.
+fn every_file(dir: &Path) -> BTreeMap<PathBuf, (Option<Vec<u8>>, SystemTime)> {
     let mut found = BTreeMap::new();
     let mut folders = vec![dir.to_owned()];
     while let Some(folder) = folders.pop() {
+        let changed = fs::symlink_metadata(&folder).unwrap().modified().unwrap();
+        found.insert(folder.clone(), (None, changed));
         for e in fs::read_dir(&folder).unwrap() {
             let path = e.unwrap().path();
             let meta = fs::symlink_metadata(&path).unwrap();
             if meta.is_dir() {
-                folders.push(path.clone());
-                found.insert(path, None);
+                folders.push(path);
             } else {
                 let bytes = fs::read(&path).unwrap();
-                found.insert(path, Some((bytes, meta.modified().unwrap())));
+                found.insert(path, (Some(bytes), meta.modified().unwrap()));
             }
         }
     }
@@ -591,11 +593,176 @@ fn every_file(dir: &Path) -> BTreeMap<PathBuf, Option<(Vec<u8>, SystemTime)>> {
 #[test]
 fn verify_writes_nothing() {
     let (dir, mut repo) = project(0);
-    plant_save(&mut repo, &[("a.txt", EntryKind::File, b"one")]);
+    let list = hello_world();
+    let gone = own_pack(&mut repo, |p| {
+        p.add_content(b"only here").unwrap();
+    });
+    own_pack(&mut repo, |p| {
+        p.add_content(b"hello ").unwrap();
+        p.add_content(b"world").unwrap();
+        p.add_chunk_list(&list).unwrap();
+    });
+    plant_root(&mut repo, |packs| {
+        let files = [
+            ("big.bin", list.file, 11),
+            ("a.txt", hash_content(b"only here"), 9),
+        ];
+        let entries = files.map(|(name, id, size)| Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            id,
+            size,
+        });
+        add_listing(packs, entries.to_vec()).0
+    });
     let bolt = dir.path().join(".bolt");
     assert!(bolt.join("format").is_file());
     let before = every_file(&bolt);
     let v = checked(&repo);
     assert_eq!(v.problems_total, 0, "{:?}", v.problems);
     assert_eq!(every_file(&bolt), before);
+
+    // Again with a needed chunk damaged and a needed file missing, so naming what needs them
+    // runs too.
+    repo.store().close_all();
+    fs::remove_file(&gone[0]).unwrap();
+    let (path, entry) = objects(&repo)
+        .into_iter()
+        .find(|(_, e)| e.id == list.chunks[0].id)
+        .unwrap();
+    flip(&path, entry.offset + ENTRY_HEADER_LEN);
+    let before = every_file(&bolt);
+    let v = checked(&repo);
+    let mut found = kinds(&v);
+    found.sort_by_key(|k| k.name());
+    assert_eq!(
+        found,
+        [ProblemKind::ObjectDamaged, ProblemKind::ObjectMissing],
+        "{:?}",
+        v.problems
+    );
+    assert!(v.problems.iter().all(|p| p.needed_by.is_some()), "{v:?}");
+    assert_eq!(every_file(&bolt), before);
+}
+
+fn found(ids: &[u8]) -> Verdict {
+    Verdict::Found(ids.iter().map(|b| Id([*b; 32])).collect())
+}
+
+fn lost(why: &str) -> Verdict {
+    Verdict::Lost(why.into())
+}
+
+fn failed(why: &str) -> Verdict {
+    Verdict::Failed(ProblemKind::PackUnreadable, why.into())
+}
+
+#[test]
+fn two_looks_that_found_the_head_report_only_what_both_found_missing() {
+    assert_eq!(agreed(&[found(&[1, 2]), found(&[2, 3])]), Some(found(&[2])));
+}
+
+#[test]
+fn two_looks_that_lost_the_head_report_it_lost() {
+    assert_eq!(agreed(&[lost("one"), lost("two")]), Some(lost("two")));
+}
+
+#[test]
+fn a_lost_head_between_two_that_found_it_is_outvoted() {
+    assert_eq!(agreed(&[found(&[1, 2]), lost("raced")]), None);
+    let three = [found(&[1, 2]), lost("raced"), found(&[2, 3])];
+    assert_eq!(agreed(&three), Some(found(&[2])));
+}
+
+#[test]
+fn a_found_head_between_two_that_lost_it_is_outvoted() {
+    assert_eq!(
+        agreed(&[lost("one"), found(&[1]), lost("three")]),
+        Some(lost("three"))
+    );
+}
+
+#[test]
+fn two_looks_that_failed_report_the_failure() {
+    assert_eq!(agreed(&[failed("one"), failed("two")]), Some(failed("two")));
+}
+
+#[test]
+fn three_looks_that_all_differ_report_the_last() {
+    assert_eq!(
+        agreed(&[found(&[1]), lost("two"), failed("three")]),
+        Some(failed("three"))
+    );
+    assert_eq!(
+        agreed(&[failed("one"), found(&[1]), lost("three")]),
+        Some(lost("three"))
+    );
+}
+
+#[test]
+fn a_save_made_while_verify_reads_the_packs_never_reads_as_a_lost_head() {
+    let (dir, mut repo) = project(0);
+    let mut content = None;
+    let gone = own_pack(&mut repo, |p| {
+        content = Some(p.add_content(b"only here").unwrap())
+    });
+    let content = content.unwrap();
+    plant_file(&mut repo, "a.txt", content, 9);
+    repo.store().close_all();
+    fs::remove_file(&gone[0]).unwrap();
+    let root = dir.path().to_owned();
+    let mut saved = false;
+    let v = verify(&repo, 30, now(), &mut |_, _| {
+        if !saved {
+            saved = true;
+            let mut other = Repository::open(&root).unwrap();
+            plant_save(&mut other, &[("b.txt", EntryKind::File, b"while it reads")]);
+        }
+    });
+    assert!(saved);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(content));
+}
+
+#[test]
+fn what_no_readable_pack_holds_is_told_as_such() {
+    let (_dir, mut repo) = project(0);
+    let mut content = None;
+    let gone = own_pack(&mut repo, |p| {
+        content = Some(p.add_content(b"only here").unwrap())
+    });
+    plant_file(&mut repo, "a.txt", content.unwrap(), 9);
+    repo.store().close_all();
+    fs::remove_file(&gone[0]).unwrap();
+    let v = checked(&repo);
+    assert_eq!(v.problems[0].message, "It isn't in any pack.");
+    fs::write(repo.packs_dir().join("zz.pack"), b"not a pack").unwrap();
+    let v = checked(&repo);
+    let missing: Vec<&Problem> = v
+        .problems
+        .iter()
+        .filter(|p| p.kind == ProblemKind::ObjectMissing)
+        .collect();
+    assert_eq!(missing.len(), 1, "{:?}", v.problems);
+    assert_eq!(missing[0].message, "It isn't in any pack Bolt could read.");
+}
+
+#[test]
+fn an_object_stored_as_another_kind_is_missing_for_what_needs_it() {
+    let (_dir, mut repo) = project(0);
+    let mut content = None;
+    own_pack(&mut repo, |p| {
+        content = Some(p.add_content(b"not a folder").unwrap())
+    });
+    let content = content.unwrap();
+    plant_root(&mut repo, |_| content);
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(content));
+    assert_eq!(
+        v.problems[0].message,
+        "It is stored, but as another kind of object than what needs it."
+    );
+    assert_eq!(v.problems[0].needed_by, Some((save, String::new())));
 }

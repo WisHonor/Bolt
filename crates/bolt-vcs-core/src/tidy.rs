@@ -469,6 +469,8 @@ pub(crate) struct Noted {
 /// Why `verify`'s marking couldn't read a record.
 pub(crate) enum Unread {
     Missing,
+    /// Stored, but as another kind of object.
+    OtherKind,
     Damaged(String),
     Unreadable(String),
 }
@@ -476,7 +478,8 @@ pub(crate) enum Unread {
 impl Unread {
     fn of(e: &StoreError) -> Unread {
         match e {
-            StoreError::Missing(_) | StoreError::WrongKind { .. } => Unread::Missing,
+            StoreError::Missing(_) => Unread::Missing,
+            StoreError::WrongKind { .. } => Unread::OtherKind,
             StoreError::Pack(p) if !is_damage(p) => Unread::Unreadable(p.to_string()),
             e => Unread::Damaged(e.to_string()),
         }
