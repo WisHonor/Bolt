@@ -528,7 +528,8 @@ fn the_summary_counts_commits_holding_lfs_files() {
     assert_eq!(json["inexact_lfs_pointers"], 0);
 }
 
-/// A file Git LFS's parser refuses is an ordinary file to Git LFS, which checks it out as it is.
+/// A file Git LFS's parser refuses is an ordinary file to Git LFS, which may check it out as the
+/// file its pointer names.
 #[test]
 fn a_lookalike_comes_in_as_it_is_with_a_warning() {
     let history = || {

