@@ -19,7 +19,7 @@ While Bolt reads and hashes, the disk has nothing to do: the system keeps the wr
 
 - **A. Keep one flush at the end.** Nothing changes; Bolt stays behind Git LFS on a first save and behind Git on going back.
 - **B. Don't flush, as Git LFS and Git's checkout don't.** Fast, and against principle 1: after a power cut a pack in the store, or a file in the folder, could be empty or cut short.
-- **C. Flush as the file is written, and once more at the end.** A helper thread asks the system to write out what has been written so far, every 16 MiB, while the writing goes on. The last flush then has little left to do. What reaches the store or the folder is exactly as durable as today.
+- **C. Flush as the file is written, and once more at the end.** A helper thread asks the system to write out what has been written so far, every 16 MiB, while the writing goes on. The last flush then has little left to do. What reaches the store or the folder is exactly as durable as today. A rough build of it was measured on GitHub's runners before deciding ([run 42758124883](https://github.com/WisHonor/Bolt/actions/runs/42758124883), one run each): the first save of 1,000 MiB that doesn't compress fell from 4.2 s to 2.5 s on Linux and from 4.5 s to 2.7 s on Windows, and going back to the first version of a 1 GiB file from 3.9 s to 2.5 s and from 4.1 s to 2.5 s.
 - **D. Write past the system's memory altogether** (unbuffered, or synced, writes). Each write waits for the disk, which is slower than C for the same safety, and Windows asks for aligned buffers.
 
 ## Decision
@@ -33,7 +33,7 @@ While Bolt reads and hashes, the disk has nothing to do: the system keeps the wr
 
 ## Consequences
 
-- A first save of big files that don't compress, and going back to an old version of a big file, should take about as long as the slower of the two halves (reading and hashing, or the disk), not their sum. The numbers are published either way ([benchmarks.md](../benchmarks.md)).
+- A first save of big files that don't compress, and going back to an old version of a big file, take about as long as the slower of the two halves (reading and hashing, or the disk), not their sum. In the rough build that put Bolt about level with Git LFS on the first save on Linux (2.5 s against 2.3 to 2.5 s), ahead of it on Windows (2.7 s against 3.4 s), and ahead of Git on going back on both. The real numbers are published either way ([benchmarks.md](../benchmarks.md)).
 - A command that fails halfway may have flushed part of a file in `tmp/`, which the next command clears, as it clears any leftover.
 - One more thread runs while a big file is written. It holds no memory beyond its handle.
 - On a drive where a flush is very slow (some network drives), the flushes along the way cost what the last one would have cost; the total doesn't grow, but progress pauses more often.

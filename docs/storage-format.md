@@ -341,7 +341,7 @@ A line's IDs are used only for a line whose newest save is the one recorded, or 
 
 ## 11. Pack files
 
-Writers write pack version 2, whose index has a fan-out table and fixed-width lines, so a reader can search it on disk; readers read versions 2 and 1 ([decision 057](decisions/057-pack-index-on-disk-and-merging.md)). The two versions differ only in the index. Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store.
+Writers write pack version 2, whose index has a fan-out table and fixed-width lines, so a reader can search it on disk; readers read versions 2 and 1 ([decision 057](decisions/057-pack-index-on-disk-and-merging.md)). The two versions differ only in the index. Each command that stores data writes one or more packs (decisions 009 and 041): each is built in `tmp/`, flushed to disk, then renamed to `store/packs/<hex of the index checksum>.pack`. The diary entry goes in the command's last pack, and `state/head` moves only after all of them are in the store. A writer may also flush a pack while it builds it (Bolt does every 16 MiB once a pack passes that size, from a helper thread, [decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)); that changes no byte of the pack, and the flush of the whole file before the rename is the one that counts.
 
 ```text
 header:
