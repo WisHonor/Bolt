@@ -384,7 +384,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 ### `bolt verify --json`
 
-`bolt verify` checks everything Bolt has stored, and that the project has everything it needs ([decision 118](decisions/118-bolt-verify.md)). It changes nothing and takes no lock. First every pack: it opens, its index reads in full and matches its checksum, and every object in it reads back as what the index says (contents against their fingerprint, records decoded as their kind, each chunked file rebuilt from its chunks). Then, from the current diary entry, everything `bolt tidy` would keep: each record must read, and each file's contents, chunk list and chunks must be in some pack.
+`bolt verify` checks everything Bolt has stored, and that the project has everything it needs ([decision 118](decisions/118-bolt-verify.md)). It changes nothing and takes no lock. Like every command, it makes the two empty working folders `.bolt/tmp` and `.bolt/cache` if they are missing. First every pack: it opens, its index reads in full and matches its checksum, and every object in it reads back as what the index says (contents against their fingerprint, records decoded as their kind, each chunked file rebuilt from its chunks). Then, from the current diary entry, everything `bolt tidy` would keep: each record must read, and each file's contents, chunk list and chunks must be in some pack.
 
 | Field | Type | Meaning |
 |---|---|---|

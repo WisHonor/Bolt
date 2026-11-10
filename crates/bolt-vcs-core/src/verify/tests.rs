@@ -766,3 +766,20 @@ fn an_object_stored_as_another_kind_is_missing_for_what_needs_it() {
     );
     assert_eq!(v.problems[0].needed_by, Some((save, String::new())));
 }
+
+#[test]
+fn a_lost_head_and_one_that_could_not_be_read_agree() {
+    let unreadable = Verdict::Failed(ProblemKind::HeadLost, "can't read it".into());
+    assert_eq!(
+        agreed(&[lost("one"), unreadable.clone()]),
+        Some(unreadable.clone())
+    );
+    assert_eq!(agreed(&[unreadable, lost("two")]), Some(lost("two")));
+}
+
+#[test]
+fn an_unreadable_head_and_an_unreadable_pack_do_not_agree() {
+    let head = Verdict::Failed(ProblemKind::HeadLost, "can't read it".into());
+    assert_eq!(agreed(&[head.clone(), failed("pack")]), None);
+    assert_eq!(agreed(&[failed("pack"), head]), None);
+}

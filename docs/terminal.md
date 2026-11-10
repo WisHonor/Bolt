@@ -167,7 +167,7 @@ Problems in `bolt.toml` come as `warning:` lines after the list. The engine's re
 
 ### `bolt verify`
 
-`<project>` is the name of the project's folder. While it reads the packs, a terminal's stderr shows the bar `Checking stored objects`, by bytes of pack read out of bytes in all (§8); the total grows when a pack arrives during the check.
+It changes nothing and takes no lock. Like every command, it makes the two empty working folders `.bolt/tmp` and `.bolt/cache` if they are missing. `<project>` is the name of the project's folder. While it reads the packs, a terminal's stderr shows the bar `Checking stored objects`, by bytes of pack read out of bytes in all (§8); the total grows when a pack arrives during the check.
 
 Nothing wrong (exit code 0), on stdout:
 
@@ -200,9 +200,9 @@ then, after the warnings, on stderr:
 hint: Bolt can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
 ```
 
-- **The three checks,** in this order, each a `✓` line when it found nothing, else its `✗` lines: the stored objects (`pack_damaged`, `pack_unreadable` and `object_damaged` problems; its `✓` line says `N of M` when some objects failed, and shows only while some matched), what the saves, lines and shelves need (`object_missing`), and the diary.
+- **The three checks,** in this order, each a `✓` line when it found nothing, else its `✗` lines: the stored objects (`pack_damaged`, `pack_unreadable` and `object_damaged` problems; when the packs couldn't be listed, its line is a `✗` saying why; its `✓` line says `N of M` when some objects failed, and shows only while some matched), what the saves, lines and shelves need (`object_missing`), and the diary.
 - **When what the project needs couldn't be worked out,** there is no line for the second and third checks, which never ran: in their place one `✗` line gives the problem's message. A lost `head` (`head_lost`) says why it is lost; a check that couldn't be made for another reason, such as a pack Bolt couldn't read while it looked, says `What the project needs couldn't be checked: <why>.` (`pack_unreadable`).
-- **A kind's `✗` line** counts every problem of that kind found, kept or not (`1 pack is damaged:`, `2 problems reading packs:`, `1 object is damaged:`, `3 objects the project needs are missing:`), one line per kind, and its rows follow, indented 8: the object's fingerprint (12 hex digits) or the pack's file name, two spaces, then the problem's message, then, for something the project needs, `Save <12 hex digits> needs it at <path>.` (`… at its top folder.` for the top folder). At most 20 rows a kind, then `… and N more (bolt verify --json lists up to 1,000)`, N counting the rest of that kind.
+- **A kind's `✗` line** counts every problem of that kind found, kept or not (`1 pack is damaged:`, `2 problems reading packs:`, `1 object is damaged:`, `3 objects the project needs are missing:`), one line per kind, and its rows follow, indented 8: the object's fingerprint (12 hex digits) or the pack's file name, two spaces, then the problem's message, then, for something the project needs, `Save <12 hex digits> needs it at <path>.` (`… at its top folder.` for the top folder). At most 20 rows a kind, then `… and N more`, N counting the rest of that kind. After the groups, when anything wasn't shown, one closing line: `bolt verify --json lists them all.` when there are at most 1,000 problems, `bolt verify --json lists the first 1,000.` when there are more.
 - **Something missing** says `It isn't in any pack.` when every pack was read, and `It isn't in any pack Bolt could read.` when some pack couldn't be opened or read. One stored as another kind of object than what needs it says `It is stored, but as another kind of object than what needs it.` All three are `object_missing`.
 - **Colour:** `Verified` green and bold; `✓` green; `✗` red; fingerprints and pack names blue, paths blue. Nothing else.
 - **Without symbols** (§4) the marks are `+` and `x`, and the cut mark is `...`. Without a terminal it is the same text, plain, and stderr holds only the warnings and the hint, with no bar.

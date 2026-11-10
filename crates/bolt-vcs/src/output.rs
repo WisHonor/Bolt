@@ -1128,17 +1128,17 @@ pub fn verified(v: &Verified, project: &str) -> String {
     };
     let check = s.paint(Role::Ok, s.sym(Sym::Check));
     let cross = s.paint(Role::Error, s.sym(Sym::Cross));
-    // About neither a pack nor an object: a check that couldn't be made, told on a line of its own.
-    let unmade = |p: &Problem| p.pack.is_none() && p.object.is_none();
-    let alone: Vec<&Problem> = v.problems.iter().filter(|p| unmade(p)).collect();
+    // The packs' listing and the needs check, when they fail, have a line each instead of a row.
     let rows = |kind: ProblemKind| -> (Vec<&Problem>, u64) {
         let rows: Vec<&Problem> = v
             .problems
             .iter()
-            .filter(|p| p.kind == kind && !unmade(p))
+            .filter(|p| p.kind == kind && (p.pack.is_some() || p.object.is_some()))
             .collect();
-        let told_alone = alone.iter().filter(|p| p.kind == kind).count() as u64;
-        (rows, v.count(kind).saturating_sub(told_alone))
+        let unlisted = v.unlisted.is_some() && kind == ProblemKind::PackUnreadable;
+        let unchecked = v.needs_failure.as_ref().is_some_and(|(k, _)| *k == kind);
+        let alone = u64::from(unlisted) + u64::from(unchecked);
+        (rows, v.count(kind).saturating_sub(alone))
     };
     let (packs, unread, damaged) = (
         rows(ProblemKind::PackDamaged),
@@ -1147,9 +1147,7 @@ pub fn verified(v: &Verified, project: &str) -> String {
     );
 
     // The stored objects.
-    let unread_objects = unread.0.iter().filter(|p| p.object.is_some()).count() as u64;
-    let failed = v.object_damaged.saturating_add(unread_objects);
-    let matched = v.objects.saturating_sub(failed);
+    let matched = v.objects.saturating_sub(v.objects_failed);
     let stored = format!(
         "{} ({}) {}",
         counted(v.packs, "pack", "packs"),
@@ -1161,7 +1159,9 @@ pub fn verified(v: &Verified, project: &str) -> String {
         }
     );
     let objects = counted(v.objects, "stored object", "stored objects");
-    if failed == 0 && (packs.1 == 0 && unread.1 == 0 || v.objects > 0) {
+    if let Some(why) = &v.unlisted {
+        let _ = writeln!(text, "    {cross} {why}");
+    } else if v.objects_failed == 0 && (packs.1 == 0 && unread.1 == 0 || v.objects > 0) {
         let _ = writeln!(text, "    {check} {objects} in {stored}");
     } else if matched > 0 {
         let _ = writeln!(
@@ -1170,60 +1170,68 @@ pub fn verified(v: &Verified, project: &str) -> String {
             thousands(matched)
         );
     }
-    group(
+    let mut unshown = group(
         &mut text,
         s,
         &packs,
         ("pack is damaged:", "packs are damaged:"),
     );
     let reading = ("problem reading packs:", "problems reading packs:");
-    group(&mut text, s, &unread, reading);
-    group(
-        &mut text,
-        s,
-        &damaged,
-        ("object is damaged:", "objects are damaged:"),
-    );
+    unshown |= group(&mut text, s, &unread, reading);
+    let objects_damaged = ("object is damaged:", "objects are damaged:");
+    unshown |= group(&mut text, s, &damaged, objects_damaged);
 
     // What the saves, lines and shelves need; the diary.
-    for p in &alone {
-        let _ = writeln!(text, "    {cross} {}", p.message);
-    }
-    if !v.needs_checked {
-        if alone.is_empty() {
+    if v.needs_checked {
+        let missing = rows(ProblemKind::ObjectMissing);
+        if missing.1 == 0 {
             let _ = writeln!(
                 text,
-                "    {cross} What the project needs couldn't be checked."
+                "    {check} {}, {} and {} point to objects that exist",
+                counted(v.saves, "save", "saves"),
+                counted(v.lines, "line", "lines"),
+                counted(v.shelves, "shelf", "shelves")
             );
         }
-        return text;
-    }
-    let missing = rows(ProblemKind::ObjectMissing);
-    if missing.1 == 0 {
-        let _ = writeln!(
-            text,
-            "    {check} {}, {} and {} point to objects that exist",
-            counted(v.saves, "save", "saves"),
-            counted(v.lines, "line", "lines"),
-            counted(v.shelves, "shelf", "shelves")
+        let needed = (
+            "object the project needs is missing:",
+            "objects the project needs are missing:",
         );
+        unshown |= group(&mut text, s, &missing, needed);
+        let entries = counted(v.entries, "entry", "entries");
+        let _ = writeln!(text, "    {check} the undo diary ({entries}) is intact");
+    } else {
+        let why = v
+            .needs_failure
+            .as_ref()
+            .map_or("What the project needs couldn't be checked.", |(_, why)| {
+                why.as_str()
+            });
+        let _ = writeln!(text, "    {cross} {why}");
     }
-    let needed = (
-        "object the project needs is missing:",
-        "objects the project needs are missing:",
-    );
-    group(&mut text, s, &missing, needed);
-    let entries = counted(v.entries, "entry", "entries");
-    let _ = writeln!(text, "    {check} the undo diary ({entries}) is intact");
+    if unshown {
+        let json = s.paint(Role::Command, "bolt verify --json");
+        let which = if v.problems_total <= PROBLEMS_KEPT as u64 {
+            "them all".to_owned()
+        } else {
+            format!("the first {}", thousands(PROBLEMS_KEPT as u64))
+        };
+        let _ = writeln!(text, "    {json} lists {which}.");
+    }
     text
 }
 
 /// A `✗` line counting all `found.1` problems of a kind, then `header` (one, many), and a row
-/// for each of the first 20 kept, `found.0`.
-fn group(text: &mut String, s: style::Screen, found: &(Vec<&Problem>, u64), header: (&str, &str)) {
+/// for each of the first 20 kept, `found.0`. Gives whether some weren't shown.
+fn group(
+    text: &mut String,
+    s: style::Screen,
+    found: &(Vec<&Problem>, u64),
+    header: (&str, &str),
+) -> bool {
     let (rows, n) = (&found.0, found.1);
     if n == 0 {
-        return;
+        return false;
     }
     let cross = s.paint(Role::Error, s.sym(Sym::Cross));
     let _ = writeln!(text, "    {cross} {}", counted(n, header.0, header.1));
@@ -1233,14 +1241,10 @@ fn group(text: &mut String, s: style::Screen, found: &(Vec<&Problem>, u64), head
     }
     let more = n.saturating_sub(shown as u64);
     if more > 0 {
-        let _ = writeln!(
-            text,
-            "        {} and {} more (bolt verify --json lists up to {})",
-            s.sym(Sym::Cut),
-            thousands(more),
-            thousands(PROBLEMS_KEPT as u64)
-        );
+        let cut = s.sym(Sym::Cut);
+        let _ = writeln!(text, "        {cut} and {} more", thousands(more));
     }
+    more > 0
 }
 
 /// A problem's row: what it is about, its message, and what needs it.
@@ -1314,20 +1318,27 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
+    /// A problem about neither a pack nor an object, of `kind`.
+    fn unmade(kind: ProblemKind, message: &str) -> Problem {
+        Problem {
+            kind,
+            pack: None,
+            object: None,
+            needed_by: None,
+            message: message.into(),
+        }
+    }
+
     #[test]
     fn a_needs_check_that_could_not_be_made_shows_no_marks_for_it() {
+        let why = "What the project needs couldn't be checked: no permission.";
         let v = Verified {
             packs: 1,
             objects: 3,
             problems_total: 1,
             pack_unreadable: 1,
-            problems: vec![Problem {
-                kind: ProblemKind::PackUnreadable,
-                pack: None,
-                object: None,
-                needed_by: None,
-                message: "What the project needs couldn't be checked: no permission.".into(),
-            }],
+            problems: vec![unmade(ProblemKind::PackUnreadable, why)],
+            needs_failure: Some((ProblemKind::PackUnreadable, why.into())),
             ..Verified::default()
         };
         let shown = verified(&v, "Skyrunner");
@@ -1337,11 +1348,32 @@ mod tests {
             lines[2].starts_with("    + 3 stored objects in 1 pack"),
             "{shown}"
         );
-        assert_eq!(
-            lines[3],
-            "    x What the project needs couldn't be checked: no permission."
-        );
+        assert_eq!(lines[3], format!("    x {why}"));
         assert_eq!(lines.len(), 4, "{shown}");
+    }
+
+    #[test]
+    fn packs_that_could_not_be_listed_get_no_check_mark() {
+        let unlisted = "Bolt couldn't list the packs in .bolt/store/packs: no permission.";
+        let lost = "Bolt can't tell which diary entry is the project's current one.";
+        let v = Verified {
+            problems_total: 2,
+            pack_unreadable: 1,
+            head_lost: 1,
+            problems: vec![
+                unmade(ProblemKind::PackUnreadable, unlisted),
+                unmade(ProblemKind::HeadLost, lost),
+            ],
+            unlisted: Some(unlisted.into()),
+            needs_failure: Some((ProblemKind::HeadLost, lost.into())),
+            ..Verified::default()
+        };
+        let shown = verified(&v, "Skyrunner");
+        let lines: Vec<&str> = shown.lines().collect();
+        assert_eq!(lines[2], format!("    x {unlisted}"), "{shown}");
+        assert_eq!(lines[3], format!("    x {lost}"), "{shown}");
+        assert_eq!(lines.len(), 4, "{shown}");
+        assert!(!shown.contains("    + "), "{shown}");
     }
 
     fn failure() -> Failure {

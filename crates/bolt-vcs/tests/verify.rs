@@ -94,12 +94,13 @@ fn verify_lists_problems_and_exits_1() {
             "{row}"
         );
     }
-    assert_eq!(
-        *rows[20],
-        "        ... and 5 more (bolt verify --json lists up to 1,000)"
-    );
+    assert_eq!(*rows[20], "        ... and 5 more");
     // The objects that matched, and the checks that found nothing, still say so.
     assert!(lines[2].starts_with("    + "), "{shown}");
+    assert_eq!(
+        lines.last(),
+        Some(&"    bolt verify --json lists them all.")
+    );
     assert!(shown.contains("    + the undo diary (2 entries) is intact"));
     let said = text(&out.stderr);
     assert!(
@@ -211,8 +212,9 @@ fn every_problem_of_a_kind_is_counted_on_screen() {
         shown.contains("    x 1,005 objects are damaged:\n"),
         "{shown}"
     );
+    assert!(shown.contains("        ... and 985 more\n"), "{shown}");
     assert!(
-        shown.contains("        ... and 985 more (bolt verify --json lists up to 1,000)\n"),
+        shown.ends_with("    bolt verify --json lists the first 1,000.\n"),
         "{shown}"
     );
 }
@@ -272,4 +274,23 @@ fn verify_leaves_every_file_as_it_was_even_bolts_leftovers() {
         assert!(leftover.exists());
         assert_eq!(picture(&bolt), before, "damaged: {damaged}");
     }
+}
+
+#[test]
+fn verify_makes_only_the_empty_working_folders_it_lacks() {
+    let env = project();
+    let bolt = env.root().join(".bolt");
+    fs::remove_dir_all(bolt.join("tmp")).unwrap();
+    let before = picture(&bolt);
+    let out = run(&env, &["verify"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let tmp = bolt.join("tmp");
+    assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
+    let mut after = picture(&bolt);
+    assert!(after.remove(&tmp).is_some());
+    // The folder that holds it changed when it was made; nothing else did.
+    let mut before = before;
+    before.remove(&bolt);
+    after.remove(&bolt);
+    assert_eq!(after, before);
 }

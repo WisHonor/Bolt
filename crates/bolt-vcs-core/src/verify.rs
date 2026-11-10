@@ -84,9 +84,15 @@ pub struct Verified {
     pub object_missing: u64,
     pub head_lost: u64,
     pub problems: Vec<Problem>,
+    /// Objects that failed when the packs were read back, their own check.
+    pub objects_failed: u64,
+    /// Why the packs couldn't be listed, when they couldn't.
+    pub unlisted: Option<String>,
     /// Whether what the project needs was worked out: not when `head` was lost, or the check
     /// couldn't be made.
     pub needs_checked: bool,
+    /// Why what the project needs couldn't be worked out, and the kind it is told as.
+    pub needs_failure: Option<(ProblemKind, String)>,
     pub warnings: Vec<Warning>,
 }
 
@@ -157,6 +163,7 @@ pub fn verify(
         Verdict::Lost(message) => (ProblemKind::HeadLost, message),
         Verdict::Failed(kind, message) => (kind, message),
     };
+    v.needs_failure = Some((kind, message.clone()));
     v.found(Problem {
         kind,
         pack: None,
@@ -236,16 +243,18 @@ fn check_packs(
         let listed = match tidy::packs(folder) {
             Ok(listed) => listed,
             Err(e) => {
+                let message = format!(
+                    "Bolt couldn't list the packs in {}: {}.",
+                    escape(&packs_dir.display().to_string(), false),
+                    escape(e.to_string().trim_end_matches('.'), false)
+                );
+                v.unlisted = Some(message.clone());
                 v.found(Problem {
                     kind: ProblemKind::PackUnreadable,
                     pack: None,
                     object: None,
                     needed_by: None,
-                    message: format!(
-                        "Bolt couldn't list the packs in {}: {}.",
-                        escape(&packs_dir.display().to_string(), false),
-                        escape(e.to_string().trim_end_matches('.'), false)
-                    ),
+                    message,
                 });
                 break;
             }
@@ -337,6 +346,7 @@ fn check_pack(
                 if kind == ProblemKind::ObjectDamaged {
                     found.damaged.insert(entry.id);
                 }
+                v.objects_failed = v.objects_failed.saturating_add(1);
                 v.found(Problem {
                     kind,
                     pack: Some(shown.clone()),
@@ -440,6 +450,7 @@ fn rebuild(
             if kind == ProblemKind::ObjectDamaged {
                 found.damaged.insert(entry.id);
             }
+            v.objects_failed = v.objects_failed.saturating_add(1);
             v.found(Problem {
                 kind,
                 pack: Some(name.to_string_lossy().into_owned()),
@@ -521,8 +532,18 @@ enum Verdict {
 }
 
 impl Verdict {
+    /// The kind of problem it would be told as; `None` for a look that found the head.
+    fn told_as(&self) -> Option<ProblemKind> {
+        match self {
+            Verdict::Found(_) => None,
+            Verdict::Lost(_) => Some(ProblemKind::HeadLost),
+            Verdict::Failed(kind, _) => Some(*kind),
+        }
+    }
+
+    /// Whether two looks agree: both found the head, or both would be told as the same problem.
     fn same_kind(&self, other: &Verdict) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
+        self.told_as() == other.told_as()
     }
 
     /// Two verdicts of the same kind as one: missing only what both found missing, else the later.
