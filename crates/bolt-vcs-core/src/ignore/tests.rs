@@ -76,10 +76,12 @@ fn lines_are_read_as_git_reads_them() {
     ] {
         assert_eq!(m.decide(path, false), want, "{path:?}");
     }
-    // A `\` that ends the line keeps the spaces before it.
-    let m = matcher(PLAIN, &[("", "a  \\")]);
-    assert_eq!(m.decide("a  ", false), NoRule);
-    assert_eq!(m.decide("a", false), NoRule);
+    // Of the spaces at the end, only the first can be kept, by an odd run of `\` before it.
+    let m = matcher(PLAIN, &[("", "c\\\\\\   \nd\\\\\\\\  \n")]);
+    assert_eq!(m.decide("c\\ ", false), Ignored);
+    assert_eq!(m.decide("c\\   ", false), NoRule);
+    assert_eq!(m.decide("d\\\\", false), Ignored);
+    assert_eq!(m.decide("d\\\\ ", false), NoRule);
     // Only one byte order mark goes, and only one CR before each LF.
     let m = matcher(PLAIN, &[("", "\u{feff}\u{feff}a\r\nb\r\r\n")]);
     assert_eq!(m.decide("\u{feff}a", false), Ignored);
@@ -160,6 +162,21 @@ fn names_are_compared_composed_where_the_drive_composes_them() {
         assert_eq!(m.decide(format!("{folder}/{nfc}.txt"), false), Ignored);
         assert_eq!(m.decide(format!("{folder}/{nfd}.txt"), false), NoRule);
         assert_eq!(m.decide(format!("{folder}/{nfd}.md"), false), Ignored);
+    }
+}
+
+#[test]
+fn going_back_up_compares_folders_composed_where_the_drive_composes_them() {
+    let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
+    let composing = Drive {
+        ignores_case: false,
+        composes_unicode: true,
+    };
+    for (entered, back_to) in [(nfd, nfc), (nfc, nfd), (nfd, nfd)] {
+        let mut m = matcher(composing, &[("", "x\n"), (entered, "y\n")]);
+        m.leave_to(&format!("{back_to}/sub"));
+        assert_eq!(m.in_force_bytes(), 4, "{entered:?} then {back_to:?}");
+        assert_eq!(m.decide(format!("{nfc}/y"), false), Decision::Ignored);
     }
 }
 
@@ -297,6 +314,9 @@ fn classes_read_as_git_reads_them() {
             ("[[:]x", &["[x", ":x"], &["]x", "x"]),
             ("[[:al]pha:]]x", &["apha:]]x"], &["ax", "x"]),
             ("[{]x", &["{x"], &[]),
+            // Ranges across the whole byte range.
+            ("[ -\u{7f}]", &[" ", "~", "\u{7f}", "."], &["\t", "/"]),
+            ("[!a-z]", &["A", "\u{1}"], &["a", "q", "z", "/"]),
             ("{a,b}", &["{a,b}"], &["a", "b"]),
             // A class never takes a `/`.
             ("a[.-0]c", &["a.c"], &["a/c"]),
@@ -305,6 +325,11 @@ fn classes_read_as_git_reads_them() {
         ],
         false,
     );
+    // Bytes above ASCII, which a path that isn't UTF-8 can hold.
+    assert!(wildmatch(b"[\x7f-\xc1]", b"\x80", false));
+    assert!(wildmatch(b"[\x7f-\xc1]", b"\xc1", false));
+    assert!(!wildmatch(b"[\x7f-\xc1]", b"\xc2", false));
+    assert!(wildmatch(b"[!a]", b"\xff", false));
     // These lines match nothing at all.
     for pattern in [
         "[[:foo:]]x",

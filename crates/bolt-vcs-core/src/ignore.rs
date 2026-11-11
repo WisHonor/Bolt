@@ -63,18 +63,71 @@ enum Tok {
 /// lowered to ignore their case.
 #[derive(Debug)]
 struct Set {
-    exact: [bool; 256],
-    folded: [bool; 256],
+    exact: Bits,
+    folded: Bits,
 }
 
 impl Set {
     fn has(&self, b: u8, fold: bool) -> bool {
-        let (set, b) = if fold {
-            (&self.folded, b.to_ascii_lowercase())
+        if fold {
+            self.folded.has(b.to_ascii_lowercase())
         } else {
-            (&self.exact, b)
-        };
-        set.get(usize::from(b)).copied().unwrap_or(false)
+            self.exact.has(b)
+        }
+    }
+}
+
+/// A set of bytes, one bit each.
+#[derive(Clone, Copy, Debug, Default)]
+struct Bits([u64; 4]);
+
+impl Bits {
+    /// Adds the bytes from `lo` to `hi`; none if `hi` comes before `lo`.
+    fn add(&mut self, lo: u8, hi: u8) {
+        let (lo, hi) = (u32::from(lo), u32::from(hi));
+        if hi < lo {
+            return;
+        }
+        for (word, start) in self.0.iter_mut().zip([0u32, 64, 128, 192]) {
+            let end = start.saturating_add(63);
+            if hi < start || lo > end {
+                continue;
+            }
+            let from = lo.saturating_sub(start);
+            let to = hi.min(end).saturating_sub(start);
+            let below_to = u64::MAX.checked_shr(63u32.saturating_sub(to)).unwrap_or(0);
+            let from_up = u64::MAX.checked_shl(from).unwrap_or(0);
+            *word |= below_to & from_up;
+        }
+    }
+
+    fn has(&self, b: u8) -> bool {
+        let (word, bit) = (usize::from(b) / 64, u32::from(b) % 64);
+        self.0
+            .get(word)
+            .is_some_and(|w| w.checked_shr(bit).unwrap_or(0) & 1 == 1)
+    }
+
+    fn or(self, other: Bits) -> Bits {
+        let mut both = self;
+        for (w, o) in both.0.iter_mut().zip(other.0) {
+            *w |= o;
+        }
+        both
+    }
+
+    /// The set as a `[…]` takes it: turned over if negated, and never `/`.
+    fn taken(self, negated: bool) -> Bits {
+        let mut out = Bits::default();
+        for (w, o) in out.0.iter_mut().zip(self.0) {
+            *w = if negated { !o } else { o };
+        }
+        let mut slash = Bits::default();
+        slash.add(b'/', b'/');
+        for (w, s) in out.0.iter_mut().zip(slash.0) {
+            *w &= !s;
+        }
+        out
     }
 }
 
@@ -292,88 +345,92 @@ fn class_named(name: &[u8]) -> Option<Class> {
     })
 }
 
-/// Reads a `[…]` whose `[` is already read: its set and what follows it, or `None` if the line
-/// can match nothing.
-fn set_of(text: &[u8]) -> Option<(Set, &[u8])> {
+/// One member of a `[…]`.
+enum Member {
+    Byte(u8),
+    Range(u8, u8),
+    Class(Class),
+}
+
+/// One byte as a `[…]` holds it, `\` making the next one plain, and what follows.
+fn member_byte(text: &[u8]) -> Option<(u8, &[u8])> {
+    match text.split_first()? {
+        (b'\\', after) => after.split_first().map(|(&b, rest)| (b, rest)),
+        (&b, after) => Some((b, after)),
+    }
+}
+
+/// A `[:name:]` at the start of `text`: its name and what follows. The name runs to the first
+/// `]`, and it is a class only if a `:` comes just before that `]`.
+fn class_at(text: &[u8]) -> Option<(&[u8], &[u8])> {
+    let body = text.strip_prefix(b"[:")?;
+    let end = body.iter().position(|&b| b == b']')?;
+    let (inside, after) = body.split_at_checked(end)?;
+    Some((inside.strip_suffix(b":")?, after.get(1..)?))
+}
+
+/// The members of a `[…]` whose `[` is already read: whether `!` or `^` turns it over, the
+/// members, and what follows its `]`. A `]` first is a member, and a `-` makes a range only
+/// between the byte before it and the byte after it, unless that is the closing `]`.
+fn members(text: &[u8]) -> Option<(bool, Vec<Member>, &[u8])> {
     let (negated, mut rest) = match text.split_first() {
         Some((b'!' | b'^', after)) => (true, after),
         _ => (false, text),
     };
-    let mut bytes = [false; 256];
-    let mut ranges: Vec<(u8, u8)> = Vec::new();
-    let mut classes: Vec<Class> = Vec::new();
-    let mut first = true;
-    // The byte just read on its own, which a `-` may make the start of a range.
-    let mut prev: Option<u8> = None;
+    let mut found = Vec::new();
     loop {
-        let (&c, after) = rest.split_first()?;
-        if c == b']' && !first {
-            rest = after;
-            break;
+        if !found.is_empty()
+            && let Some(after) = rest.strip_prefix(b"]")
+        {
+            return Some((negated, found, after));
         }
-        first = false;
-        let mut one = c;
+        if let Some((name, after)) = class_at(rest) {
+            found.push(Member::Class(class_named(name)?));
+            rest = after;
+            continue;
+        }
+        let (lo, after) = member_byte(rest)?;
         rest = after;
-        if c == b'\\' {
-            let (&e, after) = rest.split_first()?;
-            one = e;
-            rest = after;
-        } else if let (b'-', Some(lo), Some((&hi, after))) = (c, prev, rest.split_first())
-            && hi != b']'
-        {
-            let (hi, after) = if hi == b'\\' {
-                let (&e, after) = after.split_first()?;
-                (e, after)
-            } else {
-                (hi, after)
-            };
-            ranges.push((lo, hi));
-            prev = None;
-            rest = after;
-            continue;
-        } else if c == b'['
-            && let Some(body) = rest.strip_prefix(b":")
-            && let Some(end) = body.iter().position(|&b| b == b']')
-            && let Some(name) = end
-                .checked_sub(1)
-                .and_then(|colon| body.get(..colon).filter(|_| body.get(colon) == Some(&b':')))
-        {
-            classes.push(class_named(name)?);
-            prev = None;
-            rest = body.get(end.saturating_add(1)..).unwrap_or_default();
-            continue;
+        match rest.strip_prefix(b"-") {
+            Some(tail) if tail.first().is_some_and(|&b| b != b']') => {
+                let (hi, after) = member_byte(tail)?;
+                found.push(Member::Range(lo, hi));
+                rest = after;
+            }
+            _ => found.push(Member::Byte(lo)),
         }
-        if let Some(b) = bytes.get_mut(usize::from(one)) {
-            *b = true;
-        }
-        prev = Some(one);
     }
+}
+
+/// Reads a `[…]` whose `[` is already read: its set and what follows it, or `None` if the line
+/// can match nothing.
+fn set_of(text: &[u8]) -> Option<(Set, &[u8])> {
+    let (negated, found, rest) = members(text)?;
+    let mut alone = Bits::default();
+    let mut wide = Bits::default();
+    for member in found {
+        match member {
+            Member::Byte(b) => alone.add(b, b),
+            // A range's first byte counts on its own too, so a backwards range keeps it.
+            Member::Range(lo, hi) => {
+                alone.add(lo, lo);
+                wide.add(lo, hi);
+            }
+            Member::Class(class) => (0..=0x7f_u8).filter(class).for_each(|b| wide.add(b, b)),
+        }
+    }
+    let exact = alone.or(wide);
     // Where letter case is ignored the path's letters come lowered: a range or class takes a
     // letter in either case, a byte written alone only as written.
-    let takes = |t: u8, fold: bool| {
-        let up = t.to_ascii_uppercase();
-        let either = |f: &dyn Fn(u8) -> bool| f(t) || (fold && f(up));
-        bytes.get(usize::from(t)).copied().unwrap_or(false)
-            || ranges
-                .iter()
-                .any(|&(lo, hi)| either(&|b| (lo..=hi).contains(&b)))
-            || classes.iter().any(|class| either(&|b| class(&b)))
-    };
-    let mut set = Set {
-        exact: [false; 256],
-        folded: [false; 256],
-    };
-    for t in 0..=u8::MAX {
-        if t == b'/' {
-            continue;
-        }
-        if let Some(e) = set.exact.get_mut(usize::from(t)) {
-            *e = takes(t, false) != negated;
-        }
-        if let Some(f) = set.folded.get_mut(usize::from(t)) {
-            *f = takes(t, true) != negated;
-        }
+    let mut folded = exact;
+    for up in (b'A'..=b'Z').filter(|&up| wide.has(up)) {
+        let low = up.to_ascii_lowercase();
+        folded.add(low, low);
     }
+    let set = Set {
+        exact: exact.taken(negated),
+        folded: folded.taken(negated),
+    };
     Some((set, rest))
 }
 
@@ -433,21 +490,18 @@ fn strip<'a>(text: &'a [u8], what: &[u8], front: bool) -> (bool, &'a [u8]) {
     }
 }
 
-/// Drops the spaces at the end of a line, except those a `\` escapes; after a `\` that ends the
-/// line none go.
+/// Drops the spaces at the end of a line but one that a `\` escapes: the first of them, when an
+/// odd number of `\` comes just before.
 fn without_trailing_spaces(raw: &[u8]) -> &[u8] {
-    let mut keep = 0;
-    let mut bytes = raw.iter().enumerate();
-    while let Some((at, &b)) = bytes.next() {
-        if b == b'\\' {
-            keep = match bytes.next() {
-                Some(_) => at.saturating_add(2),
-                None => raw.len(),
-            };
-        } else if b != b' ' {
-            keep = at.saturating_add(1);
-        }
-    }
+    let spaces = raw.iter().rev().take_while(|&&b| b == b' ').count();
+    let before = raw.len().saturating_sub(spaces);
+    let text = raw.get(..before).unwrap_or(raw);
+    let slashes = text.iter().rev().take_while(|&&b| b == b'\\').count();
+    let keep = if spaces > 0 && slashes % 2 == 1 {
+        before.saturating_add(1)
+    } else {
+        before
+    };
     raw.get(..keep).unwrap_or(raw)
 }
 
@@ -588,14 +642,18 @@ impl InForce {
 
     /// The path as this drive compares names: composed where it composes them.
     fn composed<'a>(&self, path: &'a [u8]) -> Cow<'a, [u8]> {
-        if !self.drive.composes_unicode || path.is_ascii() {
-            return Cow::Borrowed(path);
-        }
-        match std::str::from_utf8(path) {
-            Ok(s) if !unicode_normalization::is_nfc(s) => {
-                Cow::Owned(s.nfc().collect::<String>().into_bytes())
-            }
+        match std::str::from_utf8(path).map(|s| self.composed_name(s)) {
+            Ok(Cow::Owned(s)) => Cow::Owned(s.into_bytes()),
             _ => Cow::Borrowed(path),
+        }
+    }
+
+    /// A folder or path name as this drive compares names.
+    fn composed_name<'a>(&self, name: &'a str) -> Cow<'a, str> {
+        if self.drive.composes_unicode && !name.is_ascii() && !unicode_normalization::is_nfc(name) {
+            Cow::Owned(name.nfc().collect())
+        } else {
+            Cow::Borrowed(name)
         }
     }
 }
@@ -631,11 +689,9 @@ impl Matcher {
     /// The walk enters `folder` and gives the rule files read there, in order: at the top Git's
     /// personal lists, then `.gitignore`, then `.boltignore`.
     pub fn enter(&mut self, folder: &str, mut rules: Vec<Rules>) {
-        if self.now.drive.composes_unicode {
-            for r in &mut rules {
-                if !r.folder.is_ascii() {
-                    r.folder = r.folder.nfc().collect();
-                }
+        for r in &mut rules {
+            if let Cow::Owned(name) = self.now.composed_name(&r.folder) {
+                r.folder = name;
             }
         }
         let below = self.in_force_bytes();
@@ -643,7 +699,7 @@ impl Matcher {
             .iter()
             .fold(below, |sum, r| sum.saturating_add(r.size));
         self.now.top = Some(Arc::new(Level {
-            folder: folder.to_owned(),
+            folder: self.now.composed_name(folder).into_owned(),
             rules,
             bytes,
             up: self.now.top.take(),
@@ -652,6 +708,8 @@ impl Matcher {
 
     /// The walk goes back up to `folder`: the rules of folders that don't hold it stop applying.
     pub fn leave_to(&mut self, folder: &str) {
+        let folder = self.now.composed_name(folder);
+        let folder = folder.as_ref();
         while let Some(level) = &self.now.top {
             let f = level.folder.as_str();
             let holds = f.is_empty()
