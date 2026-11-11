@@ -1837,15 +1837,17 @@ fn many(packs: &mut PackSet, n: usize, kind: EntryKind, id: Id, size: u64) -> Id
 
 /// What `verify` finds wrong in a save that can't be written out doesn't stop `tidy`, nor make
 /// it free what it keeps: a chunk held only as a chunk list, a listing giving a file another size,
-/// and a save past the entry limit.
+/// and a save past the entry limit. Each plant gives the save's top listing and what `tidy`
+/// must keep of what it stored, by ID.
 #[test]
 fn tidy_is_unchanged_by_saves_that_cannot_be_written_out() {
     let piece = |bytes: &[u8]| Chunk {
         id: hash_content(bytes),
         size: bytes.len() as u64,
     };
-    let plants: [&dyn Fn(&mut PackSet) -> Id; 3] = [
-        &|packs| {
+    type Plant<'a> = &'a dyn Fn(&mut PackSet, &mut Vec<Id>) -> Id;
+    let plants: [Plant; 3] = [
+        &|packs, keep| {
             let world = ChunkList {
                 file: hash_content(b"world"),
                 size: 5,
@@ -1861,25 +1863,36 @@ fn tidy_is_unchanged_by_saves_that_cannot_be_written_out() {
             }
             packs.add_chunk_list(&world).unwrap();
             packs.add_chunk_list(&list).unwrap();
+            // The file's own list, its first chunk, and the list stored under its second.
+            keep.extend([list.file, hash_content(b"hello "), world.file]);
             many(packs, 1, EntryKind::File, list.file, 11)
         },
-        &|packs| {
+        &|packs, keep| {
             let small = packs.add_content(b"hello\n").unwrap();
+            keep.push(small);
             many(packs, 1, EntryKind::File, small, 999)
         },
-        &|packs| {
+        &|packs, keep| {
             let x = packs.add_content(b"x").unwrap();
             let folder = many(packs, 1_000, EntryKind::File, x, 1);
+            keep.extend([x, folder]);
             many(packs, 10_001, EntryKind::Folder, folder, 0)
         },
     ];
     for plant in plants {
         let (_dir, mut repo) = project(50);
-        plant_root(&mut repo, plant);
+        let mut keep = Vec::new();
+        plant_root(&mut repo, |packs| {
+            let root = plant(packs, &mut keep);
+            keep.push(root);
+            root
+        });
+        keep.push(tip(&repo));
         age_packs(&repo, 48);
-        let keep = marked(&repo);
         tidied(&mut repo);
         let left = indexed(&repo);
-        assert!(keep.iter().all(|id| left.contains(id)));
+        for id in &keep {
+            assert!(left.contains(id), "{id}");
+        }
     }
 }

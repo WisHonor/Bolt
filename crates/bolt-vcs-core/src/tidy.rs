@@ -471,6 +471,8 @@ pub(crate) struct Noted {
     /// Each file a listing gives another size than what is stored: the listing, the file's
     /// name, the size it gives and the size stored.
     pub(crate) sizes: Vec<(Id, String, u64, u64)>,
+    /// The IDs noted as missing or held as another kind, each noted once.
+    pub(crate) absent: HashSet<Id>,
 }
 
 impl Noted {
@@ -494,24 +496,31 @@ impl Noted {
                 continue;
             }
             // One no index names at all is told as missing from the set of IDs kept.
-            let Some(held) = self.known.get(&entry.id).copied() else {
+            let Some(held) = self.known.get(&entry.id) else {
                 continue;
             };
             match held.file_size() {
-                Some(stored) if stored != entry.size => {
+                Some(_) if held.has_size(entry.size) => {}
+                Some(stored) => {
                     let name = entry.name.clone();
                     self.sizes.push((id, name, entry.size, stored));
                 }
-                Some(_) => {}
-                None => self.unread.push((entry.id, Unread::OtherKind)),
+                None => self.absent(entry.id, Unread::OtherKind),
             }
         }
         self.shapes.insert(id, shape);
     }
+
+    /// Notes `id` as missing, or held as another kind (`why`), once however often it is named.
+    fn absent(&mut self, id: Id, why: Unread) {
+        if self.absent.insert(id) {
+            self.unread.push((id, why));
+        }
+    }
 }
 
 /// How an ID is held in the packs' indexes.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Held {
     /// As file contents, of this size.
     pub(crate) content: Option<u64>,
@@ -519,24 +528,37 @@ pub(crate) struct Held {
     pub(crate) list: Option<u64>,
     /// As some other kind.
     pub(crate) other: bool,
+    /// The other sizes copies of it claim; nearly always none, as copies of one ID agree.
+    more: Vec<u64>,
 }
 
 impl Held {
     fn add(&mut self, line: &IndexEntry) {
-        match line.kind {
-            ObjectKind::Content => {
-                self.content.get_or_insert(line.uncompressed_size);
+        let size = line.uncompressed_size;
+        let first = match line.kind {
+            ObjectKind::Content => &mut self.content,
+            ObjectKind::ChunkList => &mut self.list,
+            _ => {
+                self.other = true;
+                return;
             }
-            ObjectKind::ChunkList => {
-                self.list.get_or_insert(line.uncompressed_size);
-            }
-            _ => self.other = true,
+        };
+        match *first {
+            None => *first = Some(size),
+            Some(had) if had != size && !self.more.contains(&size) => self.more.push(size),
+            Some(_) => {}
         }
     }
 
     /// The size of the file stored under this ID, if it is stored as one.
-    pub(crate) fn file_size(self) -> Option<u64> {
+    pub(crate) fn file_size(&self) -> Option<u64> {
         self.content.or(self.list)
+    }
+
+    /// Whether some copy of the file stored under this ID is `size` bytes: a reader passes over
+    /// a copy that isn't, so one that is is enough.
+    fn has_size(&self, size: u64) -> bool {
+        self.content == Some(size) || self.list == Some(size) || self.more.contains(&size)
     }
 }
 
@@ -841,15 +863,16 @@ impl Marks<'_> {
                 if let Some(noted) = &mut self.noted {
                     for chunk in &list.chunks {
                         // A chunk is read as file contents only, never through another list.
-                        let held = noted.known.get(&chunk.id).copied();
-                        let as_content = held.is_some_and(|h| h.content.is_some());
+                        let held = noted.known.get(&chunk.id);
+                        let (indexed, as_content) =
+                            (held.is_some(), held.is_some_and(|h| h.content.is_some()));
                         if !as_content {
-                            let why = if held.is_some() {
+                            let why = if indexed {
                                 Unread::OtherKind
                             } else {
                                 Unread::Missing
                             };
-                            noted.unread.push((chunk.id, why));
+                            noted.absent(chunk.id, why);
                         }
                         if !as_content || noted.watch.contains(&chunk.id) {
                             noted.via.entry(chunk.id).or_insert(list.file);

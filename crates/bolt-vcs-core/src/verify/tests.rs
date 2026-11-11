@@ -931,3 +931,58 @@ fn a_save_with_a_path_past_the_limit_is_too_big() {
         "{v:?}"
     );
 }
+
+#[test]
+fn a_listing_is_not_blamed_for_a_damaged_copy_of_its_file() {
+    let (_dir, mut repo) = project(0);
+    let text = b"hello\n";
+    let id = hash_content(text);
+    // First by name, a copy whose index line claims 999 bytes.
+    let mut w = PackWriter::create(repo.tmp_dir()).unwrap();
+    let false_size = crate::pack::Prepared {
+        id,
+        size: 999,
+        zstd: false,
+        stored: text.to_vec(),
+    };
+    w.add_prepared(ObjectKind::Content, &false_size).unwrap();
+    let made = w.finish(repo.packs_dir()).unwrap().unwrap();
+    fs::rename(&made, repo.packs_dir().join("00.pack")).unwrap();
+    own_pack(&mut repo, |p| {
+        p.add_content(text).unwrap();
+    });
+    plant_file(&mut repo, "a.txt", id, 6);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectDamaged], "{:?}", v.problems);
+    assert_eq!(v.problems[0].pack.as_deref(), Some("00.pack"));
+    assert_eq!(v.problems[0].object, Some(id));
+}
+
+#[test]
+fn a_chunk_named_many_times_is_noted_and_told_once() {
+    let (_dir, mut repo) = project(0);
+    let absent = hash_content(b"in no pack");
+    let list = ChunkList {
+        file: hash_content(b"a file of 3,000 bytes"),
+        size: 3_000,
+        chunks: vec![
+            Chunk {
+                id: absent,
+                size: 1
+            };
+            3_000
+        ],
+    };
+    own_pack(&mut repo, |p| p.add_chunk_list(&list).unwrap());
+    plant_file(&mut repo, "big.bin", list.file, 3_000);
+    repo.store().close_all();
+    let Ok(Ok((_, look))) = look_at(&repo, 30, now(), &HashSet::new()) else {
+        panic!("the look wasn't made");
+    };
+    let notes = look.noted.unread.iter().filter(|(id, _)| *id == absent);
+    assert_eq!(notes.count(), 1);
+    drop(look);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(absent));
+}
