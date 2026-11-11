@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 build, the review of the follow-ups)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (items 5 and 13), and through it decisions [026](026-ownership-check-details.md) and [042](042-trust-hint-skips-folders-anyone-can-write-to.md)
+- **Refined by:** [decision 149](149-a-drive-that-cant-name-its-folders-is-told-not-offered-safe-folders.md) (where Bolt can't read a folder's identity, the entry is named as passed over and no `safe-folders` line is offered)
 
 ## Context
 

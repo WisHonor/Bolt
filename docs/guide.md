@@ -1271,6 +1271,8 @@ hint: If you trust it, add its folder to safe-folders at the top of /home/ana/.c
       safe-folders = ["/srv/work"]
 ```
 
+**On Windows, a project on a FAT32 or exFAT drive (most USB sticks and SD cards) can't be used in v0.1.** Bolt can't tell such a drive's folders apart, so `safe-folders` can't vouch for one: Bolt refuses the project, offers no line, and says so. Work on a copy on the computer's own drive.
+
 Add the line only if you know the project is yours or someone's you trust. Each entry must be a full path, and names one exact folder: the project's own, not a folder above it. Copy the line Bolt's hint prints, rather than typing it: it is already written the right way, which matters on Windows, where a path in double quotes needs every backslash doubled (`"D:\\Shared\\game"`), or the whole path in single quotes (`'D:\Shared\game'`); otherwise Bolt can't read the settings file at all.
 
 On Windows, a few more cases need it: a project directly in your home folder (`C:\Users\<you>`, which Windows gives to the SYSTEM account), and, outside a terminal run as administrator, a folder the Administrators group owns.
@@ -1281,7 +1283,7 @@ On Windows, a few more cases need it: a project directly in your home folder (`C
 
 - **An entry that is itself a link:** a symbolic link, or on Windows also a junction, a mounted drive or anything else Windows treats as a link to another place. Otherwise whoever could replace a trusted folder with a link could move your trust wherever the link leads. List the real folder. (A link in a folder *above* the entry is still followed: the rule is about the entry itself.)
 - **An entry with `..` in it,** such as `/home/ana/shared/x/..`, whatever it leads to. Write the folder's path out in full.
-- **Any entry, on a drive that doesn't tell its folders apart.** Some network shares give every folder the same identity, so Bolt can't be sure the entry is the project's folder, and `safe-folders` can't vouch for a folder there. Work on a copy on a drive of your own, or as the account that owns the folder.
+- **Any entry, on a drive that doesn't tell its folders apart.** Some network shares give every folder the same identity, and on Windows Bolt can't read a folder's identity on a FAT32 or exFAT drive, so Bolt can't be sure the entry is the project's folder, and `safe-folders` can't vouch for a folder there. Work on a copy on a drive of your own, or as the account that owns the folder.
 
 ## 12. Scripts
 

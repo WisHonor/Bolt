@@ -530,8 +530,10 @@ jobs:
             7z x -bd -o"$RUNNER_TEMP/pkg" "$RUNNER_TEMP/download/$ARCHIVE" > /dev/null
           else
             tar -xzf "$RUNNER_TEMP/download/$ARCHIVE" -C "$RUNNER_TEMP/pkg"
-            sudo apt-get update -q > /dev/null
-            sudo apt-get install -y --no-install-recommends dosfstools exfatprogs > /dev/null
+            # Without Ubuntu's mirror the tries use whatever tools the runner already has.
+            sudo apt-get update -q > /dev/null || true
+            sudo apt-get install -y --no-install-recommends dosfstools exfatprogs > /dev/null \
+              || echo "::warning::Couldn't install dosfstools and exfatprogs"
           fi
       - name: The tries
         if: runner.os != 'Windows'

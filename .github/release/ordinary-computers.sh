@@ -65,6 +65,11 @@ try_case() {
 
 echo "Running as: $(id)"
 for fs in vfat exfat; do
+  if ! command -v "mkfs.$fs" > /dev/null; then
+    echo
+    echo "$fs: not run, this runner has no mkfs.$fs"
+    continue
+  fi
   img="$work/$fs.img" mnt="$work/$fs"
   truncate -s 512M "$img"
   if [ "$fs" = vfat ]; then mkfs.vfat -F 32 "$img"; else mkfs.exfat "$img"; fi

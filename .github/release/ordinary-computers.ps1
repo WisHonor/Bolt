@@ -79,6 +79,12 @@ foreach ($d in @(@('FAT32', 'R'), @('exFAT', 'S'))) {
   $fs, $letter = $d
   New-Drive $fs $letter
   Try-Case "$fs, a folder" "${letter}:\proj"
+  Write-Host "::group::$fs, a folder, with its safe-folders line written by hand"
+  Set-Content -LiteralPath $config -Encoding UTF8 -Value (@("safe-folders = ['${letter}:\proj']") + $user)
+  Set-Location -LiteralPath "${letter}:\proj"
+  $null = Try-Bolt start --preset custom
+  Set-Location -LiteralPath $work
+  Write-Host '::endgroup::'
   Try-Case "$fs, the top of the drive" "${letter}:\"
 }
 
