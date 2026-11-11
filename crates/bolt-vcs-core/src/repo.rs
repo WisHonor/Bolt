@@ -208,11 +208,21 @@ impl RepoError {
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
+        self.hint_with(&safe_fs::folder_id)
+    }
+
+    /// `hint`, given how to read a folder's identity.
+    fn hint_with(&self, folder_id: &FolderId) -> Option<String> {
         if let RepoError::SafeFolderPassedOver { refusal, .. } = self {
-            return refusal.hint();
+            return refusal.hint_with(folder_id);
         }
         if let Some(path) = self.trust_path() {
-            let trust = config::trust_hint(path);
+            // safe-folders can't vouch for a folder there, so no line is offered.
+            let trust = if no_identity(&folder_id(path)) {
+                NO_IDENTITY_HINT.to_owned()
+            } else {
+                config::trust_hint(path)
+            };
             return Some(if matches!(self, RepoError::AdminsNotElevated { .. }) {
                 format!("Open a terminal as administrator and run the command there.\n{trust}")
             } else {
@@ -577,6 +587,16 @@ pub(crate) fn owner_allows(
     root: &Path,
     safe: &[PathBuf],
 ) -> Result<(), RepoError> {
+    owner_allows_with(owners, root, safe, &safe_fs::folder_id)
+}
+
+/// `owner_allows`, given how to read a folder's identity.
+fn owner_allows_with(
+    owners: impl IntoIterator<Item = io::Result<Owner>>,
+    root: &Path,
+    safe: &[PathBuf],
+    folder_id: &FolderId,
+) -> Result<(), RepoError> {
     let path = || root.to_owned();
     let refusal = owners.into_iter().find_map(|owner| match owner {
         Ok(Owner::User | Owner::Administrators { elevated: true }) => None,
@@ -596,16 +616,16 @@ pub(crate) fn owner_allows(
     // Each entry is judged from one open of it, by the identity of the folder that open holds, so
     // swapping it for a link between two looks can't win. A link above its last part, such as
     // macOS's `/var`, is followed as usual.
-    let project = safe_fs::folder_id(root).ok();
+    let project = folder_id(root);
     let mut passed_over = None;
     for folder in safe {
         let why = if folder.components().any(|c| c == Component::ParentDir) {
             DOT_DOT
         } else {
-            match (safe_fs::folder_id(folder), project) {
-                (Ok(id), Some(project)) if same_identity(id, project) => return Ok(()),
-                (Ok(id), Some(project)) if id.1 == 0 || project.1 == 0 => NO_IDENTITY,
+            match (folder_id(folder), &project) {
+                (Ok(id), Ok(project)) if same_identity(id, *project) => return Ok(()),
                 (Err(e), _) if bolt_platform::dir::is_link_refusal(&e) => A_LINK,
+                (id, project) if no_identity(&id) || no_identity(project) => NO_IDENTITY,
                 _ => continue,
             }
         };
@@ -633,6 +653,27 @@ fn same_identity(a: (u64, u128), b: (u64, u128)) -> bool {
 /// Why an entry on a drive that gives no file numbers never counts.
 const NO_IDENTITY: &str =
     "its drive doesn't tell its folders apart, so safe-folders can't vouch for a folder on it";
+
+/// How to read a folder's identity: its drive and file number.
+type FolderId = dyn Fn(&Path) -> io::Result<(u64, u128)>;
+
+/// Whether a look at a folder's identity found the drive gives none Bolt can use: a file number
+/// of 0, or a drive that won't answer the question (FAT and exFAT on Windows).
+fn no_identity(id: &io::Result<(u64, u128)>) -> bool {
+    match id {
+        Ok(id) => id.1 == 0,
+        Err(e) => {
+            e.kind() == io::ErrorKind::Unsupported
+                // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER.
+                || (cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 50 | 87)))
+        }
+    }
+}
+
+/// What to do about a project on a drive that doesn't tell its folders apart.
+const NO_IDENTITY_HINT: &str = "This drive doesn't tell its folders apart, so safe-folders can't \
+     vouch for a project on it. Work on a copy on a drive that records who owns folders, such as \
+     the computer's own drive.";
 
 /// Why an entry with `..` in it never counts.
 const DOT_DOT: &str = "it has `..` in it, which the system resolves through any link before it";
@@ -4044,6 +4085,44 @@ mod tests {
             }
         }
         swapper.join().unwrap();
+    }
+
+    /// On a drive whose folders' identities can't be read (or read as file number 0), the entry
+    /// for the project is named with why it can't count, the project stays refused, and the hint
+    /// offers no safe-folders line.
+    #[test]
+    fn an_entry_on_a_drive_without_folder_identities_is_named_and_offered_no_line() {
+        let dir = tempdir();
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let unreadable = |_: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+        let zero = |_: &Path| Ok((7, 0));
+        let id_fakes: [&FolderId; 2] = [&unreadable, &zero];
+        for folder_id in id_fakes {
+            for owner in [Owner::Unknown, Owner::Other] {
+                let refused =
+                    owner_allows_with([Ok(owner)], &root, std::slice::from_ref(&root), folder_id);
+                let Err(e) = refused else {
+                    panic!("trusted without an identity");
+                };
+                assert!(
+                    matches!(&e, RepoError::SafeFolderPassedOver { entry, why, .. }
+                        if entry == &root && *why == NO_IDENTITY),
+                    "{e:?}"
+                );
+                let hint = e.hint_with(folder_id).unwrap();
+                assert!(!hint.contains("safe-folders = "), "{hint}");
+                assert!(hint.contains("a copy on a drive that records"), "{hint}");
+            }
+            // The first refusal, before any entry, offers no line either.
+            let first = owner_allows_with([Ok(Owner::Unknown)], &root, &[], folder_id).unwrap_err();
+            assert!(matches!(first, RepoError::OwnerUnknown { .. }), "{first:?}");
+            let hint = first.hint_with(folder_id).unwrap();
+            assert!(!hint.contains("safe-folders = "), "{hint}");
+        }
+        // Where identities read, the line is still offered.
+        let first = owner_allows([Ok(Owner::Unknown)], &root, &[]).unwrap_err();
+        assert!(first.hint().unwrap().contains("safe-folders = "));
     }
 
     /// Two folders are one only by an identity the drive really gives: a file number of 0, which
