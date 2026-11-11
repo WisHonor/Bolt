@@ -32,7 +32,7 @@ Your work stays yours: this agreement gives us no rights in the projects, files 
 Bolt sends nothing, to us or to anyone else: your projects, your file names and the way you work stay on your computer.
 
 - Bolt has no code that uses a network, and none of the code built into it does either.
-- Each build we release is checked first. The check reads the list of what the program asks the operating system for, and stops the release if it finds any of the system's network functions there, or a way to start another program (which could send data for Bolt).
+- Each build we release is checked first. The check reads the list of what the program asks the operating system for, and stops the release if it finds any of the network functions it looks for there, or a way to start another program (which could send data for Bolt).
 - So Bolt has no telemetry, no update check and no license check over the network, and it sends no crash reports.
 - Bolt reads and writes only on the computer it runs on.
 

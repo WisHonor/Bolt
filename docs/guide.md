@@ -253,7 +253,7 @@ Your first save is wxyn on line main.
 Next: change some files, then run: bolt save "describe your change"
 ```
 
-On Windows, in a terminal run as administrator, Bolt first warns `This project belongs to the Administrators group, so it opens only from an administrator terminal.`, and the project will then open only from such a terminal. Start your projects from a normal terminal ([section 11](#11-personal-settings), `safe-folders`, says why).
+On Windows, in a terminal run as administrator, Bolt also warns `This project belongs to the Administrators group, so it opens only from an administrator terminal.`, and the project will then open only from such a terminal. Start your projects from a normal terminal ([section 11](#11-personal-settings), `safe-folders`, says why).
 
 Bolt made three things:
 
@@ -1258,7 +1258,7 @@ The environment variables `BOLT_USER_NAME` and `BOLT_USER_EMAIL`, when both are 
 
 **What it is for.** Bolt works in a project only when both the project's folder and its `.bolt` folder belong to you, the account you're logged in as. This protects you from a project someone else planted where you'd run Bolt: in a shared folder, or a folder above your own. (Git has the same rule.)
 
-**When Bolt asks for it.** When a project's folder or its `.bolt` belongs to another account, or when the drive doesn't record who owns folders (USB sticks and SD cards often don't), Bolt refuses to use it:
+**When Bolt asks for it.** When a project's folder or its `.bolt` belongs to another account, or when the drive doesn't record who owns folders (some network shares don't), Bolt refuses to use it:
 
 ```text
 error: The project at /srv/work belongs to another user account.
@@ -1319,12 +1319,16 @@ The `--json` reference, published on the page you downloaded Bolt from, describe
 
 ### Where Git and Git LFS still do better
 
-Bolt is measured against Git and Git LFS on GitHub's Linux and Windows machines, doing the same steps on the same data. On Git's own source code, Bolt's first save takes a fifth of Git's time on Linux and a tenth on Windows, and a small save is level with Git on Linux and quicker on Windows. Git is ahead elsewhere:
+Bolt is measured against Git and Git LFS on GitHub's Linux and Windows machines (its runners), doing the same steps on the same data. The numbers below are from those runs; your own computer will give others. On Git's own source code, Bolt's first save takes about a fifth of Git's time on Linux and a tenth to an eighth on Windows, and a small save is level with Git on Linux and quicker on Windows. Every case where Git or Git LFS came out ahead:
 
-- **`bolt status`** takes 1.6 to 1.8 times Git's time.
-- **Going back to another save** (`bolt goto`) takes about twice Git's time on Linux.
-- **On a slow disk,** Git LFS is quicker at the first save of big files that don't compress.
-- **A long history takes more space** than Git's: 369 MB against 314 MB for Git's own history, since Bolt doesn't yet store a version as its difference from the one before.
+- **`bolt status`** on a code project takes 1.5 to 1.8 times Git's time on Linux and 1.4 to 2.2 times on Windows; about twice on a project with many folders (Godot's demo projects). On a project of only a few files it takes about a millisecond more than Git on Linux, which is Bolt starting up.
+- **Going back to another save** (`bolt goto`) takes 1.8 to 2.5 times Git's time on a code project on Linux, and about twice on Windows on a project with many folders.
+- **A switch that rewrites thousands of files** takes 1.8 to 3.1 seconds against Git's 0.46 to 0.75 for 3,557 files on Linux, and 3.9 to 4.4 against 1.4 to 1.7 on Windows. Bolt writes each file safely to the disk before putting it in place, so a crash can't leave half a file; Git doesn't.
+- **A small save** on a project with many folders is behind Git on Linux (30.6 ms against 23.9), though ahead on Windows.
+- **On a slow disk,** Git LFS is quicker at the first save of big files that don't compress (1.4 to 1.9 seconds against 4.9 to 5.1 for a gigabyte on Linux), and Git is quicker at going back to an old version of a big file (4.0 to 4.8 seconds against 2.4 to 3.2 for a gigabyte on Linux, 5.1 to 6.1 against 4.1 on Windows).
+- **The whole history listing** takes 1.5 to 2 times Git's time: 0.27 seconds against 0.18 on Linux for 24,498 saves, 0.67 against 0.33 on Windows.
+- **A long history takes more space** than Git's: 64.6 GB against 6.6 GB for the history of Linux (the operating system's source), and 369 MB against 314 MB for Git's own, since Bolt doesn't yet store a version as its difference from the one before.
+- **Importing a very long history takes a lot of memory:** 3.4 GB at its peak for Linux's.
 
 Bolt's own bar is to stay within twice Git's time. v0.1 ships without meeting it for `bolt goto`: that is a goal for v0.2. `bolt status` with nothing changed and a small save stay held to it: Bolt's speed check fails when either takes more than twice Git's time.
 

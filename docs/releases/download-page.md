@@ -53,4 +53,4 @@ The guide's section 3, The first five minutes, comes next. Windows and macOS may
 
 ## Reporting a problem
 
-Write to the address on the page you downloaded Bolt from. Say which version `bolt --version` prints, your system, and what you typed and saw. A security problem goes to the same address, privately, with "security" in the subject. "Reporting a problem", published on this page, says what to send.
+Write to the address on this page. Say which version `bolt --version` prints, your system, and what you typed and saw. A security problem goes to the same address, privately, with "security" in the subject. "Reporting a problem", published on this page, says what to send.

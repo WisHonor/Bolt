@@ -365,37 +365,37 @@ Two sessions prepare v0.1 at once, from 2026-11-11, each with its own branch, st
 
 ### The package
 
-The owner decided that Bolt is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)); the rest was decided on 2026-11-11 in decisions [141](decisions/141-the-user-agreement.md) to [147](decisions/147-the-package-sessions-follow-ups-before-v0.1.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-11-v0.1-package.md](plans/2026-11-11-v0.1-package.md).
+The owner decided that Bolt is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)); the rest was decided on 2026-11-11 in decisions [141](decisions/141-the-user-agreement.md) to [149](decisions/149-a-drive-that-cant-name-its-folders-is-told-not-offered-safe-folders.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-11-v0.1-package.md](plans/2026-11-11-v0.1-package.md).
 
 **0. The starting point** ✅ (2026-11-11)
 - The stale draft release and the old archives among the release workflow's artifacts deleted; what the follow-ups still list before v0.1, and every place in what ships or goes on the website that points into the repository, written down (the plan's "Starting point").
 
-**1. The license in the repository** (Task 1)
+**1. The license in the repository** ✅ (2026-11-11; Task 1)
 - *Done when:* `LICENSE` says all rights reserved, the manifests name it and keep `publish = false`, `deny.toml` says why Bolt's own crates are passed over, and a test pins the manifests.
 
-**2. The user agreement** (Task 2)
+**2. The user agreement** ✅ (2026-11-11; Task 2)
 - *Done when:* `USER-AGREEMENT.md` is written in plain language, marked a draft for a lawyer, with each of the owner's blanks marked, and says truthfully what Bolt sends.
 
-**3. Bolt sends nothing** (Task 3)
+**3. Bolt sends nothing** ✅ (2026-11-11; Task 3)
 - *Done when:* clippy and cargo-deny refuse networking in CI, and the import check refuses its two test programs and passes each release program on all four targets ([decision 142](decisions/142-bolt-sends-nothing-and-each-build-proves-it.md)).
 
-**4. The notices** (Task 4)
+**4. The notices** ✅ (2026-11-11; Task 4)
 - *Done when:* every archive holds both notices files, and the crates' file says what isn't a crate and where each crate's source is ([decision 143](decisions/143-the-notices-cover-what-is-built-in.md)).
 
-**5. What ships points nowhere private** (Tasks 5–6)
+**5. What ships points nowhere private** ✅ (2026-11-11; Tasks 5–6)
 - The README, the guide, `SECURITY.md`, the release notes, and what testers are given (the download page's text, a welcome note, what to send with a report, the known problems).
 - *Done when:* a test fails on any link into the repository in them, and passes ([decision 144](decisions/144-where-people-get-bolt-and-report-problems.md)).
 
-**6. The release workflow for every version** (Task 7)
+**6. The release workflow for every version** ✅ (2026-11-11; Task 7)
 - *Done when:* a pull request's run builds the four archives of six files each, writes `SHA256SUMS` and the website copies, and testing.md gives the steps of a fix release ([decision 145](decisions/145-one-release-workflow-for-every-version.md)).
 
-**7. Clean machines and the first run** (Tasks 8–9)
+**7. Clean machines and the first run** ✅ (2026-11-11; Tasks 8–9)
 - *Done when:* every archive passes on fresh runners and in bare containers, the oldest system each build claims included, and the guide's install steps and first five minutes run word for word on each system ([decision 146](decisions/146-the-clean-machine-check-and-which-systems-each-build-needs.md)).
 
-**8. Ordinary computers** (Task 10)
+**8. Ordinary computers** ✅ (2026-11-11; Task 10)
 - *Done when:* each case (spaces and letters outside ASCII, long paths, USB drives, files held open, read-only files, the top of a drive, synced folders, network shares, and macOS's letter case and accents) names the test that covers it, or was tried and what happened is written down.
 
-**9. Follow-ups** (Task 11)
+**9. Follow-ups** ✅ (2026-11-11; Task 11)
 - *Done when:* no row this session owns says "before v0.1" or "before the first release" ([decision 147](decisions/147-the-package-sessions-follow-ups-before-v0.1.md)).
 
 **10. Reviews** (Tasks 12–14)
