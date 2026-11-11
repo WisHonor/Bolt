@@ -34,7 +34,7 @@ pub struct Verdict {
 /// a whole folder name. With `casefold`, ASCII letters match without regard to case, as Git does
 /// with `core.ignoreCase`. A NUL ends the pattern and the text, as in Git.
 #[must_use]
-pub fn wildmatch(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
+pub fn glob_match(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
     compile(to_nul(pattern)).is_some_and(|p| p.matches(to_nul(text), casefold))
 }
 

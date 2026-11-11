@@ -350,8 +350,8 @@ fn read_packed(
 }
 
 /// Whether `git check-ref-format` takes `name` with no options: two levels at least, and no level
-/// that is empty, starts with `.`, ends with `.lock`, or holds `..`, `@{`, a control character, a space,
-/// or any of `:?[\^~*`; the name isn't `@` and doesn't end with `.`.
+/// that is empty, starts with `.`, ends with `.lock`, or holds `..`, `@{`, a control character, a
+/// space, or any of `:?[\^~*`; the name isn't `@` and doesn't end with `.`.
 fn is_valid_ref_name(name: &[u8]) -> bool {
     let mut levels = 0usize;
     for level in name.split(|&c| c == b'/') {

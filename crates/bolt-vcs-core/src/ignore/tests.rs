@@ -216,17 +216,17 @@ const FOLDING: Drive = Drive {
 };
 
 /// Pattern, then the paths it matches and those it doesn't, as `git check-ignore` decided them.
-fn check_wildmatch(cases: &[(&str, &[&str], &[&str])], casefold: bool) {
+fn check_glob_match(cases: &[(&str, &[&str], &[&str])], casefold: bool) {
     for &(pattern, yes, no) in cases {
         for path in yes {
             assert!(
-                wildmatch(pattern.as_bytes(), path.as_bytes(), casefold),
+                glob_match(pattern.as_bytes(), path.as_bytes(), casefold),
                 "{pattern:?} should match {path:?}"
             );
         }
         for path in no {
             assert!(
-                !wildmatch(pattern.as_bytes(), path.as_bytes(), casefold),
+                !glob_match(pattern.as_bytes(), path.as_bytes(), casefold),
                 "{pattern:?} should not match {path:?}"
             );
         }
@@ -235,7 +235,7 @@ fn check_wildmatch(cases: &[(&str, &[&str], &[&str])], casefold: bool) {
 
 #[test]
 fn double_stars_cross_folders_only_as_whole_folder_names() {
-    check_wildmatch(
+    check_glob_match(
         &[
             ("**", &["a", "a/b"], &[]),
             ("abc/**", &["abc/x", "abc/x/y"], &["abc"]),
@@ -264,8 +264,8 @@ fn double_stars_cross_folders_only_as_whole_folder_names() {
 }
 
 #[test]
-fn a_nul_ends_what_wildmatch_is_given() {
-    check_wildmatch(
+fn a_nul_ends_what_glob_match_is_given() {
+    check_glob_match(
         &[
             ("\0", &["", "\0", "\0x"], &["x"]),
             ("a*\0b", &["a", "ax\0y"], &["xa"]),
@@ -277,7 +277,7 @@ fn a_nul_ends_what_wildmatch_is_given() {
 
 #[test]
 fn classes_read_as_git_reads_them() {
-    check_wildmatch(
+    check_glob_match(
         &[
             ("[]a]x", &["]x", "ax"], &["bx"]),
             ("[!]a]x", &["bx"], &["]x", "ax", "/x"]),
@@ -311,10 +311,10 @@ fn classes_read_as_git_reads_them() {
         false,
     );
     // Bytes above ASCII, which a path that isn't UTF-8 can hold.
-    assert!(wildmatch(b"[\x7f-\xc1]", b"\x80", false));
-    assert!(wildmatch(b"[\x7f-\xc1]", b"\xc1", false));
-    assert!(!wildmatch(b"[\x7f-\xc1]", b"\xc2", false));
-    assert!(wildmatch(b"[!a]", b"\xff", false));
+    assert!(glob_match(b"[\x7f-\xc1]", b"\x80", false));
+    assert!(glob_match(b"[\x7f-\xc1]", b"\xc1", false));
+    assert!(!glob_match(b"[\x7f-\xc1]", b"\xc2", false));
+    assert!(glob_match(b"[!a]", b"\xff", false));
     // These lines match nothing at all.
     for pattern in [
         "[[:foo:]]x",
@@ -328,7 +328,7 @@ fn classes_read_as_git_reads_them() {
     ] {
         for path in ["x", "fx", "a[b", "ab", "]x", "^x", "a", "a\\", "a/b", "[]"] {
             assert!(
-                !wildmatch(pattern.as_bytes(), path.as_bytes(), false),
+                !glob_match(pattern.as_bytes(), path.as_bytes(), false),
                 "{pattern} {path}"
             );
         }
@@ -337,7 +337,7 @@ fn classes_read_as_git_reads_them() {
 
 #[test]
 fn letter_case_is_folded_as_git_folds_it() {
-    check_wildmatch(
+    check_glob_match(
         &[
             ("[A-Z]1", &["x1", "X1"], &[]),
             ("[a-z]2", &["x2", "X2"], &[]),
@@ -357,7 +357,7 @@ fn letter_case_is_folded_as_git_folds_it() {
         ],
         true,
     );
-    check_wildmatch(
+    check_glob_match(
         &[
             ("[Z-a]2", &["Z2", "a2", "_2"], &["z2", "A2"]),
             ("[Z-A]3", &["Z3"], &["z3"]),
@@ -452,13 +452,13 @@ fn matching_takes_time_in_proportion_to_pattern_and_path() {
     // A matcher that backtracks would take years over these.
     let pattern = "**/".repeat(30) + "x";
     let path = "a/".repeat(3000) + "y";
-    assert!(!wildmatch(pattern.as_bytes(), path.as_bytes(), false));
+    assert!(!glob_match(pattern.as_bytes(), path.as_bytes(), false));
     let pattern = "*a".repeat(40) + "b";
     let path = "a".repeat(5000);
-    assert!(!wildmatch(pattern.as_bytes(), path.as_bytes(), true));
+    assert!(!glob_match(pattern.as_bytes(), path.as_bytes(), true));
     let pattern = "a/**/".repeat(30) + "[!/]*?b";
     let path = "a/".repeat(2000) + "zzb";
-    assert!(wildmatch(pattern.as_bytes(), path.as_bytes(), false));
+    assert!(glob_match(pattern.as_bytes(), path.as_bytes(), false));
 }
 
 #[test]
@@ -473,12 +473,12 @@ fn reading_a_bracket_takes_time_in_proportion_to_its_length() {
         (format!("[{}]", "\\]".repeat(n)), "]", "\\"),
         (format!("[a{}]", "-[:".repeat(n)), ":", "b"),
     ] {
-        assert!(wildmatch(pattern.as_bytes(), takes.as_bytes(), false));
-        assert!(!wildmatch(pattern.as_bytes(), refuses.as_bytes(), false));
+        assert!(glob_match(pattern.as_bytes(), takes.as_bytes(), false));
+        assert!(!glob_match(pattern.as_bytes(), refuses.as_bytes(), false));
     }
     // Never closed, or a class name that runs to the end: these match nothing.
     for pattern in [format!("[{opens}x"), format!("[{opens}:]")] {
-        assert!(!wildmatch(pattern.as_bytes(), b"x", false));
+        assert!(!glob_match(pattern.as_bytes(), b"x", false));
         let m = matcher(PLAIN, &[("", &format!("{pattern}\n{pattern}\n"))]);
         assert_eq!(m.decide("x", false), Decision::NoRule);
     }

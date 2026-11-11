@@ -745,9 +745,8 @@ fn from_home(value: &[u8]) -> bool {
 }
 
 /// The home folder Git v2.56.0 takes `~` and its own files from: `HOME`, whatever it is set to;
-/// on Windows (`windows`), where Git for Windows sets `HOME` when it isn't set
-/// (`setup_windows_environment`), `HOMEDRIVE` followed by `HOMEPATH` when that names a folder
-/// (`is_dir`), else `USERPROFILE`. `None` where there is none: Git doesn't ask the system.
+/// on Windows (`windows`), where Git for Windows sets `HOME` itself when it isn't set,
+/// `HOMEDRIVE` followed by `HOMEPATH` when that names a folder, else `USERPROFILE`. `None` where there is none: Git doesn't ask the system.
 fn git_home(
     var: &dyn Fn(&str) -> Option<OsString>,
     windows: bool,

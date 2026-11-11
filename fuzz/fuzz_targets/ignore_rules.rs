@@ -1,6 +1,6 @@
 #![no_main]
 use bolt_core::drive::Drive;
-use bolt_core::ignore::{Matcher, Rules, wildmatch};
+use bolt_core::ignore::{Matcher, Rules, glob_match};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -34,6 +34,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let (pattern, text) = data.split_at(data.len() / 2);
-    let _ = wildmatch(pattern, text, false);
-    let _ = wildmatch(pattern, text, true);
+    let _ = glob_match(pattern, text, false);
+    let _ = glob_match(pattern, text, true);
 });
