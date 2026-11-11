@@ -646,7 +646,11 @@ fn verify_writes_nothing() {
 }
 
 fn found(ids: &[u8]) -> Verdict {
-    Verdict::Found(ids.iter().map(|b| Finding::Missing(Id([*b; 32]))).collect())
+    let kept: BTreeSet<Finding> = ids.iter().map(|b| Finding::Missing(Id([*b; 32]))).collect();
+    Verdict::Found(Findings {
+        counts: [kept.len() as u64, 0, 0],
+        kept,
+    })
 }
 
 fn lost(why: &str) -> Verdict {
@@ -985,4 +989,111 @@ fn a_chunk_named_many_times_is_noted_and_told_once() {
     let v = checked(&repo);
     assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
     assert_eq!(v.problems[0].object, Some(absent));
+}
+
+/// What `verify`'s marking notes for one look of `repo`, with a 30-day window.
+fn needs_of(repo: &Repository) -> Noted {
+    let store = Store::open_in(Arc::clone(repo.packs_folder()), repo.packs_dir()).unwrap();
+    let (head, _) = head_entry(&store, repo.head().unwrap()).unwrap();
+    let now_ns = i128::from(now()) * 1_000_000;
+    let packs = tidy::listed_leniently(repo.packs_folder(), now_ns).unwrap();
+    let src = Source {
+        store: &store,
+        signed: repo.signatures_allowed(),
+        folder: repo.packs_folder(),
+        packs_dir: repo.packs_dir(),
+    };
+    let since = now() - 30 * DAY;
+    tidy::needs(&src, &packs, head, since, Noted::default())
+        .unwrap()
+        .1
+}
+
+#[test]
+fn many_wrong_sizes_are_counted_and_only_what_is_told_is_held() {
+    let (_dir, mut repo) = project(0);
+    plant_root(&mut repo, |packs| {
+        let x = packs.add_content(b"x").unwrap();
+        many(packs, 3_000, EntryKind::File, x, 2)
+    });
+    repo.store().close_all();
+    let noted = needs_of(&repo);
+    assert!(noted.sizes.len() <= PROBLEMS_KEPT, "{}", noted.sizes.len());
+    let v = checked(&repo);
+    assert_eq!(v.problems_total, 3_000);
+    assert_eq!(v.count(ProblemKind::ObjectDamaged), 3_000);
+    assert_eq!(v.problems.len(), PROBLEMS_KEPT);
+    // The first by name are the ones told.
+    assert!(
+        v.problems[0].message.contains("00000 "),
+        "{:?}",
+        v.problems[0]
+    );
+    assert!(
+        v.problems[999].message.contains("00999 "),
+        "{:?}",
+        v.problems[999]
+    );
+}
+
+#[test]
+fn a_listing_naming_one_folder_many_times_holds_one_link() {
+    let (_dir, mut repo) = project(0);
+    plant_root(&mut repo, |packs| {
+        let x = packs.add_content(b"x").unwrap();
+        let folder = many(packs, 2, EntryKind::File, x, 1);
+        many(packs, 10_000, EntryKind::Folder, folder, 0)
+    });
+    let root = repo.store().save(&tip(&repo), false).unwrap().root;
+    repo.store().close_all();
+    let noted = needs_of(&repo);
+    assert_eq!(noted.shapes[&root].folders.len(), 1);
+    assert_eq!(checked(&repo).problems_total, 0);
+}
+
+/// How long `verify` takes, at best of three, on a save of one listing of `n` files with names of
+/// 208 bytes.
+fn time_wide(n: usize) -> std::time::Duration {
+    let (_dir, mut repo) = project(0);
+    plant_root(&mut repo, |packs| {
+        let x = packs.add_content(b"x").unwrap();
+        let entries = (0..n)
+            .map(|i| Entry {
+                name: format!("{i:08}{}", "a".repeat(200)),
+                kind: EntryKind::File,
+                id: x,
+                size: 1,
+            })
+            .collect();
+        add_listing(packs, entries).0
+    });
+    (0..3)
+        .map(|_| {
+            let began = std::time::Instant::now();
+            assert_eq!(checked(&repo).problems_total, 0);
+            began.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+/// Twice the entries take no more than about twice the time: nothing in `verify` searches or
+/// copies per entry. The best of three runs, and a quarter second of slack, keep a busy machine
+/// from failing it.
+#[test]
+fn verify_takes_about_twice_as_long_for_twice_the_entries() {
+    let (small, large) = (time_wide(20_000), time_wide(40_000));
+    eprintln!("verify: {small:?} for 20,000 entries, {large:?} for 40,000");
+    let bound = small.mul_f64(2.5) + std::time::Duration::from_millis(250);
+    assert!(large <= bound, "{small:?} for 20,000, {large:?} for 40,000");
+}
+
+#[test]
+fn two_looks_past_what_is_kept_tell_the_smaller_count() {
+    let keep = |n: u64| Findings {
+        kept: (0..=255u8).map(|b| Finding::Missing(Id([b; 32]))).collect(),
+        counts: [n, 0, 0],
+    };
+    let both = agreed(&[Verdict::Found(keep(1_500)), Verdict::Found(keep(1_200))]);
+    assert_eq!(both, Some(Verdict::Found(keep(1_200))));
 }

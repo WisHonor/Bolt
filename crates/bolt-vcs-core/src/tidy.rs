@@ -1,7 +1,7 @@
 //! `bolt tidy`: removes from the store what nothing needs any more, keeping what lines, shelves,
 //! tags, server lines, the diary and the undo window reach.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
@@ -468,9 +468,12 @@ pub(crate) struct Noted {
     pub(crate) roots: Vec<(Id, Id)>,
     /// What each listing read holds, to count a save's entries by path.
     pub(crate) shapes: HashMap<Id, Shape>,
-    /// Each file a listing gives another size than what is stored: the listing, the file's
-    /// name, the size it gives and the size stored.
-    pub(crate) sizes: Vec<(Id, String, u64, u64)>,
+    /// The files a listing gives another size than what is stored, as many as are told, the
+    /// first by listing and name: the listing, the file's name, the size it gives and the size
+    /// stored.
+    pub(crate) sizes: BTreeSet<(Id, String, u64, u64)>,
+    /// How many such files there are, told or not.
+    pub(crate) sizes_found: u64,
     /// The IDs noted as missing or held as another kind, each noted once.
     pub(crate) absent: HashSet<Id>,
 }
@@ -483,9 +486,13 @@ impl Noted {
             entries: listing.entries().len() as u64,
             ..Shape::default()
         };
+        // One link to each folder listing named, however many entries name it.
+        let mut folders: HashMap<Id, (u64, usize)> = HashMap::new();
         for entry in listing.entries() {
             if entry.kind == EntryKind::Folder {
-                shape.folders.push((entry.name.len(), entry.id));
+                let (times, longest) = folders.entry(entry.id).or_default();
+                *times = times.saturating_add(1);
+                *longest = (*longest).max(entry.name.len());
                 continue;
             }
             shape.longest = shape.longest.max(entry.name.len());
@@ -501,14 +508,30 @@ impl Noted {
             };
             match held.file_size() {
                 Some(_) if held.has_size(entry.size) => {}
-                Some(stored) => {
-                    let name = entry.name.clone();
-                    self.sizes.push((id, name, entry.size, stored));
-                }
+                Some(stored) => self.wrong_size(id, &entry.name, entry.size, stored),
                 None => self.absent(entry.id, Unread::OtherKind),
             }
         }
+        shape.folders = folders
+            .into_iter()
+            .map(|(folder, (times, longest))| (folder, times, longest))
+            .collect();
         self.shapes.insert(id, shape);
+    }
+
+    /// Counts a file the listing `id` gives as `listed` bytes, stored as `stored`; keeps its
+    /// details only while it is among the first told, by listing and name.
+    fn wrong_size(&mut self, id: Id, name: &str, listed: u64, stored: u64) {
+        self.sizes_found = self.sizes_found.saturating_add(1);
+        let full = self.sizes.len() >= crate::verify::PROBLEMS_KEPT;
+        let later = |(l, n, ..): &(Id, String, u64, u64)| (*l, n.as_str()) <= (id, name);
+        if full && self.sizes.last().is_some_and(later) {
+            return;
+        }
+        self.sizes.insert((id, name.to_owned(), listed, stored));
+        if self.sizes.len() > crate::verify::PROBLEMS_KEPT {
+            self.sizes.pop_last();
+        }
     }
 
     /// Notes `id` as missing, or held as another kind (`why`), once however often it is named.
@@ -568,8 +591,9 @@ pub(crate) struct Shape {
     pub(crate) entries: u64,
     /// The longest name of an entry that isn't a folder.
     pub(crate) longest: usize,
-    /// Each folder's name length and listing.
-    pub(crate) folders: Vec<(usize, Id)>,
+    /// Each folder listing it names, once: how many of its entries name it, and the longest
+    /// of their names.
+    pub(crate) folders: Vec<(Id, u64, usize)>,
 }
 
 /// Why `verify`'s marking couldn't read a record.

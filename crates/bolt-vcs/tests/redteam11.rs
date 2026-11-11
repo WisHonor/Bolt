@@ -51,7 +51,6 @@ fn wide_listings(listings: usize, per: usize, size: u64) -> support::Env {
 /// too, not run out of memory.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT11-1: verify holds every wrong-size finding's name, in each look, and runs out of memory"]
 fn rt11_1_verify_reports_many_wrong_sizes_within_bounded_memory() {
     const CAP_KB: u32 = 1_000_000;
     let (listings, per) = (12, 50_000);

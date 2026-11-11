@@ -101,8 +101,16 @@ pub struct Verified {
 
 impl Verified {
     fn found(&mut self, problem: Problem) {
-        self.problems_total = self.problems_total.saturating_add(1);
-        let count = match problem.kind {
+        self.more(problem.kind, 1);
+        if self.problems.len() < PROBLEMS_KEPT {
+            self.problems.push(problem);
+        }
+    }
+
+    /// Counts `n` more problems of `kind`, found but not kept.
+    fn more(&mut self, kind: ProblemKind, n: u64) {
+        self.problems_total = self.problems_total.saturating_add(n);
+        let count = match kind {
             ProblemKind::PackDamaged => &mut self.pack_damaged,
             ProblemKind::PackUnreadable => &mut self.pack_unreadable,
             ProblemKind::ObjectDamaged => &mut self.object_damaged,
@@ -110,10 +118,7 @@ impl Verified {
             ProblemKind::HeadLost => &mut self.head_lost,
             ProblemKind::SaveTooBig => &mut self.save_too_big,
         };
-        *count = count.saturating_add(1);
-        if self.problems.len() < PROBLEMS_KEPT {
-            self.problems.push(problem);
-        }
+        *count = count.saturating_add(n);
     }
 
     /// How many problems of `kind` were found, kept or not.
@@ -525,11 +530,50 @@ fn object_problem(e: &PackError) -> (ProblemKind, String) {
     }
 }
 
+/// What a look found wrong with what the project needs: of each kind of finding, the first that
+/// can be told, by ID and then name, so that two looks of an unchanged store keep the same; and
+/// how many of each there are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Findings {
+    kept: BTreeSet<Finding>,
+    /// How many were found: missing, of a wrong size, too big.
+    counts: [u64; 3],
+}
+
+impl Findings {
+    fn is_empty(&self) -> bool {
+        self.counts.iter().all(|&n| n == 0)
+    }
+
+    /// What two looks agree on: what both kept, and of each kind, when both kept all they
+    /// found, how many both found; else the smaller of their counts.
+    fn with(&self, later: &Findings) -> Findings {
+        let kept: BTreeSet<Finding> = &self.kept & &later.kept;
+        let mut counts = [0u64; 3];
+        for (kind, n) in counts.iter_mut().enumerate() {
+            let (a, b) = (self.counts[kind], later.counts[kind]);
+            *n = if a.max(b) <= PROBLEMS_KEPT as u64 {
+                kept.iter().filter(|f| f.kind() == kind).count() as u64
+            } else {
+                a.min(b)
+            };
+        }
+        Findings { kept, counts }
+    }
+
+    /// Keeps the first that can be told of `found`, all of one `kind` (0, 1 or 2), and counts
+    /// them all.
+    fn add(&mut self, kind: usize, found: u64, first: impl IntoIterator<Item = Finding>) {
+        self.counts[kind] = found;
+        self.kept.extend(first.into_iter().take(PROBLEMS_KEPT));
+    }
+}
+
 /// What a look at what the project needs concluded, kept once its working sets are dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Verdict {
     /// What it found wrong with what the project needs.
-    Found(BTreeSet<Finding>),
+    Found(Findings),
     /// `state/head` names nothing Bolt can read: why.
     Lost(String),
     /// The look couldn't be made: the kind it is told as, and why.
@@ -551,10 +595,10 @@ impl Verdict {
         self.told_as() == other.told_as()
     }
 
-    /// Two verdicts of the same kind as one: missing only what both found missing, else the later.
+    /// Two verdicts of the same kind as one: what both found, else the later.
     fn with(&self, later: &Verdict) -> Verdict {
         match (self, later) {
-            (Verdict::Found(a), Verdict::Found(b)) => Verdict::Found(a & b),
+            (Verdict::Found(a), Verdict::Found(b)) => Verdict::Found(a.with(b)),
             _ => later.clone(),
         }
     }
@@ -591,7 +635,7 @@ fn agreed_needs(
         drop(last.take());
         let (verdict, look) = look(repo, window_days, now_ms, damaged);
         last = look;
-        let clean = matches!(&verdict, Verdict::Found(missing) if missing.is_empty());
+        let clean = matches!(&verdict, Verdict::Found(found) if found.is_empty());
         verdicts.push(verdict);
         let done = match verdicts.as_slice() {
             [only] if clean => Some(only.clone()),
@@ -632,7 +676,7 @@ fn look(
     damaged: &HashSet<Id>,
 ) -> (Verdict, Option<Box<Look>>) {
     match look_at(repo, window_days, now_ms, damaged) {
-        Ok(Ok((missing, look))) => (Verdict::Found(missing), Some(look)),
+        Ok(Ok((found, look))) => (Verdict::Found(found), Some(look)),
         Ok(Err(lost)) => (Verdict::Lost(lost.to_string()), None),
         Err(unmade) => {
             let (kind, e) = match unmade {
@@ -663,6 +707,17 @@ enum Finding {
     TooBig { save: Id, why: String },
 }
 
+impl Finding {
+    /// Which count of [`Findings`] it is in.
+    fn kind(&self) -> usize {
+        match self {
+            Finding::Missing(_) => 0,
+            Finding::Size { .. } => 1,
+            Finding::TooBig { .. } => 2,
+        }
+    }
+}
+
 /// [`look`]: what is wrong and the look's sets, or a lost head, or why it couldn't be made.
 #[allow(clippy::type_complexity)]
 fn look_at(
@@ -670,7 +725,7 @@ fn look_at(
     window_days: u32,
     now_ms: i64,
     damaged: &HashSet<Id>,
-) -> Result<Result<(BTreeSet<Finding>, Box<Look>), RepoError>, Unmade> {
+) -> Result<Result<(Findings, Box<Look>), RepoError>, Unmade> {
     // `head` before the packs are listed: whatever it names was stored before the listing began.
     let head = match repo.head() {
         Ok(head) => head,
@@ -700,29 +755,36 @@ fn look_at(
         ..Noted::default()
     };
     let (kept, mut noted) = tidy::needs(&src, &packs, head, since, watch).map_err(packs_failed)?;
-    let mut found: BTreeSet<Finding> = kept
+    // At most one of each object the store holds.
+    let mut missing: BTreeSet<Id> = kept
         .iter()
         .filter(|id| !noted.known.contains_key(id))
-        .map(|id| Finding::Missing(*id))
+        .copied()
         .collect();
     let unread = noted.unread.iter();
-    found.extend(
+    missing.extend(
         unread
             .filter(|(_, why)| matches!(why, Unread::Missing | Unread::OtherKind))
-            .map(|(id, _)| Finding::Missing(*id)),
+            .map(|(id, _)| *id),
+    );
+    let mut found = Findings::default();
+    found.add(
+        0,
+        missing.len() as u64,
+        missing.into_iter().map(Finding::Missing),
     );
     let sizes = std::mem::take(&mut noted.sizes);
-    found.extend(
-        sizes
-            .into_iter()
-            .map(|(listing, name, listed, stored)| Finding::Size {
-                listing,
-                name,
-                listed,
-                stored,
-            }),
-    );
-    found.extend(too_big(&noted));
+    let sizes = sizes
+        .into_iter()
+        .map(|(listing, name, listed, stored)| Finding::Size {
+            listing,
+            name,
+            listed,
+            stored,
+        });
+    found.add(1, noted.sizes_found, sizes);
+    let big: BTreeSet<Finding> = too_big(&noted).into_iter().collect();
+    found.add(2, big.len() as u64, big);
     // Measured; not needed once done.
     noted.shapes = HashMap::new();
     let look = Look {
@@ -767,8 +829,8 @@ fn too_big(noted: &Noted) -> Vec<Finding> {
                 let unmeasured = shape
                     .folders
                     .iter()
-                    .filter(|(_, f)| !measured.contains_key(f));
-                todo.extend(unmeasured.map(|&(_, folder)| (folder, false)));
+                    .filter(|(f, ..)| !measured.contains_key(f));
+                todo.extend(unmeasured.map(|&(folder, ..)| (folder, false)));
                 continue;
             }
             let mut m = Measure {
@@ -776,9 +838,11 @@ fn too_big(noted: &Noted) -> Vec<Finding> {
                 depth: 0,
                 longest: shape.longest,
             };
-            for &(name, folder) in &shape.folders {
+            // A folder named by several entries counts once for each of them.
+            for &(folder, times, name) in &shape.folders {
                 let below = measured.get(&folder).copied().unwrap_or_default();
-                m.entries = m.entries.saturating_add(below.entries);
+                let all = below.entries.saturating_mul(times);
+                m.entries = m.entries.saturating_add(all);
                 m.depth = m.depth.max(below.depth.saturating_add(1));
                 let path = match below.longest {
                     0 => name,
@@ -808,7 +872,7 @@ fn too_big(noted: &Noted) -> Vec<Finding> {
 fn told_needs(
     v: &mut Verified,
     look: &Look,
-    found: &BTreeSet<Finding>,
+    found: &Findings,
     damaged: &HashSet<Id>,
 ) -> HashMap<usize, String> {
     v.saves = look.noted.saves.len() as u64;
@@ -847,7 +911,9 @@ fn told_needs(
         }
     }
     let mut names = HashMap::new();
-    for finding in found {
+    let mut told_of = [0u64; 3];
+    for finding in &found.kept {
+        told_of[finding.kind()] += 1;
         let (kind, object, message) = match finding {
             Finding::Missing(id) => {
                 let message = if other_kind.contains(id) {
@@ -889,6 +955,15 @@ fn told_needs(
             message,
         });
     }
+    // Counted, not kept: past what is told.
+    let kinds = [
+        ProblemKind::ObjectMissing,
+        ProblemKind::ObjectDamaged,
+        ProblemKind::SaveTooBig,
+    ];
+    for ((kind, &count), told) in kinds.into_iter().zip(&found.counts).zip(told_of) {
+        v.more(kind, count.saturating_sub(told));
+    }
     names
 }
 
@@ -926,26 +1001,32 @@ fn name_needers(v: &mut Verified, look: &Look, signed: bool, names: &HashMap<usi
         let Ok(read) = look.store.save(save, signed) else {
             continue;
         };
-        let mut folders = vec![(read.root, String::new())];
-        while let Some((folder, path)) = folders.pop() {
+        // Each folder is walked once, from the first path met; it is pushed again only when
+        // wanted itself. Whether to walk it is decided when it is pushed.
+        let mut folders = vec![(read.root, String::new(), seen.insert(read.root))];
+        while let Some((folder, path, walk)) = folders.pop() {
             for i in wanted.remove(&folder).into_iter().flatten() {
                 let at = names
                     .get(&i)
                     .map_or_else(|| path.clone(), |n| joined(&path, n));
                 v.problems[i].needed_by = Some((*save, at));
             }
-            if !seen.insert(folder) {
+            if !walk {
                 continue;
             }
             let Ok(listing) = look.store.listing(&folder) else {
                 continue;
             };
+            // A path is built only for a folder first met or an object wanted.
             for entry in listing.entries() {
-                let at = joined(&path, &entry.name);
                 if entry.kind == EntryKind::Folder {
-                    folders.push((entry.id, at));
-                } else {
-                    for i in wanted.remove(&entry.id).into_iter().flatten() {
+                    let walk = seen.insert(entry.id);
+                    if walk || wanted.contains_key(&entry.id) {
+                        folders.push((entry.id, joined(&path, &entry.name), walk));
+                    }
+                } else if let Some(found) = wanted.remove(&entry.id) {
+                    let at = joined(&path, &entry.name);
+                    for i in found {
                         v.problems[i].needed_by = Some((*save, at.clone()));
                     }
                 }
