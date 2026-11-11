@@ -11,8 +11,8 @@ fn people_parse_best_effort() {
     };
     for (line, want) in [
         (
-            &b"A U Thor <author@example.com> 1112912053 -0700"[..],
-            person("A U Thor", "author@example.com", 1_112_912_053_000, -420),
+            &b"Ida Lark <ida.lark@example.com> 1601234567 -0400"[..],
+            person("Ida Lark", "ida.lark@example.com", 1_601_234_567_000, -240),
         ),
         (b"C <c@d> 0 +0530", person("C", "c@d", 0, 330)),
         (b"<a@b> 1 +0000", person("", "a@b", 1000, 0)),
@@ -23,8 +23,8 @@ fn people_parse_best_effort() {
         (b"A <a<b>c> 1 +0000", person("A", "a<b", 1000, 0)),
         // Without an email, Git can't split the line: it all becomes the name.
         (
-            b"A U Thor 1112912053 -0700",
-            person("A U Thor 1112912053 -0700", "", 0, 0),
+            b"Ida Lark 1601234567 -0400",
+            person("Ida Lark 1601234567 -0400", "", 0, 0),
         ),
         (b"A <a@b 1 +0000", person("A", "", 0, 0)),
         // Without a time and a zone, Git takes neither.

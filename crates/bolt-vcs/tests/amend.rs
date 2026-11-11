@@ -263,8 +263,8 @@ fn amend_drops_git_fields() {
         format!("100644 blob {blob}\ta.txt\n").as_bytes(),
     );
     let header = format!(
-        "tree {tree}\nauthor A U Thor <author@example.com> 1112912053 -0700\n\
-         committer C O Mitter <committer@example.com> 1112912113 +0530\n\
+        "tree {tree}\nauthor Ida Lark <ida.lark@example.com> 1601234567 -0400\n\
+         committer Omar Fenn <omar.fenn@example.com> 1601234627 +0545\n\
          encoding ISO-8859-1\n\n"
     );
     let raw = [header.as_bytes(), b"Caf\xe9\n"].concat();

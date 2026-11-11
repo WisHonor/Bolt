@@ -390,6 +390,148 @@ mod tests {
         assert!(!is_valid_ref_name(b"refs/heads/a\0"));
     }
 
+    #[test]
+    fn ref_names_follow_each_rule() {
+        let cases: &[(&[u8], bool)] = &[
+            // No level starts with a dot or ends with `.lock`.
+            (b"refs/heads/.hidden", false),
+            (b".refs/heads/a", false),
+            (b"refs/.x/a", false),
+            (b"refs/heads/a.lock", false),
+            (b"refs/heads/a.lock/b", false),
+            (b"refs/heads/a.locked", true),
+            (b"refs/heads/lock", true),
+            (b"refs/heads/a.b", true),
+            // Two levels at least.
+            (b"main", false),
+            (b"HEAD", false),
+            (b"a/b", true),
+            (b"refs/heads/HEAD", true),
+            // No `..` anywhere.
+            (b"refs/heads/a..b", false),
+            (b"refs/heads/..", false),
+            (b"refs/heads/a.b.c", true),
+            // No control character, space, `~`, `^` or `:`; bytes past ASCII are fine.
+            (b"refs/heads/a\x01", false),
+            (b"refs/heads/a\x1fb", false),
+            (b"refs/heads/a\x7f", false),
+            (b"refs/heads/a\tb", false),
+            (b"refs/heads/a b", false),
+            (b"refs/heads/a~1", false),
+            (b"refs/heads/a^", false),
+            (b"refs/heads/a:b", false),
+            (b"refs/heads/caf\xc3\xa9", true),
+            (b"refs/heads/\xff\x80", true),
+            // No `?`, `*` or `[`; other brackets are fine.
+            (b"refs/heads/a?", false),
+            (b"refs/heads/*", false),
+            (b"refs/heads/a[1", false),
+            (b"refs/heads/a]{}", true),
+            // No slash first, last or doubled.
+            (b"/refs/heads/a", false),
+            (b"refs/heads/a/", false),
+            (b"refs//heads/a", false),
+            // Not ending with a dot.
+            (b"refs/heads/a.", false),
+            (b"refs/heads./a", true),
+            // No `@{`, though `@` and `{` apart are fine.
+            (b"refs/heads/a@{1}", false),
+            (b"refs/heads/@{", false),
+            (b"refs/heads/a@b", true),
+            (b"refs/heads/a{@", true),
+            (b"refs/heads/@", true),
+            // Not `@` alone.
+            (b"@", false),
+            // No backslash.
+            (b"refs/heads/a\\b", false),
+            (b"", false),
+        ];
+        for &(name, valid) in cases {
+            assert_eq!(is_valid_ref_name(name), valid, "{}", name.escape_ascii());
+        }
+    }
+
+    /// Random names built from the pieces Git's rules turn on, the same on every run.
+    fn random_ref_names(count: usize) -> Vec<String> {
+        const PIECES: &[&str] = &[
+            "a", "b9", "a-b", "_", "\u{e9}", "\u{65e5}", "/", "/", "/", ".", ".", "..", "@", "@{",
+            "{", "}", "*", "?", "[", "]", "\\", "~", "^", ":", " ", "\t", "\x01", "\x1f", "\x7f",
+            ".lock", "lock", "HEAD",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        (0..count)
+            .map(|_| {
+                // Half start as a branch would, so that plenty are valid.
+                let mut name = String::from(["", "refs/heads/"][next(2)]);
+                for _ in 0..=next(6) {
+                    name.push_str(PIECES[next(PIECES.len())]);
+                }
+                name
+            })
+            .collect()
+    }
+
+    /// Bolt takes the names `git check-ref-format` takes with no options, and only those.
+    #[test]
+    fn ref_names_are_checked_as_git_checks_them() {
+        use std::process::{Command, Stdio};
+        if !Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            eprintln!("note: git isn't installed, so ref names aren't compared with it");
+            return;
+        }
+        // An empty folder: no repository around, and nothing for a `*` to match.
+        let dir = tempfile::tempdir().unwrap();
+        let mut names = random_ref_names(3000);
+        names.extend(
+            [
+                "HEAD",
+                "@",
+                "a",
+                "refs/heads/main",
+                "/a/b",
+                "a/b/",
+                "a/b.",
+                "a./b",
+                "a/@",
+            ]
+            .map(String::from),
+        );
+        // Many at a time: one `git` after another would take a minute.
+        for batch in names.chunks(32) {
+            let running: Vec<_> = batch
+                .iter()
+                .map(|name| {
+                    let child = Command::new("git")
+                        .args(["check-ref-format", name])
+                        .current_dir(dir.path())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .unwrap();
+                    (name, child)
+                })
+                .collect();
+            for (name, mut child) in running {
+                let git_takes = match child.wait().unwrap().code() {
+                    Some(0) => true,
+                    Some(1) => false,
+                    other => panic!("git check-ref-format {name:?} exited with {other:?}"),
+                };
+                assert_eq!(is_valid_ref_name(name.as_bytes()), git_takes, "{name:?}");
+            }
+        }
+    }
+
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const C: &str = "cccccccccccccccccccccccccccccccccccccccc";

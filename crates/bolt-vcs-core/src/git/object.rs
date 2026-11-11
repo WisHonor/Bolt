@@ -484,13 +484,13 @@ mod tests {
     /// The empty tree, in each hash.
     const TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     const TREE_256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
-    const AUTHOR: &str = "A U Thor <author@example.com> 1112912053 -0700";
-    const COMMITTER: &str = "C O Mitter <committer@example.com> 1112912113 +0530";
+    const AUTHOR: &str = "Ida Lark <ida.lark@example.com> 1601234567 -0400";
+    const COMMITTER: &str = "Omar Fenn <omar.fenn@example.com> 1601234627 +0545";
     const GPGSIG: &str = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iHUEABYKAB0WIQRNmrJ5\n \
                           =Xd3h\n -----END PGP SIGNATURE-----\n";
     const MERGETAG: &str = "mergetag object 1111111111111111111111111111111111111111\n \
                             type commit\n tag v1.0\n \
-                            tagger T Agger <tagger@example.com> 1112912000 +0000\n \n \
+                            tagger Vera Toll <vera.toll@example.com> 1601234500 +0000\n \n \
                             Version 1.0\n -----BEGIN PGP SIGNATURE-----\n \n \
                             iHUEABYKAB0WIQRNmrJ5\n -----END PGP SIGNATURE-----\n";
 
@@ -679,7 +679,7 @@ mod tests {
             (&b"A <a@b> 0 -0000"[..], &b" <> 1 +0000"[..])
         );
         // A SHA-256 commit, its IDs in either letter case, as Git reads them.
-        let parent = "24803bbbde2122a9dda2df52d7a77ed79292249526a3f810c6858728e91a0395";
+        let parent = "6230c9b97162440b78b8dc5601e48ec3974574fbafe81baff53aa1d7f4baeb35";
         let raw = commit(&TREE_256.to_uppercase(), &[parent.to_owned()], "", b"m");
         let c = parse_commit(&raw, Sha256).unwrap();
         assert_eq!(
@@ -1063,9 +1063,9 @@ mod tests {
 
     #[test]
     fn tags_parse() {
-        let object = "c39ae07f393806ccf406ef966e9a15afc43cc36a";
+        let object = "5e1f0a7d9c3b2486e0d4a1b7c9f3e5d2a8b6c4e0";
         let signed = format!(
-            "object {object}\ntype commit\ntag v1.0\ntagger T Agger <t@example.com> 1112912000 \
+            "object {object}\ntype commit\ntag v1.0\ntagger Vera Toll <t@example.com> 1601234500 \
              +0000\n\nVersion 1.0\n-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQRNmrJ5\n\
              -----END PGP SIGNATURE-----\n"
         );
@@ -1087,12 +1087,12 @@ mod tests {
             (
                 Sha1,
                 format!(
-                    "object {object}\ntype tree\ntag v2.6.11-tree\n\n\
-                     This is the 2.6.11 tree object.\n"
+                    "object {object}\ntype tree\ntag snapshot-3-tree\n\n\
+                     The tree as it stood at snapshot 3.\n"
                 ),
                 ObjectType::Tree,
-                b"v2.6.11-tree",
-                b"This is the 2.6.11 tree object.\n",
+                b"snapshot-3-tree",
+                b"The tree as it stood at snapshot 3.\n",
             ),
             (
                 Sha1,
@@ -1434,8 +1434,8 @@ mod tests {
 
     #[test]
     fn a_standard_commit_rebuilds_without_git_header() {
-        let parent_256 = "24803bbbde2122a9dda2df52d7a77ed79292249526a3f810c6858728e91a0395";
-        let first = "161d798e9e0e3c66157d429fa481c48823e296e4";
+        let parent_256 = "6230c9b97162440b78b8dc5601e48ec3974574fbafe81baff53aa1d7f4baeb35";
+        let first = "cc9c65860c20d54b080b52ee21db2583360e6e2c";
         // What, the hash, the commit, and its ID if Git made it (`git commit-tree` with these
         // dates).
         let cases = [
@@ -1449,13 +1449,13 @@ mod tests {
                 "a second commit",
                 Sha1,
                 commit(TREE, &[first.to_owned()], "", b"second\n\nbody\n"),
-                Some("3707222d2f901a4ce5561b69a91c1ccf8a13d00c"),
+                Some("9bb66b4c269a6c581f665428dae41e5eb4b6ce18"),
             ),
             (
                 "a SHA-256 commit",
                 Sha256,
                 commit(TREE_256, &[parent_256.to_owned()], "", b"second\n\nbody\n"),
-                Some("483aa42625b052fef07e4b1673a53bfbdeb2ff1a7f81aa242fa8cbd21b88362d"),
+                Some("acf2103adf5367d0b44724c3d2256675037b592f8822de1a41e28f0340513199"),
             ),
             (
                 "a merge",
@@ -1549,19 +1549,19 @@ mod tests {
             ),
             (
                 "a -0000 zone",
-                authored(b"A U Thor <author@example.com> 1112912053 -0000"),
+                authored(b"Ida Lark <ida.lark@example.com> 1601234567 -0000"),
             ),
             (
                 "two spaces before the email",
-                authored(b"A U Thor  <author@example.com> 1112912053 -0700"),
+                authored(b"Ida Lark  <ida.lark@example.com> 1601234567 -0400"),
             ),
             (
                 "no space before the email",
-                authored(b"A U Thor<author@example.com> 1112912053 -0700"),
+                authored(b"Ida Lark<ida.lark@example.com> 1601234567 -0400"),
             ),
-            ("no email", authored(b"A U Thor 1112912053 -0700")),
-            ("no time", authored(b"A U Thor <author@example.com>")),
-            ("a zero-padded time", authored(b"A <a@b> 01112912053 -0700")),
+            ("no email", authored(b"Ida Lark 1601234567 -0400")),
+            ("no time", authored(b"Ida Lark <ida.lark@example.com>")),
+            ("a zero-padded time", authored(b"A <a@b> 01601234567 -0700")),
             (
                 "a time past what Bolt holds",
                 authored(b"A <a@b> 99999999999999999999 +0000"),

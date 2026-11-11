@@ -1457,8 +1457,8 @@ mod tests {
             .sum()
     }
 
-    const PEOPLE: &str = "author A U Thor <author@example.com> 1112912053 -0700\n\
-                          committer C O Mitter <committer@example.com> 1112912100 +0530\n";
+    const PEOPLE: &str = "author Ida Lark <ida.lark@example.com> 1601234567 -0400\n\
+                          committer Omar Fenn <omar.fenn@example.com> 1601234614 +0545\n";
 
     /// A signature as Git writes it, each line after the first starting with a space.
     const GPGSIG: &str = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEE\n =abcd\n \
@@ -2262,19 +2262,19 @@ mod tests {
         assert_eq!(
             save.author,
             Person {
-                name: "A U Thor".into(),
-                email: "author@example.com".into(),
-                time_ms: 1_112_912_053_000,
-                tz_offset_min: -420,
+                name: "Ida Lark".into(),
+                email: "ida.lark@example.com".into(),
+                time_ms: 1_601_234_567_000,
+                tz_offset_min: -240,
             }
         );
         assert_eq!(
             save.saver,
             Person {
-                name: "C O Mitter".into(),
-                email: "committer@example.com".into(),
-                time_ms: 1_112_912_100_000,
-                tz_offset_min: 330,
+                name: "Omar Fenn".into(),
+                email: "omar.fenn@example.com".into(),
+                time_ms: 1_601_234_614_000,
+                tz_offset_min: 345,
             }
         );
         assert_eq!(save.message, "Merge\n\nBody.\n");
@@ -2410,7 +2410,7 @@ mod tests {
             message,
             parents,
         };
-        let committer = "committer C O Mitter <committer@example.com> 1112912100 +0530\n";
+        let committer = "committer Omar Fenn <omar.fenn@example.com> 1601234614 +0545\n";
         let odd_author = |what, line: &[u8]| Case {
             what,
             people: [b"author ", line, b"\n", committer.as_bytes()].concat(),
@@ -2438,7 +2438,7 @@ mod tests {
             usual("no LF at the end", "", b"no end", &[]),
             odd_author("a -0000 zone", b"A <a@b> 1 -0000"),
             odd_author("two spaces", b"A  <a@b> 1 +0000"),
-            odd_author("no email", b"A U Thor 1112912053 -0700"),
+            odd_author("no email", b"Ida Lark 1601234567 -0400"),
             odd_author("a huge time", b"A <a@b> 99999999999999999999 +0000"),
             odd_author("a name that isn't UTF-8", b"Ren\xe9 <r@x> 1 +0000"),
             odd_author("a name over 4 KiB", long_name.as_bytes()),
