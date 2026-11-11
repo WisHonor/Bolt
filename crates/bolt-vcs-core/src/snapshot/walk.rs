@@ -4431,8 +4431,8 @@ mod tests {
         assert!(scan.folders[""].is_empty());
     }
 
-    /// Plants a save holding, in each of the folders `tops`, the red team's deep tree: 24 listings
-    /// each naming the next twice, `a` and `b`, ending in a listing of two files.
+    /// Plants a save holding, in each of the folders `tops`, a deep tree of shared listings: 24
+    /// listings each naming the next twice, `a` and `b`, ending in a listing of two files.
     fn plant_deep_trees(repo: &mut Repository, tops: &[&str]) {
         plant_root(repo, |packs| {
             let x = packs.add_content(b"x").unwrap();

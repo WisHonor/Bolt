@@ -31,13 +31,29 @@ pub struct SaveLimits {
 
 /// How big the part of a save below one folder listing is, counted by path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Measure {
+pub(crate) struct Measure {
     /// Its entries and all below them, a listing again for every path to it.
-    entries: u64,
+    pub(crate) entries: u64,
     /// Levels of folders below it.
-    depth: usize,
+    pub(crate) depth: usize,
     /// Its longest path, from below it.
-    longest: usize,
+    pub(crate) longest: usize,
+}
+
+impl Measure {
+    /// Adds what a folder of its listing holds: `below` is the folder's own measure, `times` how
+    /// many entries name it, and `name` the length of the longest of their names.
+    pub(crate) fn add_folder(&mut self, below: Measure, times: u64, name: usize) {
+        let all = below.entries.saturating_mul(times);
+        self.entries = self.entries.saturating_add(all);
+        self.depth = self.depth.max(below.depth.saturating_add(1));
+        // The folder's own path is a path too, and the only one of an empty folder.
+        let path = match below.longest {
+            0 => name,
+            longest => name.saturating_add(1).saturating_add(longest),
+        };
+        self.longest = self.longest.max(path);
+    }
 }
 
 impl Default for SaveLimits {
@@ -82,12 +98,13 @@ impl SaveLimits {
     /// listing is level 0) is deeper than the limit.
     pub fn check_depth(&self, depth: usize) -> Result<(), String> {
         if depth > self.max_depth {
-            return Err(format!(
-                "its folders nest more than {} levels deep",
-                self.max_depth
-            ));
+            return Err(self.too_deep());
         }
         Ok(())
+    }
+
+    fn too_deep(&self) -> String {
+        format!("its folders nest more than {} levels deep", self.max_depth)
     }
 
     /// Counts `n` more entries, a listing again for every path it is reached by; says what is
@@ -197,20 +214,21 @@ impl SaveLimits {
                         longest,
                     };
                     for (folder, name) in folders {
-                        let below = self.measured.get(&folder).copied().unwrap_or_default();
-                        m.entries = m.entries.saturating_add(below.entries);
-                        m.depth = m.depth.max(below.depth.saturating_add(1));
-                        let path = match below.longest {
-                            0 => name,
-                            longest => name.saturating_add(1).saturating_add(longest),
+                        // Each was measured before this, unless a listing held itself, which
+                        // would be a tree without end.
+                        let Some(&below) = self.measured.get(&folder) else {
+                            return Ok(Err(self.too_deep()));
                         };
-                        m.longest = m.longest.max(path);
+                        m.add_folder(below, 1, name);
                     }
                     self.measured.insert(id, m);
                 }
             }
         }
-        Ok(Ok(self.measured.get(&id).copied().unwrap_or_default()))
+        match self.measured.get(&id) {
+            Some(&m) => Ok(Ok(m)),
+            None => Ok(Err(self.too_deep())),
+        }
     }
 }
 
@@ -478,8 +496,8 @@ mod tests {
         (0..n).map(move |i| format!("{prefix}{i:05}"))
     }
 
-    /// The red team's deep tree: 24 listings each naming the next twice, `a` and `b`, ending in
-    /// a listing of two files.
+    /// A deep tree of shared listings: 24 listings each naming the next twice, `a` and `b`,
+    /// ending in a listing of two files.
     fn chain(held: &mut Held) -> Id {
         let file = Id([7; 32]);
         let mut at = held.add(["a".into(), "b".into()], EntryKind::File, file);
@@ -507,6 +525,19 @@ mod tests {
         // Kept for the rest of the walk: met again, nothing is read.
         assert_eq!(limits.measure(top, 0, |id| held.read(id)).unwrap(), Ok(m));
         assert!(held.reads.values().all(|&n| n == 1));
+    }
+
+    #[test]
+    fn a_listing_that_names_itself_is_refused_as_too_deep() {
+        // A store that checks no fingerprints could hand one back; it is a tree without end.
+        let mut held = Held::default();
+        let looped = Id([3; 32]);
+        let id = held.add(["a".into()], EntryKind::Folder, looped);
+        let listing = held.listings[&id].clone();
+        held.listings.insert(looped, listing);
+        let mut limits = SaveLimits::new(10, MAX_SAVE_ENTRIES);
+        let why = limits.measure(looped, 0, |id| held.read(id)).unwrap();
+        assert_eq!(why, Err("its folders nest more than 10 levels deep".into()));
     }
 
     #[test]

@@ -519,7 +519,16 @@ pub fn save_folder(
     if let Some(given) = req.only {
         let scope = Scope::new(given, drive);
         let store = repo.store();
-        let narrowed = only::narrow(&scope, given, store, &mut folders, &mut old, &mut rebuilt)?;
+        let limits = SaveLimits::default();
+        let narrowed = only::narrow(
+            &scope,
+            given,
+            store,
+            &mut folders,
+            &mut old,
+            &mut rebuilt,
+            limits,
+        )?;
         only::check_matched(&scope, given, &narrowed, &mut handles)?;
     }
     check_names(&folders, &old)?;

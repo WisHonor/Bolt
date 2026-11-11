@@ -612,8 +612,8 @@ mod tests {
         }
     }
 
-    /// The red team's deep tree: 24 listings each naming the next twice, `a` and `b`, ending in
-    /// a listing of two files; 2^25 files by path.
+    /// A deep tree of shared listings: 24 listings each naming the next twice, `a` and `b`,
+    /// ending in a listing of two files; 2^25 files by path.
     fn deep_tree(pack: &mut PackWriter) -> Id {
         let two = |kind, id| {
             let both = ["a", "b"].map(|name| Entry {
