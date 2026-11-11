@@ -490,6 +490,60 @@ jobs:
             -Page $env:GITHUB_WORKSPACE\docs\releases\download-page.md
           exit $LASTEXITCODE
 
+  # Bolt where ordinary computers keep projects: FAT32 and exFAT drives, their top, a network
+  # share. What it says is written down in testing.md, not gated: the release doesn't need this.
+  ordinary-computers:
+    needs: [prepare, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the archive and unpack it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh run download "$RUN_ID" --repo "$REPO" --name "$ARCHIVE" --dir "$RUNNER_TEMP/download"
+          mkdir "$RUNNER_TEMP/pkg"
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z x -bd -o"$RUNNER_TEMP/pkg" "$RUNNER_TEMP/download/$ARCHIVE" > /dev/null
+          else
+            tar -xzf "$RUNNER_TEMP/download/$ARCHIVE" -C "$RUNNER_TEMP/pkg"
+            sudo apt-get update -q > /dev/null
+            sudo apt-get install -y --no-install-recommends dosfstools exfatprogs > /dev/null
+          fi
+      - name: The tries
+        if: runner.os != 'Windows'
+        run: bash .github/release/ordinary-computers.sh "$RUNNER_TEMP/pkg/bolt"
+      - name: The tries
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\ordinary-computers.ps1 `
+            -Bolt $env:RUNNER_TEMP\pkg\bolt.exe
+          exit $LASTEXITCODE
+
   # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
   release:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
