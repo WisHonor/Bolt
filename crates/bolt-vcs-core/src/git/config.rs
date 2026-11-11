@@ -1,7 +1,8 @@
 //! Git's config files, read as `git config` reads them: the repository's `.git/config` and
 //! `config.worktree`, for what decides how to read the repository, and the user's own Git
-//! settings, for the few Bolt takes from them. A file Git refuses is refused, and a value Bolt
-//! takes that it can't read exactly as Git does is refused rather than guessed.
+//! settings, for the few Bolt takes from them. A file whose syntax Git refuses is refused, and
+//! so is a value Bolt takes that it can't read exactly as Git does; the values of settings Bolt
+//! doesn't take aren't checked, though Git may refuse some of them (`core.bare = maybe`).
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use super::{GitError, HashKind, Refusal, broken, shown};
@@ -262,7 +263,8 @@ fn read<E>(
     Ok(())
 }
 
-/// Git's whitespace for numbers: C's `isspace`.
+/// The whitespace Git skips before a number: space, tab, line feed, vertical tab, form feed
+/// and carriage return.
 fn is_c_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r')
 }
@@ -273,8 +275,9 @@ enum BadInt {
     OutOfRange,
 }
 
-/// An integer as Git reads one in a config value: C's `strtoimax` in base 0 (`0x` hex, a leading
-/// `0` octal), then an optional `k`, `m` or `g`, all within a 32-bit int.
+/// An integer as Git reads one in a config value: whitespace, a sign, then decimal, `0x` hex or
+/// leading-`0` octal digits up to 64 bits, then an optional `k`, `m` or `g`, all within a 32-bit
+/// int.
 fn parse_int(text: &[u8]) -> Result<i32, BadInt> {
     let mut rest = text;
     while let Some((&c, tail)) = rest.split_first()
@@ -306,7 +309,7 @@ fn parse_int(text: &[u8]) -> Result<i32, BadInt> {
             .checked_mul(i128::from(radix))
             .and_then(|m| m.checked_add(i128::from(digit)))
             .ok_or(BadInt::OutOfRange)?;
-        // strtoimax itself stops at 64 bits.
+        // The digits alone may not pass 64 bits.
         if magnitude > i128::from(i64::MAX).saturating_add(1) {
             return Err(BadInt::OutOfRange);
         }
@@ -343,8 +346,8 @@ pub(crate) fn read_bool(value: &[u8]) -> Option<bool> {
     }
 }
 
-/// `GIT_CONFIG_COUNT` as Git reads it: C's `strtoul` in base 10 to the end of the text, then no
-/// more than an int holds. Empty is none.
+/// `GIT_CONFIG_COUNT` as Git reads it: whitespace, a sign and decimal digits to the end of the
+/// text, as an unsigned long, then no more than an int holds. Empty is none.
 pub(crate) fn read_count(text: &[u8]) -> Result<u32, &'static str> {
     const NOT_A_NUMBER: &str = "isn't a number Git reads as a count";
     const TOO_BIG: &str = "is more than Git takes";
@@ -371,7 +374,7 @@ pub(crate) fn read_count(text: &[u8]) -> Result<u32, &'static str> {
             .and_then(|n| n.checked_add(std::ffi::c_ulong::from(c.saturating_sub(b'0'))))
             .ok_or(TOO_BIG)?;
     }
-    // strtoul negates in an unsigned long, so a negative number wraps round.
+    // A negative count wraps round in the unsigned long.
     if negative {
         number = number.wrapping_neg();
     }
@@ -468,18 +471,26 @@ struct Seen {
     lfs_storage: Option<Vec<u8>>,
 }
 
-/// The extensions Git knows, and whether a version 0 repository may use each.
-const EXTENSIONS: [(&[u8], bool); 10] = [
-    (b"noop", true),
-    (b"partialclone", true),
-    (b"preciousobjects", true),
-    (b"worktreeconfig", true),
-    (b"noop-v1", false),
-    (b"objectformat", false),
-    (b"compatobjectformat", false),
-    (b"refstorage", false),
-    (b"relativeworktrees", false),
-    (b"submodulepathconfig", false),
+/// The extensions Git knows.
+const EXTENSIONS: [&[u8]; 10] = [
+    b"compatobjectformat",
+    b"noop",
+    b"noop-v1",
+    b"objectformat",
+    b"partialclone",
+    b"preciousobjects",
+    b"refstorage",
+    b"relativeworktrees",
+    b"submodulepathconfig",
+    b"worktreeconfig",
+];
+
+/// Those Git takes in a format version 0 repository too.
+const VERSION_0_EXTENSIONS: [&[u8]; 4] = [
+    b"noop",
+    b"partialclone",
+    b"preciousobjects",
+    b"worktreeconfig",
 ];
 
 fn hash_named(value: &[u8]) -> Option<HashKind> {
@@ -595,21 +606,17 @@ pub(crate) fn read_format(text: &[u8], file: &'static str) -> Result<Format, Git
     if version > 1 {
         return refuse(Refusal::FormatVersion(version.unsigned_abs().into()));
     }
-    let known = |name: &[u8]| EXTENSIONS.iter().find(|(known, _)| *known == name);
     for name in &seen.extensions {
-        match known(name) {
-            None if version == 1 => {
-                return refuse(Refusal::UnknownExtension(shown(name)));
-            }
-            // Only Git's own names get here, so they need no escaping.
-            Some((known, false)) if version == 0 => {
-                return Err(broken(format!(
-                    "{file} sets extensions.{}, which needs format version 1, but the version \
-                     is 0",
-                    String::from_utf8_lossy(known)
-                )));
-            }
-            _ => {}
+        let known = EXTENSIONS.contains(&name.as_slice());
+        if version == 1 && !known {
+            return refuse(Refusal::UnknownExtension(shown(name)));
+        }
+        if version == 0 && known && !VERSION_0_EXTENSIONS.contains(&name.as_slice()) {
+            // One of Git's own names, so it needs no escaping.
+            return Err(broken(format!(
+                "{file} sets extensions.{}, which needs format version 1, but the version is 0",
+                String::from_utf8_lossy(name)
+            )));
         }
     }
     // A compatObjectFormat equal to the hash is let through, though Git stops on it.

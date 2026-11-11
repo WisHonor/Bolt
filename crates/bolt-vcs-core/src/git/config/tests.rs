@@ -191,7 +191,8 @@ fn keys_in_the_environment_are_read_as_git_reads_them() {
     assert_eq!(read_user_variable(b"a.\xff.x", b"x"), Ok(None));
 }
 
-/// `strtoul` in base 10, then Git's own checks, as Git reads `GIT_CONFIG_COUNT`.
+/// Decimal digits with an optional sign, to the end, then no more than an int, as Git reads
+/// `GIT_CONFIG_COUNT`.
 #[test]
 fn a_count_in_the_environment_is_read_as_git_reads_it() {
     for (text, want) in [
@@ -202,7 +203,7 @@ fn a_count_in_the_environment_is_read_as_git_reads_it() {
         (" \t\n3", Some(3)),
         ("007", Some(7)),
         ("2147483647", Some(2_147_483_647)),
-        // What strtoul doesn't read to the end.
+        // What isn't a number to the end.
         (" ", None),
         ("+", None),
         ("3 ", None),
@@ -216,7 +217,7 @@ fn a_count_in_the_environment_is_read_as_git_reads_it() {
     ] {
         assert_eq!(read_count(text.as_bytes()).ok(), want, "{text:?}");
     }
-    // strtoul negates in an unsigned long, whose size Git's build decides.
+    // A negative count wraps round in an unsigned long, whose size Git's build decides.
     let wraps_to_one = format!("-{}", std::ffi::c_ulong::MAX);
     assert_eq!(read_count(wraps_to_one.as_bytes()), Ok(1));
 }
