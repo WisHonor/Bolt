@@ -146,7 +146,7 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then
             file "$bin"
             echo "The macOS version it declares:"
-            vtool -show-build "$bin" || otool -l "$bin" | grep -A 4 LC_BUILD_VERSION
+            vtool -show-build "$bin" || otool -l "$bin" | grep -E -A 4 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
           fi
       - name: Check it reaches no network and starts no program
         run: |
@@ -162,13 +162,35 @@ jobs:
             rustc -O .github/release/probes/net.rs -o "$probes/net-delayed$EXE" \
               -C link-arg=-DELAYLOAD:ws2_32.dll -C link-arg=delayimp.lib
             names+=(net-delayed)
+            # The linker must really have delay-loaded it, or that probe proves nothing new.
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            dumpbin=$("$vswhere" -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | tr -d '\r' | head -n 1)
+            delayed=$("$(cygpath -u "$dumpbin")" -nologo -imports "$(cygpath -w "$probes/net-delayed$EXE")" | tr -d '\r' | awk '
+              /Section contains the following delay load imports/ { on = 1; next }
+              /Section contains the following imports/ || /^  Summary/ { on = 0 }
+              on && /^    [^ ]+$/ { print $1 }')
+            echo "delay-loaded by the net-delayed probe: $delayed"
+            if ! grep -q -i -x -e 'ws2_32\.dll' <<< "$delayed"; then
+              echo "::error::The net-delayed probe doesn't delay-load WS2_32.dll"
+              exit 1
+            fi
           fi
+          # What each probe must be refused for, as the check names it.
+          expect() {
+            case "$RUNNER_OS-$1" in
+              Windows-net*) echo '^  WS2_32\.dll' ;;
+              Windows-spawn) echo '^  KERNEL32\.dll CreateProcessW$' ;;
+              *-net) echo '^  (socket|connect)$' ;;
+              *-spawn) echo '^  (fork|execvp|posix_spawnp?)$' ;;
+            esac
+          }
           for p in "${names[@]}"; do
             s=0
-            out=$(bash "$check" "$probes/$p$EXE") || s=$?
-            echo "probe $p: $(wc -l <<< "$out") imports, exit $s"
-            if [ "$s" != 1 ]; then
-              echo "::error::The import check didn't refuse the $p probe (exit $s)"
+            out=$(bash "$check" "$probes/$p$EXE" 2> "$probes/$p.err") || s=$?
+            echo "probe $p: $(wc -l < <(echo "$out") | tr -d ' ') imports, exit $s, refused for:"
+            cat "$probes/$p.err"
+            if [ "$s" != 1 ] || ! grep -q -i -E -e "$(expect "$p")" "$probes/$p.err"; then
+              echo "::error::The import check didn't refuse the $p probe for what it was built to show (exit $s)"
               exit 1
             fi
           done
@@ -342,6 +364,12 @@ jobs:
           fi
           (cd "$dist" && sha256sum --check --strict SHA256SUMS)
           ls -l "$dist"
+          want=$(printf '%s\n' SHA256SUMS "bolt-$VERSION-website.zip" "bolt-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "bolt-$VERSION-"{x86_64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-apple-darwin}.tar.gz | sort)
+          if [ "$(ls -A "$dist" | sort)" != "$want" ]; then
+            echo "::error::The draft's files aren't exactly the four archives, SHA256SUMS and the website copies"
+            exit 1
+          fi
       - name: Make the draft release
         run: |
           dist="$RUNNER_TEMP/dist"
