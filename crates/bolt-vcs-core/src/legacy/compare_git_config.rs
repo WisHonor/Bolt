@@ -376,6 +376,7 @@ fn interesting() -> impl Strategy<Value = Vec<u8>> {
         ("extensions", "submodulepathconfig"),
         ("extensions", "preciousobjects"),
         ("extensions", "foo"),
+        ("extensions", "compatobjectformat"),
         ("core", "sparsecheckout"),
         ("lfs", "storage"),
         ("include", "path"),
@@ -398,6 +399,105 @@ fn interesting() -> impl Strategy<Value = Vec<u8>> {
         })
 }
 
+// A format file of mostly well-formed settings Bolt reads, repeated and mixed, so that answers
+// other than "can't read" are common: hashes, compatibility hashes, refusals and their order.
+fn format_file() -> impl Strategy<Value = Vec<u8>> {
+    let settings: &[(&str, &str, &[&str])] = &[
+        (
+            "core",
+            "repositoryformatversion",
+            &["0", "1", "1", "2", "-1", "01", "1k", "\"1\"", "0x1"],
+        ),
+        (
+            "extensions",
+            "objectformat",
+            &[
+                "sha1",
+                "sha256",
+                "SHA256",
+                "Sha1",
+                "sha512",
+                "",
+                "\"sha256\"",
+                "sha256 ",
+                "sha1 # c",
+            ],
+        ),
+        (
+            "extensions",
+            "compatobjectformat",
+            &[
+                "sha1",
+                "sha256",
+                "SHA1",
+                "Sha256",
+                "sha512",
+                "",
+                "\"sha1\"",
+                "sha256 ; c",
+                "sha1\\n",
+                "md5",
+            ],
+        ),
+        (
+            "Extensions",
+            "compatObjectFormat",
+            &["sha1", "sha256", "SHA256", ""],
+        ),
+        (
+            "extensions",
+            "worktreeconfig",
+            &["true", "false", "yes", "0", "1", "maybe", ""],
+        ),
+        (
+            "extensions",
+            "refstorage",
+            &[
+                "files",
+                "reftable",
+                "FILES",
+                "files://x",
+                "reftable://x",
+                "",
+                "x",
+            ],
+        ),
+        ("extensions", "partialclone", &["origin", "", "\"\""]),
+        ("extensions", "noop", &["x", ""]),
+        ("extensions", "noop-v1", &["x", ""]),
+        ("extensions", "preciousobjects", &["true", "false", ""]),
+        ("extensions", "relativeworktrees", &["true", "false"]),
+        ("extensions", "submodulepathconfig", &["true", "false"]),
+        ("extensions", "unknownext", &["x"]),
+        ("core", "sparsecheckout", &["true", "false", "maybe", ""]),
+        ("lfs", "storage", &["/x", "", "\"a b\""]),
+        ("include", "path", &["x", ""]),
+        ("includeIf \"gitdir:x\"", "path", &["x"]),
+    ];
+    let line = (
+        prop::sample::select(settings),
+        any::<prop::sample::Index>(),
+        prop_oneof![6 => pick(&[" = ", "=", "\t=\t"]).prop_map(Some), 1 => Just(None)],
+        pick(&["", "", "", " ", " # c", "\r"]),
+        any::<bool>(),
+    )
+        .prop_map(|((section, key, values), at, sep, trail, header)| {
+            let mut l = Vec::new();
+            if header {
+                l.extend(format!("[{section}]\n").into_bytes());
+            }
+            l.extend(format!("\t{key}").into_bytes());
+            if let Some(sep) = sep {
+                l.extend(sep);
+                l.extend(values[at.index(values.len())].as_bytes());
+                l.extend(trail);
+            }
+            l.push(b'\n');
+            l
+        });
+    prop::collection::vec(line, 1..8).prop_map(|lines| lines.concat())
+}
+
 fn version_prelude() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
         2 => Just(Vec::new()),
@@ -415,6 +515,10 @@ fn noise() -> impl Strategy<Value = Vec<u8>> {
 }
 
 fn config_text() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![3 => mixed_text(), 2 => format_file()]
+}
+
+fn mixed_text() -> impl Strategy<Value = Vec<u8>> {
     let piece = (
         prop_oneof![
             3 => header(),
@@ -588,6 +692,18 @@ const HAND_TEXTS: &[&[u8]] = &[
     b"[core]\x00\n",
     b"[core]\n\tx = \xff\xfe\n",
     b"[c\xc3\xb6re]\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat = sha1\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat = sha256\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n\tcompatObjectFormat = sha256\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat = sha256\n\tobjectformat = sha256\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n\tcompatObjectFormat = sha1\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n\tcompatObjectFormat = sha1\n\tcompatObjectFormat = sha1\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n\tcompatObjectFormat = sha1\n\tcompatObjectFormat = sha256\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat = \"sha256\"\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat = md5\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat\n",
+    b"[core]\n\trepositoryformatversion = 1\n[extensions]\n\tcompatObjectFormat =\n",
+    b"[core]\n\trepositoryformatversion = 0\n[extensions]\n\tcompatObjectFormat = sha1\n",
 ];
 
 #[test]
