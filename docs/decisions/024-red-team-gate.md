@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-01
 - **Agenda topic:** none (process change after milestone 1)
-- **Refined by:** [decision 119](119-packaging-v0.1.md) (`SECURITY.md` ships with v0.1)
+- **Refined by:** [decision 119](119-packaging-v0.1.md) (`SECURITY.md` ships with v0.1); [decision 144](144-where-people-get-bolt-and-report-problems.md) (problems, security ones included, go to the owner's report address)
 - **Followed by:** [decision 025](025-red-team-m1-rulings.md) (rulings after milestone 1's first session), [decision 028](028-red-team-m1-session-2-rulings.md) (after its second) and [decision 029](029-red-team-m1-final-review-rulings.md) (after the final review of the fixes)
 
 ## Context

@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 6, speed and space)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (the rows it left to the speed session); [decision 121](121-format-1-freezes-at-v0.1.md) (the three format questions it left open); [decision 105](105-the-change-id-cache-keeps-each-lines-saves-in-order.md) (how a save is found by its whole ID, and what a wrong list may do); [decision 044](044-red-team-m2-final-rulings.md) and [decision 087](087-what-an-import-writes-once-files-are-chunked.md) (what an import costs)
-- **Refined by:** [decision 111](111-rulings-after-the-first-red-team-session-on-the-speed-work.md) (a whole ID is checked against its line's saves too)
+- **Refined by:** [decision 111](111-rulings-after-the-first-red-team-session-on-the-speed-work.md) (a whole ID is checked against its line's saves too); [decision 147](147-the-package-sessions-follow-ups-before-v0.1.md) (the walk's row and the store's memory row, labelled as moved)
 
 ## Context
 
