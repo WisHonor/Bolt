@@ -406,11 +406,10 @@ fn files_are_read_as_git_reads_them() {
         b"[s]\nk =\ra\n",
         b"[s]\nk =\x0ba\x0b\n",
         b"[s]\nk =\x0ca\n",
-        b"[s]\nk = a\x00b\n",
         b"[s]\nk = \xff\xfe\n",
         b"[s \"\xff\"]\nk = a\n",
-        b"[s \"a\x00b\"]\nk = a\n",
-        // Byte order marks, line ends, comments and blank lines.
+        // Byte order marks, line ends, comments and blank lines. A NUL in a subsection or a
+        // value, which Bolt refuses where Git cuts it short, has its own test.
         b"\xef\xbb\xbf[s]\nk = a\n",
         b"\xef\xbb\xbf\xef\xbb\xbf[s]\nk = a\n",
         b"\n\xef\xbb\xbf[s]\nk = a\n",
@@ -451,7 +450,6 @@ fn files_are_read_as_git_reads_them() {
         b"-",
         b".",
         b"_",
-        b"\x00",
         b"\x0b",
         b"\xff",
         b"[s]\n",
@@ -609,8 +607,7 @@ fn extension_values_are_checked_as_git_checks_them() {
     };
     let broken_at = |result: Result<Format, GitError>, line: usize| match result {
         Err(GitError::Broken { what }) => {
-            let want = format!("line {line} of .git/config");
-            assert!(what.starts_with(&want), "{what}");
+            assert_eq!(what, format!("it can't read line {line} of .git/config"));
         }
         Err(other) => panic!("{other:?}"),
         Ok(_) => panic!("read"),
@@ -620,7 +617,6 @@ fn extension_values_are_checked_as_git_checks_them() {
         ("\tobjectformat\n", 4),
         ("\tobjectformat =\n", 4),
         ("\tobjectformat = sha\\\n256x\n", 5),
-        ("\tobjectformat = sha256\x00\n", 4),
         ("\tcompatObjectFormat = md5\n", 4),
         (
             "\tcompatObjectFormat = sha256\n\tcompatObjectFormat = sha256\n",
@@ -658,11 +654,20 @@ fn extension_values_are_checked_as_git_checks_them() {
         assert!(v("1", extensions).is_ok(), "{extensions}");
     }
     // Extensions only version 1 knows are refused under version 0, naming the first.
-    for name in ["noop-v1", "relativeWorktrees", "compatObjectFormat"] {
-        match v("0", &format!("\tnoop = 1\n\t{name} = sha256\n")) {
+    for (name, value) in [
+        ("noop-v1", "x"),
+        ("relativeWorktrees", "true"),
+        ("compatObjectFormat", "sha256"),
+    ] {
+        let extensions = format!("\tnoop = 1\n\t{name} = {value}\n\tobjectformat = sha1\n");
+        match v("0", &extensions) {
             Err(GitError::Broken { what }) => {
-                let want = format!("line 5 of .git/config: extensions.{}", name.to_lowercase());
-                assert!(what.starts_with(&want), "{what}");
+                let want = format!(
+                    ".git/config sets extensions.{}, which needs format version 1, but the \
+                     version is 0",
+                    name.to_lowercase()
+                );
+                assert_eq!(what, want);
             }
             other => panic!("{name}: {:?}", other.err()),
         }
@@ -676,51 +681,110 @@ fn extension_values_are_checked_as_git_checks_them() {
         );
     }
     // A negative version is refused, though Git reads it as none.
-    broken_at(v("-1", "\tobjectformat = sha256\n"), 2);
-}
-
-/// Git ends a name at a NUL, so a subsection can hide the setting it ends in. A NUL in a value
-/// Bolt takes is refused rather than read short.
-#[test]
-fn a_nul_ends_names_and_refuses_values() {
-    assert_eq!(
-        read_user_settings(b"[core \"excludesfile\x00x\"]\n\tfoo = bar\n"),
-        Ok(vec![UserSetting::ExcludesFile(b"bar".to_vec())])
-    );
-    // A subsection keeps its letter case.
-    assert_eq!(
-        read_user_settings(b"[core \"excludesFile\x00x\"]\n\tfoo = bar\n"),
-        Ok(vec![])
-    );
-    assert_eq!(
-        read_user_settings(b"[core]\n\texcludesFile = a\x00b\n"),
-        Err(2)
-    );
-    assert_eq!(read_user_settings(b"[user]\n\tname = a\x00b\n"), Ok(vec![]));
-    let sparse = format("[core \"sparsecheckout\x00\"]\n\tx = no\n").unwrap();
-    assert_eq!(sparse.sparse, Some(false));
-    assert!(format("[lfs]\n\tstorage = a\x00b\n").is_err());
-    assert!(format("[core]\n\trepositoryformatversion = 1\x00\n").is_err());
-}
-
-/// An include with no path stops Git; a conditional one is only noted.
-#[test]
-fn includes_git_cant_follow_are_refused() {
-    for text in ["[include]\n\tpath\n", "[include]\n\tpath =\n"] {
+    match v("-1", "\tobjectformat = sha256\n") {
+        Err(GitError::Broken { what }) => assert_eq!(
+            what,
+            ".git/config gives the format version -1, which Git never writes"
+        ),
+        other => panic!("{:?}", other.err()),
+    }
+    // Refs kept elsewhere are named before a partial clone.
+    for (refs, refusal) in [
+        ("files://x", Refusal::RefsElsewhere),
+        ("reftable://x", Refusal::Reftable),
+    ] {
+        let result = v("1", &format!("\tpartialClone = o\n\trefStorage = {refs}\n"));
         assert!(
-            matches!(format(text), Err(GitError::Broken { .. })),
-            "{text}"
+            matches!(&result, Err(GitError::Refused(r)) if *r == refusal),
+            "{refs}"
         );
     }
+}
+
+/// Git cuts a name or value short at a NUL; Bolt refuses the line instead, wherever the NUL is
+/// but in a comment.
+#[test]
+fn a_nul_in_a_subsection_or_value_is_refused() {
+    for (text, line) in [
+        (b"[core \"excludesfile\x00x\"]\n\tfoo = bar\n".as_slice(), 1),
+        (b"#\n[core \"a\\\x00\"]\n", 2),
+        (b"[core]\n\texcludesFile = a\x00b\n", 2),
+        (b"[user]\n\tname = \"a\x00b\"\n", 2),
+        (b"[lfs]\n\tstorage = a\\\n\x00b\n", 3),
+    ] {
+        let shown = shown_text(text);
+        assert_eq!(read_user_settings(text), Err(line), "{shown}");
+        let want = format!("it can't read line {line} of .git/config");
+        assert!(
+            matches!(read_format(text, ".git/config"), Err(GitError::Broken { what }) if what == want),
+            "{shown}"
+        );
+        assert!(
+            read_worktree(text, ".git/config.worktree").is_err(),
+            "{shown}"
+        );
+    }
+    assert_eq!(
+        read_user_settings(b"# \x00\n[core]\n\texcludesFile = a\n"),
+        Ok(vec![UserSetting::ExcludesFile(b"a".to_vec())])
+    );
+}
+
+/// Any setting in an `[include]` or `[includeIf]` section is noted, whatever its subsection or
+/// value: Bolt follows none of them.
+#[test]
+fn every_include_setting_is_noted() {
     for (text, includes) in [
+        ("[include]\n\tpath\n", true),
+        ("[include]\n\tpath =\n", true),
+        ("[include]\n\tpath = #x\n", true),
         ("[includeIf \"gitdir:/x/\"]\n\tpath\n", true),
         ("[includeIf.x]\n\tpath = y\n", true),
-        ("[includeIf]\n\tpath = y\n", false),
-        ("[include.x]\n\tpath = y\n", false),
-        ("[include \"\"]\n\tpath = y\n", false),
-        ("[include]\n\tother = y\n", false),
+        ("[includeIf]\n\tpath = y\n", true),
+        ("[includeIf]\n sparsecheckoutcone\n", true),
+        ("[include \"x\"]\n\ta\n", true),
+        ("[include]\n\tother = y\n", true),
+        ("[includes]\n\tpath = y\n", false),
+        ("[x \"include\"]\n\tpath = y\n", false),
     ] {
         assert_eq!(format(text).unwrap().includes, includes, "{text}");
+        let worktree = read_worktree(text.as_bytes(), ".git/config.worktree").unwrap();
+        assert_eq!(worktree.includes, includes, "{text}");
+    }
+    // In the user's settings only a plain `include.path` is followed, and it needs a value.
+    assert_eq!(read_user_settings(b"[include]\n\tpath\n"), Err(2));
+    assert_eq!(
+        read_user_settings(b"[include]\n\tpath =\n"),
+        Ok(vec![UserSetting::Include(Vec::new())])
+    );
+}
+
+/// Git names the second line for a file that is only part of a byte order mark.
+#[test]
+fn a_byte_order_mark_cut_short_is_refused_where_git_says() {
+    for (text, line) in [
+        (b"\xef".as_slice(), 2),
+        (b"\xef\xbb", 2),
+        (b"\xef\n", 2),
+        (b"\xef\xbb\r\n", 2),
+        (b"\xefx", 1),
+        (b"\xef\xbb[core]\n", 1),
+    ] {
+        assert_eq!(read_user_settings(text), Err(line), "{}", shown_text(text));
+    }
+}
+
+/// The reasons a count is refused.
+#[test]
+fn a_count_is_refused_with_its_reason() {
+    for (text, why) in [
+        ("two", "isn't a number Git reads as a count"),
+        ("3 ", "isn't a number Git reads as a count"),
+        ("-1", "is more than Git takes"),
+        ("2147483648", "is more than Git takes"),
+        ("99999999999999999999999", "is more than Git takes"),
+    ] {
+        assert_eq!(read_count(text.as_bytes()), Err(why), "{text}");
     }
 }
 

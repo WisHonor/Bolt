@@ -104,10 +104,11 @@ impl Reader<'_> {
         name.push(b'.');
         loop {
             match self.next() {
-                None | Some(b'\n') => return Err(here),
+                // Git would cut the name short at a NUL; Bolt refuses it instead.
+                None | Some(b'\n' | 0) => return Err(here),
                 Some(b'"') => break,
                 Some(b'\\') => match self.next() {
-                    None | Some(b'\n') => return Err(here),
+                    None | Some(b'\n' | 0) => return Err(here),
                     Some(c) => name.push(c),
                 },
                 Some(c) => name.push(c),
@@ -129,6 +130,8 @@ impl Reader<'_> {
         let ended_line = loop {
             let c = match self.next() {
                 None | Some(b'\n') if quoted => return Err(self.line),
+                // Git would cut the value short at a NUL; Bolt refuses it instead.
+                Some(0) => return Err(self.line),
                 None => break false,
                 Some(b'\n') => break true,
                 Some(b'#' | b';') if !quoted => {
@@ -151,8 +154,8 @@ impl Reader<'_> {
                     continue;
                 }
                 Some(b'\\') => match self.next() {
-                    // The end of the file after a backslash counts as a line end too.
-                    // and keeps the whitespace before it.
+                    // The end of the file after a backslash counts as a line end too, and a
+                    // continuation keeps the whitespace before it.
                     None | Some(b'\n') => {
                         self.new_line();
                         kept = value.len();
@@ -184,6 +187,16 @@ fn read<E>(
     text: &[u8],
     each: &mut dyn FnMut(Entry) -> Result<(), E>,
 ) -> Result<(), Result<usize, E>> {
+    // Git names the second line for a byte order mark cut short that ends the first.
+    for part in [b"\xef\xbb".as_slice(), b"\xef"] {
+        if let Some(rest) = text.strip_prefix(part)
+            && !rest.starts_with(b"\xbb")
+            && !rest.starts_with(b"\xbf")
+        {
+            let ends = rest.is_empty() || rest.starts_with(b"\n") || rest.starts_with(b"\r\n");
+            return Err(Ok(if ends { 2 } else { 1 }));
+        }
+    }
     let start = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
     let mut r = Reader {
         text: start,
@@ -218,8 +231,7 @@ fn read<E>(
                 while let Some(b' ' | b'\t') = after {
                     after = r.next();
                 }
-                // Git's names end at a NUL, which a subsection may hold.
-                let full = name.split(|&b| b == 0).next().unwrap_or_default();
+                let full = name.as_slice();
                 match after {
                     None | Some(b'\n') => {
                         each(Entry {
@@ -248,11 +260,6 @@ fn read<E>(
         }
     }
     Ok(())
-}
-
-/// A value Bolt takes, unless it holds a NUL, where Git would see only the bytes before it.
-fn whole(value: &[u8]) -> Option<&[u8]> {
-    (!value.contains(&0)).then_some(value)
 }
 
 /// Git's whitespace for numbers: C's `isspace`.
@@ -340,7 +347,7 @@ pub(crate) fn read_bool(value: &[u8]) -> Option<bool> {
 /// more than an int holds. Empty is none.
 pub(crate) fn read_count(text: &[u8]) -> Result<u32, &'static str> {
     const NOT_A_NUMBER: &str = "isn't a number Git reads as a count";
-    const TOO_BIG: &str = NOT_A_NUMBER;
+    const TOO_BIG: &str = "is more than Git takes";
     if text.is_empty() {
         return Ok(0);
     }
@@ -418,20 +425,14 @@ pub(crate) fn read_user_variable(key: &[u8], value: &[u8]) -> Result<Option<User
 pub(crate) fn read_user_settings(text: &[u8]) -> Result<Vec<UserSetting>, usize> {
     let mut settings = Vec::new();
     read(text, &mut |entry: Entry| {
-        let value = entry.value.map(whole);
-        let setting = match (entry.name, value) {
-            (_, Some(None)) if is_taken_by_user(entry.name) => return Err(entry.line),
+        let setting = match (entry.name, entry.value) {
             // Git refuses a path with no value.
             (b"core.excludesfile" | b"include.path", None) => return Err(entry.line),
-            (b"core.excludesfile", Some(Some(path))) => UserSetting::ExcludesFile(path.to_vec()),
-            (b"include.path", Some(Some(path))) => UserSetting::Include(path.to_vec()),
-            (b"lfs.storage", value) => {
-                UserSetting::LfsStorage(value.flatten().unwrap_or_default().to_vec())
-            }
+            (b"core.excludesfile", Some(path)) => UserSetting::ExcludesFile(path.to_vec()),
+            (b"include.path", Some(path)) => UserSetting::Include(path.to_vec()),
+            (b"lfs.storage", value) => UserSetting::LfsStorage(value.unwrap_or_default().to_vec()),
             (b"core.sparsecheckout", None) => UserSetting::SparseCheckout(Some(true)),
-            (b"core.sparsecheckout", Some(value)) => {
-                UserSetting::SparseCheckout(value.and_then(read_bool))
-            }
+            (b"core.sparsecheckout", Some(value)) => UserSetting::SparseCheckout(read_bool(value)),
             _ => return Ok(()),
         };
         settings.push(setting);
@@ -439,13 +440,6 @@ pub(crate) fn read_user_settings(text: &[u8]) -> Result<Vec<UserSetting>, usize>
     })
     .map_err(|e| e.unwrap_or_else(|line| line))?;
     Ok(settings)
-}
-
-fn is_taken_by_user(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"core.excludesfile" | b"include.path" | b"lfs.storage" | b"core.sparsecheckout"
-    )
 }
 
 /// Where `extensions.refStorage` keeps the refs.
@@ -459,10 +453,10 @@ enum RefStorage {
 /// What the repository's config files set, as far as Bolt reads them.
 #[derive(Default)]
 struct Seen {
-    /// The last `core.repositoryformatversion`, and its line.
-    version: Option<(i32, usize)>,
-    /// Every extension named, in order, with its line.
-    extensions: Vec<(Vec<u8>, usize)>,
+    /// The last `core.repositoryformatversion`.
+    version: Option<i32>,
+    /// Every extension named, in order.
+    extensions: Vec<Vec<u8>>,
     object_format: Option<HashKind>,
     compat: Option<(HashKind, usize)>,
     partial_clone: bool,
@@ -503,111 +497,80 @@ fn read_repository(
     common: bool,
     seen: &mut Seen,
 ) -> Result<(), GitError> {
-    let bad = |line: usize, why: String| broken(format!("line {line} of {file}: {why}"));
+    // Every line Bolt can't read as Git does, whatever the reason, gets the same message.
     let result = read(text, &mut |entry: Entry| {
-        let (name, line) = (entry.name, entry.line);
-        let shown_name = || shown(name);
-        let missing = || bad(line, format!("{} has no value", shown_name()));
-        let value = match entry.value {
-            Some(value) => Some(whole(value).ok_or_else(|| {
-                bad(
-                    line,
-                    format!("the value of {} holds a NUL byte", shown_name()),
-                )
-            })?),
-            None => None,
-        };
+        let (name, value) = (entry.name, entry.value);
         let boolean = |value: Option<&[u8]>| match value {
-            None => Ok(true),
-            Some(value) => read_bool(value).ok_or_else(|| {
-                bad(
-                    line,
-                    format!("{} is `{}`, not true or false", shown_name(), shown(value)),
-                )
-            }),
+            None => Some(true),
+            Some(value) => read_bool(value),
         };
-        match name {
-            b"core.sparsecheckout" => seen.sparse = Some(boolean(value)?),
-            b"lfs.storage" => seen.lfs_storage = Some(value.unwrap_or_default().to_vec()),
-            b"include.path" => match value {
-                // Git can't read an include with no path.
-                None | Some(b"") => return Err(missing()),
-                Some(_) => seen.includes = true,
-            },
-            _ if name.starts_with(b"includeif.")
-                && name.ends_with(b".path")
-                && name.len() >= b"includeif..path".len() =>
-            {
+        let taken = match name {
+            b"core.sparsecheckout" => boolean(value).map(|on| seen.sparse = Some(on)),
+            b"lfs.storage" => {
+                seen.lfs_storage = Some(value.unwrap_or_default().to_vec());
+                Some(())
+            }
+            // Any setting in a section that can name another file: Bolt doesn't follow them.
+            _ if name.starts_with(b"include.") || name.starts_with(b"includeif.") => {
                 seen.includes = true;
+                Some(())
             }
-            b"core.repositoryformatversion" if common => {
-                let version = parse_int(value.unwrap_or_default()).map_err(|_| {
-                    bad(
-                        line,
-                        format!(
-                            "core.repositoryformatversion is `{}`, not a number",
-                            shown(value.unwrap_or_default())
-                        ),
-                    )
-                })?;
-                seen.version = Some((version, line));
-            }
+            b"core.repositoryformatversion" if common => parse_int(value.unwrap_or_default())
+                .ok()
+                .map(|version| seen.version = Some(version)),
             _ if common && name.starts_with(b"extensions.") => {
                 let extension = name.get(b"extensions.".len()..).unwrap_or_default();
-                seen.extensions.push((extension.to_vec(), line));
-                let unknown = |value: &[u8]| {
-                    bad(
-                        line,
-                        format!(
-                            "{} is `{}`, which Git doesn't know",
-                            shown_name(),
-                            shown(value)
-                        ),
-                    )
-                };
-                match extension {
-                    b"objectformat" => {
-                        let value = value.ok_or_else(missing)?;
-                        seen.object_format = Some(hash_named(value).ok_or_else(|| unknown(value))?);
-                    }
-                    b"compatobjectformat" => {
-                        let value = value.ok_or_else(missing)?;
-                        let hash = hash_named(value).ok_or_else(|| unknown(value))?;
-                        if seen.compat.is_some() {
-                            return Err(bad(line, format!("{} is set twice", shown_name())));
-                        }
-                        seen.compat = Some((hash, line));
-                    }
-                    b"refstorage" => {
-                        let value = value.ok_or_else(missing)?;
-                        seen.refs = Some(match value {
-                            b"files" => RefStorage::Files,
-                            b"reftable" => RefStorage::Reftable,
-                            _ if value.starts_with(b"files://") => RefStorage::Elsewhere,
-                            _ if value.starts_with(b"reftable://") => RefStorage::Reftable,
-                            _ => return Err(unknown(value)),
-                        });
-                    }
-                    b"partialclone" => {
-                        value.ok_or_else(missing)?;
-                        seen.partial_clone = true;
-                    }
-                    b"worktreeconfig" => seen.worktree_config = boolean(value)?,
-                    b"preciousobjects" | b"relativeworktrees" | b"submodulepathconfig" => {
-                        boolean(value)?;
-                    }
-                    _ => {}
-                }
+                seen.extensions.push(extension.to_vec());
+                read_extension(extension, value, entry.line, seen)
             }
-            _ => {}
-        }
-        Ok(())
+            _ => Some(()),
+        };
+        taken.ok_or(entry.line)
     });
-    match result {
-        Ok(()) => Ok(()),
-        Err(Ok(line)) => Err(bad(line, "Git can't read this line".to_owned())),
-        Err(Err(e)) => Err(e),
+    result.map_err(|e| {
+        let line = e.unwrap_or_else(|line| line);
+        broken(format!("it can't read line {line} of {file}"))
+    })
+}
+
+/// Checks one extension's value as Git checks it, keeping what Bolt needs; `None` where Git
+/// refuses the value.
+fn read_extension(
+    extension: &[u8],
+    value: Option<&[u8]>,
+    line: usize,
+    seen: &mut Seen,
+) -> Option<()> {
+    let boolean = || value.map_or(Some(true), read_bool);
+    match extension {
+        b"objectformat" => seen.object_format = Some(hash_named(value?)?),
+        b"compatobjectformat" => {
+            let hash = hash_named(value?)?;
+            if seen.compat.replace((hash, line)).is_some() {
+                return None;
+            }
+        }
+        b"refstorage" => {
+            let value = value?;
+            seen.refs = Some(match value {
+                b"files" => RefStorage::Files,
+                b"reftable" => RefStorage::Reftable,
+                _ if value.starts_with(b"files://") => RefStorage::Elsewhere,
+                _ if value.starts_with(b"reftable://") => RefStorage::Reftable,
+                _ => return None,
+            });
+        }
+        b"partialclone" => {
+            value?;
+            seen.partial_clone = true;
+        }
+        b"worktreeconfig" => seen.worktree_config = boolean()?,
+        b"preciousobjects" | b"relativeworktrees" | b"submodulepathconfig" => {
+            boolean()?;
+        }
+        _ => {}
     }
+    Some(())
 }
 
 /// The repository's `.git/config` (`file` names it in messages): its format, refusing what Bolt
@@ -624,29 +587,30 @@ pub(crate) fn read_format(text: &[u8], file: &'static str) -> Result<Format, Git
         lfs_storage,
     };
     // Without a version, Git ignores the extensions, once it has checked their values.
-    let Some((version, line)) = seen.version else {
+    let Some(version) = seen.version else {
         return Ok(unversioned);
     };
     let refuse = |refusal| Err(GitError::Refused(refusal));
     if version < 0 {
         return Err(broken(format!(
-            "line {line} of {file}: core.repositoryformatversion is negative"
+            "{file} gives the format version {version}, which Git never writes"
         )));
     }
     if version > 1 {
         return refuse(Refusal::FormatVersion(version.unsigned_abs().into()));
     }
     let known = |name: &[u8]| EXTENSIONS.iter().find(|(known, _)| *known == name);
-    for (name, line) in &seen.extensions {
+    for name in &seen.extensions {
         match known(name) {
             None if version == 1 => {
                 return refuse(Refusal::UnknownExtension(shown(name)));
             }
-            Some((_, false)) if version == 0 => {
+            // Only Git's own names get here, so they need no escaping.
+            Some((known, false)) if version == 0 => {
                 return Err(broken(format!(
-                    "line {line} of {file}: extensions.{} needs format version 1, and \
-                     core.repositoryformatversion is 0",
-                    shown(name)
+                    "{file} sets extensions.{}, which needs format version 1, but the version \
+                     is 0",
+                    String::from_utf8_lossy(known)
                 )));
             }
             _ => {}
@@ -656,17 +620,16 @@ pub(crate) fn read_format(text: &[u8], file: &'static str) -> Result<Format, Git
     if let Some((compat, line)) = seen.compat
         && compat == hash
     {
-        return Err(broken(format!(
-            "line {line} of {file}: extensions.compatobjectformat is the repository's own hash"
-        )));
+        return Err(broken(format!("it can't read line {line} of {file}")));
     }
-    if seen.partial_clone {
-        return refuse(Refusal::PartialClone);
-    }
+    // Refs kept elsewhere are named before a partial clone.
     match seen.refs {
         Some(RefStorage::Reftable) => return refuse(Refusal::Reftable),
         Some(RefStorage::Elsewhere) => return refuse(Refusal::RefsElsewhere),
         Some(RefStorage::Files) | None => {}
+    }
+    if seen.partial_clone {
+        return refuse(Refusal::PartialClone);
     }
     Ok(Format {
         hash,
