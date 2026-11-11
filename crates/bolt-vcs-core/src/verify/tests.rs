@@ -491,6 +491,30 @@ fn a_save_missing_inside_the_window_is_a_problem() {
 }
 
 #[test]
+fn a_diary_end_that_cannot_be_read_back_is_a_warning_told_once() {
+    let (_dir, mut repo) = project(0);
+    let gone = Id([7; 32]);
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (_, mut entry) = repo.current().unwrap();
+    entry.parent = Some(gone);
+    entry.command = "test".into();
+    entry.folder_change = None;
+    let packs = repo.new_packs().unwrap();
+    let end = repo.store_entry(&lock, packs, &entry).unwrap();
+    drop(lock);
+    let v = checked(&repo);
+    assert_eq!(v.problems_total, 0, "{:?}", v.problems);
+    let warned: Vec<&Warning> = v
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::warning::DIARY_END_UNREADABLE)
+        .collect();
+    assert_eq!(warned.len(), 1, "{:?}", v.warnings);
+    assert!(warned[0].message.contains(&end.short_hex()), "{warned:?}");
+    assert!(warned[0].message.contains(&gone.short_hex()), "{warned:?}");
+}
+
+#[test]
 fn a_pack_that_goes_away_mid_check_is_no_problem() {
     let (_dir, mut repo) = project(0);
     plant_save(&mut repo, &[("a.txt", EntryKind::File, b"one")]);
@@ -648,7 +672,8 @@ fn verify_writes_nothing() {
 fn found(ids: &[u8]) -> Verdict {
     let kept: BTreeSet<Finding> = ids.iter().map(|b| Finding::Missing(Id([*b; 32]))).collect();
     Verdict::Found(Findings {
-        counts: [kept.len() as u64, 0, 0],
+        counts: [kept.len() as u64, 0, 0, 0, 0],
+        diary_gap: false,
         kept,
     })
 }
@@ -980,7 +1005,7 @@ fn a_chunk_named_many_times_is_noted_and_told_once() {
     own_pack(&mut repo, |p| p.add_chunk_list(&list).unwrap());
     plant_file(&mut repo, "big.bin", list.file, 3_000);
     repo.store().close_all();
-    let Ok(Ok((_, look))) = look_at(&repo, 30, now(), &HashSet::new()) else {
+    let Ok(Ok((_, look))) = look_at(&repo, 30, now(), &Told::default()) else {
         panic!("the look wasn't made");
     };
     let notes = look.noted.unread.iter().filter(|(id, _)| *id == absent);
@@ -1092,8 +1117,76 @@ fn verify_takes_about_twice_as_long_for_twice_the_entries() {
 fn two_looks_past_what_is_kept_tell_the_smaller_count() {
     let keep = |n: u64| Findings {
         kept: (0..=255u8).map(|b| Finding::Missing(Id([b; 32]))).collect(),
-        counts: [n, 0, 0],
+        counts: [n, 0, 0, 0, 0],
+        diary_gap: false,
     };
     let both = agreed(&[Verdict::Found(keep(1_500)), Verdict::Found(keep(1_200))]);
     assert_eq!(both, Some(Verdict::Found(keep(1_200))));
+}
+
+#[test]
+fn two_looks_tell_only_the_unreadable_objects_and_the_diary_gap_both_found() {
+    let looked = |ids: &[u8], gap: bool| {
+        let damaged = ids.iter().map(|b| Finding::Damaged(Id([*b; 32])));
+        let unreadable = ids.iter().map(|b| Finding::Unreadable(Id([*b; 32])));
+        let kept: BTreeSet<Finding> = damaged.chain(unreadable).collect();
+        let n = ids.len() as u64;
+        Verdict::Found(Findings {
+            kept,
+            counts: [0, 0, 0, n, n],
+            diary_gap: gap,
+        })
+    };
+    let both = agreed(&[looked(&[1, 2], true), looked(&[2, 3], false)]);
+    assert_eq!(both, Some(looked(&[2], false)));
+    let both = agreed(&[looked(&[1], true), looked(&[1], true)]);
+    assert_eq!(both, Some(looked(&[1], true)));
+}
+
+#[test]
+fn a_diary_with_a_gap_is_not_intact() {
+    let (_dir, mut repo) = project(0);
+    assert!(!checked(&repo).diary_gap);
+    let gone = Id([7; 32]);
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (_, mut entry) = repo.current().unwrap();
+    entry.parent = Some(gone);
+    entry.command = "test".into();
+    entry.folder_change = None;
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
+    let v = checked(&repo);
+    assert!(v.diary_gap);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(gone));
+}
+
+#[test]
+fn what_the_check_of_the_packs_told_as_unreadable_is_not_told_again() {
+    let (_dir, mut repo) = project(0);
+    let mut content = None;
+    own_pack(&mut repo, |p| {
+        content = Some(p.add_content(b"one").unwrap())
+    });
+    plant_file(&mut repo, "a.txt", content.unwrap(), 3);
+    let root = repo.store().save(&tip(&repo), false).unwrap().root;
+    let (path, entry) = objects(&repo)
+        .into_iter()
+        .find(|(_, e)| e.id == root)
+        .unwrap();
+    repo.store().close_all();
+    flip(&path, entry.offset + ENTRY_HEADER_LEN);
+    let damaged = |told: &Told| {
+        let Ok(Ok((found, _))) = look_at(&repo, 30, now(), told) else {
+            panic!("the look wasn't made");
+        };
+        found.kept.contains(&Finding::Damaged(root))
+    };
+    assert!(damaged(&Told::default()));
+    let told = Told {
+        unreadable: HashSet::from([root]),
+        ..Told::default()
+    };
+    assert!(!damaged(&told));
 }

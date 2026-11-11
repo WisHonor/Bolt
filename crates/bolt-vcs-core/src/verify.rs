@@ -20,7 +20,7 @@ use crate::save::Save;
 use crate::store::{Store, is_damage};
 use crate::text::{escape, thousands};
 use crate::tidy::{self, Noted, Source, Unread};
-use crate::warning::Warning;
+use crate::warning::{self, Warning};
 use crate::writeout;
 
 /// What is wrong.
@@ -76,6 +76,8 @@ pub struct Verified {
     pub saves: u64,
     /// Diary entries read, from the current one back.
     pub entries: u64,
+    /// Whether the diary met an entry that is missing or can't be read: it isn't intact.
+    pub diary_gap: bool,
     pub lines: u64,
     pub shelves: u64,
     pub problems_total: u64,
@@ -149,7 +151,7 @@ pub fn verify(
     let mut v = Verified::default();
     v.warnings.extend(writeout::unfinished_warning(repo));
     let (folder, packs_dir) = (repo.packs_folder(), repo.packs_dir());
-    let damaged = check_packs(
+    let told = check_packs(
         folder,
         packs_dir,
         repo.signatures_allowed(),
@@ -160,13 +162,17 @@ pub fn verify(
     // A problem with what the project needs is told only when two looks agree on it: a merge or
     // a tidy beside this one writes its new packs before it removes an old one, and a save its
     // packs before it moves `head`.
-    let (verdict, look) = agreed_needs(repo, window_days, now_ms, &damaged);
+    let (verdict, look) = agreed_needs(repo, window_days, now_ms, &told);
     let (kind, message) = match verdict {
-        Verdict::Found(missing) => {
+        Verdict::Found(found) => {
             if let Some(look) = look {
                 v.needs_checked = true;
-                let names = told_needs(&mut v, &look, &missing, &damaged);
+                let names = told_needs(&mut v, &look, &found);
                 name_needers(&mut v, &look, repo.signatures_allowed(), &names);
+                // From the last look only, so told once.
+                let ends = look.store.warnings().into_iter();
+                v.warnings
+                    .extend(ends.filter(|w| w.kind == warning::DIARY_END_UNREADABLE));
             }
             return v;
         }
@@ -238,7 +244,7 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
 /// Checks every pack in `folder`, at `packs_dir`, listing them again until a listing brings
 /// nothing new, then rebuilds every chunked file from its chunks. With `skip_missing_chunks`, a
 /// list naming a chunk no pack holds is left to the check of what the project needs. Gives the
-/// objects found damaged.
+/// objects it told of.
 fn check_packs(
     folder: &Arc<Dir>,
     packs_dir: &Path,
@@ -246,7 +252,7 @@ fn check_packs(
     skip_missing_chunks: bool,
     v: &mut Verified,
     progress: &mut dyn FnMut(u64, u64),
-) -> HashSet<Id> {
+) -> Told {
     let mut found = Found::default();
     let (mut seen, mut done, mut total) = (HashSet::new(), 0u64, 0u64);
     for _ in 0..ROUNDS {
@@ -293,7 +299,25 @@ fn check_packs(
         }
     }
     rebuild(folder, packs_dir, skip_missing_chunks, v, &mut found);
-    found.damaged
+    Told {
+        damaged: found.damaged,
+        unreadable: found.unreadable,
+    }
+}
+
+/// The objects the check of the packs told of, which the check of what is needed doesn't tell
+/// again.
+#[derive(Default)]
+struct Told {
+    damaged: HashSet<Id>,
+    /// Those that couldn't be read for a reason other than damage.
+    unreadable: HashSet<Id>,
+}
+
+impl Told {
+    fn contains(&self, id: &Id) -> bool {
+        self.damaged.contains(id) || self.unreadable.contains(id)
+    }
 }
 
 /// What checking the packs found that the later steps need.
@@ -301,10 +325,24 @@ fn check_packs(
 struct Found {
     /// Objects found damaged.
     damaged: HashSet<Id>,
+    /// Objects that couldn't be read for another reason.
+    unreadable: HashSet<Id>,
     /// Content read back whole.
     content: HashSet<Id>,
     /// Each chunk list whose structure checked out, by its pack, to rebuild its file.
     lists: Vec<(OsString, IndexEntry)>,
+}
+
+impl Found {
+    /// Keeps `id`, told as `kind`.
+    fn told(&mut self, kind: ProblemKind, id: Id) {
+        let told = if kind == ProblemKind::ObjectDamaged {
+            &mut self.damaged
+        } else {
+            &mut self.unreadable
+        };
+        told.insert(id);
+    }
 }
 
 /// Checks the pack `name`: its index, against its checksum, then each object in it. `at` hears
@@ -353,9 +391,7 @@ fn check_pack(
             }
             Ok(()) => {}
             Err((kind, message)) => {
-                if kind == ProblemKind::ObjectDamaged {
-                    found.damaged.insert(entry.id);
-                }
+                found.told(kind, entry.id);
                 v.objects_failed = v.objects_failed.saturating_add(1);
                 v.found(Problem {
                     kind,
@@ -457,9 +493,7 @@ fn rebuild(
         }
         if let Err(e) = store.copy_chunks(&list, pack.path(), &mut io::sink()) {
             let (kind, message) = object_problem(&e);
-            if kind == ProblemKind::ObjectDamaged {
-                found.damaged.insert(entry.id);
-            }
+            found.told(kind, entry.id);
             v.objects_failed = v.objects_failed.saturating_add(1);
             v.found(Problem {
                 kind,
@@ -536,20 +570,22 @@ fn object_problem(e: &PackError) -> (ProblemKind, String) {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Findings {
     kept: BTreeSet<Finding>,
-    /// How many were found: missing, of a wrong size, too big.
-    counts: [u64; 3],
+    /// How many were found: missing, of a wrong size, too big, damaged, unreadable.
+    counts: [u64; 5],
+    /// Whether the diary met an entry that is missing or can't be read.
+    diary_gap: bool,
 }
 
 impl Findings {
     fn is_empty(&self) -> bool {
-        self.counts.iter().all(|&n| n == 0)
+        !self.diary_gap && self.counts.iter().all(|&n| n == 0)
     }
 
     /// What two looks agree on: what both kept, and of each kind, when both kept all they
     /// found, how many both found; else the smaller of their counts.
     fn with(&self, later: &Findings) -> Findings {
         let kept: BTreeSet<Finding> = &self.kept & &later.kept;
-        let mut counts = [0u64; 3];
+        let mut counts = [0u64; 5];
         for (kind, n) in counts.iter_mut().enumerate() {
             let (a, b) = (self.counts[kind], later.counts[kind]);
             *n = if a.max(b) <= PROBLEMS_KEPT as u64 {
@@ -558,10 +594,14 @@ impl Findings {
                 a.min(b)
             };
         }
-        Findings { kept, counts }
+        Findings {
+            kept,
+            counts,
+            diary_gap: self.diary_gap && later.diary_gap,
+        }
     }
 
-    /// Keeps the first that can be told of `found`, all of one `kind` (0, 1 or 2), and counts
+    /// Keeps the first that can be told of `found`, all of one `kind` (0 to 4), and counts
     /// them all.
     fn add(&mut self, kind: usize, found: u64, first: impl IntoIterator<Item = Finding>) {
         self.counts[kind] = found;
@@ -626,14 +666,14 @@ fn agreed_needs(
     repo: &Repository,
     window_days: u32,
     now_ms: i64,
-    damaged: &HashSet<Id>,
+    told: &Told,
 ) -> (Verdict, Option<Box<Look>>) {
     let mut verdicts = Vec::new();
     let mut last: Option<Box<Look>> = None;
     loop {
         // Gone before the next look begins, so two looks never hold their sets at once.
         drop(last.take());
-        let (verdict, look) = look(repo, window_days, now_ms, damaged);
+        let (verdict, look) = look(repo, window_days, now_ms, told);
         last = look;
         let clean = matches!(&verdict, Verdict::Found(found) if found.is_empty());
         verdicts.push(verdict);
@@ -667,15 +707,15 @@ enum Unmade {
 }
 
 /// Works out what the project needs from `state/head`, read again, as `tidy` does with the same
-/// window, and what of it no pack holds, with the packs listed again. `damaged` are the objects
-/// found damaged, whose files are named too.
+/// window, and what of it no pack holds, with the packs listed again. `told` are the objects the
+/// check of the packs told of; the files of those found damaged are named too.
 fn look(
     repo: &Repository,
     window_days: u32,
     now_ms: i64,
-    damaged: &HashSet<Id>,
+    told: &Told,
 ) -> (Verdict, Option<Box<Look>>) {
-    match look_at(repo, window_days, now_ms, damaged) {
+    match look_at(repo, window_days, now_ms, told) {
         Ok(Ok((found, look))) => (Verdict::Found(found), Some(look)),
         Ok(Err(lost)) => (Verdict::Lost(lost.to_string()), None),
         Err(unmade) => {
@@ -694,6 +734,10 @@ fn look(
 /// when both found it the same.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Finding {
+    /// Needed, and damaged where the check of the packs didn't tell it.
+    Damaged(Id),
+    /// Needed, and unreadable for another reason, where the check of the packs didn't tell it.
+    Unreadable(Id),
     /// Needed, and in no pack as what needs it.
     Missing(Id),
     /// The listing gives the file `name` another size than what is stored for it.
@@ -714,6 +758,8 @@ impl Finding {
             Finding::Missing(_) => 0,
             Finding::Size { .. } => 1,
             Finding::TooBig { .. } => 2,
+            Finding::Damaged(_) => 3,
+            Finding::Unreadable(_) => 4,
         }
     }
 }
@@ -724,7 +770,7 @@ fn look_at(
     repo: &Repository,
     window_days: u32,
     now_ms: i64,
-    damaged: &HashSet<Id>,
+    told: &Told,
 ) -> Result<Result<(Findings, Box<Look>), RepoError>, Unmade> {
     // `head` before the packs are listed: whatever it names was stored before the listing began.
     let head = match repo.head() {
@@ -751,7 +797,7 @@ fn look_at(
         packs_dir: repo.packs_dir(),
     };
     let watch = Noted {
-        watch: damaged.clone(),
+        watch: told.damaged.clone(),
         ..Noted::default()
     };
     let (kept, mut noted) = tidy::needs(&src, &packs, head, since, watch).map_err(packs_failed)?;
@@ -761,18 +807,28 @@ fn look_at(
         .filter(|id| !noted.known.contains_key(id))
         .copied()
         .collect();
-    let unread = noted.unread.iter();
-    missing.extend(
-        unread
-            .filter(|(_, why)| matches!(why, Unread::Missing | Unread::OtherKind))
-            .map(|(id, _)| *id),
-    );
-    let mut found = Findings::default();
-    found.add(
-        0,
-        missing.len() as u64,
-        missing.into_iter().map(Finding::Missing),
-    );
+    let (mut damaged, mut unreadable) = (BTreeSet::new(), BTreeSet::new());
+    for (id, why) in &noted.unread {
+        let into = match why {
+            Unread::Missing | Unread::OtherKind => &mut missing,
+            // Told already, by the check of the packs.
+            _ if told.contains(id) => continue,
+            Unread::Damaged(_) => &mut damaged,
+            Unread::Unreadable(_) => &mut unreadable,
+        };
+        into.insert(*id);
+    }
+    let mut found = Findings {
+        diary_gap: noted.diary_gap,
+        ..Findings::default()
+    };
+    for (kind, ids, finding) in [
+        (0, missing, Finding::Missing as fn(Id) -> Finding),
+        (3, damaged, Finding::Damaged),
+        (4, unreadable, Finding::Unreadable),
+    ] {
+        found.add(kind, ids.len() as u64, ids.into_iter().map(finding));
+    }
     let sizes = std::mem::take(&mut noted.sizes);
     let sizes = sizes
         .into_iter()
@@ -866,55 +922,47 @@ fn too_big(noted: &Noted) -> Vec<Finding> {
     found
 }
 
-/// Tells what `look` found the project needs but couldn't read, past the objects in `damaged`,
-/// told already, and `found`, which the looks agree on. Gives, for each problem kept that is a
-/// listing giving a file the wrong size, the file's name.
-fn told_needs(
-    v: &mut Verified,
-    look: &Look,
-    found: &Findings,
-    damaged: &HashSet<Id>,
-) -> HashMap<usize, String> {
+/// Tells what the looks agree on, `found`, in the words of the last, `look`. Gives, for each
+/// problem kept that is a listing giving a file the wrong size, the file's name.
+fn told_needs(v: &mut Verified, look: &Look, found: &Findings) -> HashMap<usize, String> {
     v.saves = look.noted.saves.len() as u64;
     v.entries = look.noted.entries;
     v.lines = look.lines;
     v.shelves = look.shelves;
+    v.diary_gap = found.diary_gap;
     // Something in a pack Bolt couldn't read may be there all the same.
     let all_read = v.pack_damaged == 0 && v.pack_unreadable == 0;
-    let mut told = HashSet::new();
-    let mut other_kind = HashSet::new();
+    let (mut other_kind, mut why_damaged, mut why_unreadable) =
+        (HashSet::new(), HashMap::new(), HashMap::new());
     for (id, why) in &look.noted.unread {
-        let (kind, message) = match why {
-            Unread::Missing => continue,
+        match why {
+            Unread::Missing => {}
             Unread::OtherKind => {
                 other_kind.insert(*id);
-                continue;
             }
-            Unread::Damaged(_) if damaged.contains(id) => continue,
-            Unread::Damaged(why) => (
-                ProblemKind::ObjectDamaged,
-                format!("It can't be read: {}.", escape(why, false)),
-            ),
-            Unread::Unreadable(why) => (
-                ProblemKind::PackUnreadable,
-                format!("Bolt couldn't read it: {}.", escape(why, false)),
-            ),
-        };
-        if told.insert(*id) {
-            v.found(Problem {
-                kind,
-                pack: None,
-                object: Some(*id),
-                needed_by: None,
-                message,
-            });
+            Unread::Damaged(why) => {
+                why_damaged.entry(*id).or_insert(why.as_str());
+            }
+            Unread::Unreadable(why) => {
+                why_unreadable.entry(*id).or_insert(why.as_str());
+            }
         }
     }
     let mut names = HashMap::new();
-    let mut told_of = [0u64; 3];
+    let mut told_of = [0u64; 5];
     for finding in &found.kept {
         told_of[finding.kind()] += 1;
         let (kind, object, message) = match finding {
+            Finding::Damaged(id) => {
+                let why = escape(why_damaged.get(id).copied().unwrap_or_default(), false);
+                let message = format!("It can't be read: {why}.");
+                (ProblemKind::ObjectDamaged, *id, message)
+            }
+            Finding::Unreadable(id) => {
+                let why = escape(why_unreadable.get(id).copied().unwrap_or_default(), false);
+                let message = format!("Bolt couldn't read it: {why}.");
+                (ProblemKind::PackUnreadable, *id, message)
+            }
             Finding::Missing(id) => {
                 let message = if other_kind.contains(id) {
                     "It is stored, but as another kind of object than what needs it."
@@ -960,6 +1008,8 @@ fn told_needs(
         ProblemKind::ObjectMissing,
         ProblemKind::ObjectDamaged,
         ProblemKind::SaveTooBig,
+        ProblemKind::ObjectDamaged,
+        ProblemKind::PackUnreadable,
     ];
     for ((kind, &count), told) in kinds.into_iter().zip(&found.counts).zip(told_of) {
         v.more(kind, count.saturating_sub(told));

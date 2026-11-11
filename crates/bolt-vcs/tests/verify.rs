@@ -111,6 +111,37 @@ fn verify_lists_problems_and_exits_1() {
 }
 
 #[test]
+fn a_diary_with_a_gap_is_never_called_intact() {
+    let env = project();
+    let gone = bolt_core::id::Id([7; 32]);
+    let mut repo = bolt_core::repo::Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (_, mut entry) = repo.current().unwrap();
+    entry.parent = Some(gone);
+    entry.command = "test".into();
+    entry.folder_change = None;
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
+    drop(repo);
+    let out = run(&env, &["verify"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(&format!(
+            "        {}  It isn't in any pack.",
+            gone.short_hex()
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("intact"), "{shown}");
+    assert!(
+        shown.contains("    x the undo diary has a gap: Bolt could read 1 entry of it\n"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn verify_json_matches_json_md() {
     let env = project();
     let out = run(&env, &["--json", "verify"]);

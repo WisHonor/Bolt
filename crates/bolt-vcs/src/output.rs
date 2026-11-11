@@ -1246,14 +1246,18 @@ pub fn verified(v: &Verified, project: &str) -> String {
         );
         unshown |= group(&mut text, s, &too_big, big);
         let entries = counted(v.entries, "entry", "entries");
-        let _ = writeln!(
-            text,
-            "{}",
+        let diary = if v.diary_gap {
+            s.detail(
+                Some(&cross),
+                &format!("the undo diary has a gap: Bolt could read {entries} of it"),
+            )
+        } else {
             s.detail(
                 Some(&check),
-                &format!("the undo diary ({entries}) is intact")
+                &format!("the undo diary ({entries}) is intact"),
             )
-        );
+        };
+        let _ = writeln!(text, "{diary}");
     } else {
         let why = v
             .needs_failure

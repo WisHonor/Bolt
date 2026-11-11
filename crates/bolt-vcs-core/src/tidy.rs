@@ -464,6 +464,8 @@ pub(crate) struct Noted {
     pub(crate) saves: Vec<Id>,
     /// The diary entries read from the current one back.
     pub(crate) entries: u64,
+    /// Whether the diary met an entry that is missing or can't be read.
+    pub(crate) diary_gap: bool,
     /// Each save read, with its top folder's listing.
     pub(crate) roots: Vec<(Id, Id)>,
     /// What each listing read holds, to count a save's entries by path.
@@ -666,7 +668,10 @@ fn mark(
     let mut walked = HashSet::new();
     if let Err(e) = marks.diary(head, since, &mut walked, false) {
         match (marks.gap.take(), &mut marks.noted) {
-            (Some(missing), Some(noted)) => noted.unread.push((missing, Unread::Missing)),
+            (Some(missing), Some(noted)) => {
+                noted.unread.push((missing, Unread::Missing));
+                noted.diary_gap = true;
+            }
             _ => return Err(e),
         }
     }
@@ -694,8 +699,8 @@ fn mark(
             warning::DIARY_END_UNREADABLE,
             format!(
                 "The diary that ends at entry {}, cut off from the current one, can't be read \
-                 back to its start: entry {} isn't in the store. Tidy kept what it could reach \
-                 from that end and went on.",
+                 back to its start: entry {} isn't in the store. What can be reached from that \
+                 end is kept, and Bolt went on.",
                 end.short_hex(),
                 missing.short_hex()
             ),
@@ -813,6 +818,7 @@ impl Marks<'_> {
                     e => Unread::Unreadable(e.to_string()),
                 };
                 noted.unread.push((*id, why));
+                noted.diary_gap = true;
                 Ok(None)
             }
         }
