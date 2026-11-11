@@ -1163,6 +1163,33 @@ fn a_diary_with_a_gap_is_not_intact() {
 }
 
 #[test]
+fn an_entry_only_a_cut_off_diary_cannot_read_is_no_gap_in_the_current_one() {
+    let (_dir, mut repo) = project(0);
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (_, mut entry) = repo.current().unwrap();
+    // Two entries beside the diary: an end, and the one before it.
+    entry.command = "before".into();
+    entry.folder_change = None;
+    let packs = repo.new_packs().unwrap();
+    let before = repo.store_entry(&lock, packs, &entry).unwrap();
+    entry.parent = Some(before);
+    entry.command = "end".into();
+    let packs = repo.new_packs().unwrap();
+    repo.store_entry(&lock, packs, &entry).unwrap();
+    drop(lock);
+    let (path, at) = objects(&repo)
+        .into_iter()
+        .find(|(_, e)| e.id == before)
+        .unwrap();
+    repo.store().close_all();
+    flip(&path, at.offset + ENTRY_HEADER_LEN);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectDamaged], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(before));
+    assert!(!v.diary_gap);
+}
+
+#[test]
 fn what_the_check_of_the_packs_told_as_unreadable_is_not_told_again() {
     let (_dir, mut repo) = project(0);
     let mut content = None;

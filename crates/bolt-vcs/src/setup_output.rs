@@ -278,15 +278,15 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
     text
 }
 
-/// A rule's pattern, escaped; between double quotes, as `bolt.toml` writes it, when it holds a
-/// space, so the list reads as its patterns.
+/// A rule's pattern, escaped. One that holds a space of any kind or a double quote is between
+/// double quotes, as `bolt.toml` writes it (`\"` and `\\` inside), so the list reads as its
+/// patterns.
 fn shown_pattern(pattern: &str) -> String {
-    let shown = escape(pattern, false);
-    if pattern.contains(' ') {
-        format!("\"{shown}\"")
-    } else {
-        shown
+    if !pattern.contains(|c: char| c.is_whitespace() || c == '"') {
+        return escape(pattern, false);
     }
+    let inside = pattern.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escape(&inside, false))
 }
 
 pub fn rules_json(read: &RulesRead, block_lines: Option<usize>) -> Value {
@@ -405,6 +405,10 @@ mod tests {
         let shown = rules_shown(&read, None);
         let row = shown.lines().find(|l| l.contains("Lockable")).unwrap();
         assert!(row.ends_with(" \"My Art/*.psd\" *.png"), "{row}");
+        // A quote inside can't end the quotes early, and a wide space is a space.
+        assert_eq!(shown_pattern(r#"a" "b\c"#), r#""a\" \"b\\c""#);
+        assert_eq!(shown_pattern("a\u{3000}b/*"), "\"a\u{3000}b/*\"");
+        assert_eq!(shown_pattern(r"a\b"), r"a\b");
     }
 
     #[test]

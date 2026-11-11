@@ -161,6 +161,21 @@ fn files_changed_after_they_were_kept_are_not_written() {
     let changed = done.warnings.iter().any(|w| w.kind == "changed_since_plan");
     assert!(changed, "{:?}", done.warnings);
     assert_eq!(fs::read(dir.path().join("bolt.toml")).unwrap(), b"edited");
+    // The step is in the diary though it wrote nothing; taking it back stops at the edits.
+    let who = who();
+    let Err(stopped) = undo(&mut repo, &step(&who), &mut |_| {}) else {
+        panic!("the undo wrote over the edits");
+    };
+    let why = stopped.to_string();
+    assert!(why.contains("so that step changed nothing"), "{why}");
+    assert_eq!(
+        files(dir.path()),
+        holding(&[
+            ("a.txt", b"a"),
+            ("bolt.toml", b"edited"),
+            (".boltignore", b"edited too\n"),
+        ])
+    );
 }
 
 #[test]

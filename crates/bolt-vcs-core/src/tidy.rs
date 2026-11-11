@@ -680,6 +680,8 @@ fn mark(
         noted.entries = marks.followed.iter().filter(|(k, _)| *k == entry).count() as u64;
     }
     // A diary cut off from `head` (a rolled-back `head`, a crash's leftover) lives out the window.
+    // What can't be read of it is told, and is no gap in the current diary.
+    let gap = marks.noted.as_ref().is_some_and(|n| n.diary_gap);
     for (end, entry) in undo::ends_among(src.store, entries.iter().copied())? {
         if entry.who.time_ms < since {
             continue;
@@ -705,6 +707,9 @@ fn mark(
                 missing.short_hex()
             ),
         ));
+    }
+    if let Some(noted) = &mut marks.noted {
+        noted.diary_gap = gap;
     }
     marks.follow()?;
     marks.chunks(packs)?;
