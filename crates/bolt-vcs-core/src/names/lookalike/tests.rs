@@ -102,3 +102,97 @@ fn every_git_spelling_is_spotted() {
         assert!(!is_git_alias(name), "{name:?}");
     }
 }
+
+#[test]
+fn git_spellings_match_what_git_fsck_flags() {
+    // Each checked with `git fsck`'s hasDotgit on a tree holding the name.
+    for name in [
+        ".git:",
+        ".git.:x",
+        ".git . :x",
+        ".git:x.",
+        "git~1:",
+        "git~1\\",
+        "x\\git~1.",
+        "a:b\\.git",
+        ".git\\\\",
+        ".g\u{200c}it\\x",
+        ".\u{200c}git",
+        ".git\u{206e}",
+    ] {
+        assert!(is_git_alias(name), "{name:?}");
+    }
+    for name in [
+        "x:.git",
+        ".gitx:.git",
+        "git~01",
+        "git~1x",
+        "git~1.x",
+        " .git",
+        ". git",
+        ".git x",
+        "..git",
+        ".git~1",
+        // HFS+ skips ignorables but not trailing dots or spaces, and only from the start.
+        ".git\u{200c}.",
+        ".git\u{200c} ",
+        ".git\u{200c}:x",
+        "git~1\u{200c}",
+        "x\\.g\u{200c}it",
+        ".git\u{200b}",
+        ".git\u{2060}",
+        ".git\u{a0}",
+        ".g\u{130}t",
+        ".\u{212a}IT",
+    ] {
+        assert!(!is_git_alias(name), "{name:?}");
+    }
+}
+
+#[test]
+fn short_names_of_gitmodules_match_what_git_fsck_flags() {
+    // Each checked with `git fsck`'s gitmodulesSymlink on a link holding the name.
+    let short =
+        |name: &str| is_plain_short_name(name, b"gitmod") || is_hashed_short_name(name, b"gi7eba");
+    for name in [
+        "gitmod~1",
+        "GITMOD~4",
+        "GiTmOd~2",
+        "gitmod~1 . ",
+        "gitmod~1 :x",
+        "x\\gitmod~1",
+        "gi7eba~1",
+        "Gi7EbA~9",
+        "gi7eba~1.",
+        "gi7eba~1:",
+    ] {
+        assert!(short(name), "{name:?}");
+    }
+    for name in [
+        "gitmod~5",
+        "gitmod~0",
+        "gitmod~10",
+        "gitmod~1x",
+        "gitmod~1.x",
+        "gitmo~1",
+        "gi7eba~0",
+        "gi7eba~10",
+        "gi7eb~1",
+        "gi7ebaa~1",
+        "gi7ebb~1",
+        "gitmod~1\u{200c}",
+        ".gitmodules",
+    ] {
+        assert!(!short(name), "{name:?}");
+    }
+    // Stricter than Git, which lets a `\` follow a short name.
+    assert!(short("gitmod~1\\"));
+}
+
+#[test]
+fn ordinary_names_are_answered_at_once() {
+    for name in ["Player.cs", "README", "src", "名前", "x\\y"] {
+        assert!(!is_git_alias(name), "{name:?}");
+        assert!(!is_bolt_alias(name), "{name:?}");
+    }
+}

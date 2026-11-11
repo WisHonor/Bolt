@@ -74,3 +74,35 @@ fn people_parse_best_effort() {
     let line = format!("{}\u{1f600}bb <a> 1 +0000", "a".repeat(4093));
     assert_eq!(parse_person(line.as_bytes()).name, "a".repeat(4093));
 }
+
+#[test]
+fn people_read_as_git_log_shows_them() {
+    // Each checked against `git log --date=raw --format='%an|%ae|%at|%ad'`.
+    for (line, name, email, time_ms, tz) in [
+        (&b"A <a@b> 1+0100"[..], "A", "a@b", 1000, 60),
+        (b"A <a@b>1 +0100", "A", "a@b", 1000, 60),
+        (b"A <a@b> 1 +0100 extra", "A", "a@b", 1000, 60),
+        (b"A <a@b> 1 + 0100", "A", "a@b", 0, 0),
+        (b"A <a@b> x1 +0100", "A", "a@b", 0, 0),
+        (b"A <a@b> -1 +0100", "A", "a@b", 0, 0),
+        (b"A <a>b> 1 +0000", "A", "a", 1000, 0),
+        (b"A <a@b>  <c> 5 +0100", "A", "a@b", 5000, 60),
+        (b"A <a@b> 1 +0100 >x 2 +0200", "A", "a@b", 0, 0),
+        (b"A > <a@b> 1 +0000", "A >", "a@b", 1000, 0),
+        (b"A<a@b> 1 +0000", "A", "a@b", 1000, 0),
+        (b"A <  a@b  > 1 +0000", "A", "  a@b  ", 1000, 0),
+    ] {
+        let p = parse_person(line);
+        assert_eq!(
+            (
+                p.name.as_str(),
+                p.email.as_str(),
+                p.time_ms,
+                p.tz_offset_min
+            ),
+            (name, email, time_ms, tz),
+            "{}",
+            String::from_utf8_lossy(line)
+        );
+    }
+}

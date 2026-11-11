@@ -126,3 +126,238 @@ fn pointers_parse_as_git_lfs_parses_them() {
     assert!(lfs_pointer(&raw).is_some());
     assert!(lfs_pointer(&[b"\xff", pointer.as_bytes()].concat()).is_none());
 }
+
+const OID: &str = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
+
+fn ext(digit: char, name: &str) -> String {
+    format!("ext-{digit}-{name} sha256:{}\n", "f".repeat(64))
+}
+
+#[test]
+fn the_lines_go_in_git_lfs_order() {
+    // Each checked with `git lfs pointer --check`.
+    let v = "version https://git-lfs.github.com/spec/v1\n";
+    let o = format!("oid sha256:{OID}\n");
+    let s = "size 12345\n";
+    for (what, data, want) in [
+        (
+            "the pre-release version",
+            format!("version https://hawser.github.com/spec/v1\n{o}{s}"),
+            true,
+        ),
+        (
+            "extensions between the lines",
+            format!(
+                "{}{v}{}{o}{}{s}",
+                ext('0', "a"),
+                ext('1', "b"),
+                ext('2', "c")
+            ),
+            true,
+        ),
+        (
+            "extensions out of order",
+            format!("{}{}{v}{o}{s}", ext('1', "a"), ext('0', "b")),
+            true,
+        ),
+        (
+            "one extension twice",
+            format!("{}{}{v}{o}{s}", ext('0', "a"), ext('0', "a")),
+            true,
+        ),
+        (
+            "one name at two digits",
+            format!("{}{}{v}{o}{s}", ext('0', "a"), ext('1', "a")),
+            true,
+        ),
+        (
+            "two names at one digit",
+            format!("{}{}{v}{o}{s}", ext('0', "a"), ext('0', "b")),
+            false,
+        ),
+        (
+            "names after their first letter",
+            format!("{}{}{v}{o}{s}", ext('0', "_./"), ext('1', "9\u{e9}")),
+            true,
+        ),
+        (
+            "a name starting with `-`",
+            format!("{}{v}{o}{s}", ext('0', "-a")),
+            false,
+        ),
+        (
+            "a name starting outside ASCII",
+            format!("{}{v}{o}{s}", ext('0', "\u{e9}")),
+            false,
+        ),
+        ("an empty name", format!("{}{v}{o}{s}", ext('0', "")), false),
+        (
+            "two digits",
+            format!("ext-10-a sha256:{}\n{v}{o}{s}", "f".repeat(64)),
+            false,
+        ),
+        ("the oid first", format!("{o}{v}{s}"), false),
+        ("the size before the oid", format!("{v}{s}{o}"), false),
+        ("the version twice", format!("{v}{v}{o}{s}"), false),
+        ("the size twice", format!("{v}{o}{s}{s}"), false),
+        ("another key", format!("{v}{o}{s}foo bar\n"), false),
+        ("no size", format!("{v}{o}"), false),
+        (
+            "CR alone ends no line",
+            format!("{v}{o}{s}").replace('\n', "\r"),
+            false,
+        ),
+        (
+            "two CRs",
+            format!("{v}{o}{s}").replace('\n', "\r\r\n"),
+            false,
+        ),
+        ("an empty CRLF line", format!("{v}\r\n{o}{s}"), true),
+        ("a line of spaces", format!("{v}  \n{o}{s}"), false),
+        ("a space starting a line", format!("{v} {o}{s}"), false),
+        ("a tab after a key", format!("{v}{o}size\t12345\n"), false),
+        (
+            "Unicode spaces around it",
+            format!("\u{2028}{v}{o}{s}\u{3000}"),
+            true,
+        ),
+        ("a zero-width space", format!("\u{200b}{v}{o}{s}"), false),
+        (
+            "the largest size",
+            format!("{v}{o}size 9223372036854775807\n"),
+            true,
+        ),
+        ("a hex size", format!("{v}{o}size 0x10\n"), false),
+    ] {
+        assert_eq!(lfs_pointer(data.as_bytes()).is_some(), want, "{what}");
+    }
+    // A byte that isn't UTF-8 stops the trimming of whitespace.
+    let pointer = format!("{v}{o}{s}");
+    assert!(lfs_pointer(&[b"\xe2\x80 ", pointer.as_bytes()].concat()).is_none());
+    assert!(lfs_pointer(&[pointer.as_bytes(), b"\xc2\xa0\xe2\x80"].concat()).is_none());
+}
+
+/// Near-pointers made from the pieces Git LFS looks at, each judged by `git lfs pointer
+/// --check` too.
+#[test]
+fn lfs_pointer_agrees_with_git_lfs() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let git_lfs = || {
+        let mut command = Command::new("git");
+        command.args(["lfs"]).current_dir(dir.path());
+        command
+    };
+    if !git_lfs()
+        .arg("version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("git lfs isn't installed: skipped");
+        return;
+    }
+    let oid = format!("sha256:{OID}");
+    let pieces: [&[&str]; 7] = [
+        &[
+            "https://git-lfs.github.com/spec/v1",
+            "http://git-media.io/v/2",
+            "https://git-lfs.github.com/spec/v2",
+            "https://git-lfs.github.com/spec/v1 ",
+        ],
+        &[&oid, &oid.to_uppercase(), &oid[..70], OID],
+        &[
+            "12345",
+            "+1",
+            "-0",
+            "000",
+            "-1",
+            "9223372036854775808",
+            "1 2",
+            "",
+        ],
+        &[
+            "",
+            "ext-0-foo",
+            "ext-0--a",
+            "ext-0-foo ext-0-bar",
+            "ext-3-a ext-1-b",
+        ],
+        &["\n", "\r\n", "\r", "\n\n"],
+        &["", " ", "\u{a0}", "\u{200b}", "\u{b}"],
+        &["vos", "ovs", "vso", "vosx"],
+    ];
+    let make = |pick: [usize; 7]| {
+        let [v, o, s, e, end, around, order] = [0, 1, 2, 3, 4, 5, 6].map(|i| pieces[i][pick[i]]);
+        let mut lines: Vec<String> = e
+            .split(' ')
+            .filter(|key| !key.is_empty())
+            .map(|key| format!("{key} sha256:{}", "f".repeat(64)))
+            .collect();
+        for key in order.chars() {
+            lines.push(match key {
+                'v' => format!("version {v}"),
+                'o' => format!("oid {o}"),
+                's' => format!("size {s}"),
+                _ => "x y".to_owned(),
+            });
+        }
+        format!("{around}{}{end}{around}", lines.join(end))
+    };
+    // Each piece once from the canonical pointer, then mixtures.
+    let mut picks = vec![[0; 7]];
+    for (i, list) in pieces.iter().enumerate() {
+        for choice in 1..list.len() {
+            let mut pick = [0; 7];
+            pick[i] = choice;
+            picks.push(pick);
+        }
+    }
+    let mut seed = 0x9e37_79b9_u32;
+    for _ in 0..40 {
+        picks.push(std::array::from_fn(|i| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as usize % pieces[i].len()
+        }));
+    }
+    let datas: Vec<String> = picks.into_iter().map(make).collect();
+    let verdicts: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = datas
+            .chunks(datas.len().div_ceil(8))
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|data| {
+                            let mut child = git_lfs()
+                                .args(["pointer", "--check", "--stdin"])
+                                .stdin(Stdio::piped())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn()
+                                .unwrap();
+                            child
+                                .stdin
+                                .take()
+                                .unwrap()
+                                .write_all(data.as_bytes())
+                                .unwrap();
+                            let code = child.wait().unwrap().code();
+                            assert!(matches!(code, Some(0 | 1)), "{data:?}: {code:?}");
+                            code == Some(0)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    assert!(verdicts.iter().any(|&yes| yes) && verdicts.iter().any(|&yes| !yes));
+    for (data, git) in datas.iter().zip(verdicts) {
+        assert_eq!(lfs_pointer(data.as_bytes()).is_some(), git, "{data:?}");
+    }
+}
