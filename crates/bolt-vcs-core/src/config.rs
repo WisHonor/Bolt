@@ -17,6 +17,9 @@ use crate::safe_fs;
 use crate::save::Person;
 use crate::text::escape;
 
+mod git_path;
+use git_path::tidy_path;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub name: String,
@@ -667,110 +670,6 @@ fn os_path(bytes: Vec<u8>) -> Option<PathBuf> {
     {
         String::from_utf8(bytes).ok().map(PathBuf::from)
     }
-}
-
-/// Git's `normalize_path_copy`, which Git runs on `GIT_CONFIG_SYSTEM` alone: on Windows (`windows`)
-/// `\` is a separator too, and a drive or `//server/share/` starts a path; each run of separators
-/// becomes one `/`; a `.` part is dropped; and a `..` part takes the part before it away. Only the
-/// text changes. `None` where a `..` would climb above the path's start, where Git's fails.
-#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
-    let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
-    // Past the end reads as the C string's closing NUL.
-    let at = |i: usize| src.get(i).copied().unwrap_or(0);
-    let skip_seps = |mut i: usize| {
-        while is_sep(at(i)) {
-            i = i.saturating_add(1);
-        }
-        i
-    };
-    let start = first_component(src, windows);
-    let root = src.get(..start)?.iter();
-    let mut out: Vec<u8> = root.map(|&c| if is_sep(c) { b'/' } else { c }).collect();
-    let kept = out.len();
-    let mut i = skip_seps(start);
-    loop {
-        if at(i) == b'.' {
-            let up_to = match (at(i.saturating_add(1)), at(i.saturating_add(2))) {
-                (0, _) => {
-                    i = i.saturating_add(1);
-                    None
-                }
-                (c, _) if is_sep(c) => {
-                    i = skip_seps(i.saturating_add(2));
-                    continue;
-                }
-                (b'.', 0) => Some(i.saturating_add(2)),
-                (b'.', c) if is_sep(c) => Some(skip_seps(i.saturating_add(3))),
-                _ => None,
-            };
-            if let Some(next) = up_to {
-                // Back past the `/` that ends the part before, to the `/` before that part.
-                let end = out.len().checked_sub(1).filter(|&end| end > kept)?;
-                let part = out.get(kept..end)?.iter().rposition(|&c| c == b'/');
-                out.truncate(part.map_or(kept, |at| kept.saturating_add(at).saturating_add(1)));
-                i = next;
-                continue;
-            }
-        }
-        // A part, up to the next separator, then that run of separators as one `/`.
-        loop {
-            let c = at(i);
-            i = i.saturating_add(1);
-            if c == 0 {
-                return Some(out);
-            }
-            if is_sep(c) {
-                out.push(b'/');
-                i = skip_seps(i);
-                break;
-            }
-            out.push(c);
-        }
-    }
-}
-
-/// Git's `offset_1st_component`: how long the root of `path` is, which `tidy_path` keeps but for
-/// its `\`, which becomes `/`: a leading `/`, and on Windows a drive (Git's `has_dos_drive_prefix`,
-/// in compat/win32/path-utils.c) or the `//server/share/` of a network path.
-#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-fn first_component(path: &[u8], windows: bool) -> usize {
-    let is_sep = |c: u8| c == b'/' || (windows && c == b'\\');
-    let at = |i: usize| path.get(i).copied().unwrap_or(0);
-    if !windows {
-        return usize::from(is_sep(at(0)));
-    }
-    let drive = match at(0) {
-        0 => 0,
-        c if c & 0x80 == 0 => {
-            if at(1) == b':' {
-                2
-            } else {
-                0
-            }
-        }
-        // A drive named by a letter beyond ASCII, of up to four bytes in UTF-8.
-        _ => {
-            let letter = (1..4).find(|&i| at(i) & 0x80 == 0).unwrap_or(4);
-            if at(letter) == b':' {
-                letter.saturating_add(1)
-            } else {
-                0
-            }
-        }
-    };
-    if drive == 0 && is_sep(at(0)) && is_sep(at(1)) {
-        // Past the server's name, then the share's.
-        let Some(server) = path.iter().skip(2).position(|&c| is_sep(c)) else {
-            return 0;
-        };
-        let mut end = server.saturating_add(3);
-        while at(end) != 0 && !is_sep(at(end)) {
-            end = end.saturating_add(1);
-        }
-        return end.saturating_add(usize::from(is_sep(at(end))));
-    }
-    drive.saturating_add(usize::from(is_sep(at(drive))))
 }
 
 /// Whether `value`, a path a Git setting or variable gives, names no file, as Git reads it: the
@@ -1759,96 +1658,9 @@ mod tests {
         }
     }
 
-    /// Git's own cases for `normalize_path_copy` (t/t0060-path-utils.sh, v2.56.0), with what
-    /// Windows adds: `\`, drives and network paths.
+    /// `GIT_CONFIG_SYSTEM` names no file where Git opens none.
     #[test]
-    fn git_config_system_is_tidied_as_git_tidies_it() {
-        let failed = None;
-        let to = |text: &str| Some(text.to_owned());
-        // Run on every system; those marked POSIX there aren't run on Windows.
-        let everywhere = [
-            ("", to("")),
-            (".", to("")),
-            ("./", to("")),
-            ("./.", to("")),
-            ("./..", failed.clone()),
-            ("../.", failed.clone()),
-            ("./.././/", failed.clone()),
-            ("dir/..", to("")),
-            ("dir/sub/../..", to("")),
-            ("dir/sub/../../..", failed.clone()),
-            ("dir", to("dir")),
-            ("dir//", to("dir/")),
-            ("./dir", to("dir")),
-            ("dir/.", to("dir/")),
-            ("dir///./", to("dir/")),
-            ("dir//sub/..", to("dir/")),
-            ("dir/sub/../", to("dir/")),
-            ("dir/sub/../.", to("dir/")),
-            ("dir/s1/../s2/", to("dir/s2/")),
-            ("d1/s1///s2/..//../s3/", to("d1/s3/")),
-            ("d1/s1//../s2/../../d2", to("d2")),
-            ("d1/.../d2", to("d1/.../d2")),
-            ("d1/..././../d2", to("d1/d2")),
-            ("/", to("/")),
-            ("/.", to("/")),
-            ("/../.", failed.clone()),
-            ("/dir", to("/dir")),
-            ("/dir//", to("/dir/")),
-            ("/./dir", to("/dir")),
-            ("/dir/.", to("/dir/")),
-            ("/dir///./", to("/dir/")),
-            ("/dir//sub/..", to("/dir/")),
-            ("/dir/sub/../", to("/dir/")),
-            ("/dir/s1/../s2/", to("/dir/s2/")),
-            ("/d1/s1///s2/..//../s3/", to("/d1/s3/")),
-            ("/d1/s1//../s2/../../d2", to("/d2")),
-            ("/d1/.../d2", to("/d1/.../d2")),
-            ("/d1/..././../d2", to("/d1/d2")),
-        ];
-        let posix = [
-            ("//", to("/")),
-            ("///", to("/")),
-            ("/./", to("/")),
-            ("/./..", failed.clone()),
-            ("/./.././/", failed.clone()),
-            ("/dir/..", to("/")),
-            ("/dir/sub/../..", to("/")),
-            ("/dir/sub/../../..", failed.clone()),
-            ("//dir/sub/../.", to("/dir/")),
-            // `\` is no separator there.
-            ("\\dev\\null", to("\\dev\\null")),
-        ];
-        let windows = [
-            ("\\dev\\null", to("/dev/null")),
-            ("C:\\dir\\..\\x", to("C:/x")),
-            ("C:dir/../..", failed.clone()),
-            ("C:\\..", failed.clone()),
-            ("\\\\server\\share\\dir\\..\\x", to("//server/share/x")),
-            ("//server/share/../x", failed.clone()),
-            // A network path with no share keeps no root, as in Git.
-            ("//server", to("server")),
-            ("\u{e4}:\\x\\.\\y", to("\u{e4}:/x/y")),
-        ];
-        let tidy = |text: &str, windows| {
-            let tidied = tidy_path(text.as_bytes(), windows)?;
-            Some(String::from_utf8(tidied).unwrap())
-        };
-        for (text, want) in everywhere.iter() {
-            for on_windows in [false, true] {
-                assert_eq!(
-                    &tidy(text, on_windows),
-                    want,
-                    "{text:?}, Windows: {on_windows}"
-                );
-            }
-        }
-        for (text, want) in posix {
-            assert_eq!(tidy(text, false), want, "{text:?}");
-        }
-        for (text, want) in windows {
-            assert_eq!(tidy(text, true), want, "{text:?} on Windows");
-        }
+    fn git_config_system_names_no_file_where_git_reads_none() {
         // So these name no file on Windows, as they do to Git there.
         let named = |text: &str, windows| system_file_named(text.as_bytes(), windows);
         for text in ["\\dev\\null", "/dev//null", "/dev/./null", "/x/../dev/null"] {

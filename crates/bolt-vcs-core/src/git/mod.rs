@@ -8,20 +8,24 @@ mod config;
 #[cfg(any(test, feature = "test-support"))]
 pub mod craft;
 mod id;
+mod lfs;
 mod object;
 mod odb;
 mod pack;
+mod person;
 mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
+pub use lfs::{LfsPointer, MAX_LFS_POINTER_BYTES, lfs_pointer};
+pub(crate) use object::split_at_byte;
 pub use object::{
-    Commit, LfsPointer, MAX_LFS_POINTER_BYTES, TagObject, TreeEntry, is_exact_lfs_pointer,
-    is_lfs_lookalike, lfs_pointer, looks_like_lfs_pointer, parse_commit, parse_person, parse_tag,
-    parse_tree, rebuild_commit,
+    Commit, TagObject, TreeEntry, is_exact_lfs_pointer, is_lfs_lookalike, looks_like_lfs_pointer,
+    parse_commit, parse_tag, parse_tree, rebuild_commit,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use odb::set_test_delta_limits;
 pub use odb::{BlobReader, DELTA_BASE_CACHE, MAX_DELTA_DEPTH, MAX_IN_MEMORY_OBJECT, Object};
+pub use person::parse_person;
 // For the delta fuzz target.
 #[cfg(feature = "test-support")]
 pub use pack::apply_delta;
@@ -322,7 +326,7 @@ fn owner_message(path: &Path, refusal: &RepoError) -> String {
     }
 }
 
-fn broken(what: impl Into<String>) -> GitError {
+pub(crate) fn broken(what: impl Into<String>) -> GitError {
     GitError::Broken { what: what.into() }
 }
 
@@ -343,12 +347,12 @@ pub(crate) fn shown(bytes: &[u8]) -> String {
 }
 
 /// Git's `isspace`: space, tab, LF and CR, but not vertical tab or form feed.
-fn is_git_space(c: u8) -> bool {
+pub(crate) fn is_git_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 /// `text` without Git's whitespace at its end, as `strbuf_rtrim` takes it off.
-fn trim_end(mut text: &[u8]) -> &[u8] {
+pub(crate) fn trim_end(mut text: &[u8]) -> &[u8] {
     while let Some((&last, rest)) = text.split_last()
         && is_git_space(last)
     {
@@ -358,7 +362,7 @@ fn trim_end(mut text: &[u8]) -> &[u8] {
 }
 
 /// `text` without Git's whitespace at its start.
-fn trim_start(mut text: &[u8]) -> &[u8] {
+pub(crate) fn trim_start(mut text: &[u8]) -> &[u8] {
     while let Some((&first, rest)) = text.split_first()
         && is_git_space(first)
     {

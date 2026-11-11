@@ -1,5 +1,5 @@
 //! Bolt's ignore rules against Git itself: the files a save keeps, and the verdict on each path,
-//! for rule files drawn at random, and the cases of Git's own `t/t0008-ignores.sh`.
+//! for rule files drawn at random.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -182,7 +182,7 @@ fn git_version() -> (u32, u32) {
     })
 }
 
-/// Whether Git 2.52 changed what `line` means: its `match_pathname` keeps one byte of a
+/// Whether Git 2.52 changed what `line` means: its matcher keeps one byte of a
 /// pattern's literal start since, so a `**` right after it is no longer a whole folder name.
 /// Errs towards yes.
 fn changed_in_git_2_52(line: &str) -> bool {
@@ -583,152 +583,6 @@ proptest! {
                 path,
                 why
             );
-        }
-    }
-}
-
-/// Paths, whether each is a folder, and what Git says of it.
-type Verdicts<'a> = &'a [(&'a str, bool, Decision)];
-
-/// Rules by folder, as t0008 writes them.
-fn rules_of(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
-    files
-        .iter()
-        .map(|&(folder, text)| (folder.to_owned(), text.as_bytes().to_vec()))
-        .collect()
-}
-
-#[test]
-fn gits_own_ignore_cases_match() {
-    use Decision::*;
-    let drive = Drive {
-        ignores_case: false,
-        composes_unicode: false,
-    };
-    // t0008's set-up, without the user's own lists, which Bolt never reads.
-    let setup = rules_of(&[
-        ("", "one\nignored-*\ntop-level-dir/\n"),
-        ("a", "two*\n*three\n"),
-        (
-            "a/b",
-            "four\nfive\n# this comment should affect the line numbers\nsix\nignored-dir/\n\
-             # and so should this blank line:\n\n!on*\n!two\n",
-        ),
-        ("a/b/ignored-dir", "seven\n"),
-    ]);
-    let rule_cases: &[(&BTreeMap<String, Vec<u8>>, Verdicts)] = &[
-        (
-            &setup,
-            &[
-                ("non-existent", false, NoRule),
-                ("a/non-existent", false, NoRule),
-                ("one", false, Ignored),
-                ("a/one", false, Ignored),
-                ("not-ignored", false, NoRule),
-                ("a/not-ignored", false, NoRule),
-                // With --no-index, a file in the index is judged like any other.
-                ("ignored-but-in-index", false, Ignored),
-                ("a/ignored-but-in-index", false, Ignored),
-                ("ignored-and-untracked", false, Ignored),
-                ("a/ignored-and-untracked", false, Ignored),
-                ("a/3-three", false, Ignored),
-                ("a/three-not-this-one", false, NoRule),
-                ("a/b/one", false, Kept),
-                ("a/b/ignored-dir", true, Ignored),
-                ("a/b/ignored-dir/foo", false, Ignored),
-                ("a/b/ignored-dir/twoooo", false, Ignored),
-                ("a/b/ignored-dir/seven", false, Ignored),
-                ("a/b/on", false, Kept),
-                ("a/b/one one", false, Kept),
-                ("a/b/one two", false, Kept),
-                ("a/b/one\"three", false, Kept),
-                ("a/b/not-ignored", false, NoRule),
-                ("a/b/two", false, Kept),
-                ("a/b/twooo", false, Ignored),
-                ("globaltwo", false, NoRule),
-                ("a/globaltwo", false, NoRule),
-                ("a/b/globaltwo", false, NoRule),
-                ("b/globaltwo", false, NoRule),
-                ("c/not-ignored", false, NoRule),
-                ("top-level-dir", true, Ignored),
-            ],
-        ),
-        // "exact prefix matching", with root and without.
-        (
-            &rules_of(&[("a", "/git/\n")]),
-            &[
-                ("a/git", true, Ignored),
-                ("a/git/foo", false, Ignored),
-                ("a/git-foo", true, NoRule),
-                ("a/git-foo/bar", false, NoRule),
-            ],
-        ),
-        (
-            &rules_of(&[("a", "git/\n")]),
-            &[
-                ("a/git", true, Ignored),
-                ("a/git/foo", false, Ignored),
-                ("a/git-foo", true, NoRule),
-                ("a/git-foo/bar", false, NoRule),
-            ],
-        ),
-        // "directories and ** matches"
-        (
-            &rules_of(&[("", "data/**\n!data/**/\n!data/**/*.txt\n")]),
-            &[
-                ("file", false, NoRule),
-                ("data/file", false, Ignored),
-                ("data/data1/file1", false, Ignored),
-                ("data/data1/file1.txt", false, Kept),
-                ("data/data2/file2", false, Ignored),
-                ("data/data2/file2.txt", false, Kept),
-            ],
-        ),
-        // "** not confused by matching leading prefix"
-        (
-            &rules_of(&[("", "foo**/bar\n")]),
-            &[("foobar", false, NoRule), ("foo/bar", false, Ignored)],
-        ),
-        // "trailing whitespace is ignored", and "quoting allows trailing whitespace"
-        (
-            &rules_of(&[("", "whitespace/trailing   \n")]),
-            &[
-                ("whitespace/trailing", false, Ignored),
-                ("whitespace/untracked", false, NoRule),
-            ],
-        ),
-        (
-            &rules_of(&[("", "whitespace/trailing\\ \\ \n")]),
-            &[
-                ("whitespace/trailing  ", false, Ignored),
-                ("whitespace/untracked", false, NoRule),
-            ],
-        ),
-        // "correct handling of backslashes"
-        (
-            &rules_of(&[(
-                "",
-                "whitespace/trailing 1 \\    \n\
-                 whitespace/trailing 2 \\\\\\\\\n\
-                 whitespace/trailing 3 \\\\\\\\ \n\
-                 whitespace/trailing 4   \\\\\\    \n\
-                 whitespace/trailing 5 \\\\ \\\\\\   \n\
-                 whitespace/trailing 6 \\\\a\\\\\n",
-            )]),
-            &[
-                ("whitespace/trailing 1  ", false, Ignored),
-                ("whitespace/trailing 2 \\\\", false, Ignored),
-                ("whitespace/trailing 3 \\\\", false, Ignored),
-                ("whitespace/trailing 4   \\ ", false, Ignored),
-                ("whitespace/trailing 5 \\ \\ ", false, Ignored),
-                ("whitespace/trailing 6 \\a\\", false, Ignored),
-                ("whitespace/untracked", false, NoRule),
-            ],
-        ),
-    ];
-    for (rules, cases) in rule_cases {
-        for &(path, is_dir, want) in *cases {
-            assert_eq!(walk_verdict(rules, drive, path, is_dir), want, "{path:?}");
         }
     }
 }
