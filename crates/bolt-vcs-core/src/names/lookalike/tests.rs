@@ -76,7 +76,7 @@ fn every_git_spelling_is_spotted() {
     ] {
         assert!(!is_git_alias(&format!(".g{c}it")), "{c:?}");
     }
-    // Git's UTF-8 reader refuses U+FFFE and U+FFFF, which ends the name after `.git`.
+    // Git takes U+FFFE or U+FFFF after `.git` as the end of the name.
     for name in [".git\u{fffe}", ".git\u{ffff}", ".git\u{200c}\u{fffe}"] {
         assert!(is_git_alias(name), "{name:?}");
     }

@@ -19,9 +19,6 @@ use crate::text::escape;
 
 mod git_path;
 use git_path::tidy_path;
-// Reached by the comparison with the old path tidying.
-#[cfg(test)]
-pub(crate) use git_path::tidy_path as compared_tidy_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -316,7 +313,7 @@ impl<'a> UserGit<'a> {
                 PathBuf::from(home)
             }
         });
-        // As Git's `xdg_config_home`: the variable when it is set to something, else `~/.config`.
+        // As Git finds it: the variable when it is set to something, else `~/.config`.
         let xdg = var("XDG_CONFIG_HOME")
             .filter(|xdg| !xdg.is_empty())
             .map(PathBuf::from);

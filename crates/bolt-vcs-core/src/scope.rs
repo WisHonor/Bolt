@@ -158,7 +158,7 @@ mod tests {
         // A folder a pattern matches takes everything in it.
         let folder = Scope::new(&[pattern("", "s?b")], exact);
         assert!(folder.holds("sub/x/y.txt") && !folder.holds("sbb2/y.txt"));
-        // As Git's WM_CASEFOLD has it, a class of capitals takes small letters too.
+        // As Git folds case, a class of capitals takes small letters too.
         let upper = Scope::new(&[pattern("", "[[:upper:]]*.txt")], folding);
         assert!(upper.holds("A.txt") && upper.holds("a.TXT"));
         assert!(!Scope::new(&[pattern("", "[[:upper:]]*")], exact).holds("a"));

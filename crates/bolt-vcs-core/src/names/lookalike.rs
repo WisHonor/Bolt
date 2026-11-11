@@ -99,8 +99,8 @@ fn short_name(part: &str, prefix: &[u8], digits: RangeInclusive<u8>) -> bool {
 }
 
 /// Whether HFS+ reads `name` as `dotted`: the same ASCII letters in any case once the ignorable
-/// characters are skipped, then the end of the name or a `\`. Git's UTF-8 reader stops at
-/// U+FFFE and U+FFFF, so either ends the name too.
+/// characters are skipped, then the end of the name or a `\`. Git takes a name that goes on
+/// with U+FFFE or U+FFFF as ended there, so either ends the name too.
 fn hfs_spells(name: &str, dotted: &str) -> bool {
     let mut chars = name.chars().filter(|&c| !hfs_ignores(c));
     dotted

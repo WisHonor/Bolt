@@ -211,7 +211,7 @@ fn mode_kind((value, was_cut): (u16, bool), mode: &[u8]) -> Option<(EntryKind, b
         0o040000 => EntryKind::Folder,
         0o120000 => EntryKind::Symlink,
         0o160000 => EntryKind::ProjectLink,
-        // Any regular file's mode, by its owner-execute bit, as Git's `canon_mode` reads it.
+        // Any regular file's mode, by its owner-execute bit, as Git reads it.
         0o100000..=0o107777 if value & 0o100 == 0 => EntryKind::File,
         0o100000..=0o107777 => EntryKind::Executable,
         // Git reads most of the rest as a submodule, taking a file's ID for a commit.
@@ -364,7 +364,7 @@ fn other_headers<'a>(
 }
 
 /// `bytes` up to the first `byte`, and what follows it.
-pub(crate) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
+pub(super) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
     let at = bytes.iter().position(|&b| b == byte)?;
     let (before, after) = bytes.split_at_checked(at)?;
     Some((before, after.get(1..)?))
@@ -392,9 +392,9 @@ pub fn is_lfs_lookalike(start: &[u8]) -> bool {
     lfs_pointer(head).is_some() || lfs_pointer(&crlf).is_some() || looks_like_lfs_pointer(head)
 }
 
-/// Whether `data` is the pointer `p` in the exact form Git LFS writes (`Encoded` in its
-/// lfs/pointer.go): its own version, the oid and the size, each line ending in LF. Git LFS keeps
-/// an empty file as an empty blob, so no pointer of size 0 is in that form.
+/// Whether `data` is the pointer `p` in the exact form `git lfs pointer` writes: its own version,
+/// the oid and the size, each line ending in LF. Git LFS keeps an empty file as an empty blob, so
+/// no pointer of size 0 is in that form.
 #[must_use]
 pub fn is_exact_lfs_pointer(data: &[u8], p: &LfsPointer) -> bool {
     let exact = format!(

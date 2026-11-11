@@ -5,16 +5,10 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 mod config;
-// Reached by the comparison with the old reader.
-#[cfg(test)]
-pub(crate) use config::{read_format as read_config_format, read_worktree as read_config_worktree};
 #[cfg(any(test, feature = "test-support"))]
 pub mod craft;
 mod id;
 mod lfs;
-// Reached by the comparison with the old pointer reader.
-#[cfg(test)]
-pub(crate) use lfs::{LFS_SPEC, LFS_SPECS};
 mod object;
 mod odb;
 mod pack;
@@ -23,7 +17,7 @@ mod refs;
 
 pub use id::{GitId, HashKind, ObjectType, object_id};
 pub use lfs::{LfsPointer, MAX_LFS_POINTER_BYTES, lfs_pointer};
-pub(crate) use object::split_at_byte;
+use object::split_at_byte;
 pub use object::{
     Commit, TagObject, TreeEntry, is_exact_lfs_pointer, is_lfs_lookalike, looks_like_lfs_pointer,
     parse_commit, parse_tag, parse_tree, rebuild_commit,
@@ -332,7 +326,7 @@ fn owner_message(path: &Path, refusal: &RepoError) -> String {
     }
 }
 
-pub(crate) fn broken(what: impl Into<String>) -> GitError {
+fn broken(what: impl Into<String>) -> GitError {
     GitError::Broken { what: what.into() }
 }
 
@@ -352,13 +346,14 @@ pub(crate) fn shown(bytes: &[u8]) -> String {
     }
 }
 
-/// Git's `isspace`: space, tab, LF and CR, but not vertical tab or form feed.
-pub(crate) fn is_git_space(c: u8) -> bool {
+/// Whitespace as Git reads it in refs and person lines: space, tab, LF and CR, but not vertical
+/// tab or form feed.
+fn is_git_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r')
 }
 
-/// `text` without Git's whitespace at its end, as `strbuf_rtrim` takes it off.
-pub(crate) fn trim_end(mut text: &[u8]) -> &[u8] {
+/// `text` without Git's whitespace at its end.
+fn trim_end(mut text: &[u8]) -> &[u8] {
     while let Some((&last, rest)) = text.split_last()
         && is_git_space(last)
     {
@@ -368,7 +363,7 @@ pub(crate) fn trim_end(mut text: &[u8]) -> &[u8] {
 }
 
 /// `text` without Git's whitespace at its start.
-pub(crate) fn trim_start(mut text: &[u8]) -> &[u8] {
+fn trim_start(mut text: &[u8]) -> &[u8] {
     while let Some((&first, rest)) = text.split_first()
         && is_git_space(first)
     {

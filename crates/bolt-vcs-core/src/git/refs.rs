@@ -198,9 +198,9 @@ fn parse_head(text: &[u8], hash: HashKind) -> Result<Head, GitError> {
     )))
 }
 
-/// A ref file read as Git reads it (`parse_loose_ref_contents`, after `strbuf_rtrim`): `ref:`, any
-/// whitespace and another ref's name; or an ID, then the end, or whitespace and anything at all
-/// (FETCH_HEAD's form). Git would stop at a NUL; Bolt refuses one, as in config.
+/// A ref file read as Git reads it, whitespace at its end dropped: `ref:`, any whitespace and
+/// another ref's name; or an ID, then the end, or whitespace and anything at all (FETCH_HEAD's
+/// form). Git would stop at a NUL; Bolt refuses one, as in config.
 fn parse_ref_file(text: &[u8], hash: HashKind) -> Option<Contents<'_>> {
     if text.contains(&0) {
         return None;
@@ -349,8 +349,8 @@ fn read_packed(
     Ok(refs)
 }
 
-/// Git's `check_refname_format` with no options: two levels at least, and no level that is
-/// empty, starts with `.`, ends with `.lock`, or holds `..`, `@{`, a control character, a space,
+/// Whether `git check-ref-format` takes `name` with no options: two levels at least, and no level
+/// that is empty, starts with `.`, ends with `.lock`, or holds `..`, `@{`, a control character, a space,
 /// or any of `:?[\^~*`; the name isn't `@` and doesn't end with `.`.
 fn is_valid_ref_name(name: &[u8]) -> bool {
     let mut levels = 0usize;
@@ -637,8 +637,7 @@ mod tests {
         }
     }
 
-    /// Git's `parse_loose_ref_contents`, after the `strbuf_rtrim` of `read_ref_internal`
-    /// (refs/files-backend.c, v2.56.0).
+    /// Ref files as Git reads them: whitespace at the end dropped, then a symbolic ref or an ID.
     #[test]
     fn ref_files_are_read_as_git_reads_them() {
         fn sha1(text: &str) -> Option<Contents<'_>> {

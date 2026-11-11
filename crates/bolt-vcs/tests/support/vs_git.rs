@@ -434,7 +434,7 @@ fn tree_entries(mut raw: &[u8], hash: HashKind) -> Vec<(u32, &[u8], &[u8])> {
     entries
 }
 
-/// The kind of entry a mode makes, as Git reads modes (its `canon_mode`).
+/// The kind of entry a mode makes, as Git reads modes.
 fn kind_of(mode: u32) -> EntryKind {
     match mode & 0o170_000 {
         0o040_000 => EntryKind::Folder,

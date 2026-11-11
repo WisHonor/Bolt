@@ -3258,10 +3258,11 @@ mod tests {
     }
 
     #[test]
-    fn a_range_that_runs_backwards_matches_nothing_as_in_git() {
+    fn a_range_that_runs_backwards_matches_its_first_byte_alone_as_in_git() {
         let (dir, mut repo) = project();
         write(dir.path(), "secret.key", b"x");
         write(dir.path(), "m", b"x");
+        write(dir.path(), "z", b"x");
         write(dir.path(), ".boltignore", b"secret.key\n[z-a]\n");
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(saved_paths(&repo, saved), [".boltignore", "m"]);

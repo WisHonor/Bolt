@@ -183,7 +183,7 @@ const NOT_PLAIN: &str = "\nhint: Nothing was changed. Bolt reads only plain file
                          folders in a Git repository, and never follows links there: put what a \
                          link points to in its place, or import a fresh clone.\n";
 
-/// The characters HFS+ ignores in names, Git's `next_hfs_char` list.
+/// The characters HFS+ ignores in names, as Git skips them.
 fn hfs_ignorable() -> impl Iterator<Item = char> {
     ('\u{200c}'..='\u{200f}')
         .chain('\u{202a}'..='\u{202e}')
