@@ -458,7 +458,8 @@ struct Seen {
     /// Every extension named, in order.
     extensions: Vec<Vec<u8>>,
     object_format: Option<HashKind>,
-    compat: Option<(HashKind, usize)>,
+    /// Whether `compatObjectFormat` was set, which Git takes only once.
+    compat: bool,
     partial_clone: bool,
     worktree_config: bool,
     refs: Option<RefStorage>,
@@ -521,7 +522,7 @@ fn read_repository(
             _ if common && name.starts_with(b"extensions.") => {
                 let extension = name.get(b"extensions.".len()..).unwrap_or_default();
                 seen.extensions.push(extension.to_vec());
-                read_extension(extension, value, entry.line, seen)
+                read_extension(extension, value, seen)
             }
             _ => Some(()),
         };
@@ -535,18 +536,13 @@ fn read_repository(
 
 /// Checks one extension's value as Git checks it, keeping what Bolt needs; `None` where Git
 /// refuses the value.
-fn read_extension(
-    extension: &[u8],
-    value: Option<&[u8]>,
-    line: usize,
-    seen: &mut Seen,
-) -> Option<()> {
+fn read_extension(extension: &[u8], value: Option<&[u8]>, seen: &mut Seen) -> Option<()> {
     let boolean = || value.map_or(Some(true), read_bool);
     match extension {
         b"objectformat" => seen.object_format = Some(hash_named(value?)?),
         b"compatobjectformat" => {
-            let hash = hash_named(value?)?;
-            if seen.compat.replace((hash, line)).is_some() {
+            hash_named(value?)?;
+            if std::mem::replace(&mut seen.compat, true) {
                 return None;
             }
         }
@@ -616,12 +612,8 @@ pub(crate) fn read_format(text: &[u8], file: &'static str) -> Result<Format, Git
             _ => {}
         }
     }
+    // A compatObjectFormat equal to the hash is let through, though Git stops on it.
     let hash = seen.object_format.unwrap_or(HashKind::Sha1);
-    if let Some((compat, line)) = seen.compat
-        && compat == hash
-    {
-        return Err(broken(format!("it can't read line {line} of {file}")));
-    }
     // Refs kept elsewhere are named before a partial clone.
     match seen.refs {
         Some(RefStorage::Reftable) => return refuse(Refusal::Reftable),

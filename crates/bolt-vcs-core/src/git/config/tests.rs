@@ -622,11 +622,6 @@ fn extension_values_are_checked_as_git_checks_them() {
             "\tcompatObjectFormat = sha256\n\tcompatObjectFormat = sha256\n",
             5,
         ),
-        ("\tcompatObjectFormat = sha1\n", 4),
-        (
-            "\tobjectformat = sha256\n\tcompatObjectFormat = sha256\n",
-            5,
-        ),
         ("\trefStorage\n", 4),
         ("\trefStorage = FILES\n", 4),
         ("\trefStorage = files:/x\n", 4),
@@ -649,6 +644,8 @@ fn extension_values_are_checked_as_git_checks_them() {
         "\tnoop = maybe\n\tnoop-v1 = maybe\n",
         "\tworktreeConfig\n\tpreciousObjects = 0\n",
         "\tcompatObjectFormat = sha256\n",
+        "\tcompatObjectFormat = sha1\n",
+        "\tcompatObjectFormat = sha256\n\tobjectformat = sha256\n",
         "\tobjectformat = \"sha256\"\n\tobjectformat = sha1\n",
     ] {
         assert!(v("1", extensions).is_ok(), "{extensions}");
@@ -699,6 +696,12 @@ fn extension_values_are_checked_as_git_checks_them() {
             "{refs}"
         );
     }
+    // A compatObjectFormat equal to the hash doesn't stop the reading of later lines.
+    let result = v(
+        "1",
+        "\tcompatObjectFormat = sha1\n\trefStorage = reftable\n",
+    );
+    assert!(matches!(result, Err(GitError::Refused(Refusal::Reftable))));
 }
 
 /// Git cuts a name or value short at a NUL; Bolt refuses the line instead, wherever the NUL is
