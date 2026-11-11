@@ -2,9 +2,9 @@
 
 Bolt keeps every version of your project, the code and the big files together: textures, models, sounds, videos.
 It has its own engine and its own way of storing things; it is not built on Git, though it can bring in a Git repository.
-Every command that changes something can be taken back with `bolt undo`.
+Almost every command that changes something can be taken back with `bolt undo`.
 
-**This is an early version.** Bolt 0.1 is for one person on one computer: there is no server, so no sharing, merging or locking yet. Keep another copy of anything that matters to you; Bolt is not a backup yet.
+**This is an early version.** Bolt 0.1 is for one person on one computer: there is no server, so no sharing or locking yet, and no merging yet either. Keep another copy of anything that matters to you; Bolt is not a backup yet.
 
 ## The downloads
 
@@ -17,7 +17,7 @@ Take the archive for your system:
 | macOS on Apple silicon (M1 and later) | macOS 11 or later | `bolt-0.1.0-aarch64-apple-darwin.tar.gz` |
 | macOS on Intel | macOS 11 or later | `bolt-0.1.0-x86_64-apple-darwin.tar.gz` |
 
-Nothing else needs to be installed: not Git, not a runtime, not a library.
+Nothing else needs to be installed: not Git, not a runtime, not a library. On Linux, `ldd --version` prints your glibc version on its first line.
 
 **By downloading you accept the user agreement,** `USER-AGREEMENT.md`, offered here beside the downloads. It is also inside every archive. Please read it first: it says what you may do with Bolt.
 

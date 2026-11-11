@@ -8,7 +8,7 @@ Write to the address on the page you downloaded Bolt from. Every report helps, e
 - **Your system and its version:** Windows 11 24H2, macOS 15.1, Ubuntu 24.04, and so on. On Linux, also the first line `ldd --version` prints.
 - **What you typed:** the command, exactly, and what you did just before if it matters.
 - **What it printed:** all of it, copied as text rather than a screenshot when you can.
-- **What `bolt verify` says,** run in the project's folder. It checks that everything Bolt stored is whole, and changes nothing.
+- **What `bolt verify` says,** run in the project's folder. It checks that everything Bolt stored is whole, and changes none of your files or saves.
 - **If it helps, the same command with `--json`,** such as `bolt status --json`. It prints the same result as one block of text that is easy to read back exactly.
 - What you expected to happen instead.
 
