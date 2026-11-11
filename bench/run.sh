@@ -98,12 +98,12 @@ run_times() {
 }
 
 # gate_check <results>: Bolt's median against Git's for the gate's three steps; fails when one is
-# over its own limit: 2 times, or 3 for going back, whose goal for v0.2 is 2.
+# over its own limit: 2 times, or 3.5 for going back, whose goal for v0.2 is 2.
 # A flush that stalls on the runner's disk shows as a mean far above the median.
 gate_check() {
 	local failed=0 step limit bolt git
-	echo "== The gate: Bolt's median, Git's median, times Git's, at most 2 (3 for back-to-first, whose v0.2 goal is 2); then each mean, best and worst run"
-	for step in status:2 small-change:2 back-to-first:3; do
+	echo "== The gate: Bolt's median, Git's median, times Git's, at most 2 (3.5 for back-to-first, whose v0.2 goal is 2); then each mean, best and worst run"
+	for step in status:2 small-change:2 back-to-first:3.5; do
 		limit=${step#*:} step=${step%:*}
 		bolt=$(run_times "$1"/*-code-bolt-"$step".json)
 		git=$(run_times "$1"/*-code-git-"$step".json)

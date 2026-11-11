@@ -5,6 +5,7 @@
 - **Agenda topic:** none (getting v0.1 ready: clean code and the gate)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 128](128-v0.1-ships-without-goto-within-twice-gits-time.md) (the limit it left to be picked from the runs on record); [decision 023](023-v0.1-speed-bar.md) (its status gate, printed and read until v0.1)
+- **Partly superseded by:** [decision 132](132-gotos-limit-is-three-and-a-half-times-gits-time.md) (the limit is 3.5 times Git's time, after a run on unchanged code passed 3)
 
 ## Context
 
