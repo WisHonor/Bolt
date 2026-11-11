@@ -33,13 +33,14 @@ MINGW* | MSYS* | CYGWIN*)
     dumpbin=$("$vswhere" -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | tr -d '\r' | head -n 1)
     [ -n "$dumpbin" ] || cant "dumpbin not found"
     # Dash switches and a Windows path, so Git Bash's path rewriting can't get in the way.
-    # Each line: "<library> <function>", or "<library> #<ordinal>".
+    # Each line: "<library>", then "<library> <function>" or "<library> #<ordinal>".
+    # Delay-loaded functions carry an extra address column, so read them from the end.
     imports=$("$(cygpath -u "$dumpbin")" -nologo -imports "$(cygpath -w "$prog")" | tr -d '\r' | awk '
         /Section contains the following (delay load )?imports/ { on = 1; next }
         /^  Summary/ { on = 0 }
-        on && /^    [^ ]+\.[dD][lL][lL]$/ { lib = $1; next }
-        on && lib != "" && $1 == "Ordinal" { print lib, "#" $2; next }
-        on && lib != "" && NF == 2 && $1 ~ /^[0-9A-Fa-f]+$/ && $2 != "Characteristics" { print lib, $2 }
+        on && /^    [^ ]+$/ { lib = $1; print lib; next }
+        on && lib != "" && NF >= 2 && $(NF-1) == "Ordinal" { print lib, "#" $NF; next }
+        on && lib != "" && NF >= 2 && $(NF-1) ~ /^[0-9A-Fa-f]+$/ && $NF != "Characteristics" { print lib, $NF }
     ')
     [ -n "$imports" ] || cant "no imports read from $prog"
     lib_re=$(regex "$win_libs")
