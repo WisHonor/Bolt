@@ -5,6 +5,8 @@
 mod compare_git_config;
 #[cfg(test)]
 mod compare_ignore;
+#[cfg(test)]
+mod compare_small;
 pub(crate) mod git_config;
 pub(crate) mod git_path;
 pub(crate) mod ignore;

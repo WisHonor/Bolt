@@ -19,6 +19,9 @@ use crate::text::escape;
 
 mod git_path;
 use git_path::tidy_path;
+// Reached by the comparison with the old path tidying.
+#[cfg(test)]
+pub(crate) use git_path::tidy_path as compared_tidy_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {

@@ -12,6 +12,9 @@ pub(crate) use config::{read_format as read_config_format, read_worktree as read
 pub mod craft;
 mod id;
 mod lfs;
+// Reached by the comparison with the old pointer reader.
+#[cfg(test)]
+pub(crate) use lfs::{LFS_SPEC, LFS_SPECS};
 mod object;
 mod odb;
 mod pack;

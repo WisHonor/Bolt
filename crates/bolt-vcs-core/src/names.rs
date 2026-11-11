@@ -19,6 +19,12 @@ use crate::text::escape;
 mod lookalike;
 pub use lookalike::{is_bolt_alias, is_git_alias};
 use lookalike::{is_hashed_short_name, is_plain_short_name};
+// Reached by the comparison with the old look-alike checks.
+#[cfg(test)]
+pub(crate) use lookalike::{
+    is_hashed_short_name as compared_hashed_short_name,
+    is_plain_short_name as compared_plain_short_name,
+};
 
 /// Longest name the format allows, in bytes: Windows' 255 UTF-16 units, each at most three bytes
 /// in UTF-8.
