@@ -42,7 +42,7 @@ Bolt works in a OneDrive folder. Other sync tools may show Bolt a placeholder, a
 
 ## USB sticks, SD cards and other FAT or exFAT drives
 
-On Windows, a project on these drives can't be used in this version. They don't record who owns a folder, and Bolt can't tell their folders apart, so `safe-folders` can't vouch for one either. Bolt says "Bolt can't tell who owns the project at" the folder, "this drive doesn't record who owns folders", and that safe-folders can't vouch for a project on it. On macOS and Linux, Bolt isn't refused there. On every system, Bolt's last check before writing over a file compares fewer things on these drives than it can elsewhere.
+On Windows, a project on these drives can't be used in this version. They don't record who owns a folder, and Bolt can't tell their folders apart, so `safe-folders` can't vouch for one either. Bolt says "Bolt can't tell who owns the project at" the folder, "this drive doesn't record who owns folders", and that safe-folders can't vouch for a project on it. On Linux, Bolt was tried on both and works there; on macOS, it hasn't been tried yet. On every system, Bolt's last check before writing over a file compares fewer things on these drives than it can elsewhere.
 
 **What to do:** on Windows, work on a copy of the project on your computer's own drive. Elsewhere, keep projects on your computer's own drive where you can.
 

@@ -64,10 +64,12 @@ try_case() {
 }
 
 echo "Running as: $(id)"
+skipped=()
 for fs in vfat exfat; do
   if ! command -v "mkfs.$fs" > /dev/null; then
     echo
-    echo "$fs: not run, this runner has no mkfs.$fs"
+    echo "::warning::$fs: not run, this runner has no mkfs.$fs"
+    skipped+=("$fs")
     continue
   fi
   img="$work/$fs.img" mnt="$work/$fs"
@@ -81,4 +83,8 @@ for fs in vfat exfat; do
   sudo umount "$mnt"
 done
 echo
-echo "ordinary-computers: every try ran"
+if [ ${#skipped[@]} -eq 0 ]; then
+  echo "ordinary-computers: every try ran"
+else
+  echo "ordinary-computers: not run on ${skipped[*]}"
+fi

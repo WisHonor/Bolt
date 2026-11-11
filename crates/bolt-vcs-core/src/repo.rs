@@ -218,7 +218,8 @@ impl RepoError {
         }
         if let Some(path) = self.trust_path() {
             // safe-folders can't vouch for a folder there, so no line is offered.
-            let trust = if no_identity(&folder_id(path)) {
+            // A folder anyone can write to keeps its own words: move the project, don't trust it.
+            let trust = if no_identity(&folder_id(path)) && !config::others_can_write(path) {
                 NO_IDENTITY_HINT.to_owned()
             } else {
                 config::trust_hint(path)
@@ -4097,7 +4098,12 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let unreadable = |_: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
         let zero = |_: &Path| Ok((7, 0));
-        let id_fakes: [&FolderId; 2] = [&unreadable, &zero];
+        // What FAT and exFAT give on Windows: ERROR_INVALID_PARAMETER.
+        let invalid_parameter = |_: &Path| Err(io::Error::from_raw_os_error(87));
+        let mut id_fakes: Vec<&FolderId> = vec![&unreadable, &zero];
+        if cfg!(windows) {
+            id_fakes.push(&invalid_parameter);
+        }
         for folder_id in id_fakes {
             for owner in [Owner::Unknown, Owner::Other] {
                 let refused =
