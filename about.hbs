@@ -10,7 +10,9 @@ pre { white-space: pre-wrap; background: #f4f4f4; padding: 1em; }
 </head>
 <body>
 <h1>Third-party licenses</h1>
-<p>Bolt is built from the crates below. Their licenses ask that these texts go with the program.</p>
+<p>This file covers the crates built into Bolt's program: code written by other people, which Bolt uses under their licenses. Those licenses ask that these texts go with the program. Each crate below links to its source on crates.io, for the version in Bolt.</p>
+<p>Rust's standard library is in the program too. Its licenses and notices are in the file beside this one, <code>THIRD-PARTY-LICENSES-RUST.html</code>.</p>
+<p>The Windows program also holds Microsoft's C runtime, linked in by Microsoft's build tools under their license. On Linux and macOS, the program uses the system's own C library, which is not shipped with Bolt.</p>
 <h2>Overview</h2>
 <ul>
 {{#each overview}}
@@ -23,7 +25,7 @@ pre { white-space: pre-wrap; background: #f4f4f4; padding: 1em; }
 <p>Used by:</p>
 <ul>
 {{#each used_by}}
-<li>{{crate.name}} {{crate.version}}</li>
+<li><a href="https://crates.io/crates/{{crate.name}}/{{crate.version}}">{{crate.name}} {{crate.version}}</a></li>
 {{/each}}
 </ul>
 <pre>{{text}}</pre>

@@ -10,7 +10,6 @@ accepted = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
-    "MPL-2.0",
     "Unlicense",
 ]
 # The four systems the release builds for.
@@ -26,3 +25,7 @@ ignore-build-dependencies = true
 # Bolt's own crates are closed source and never published, so the allow list judges only
 # the crates of others, and only theirs go in the notices.
 private = { ignore = true }
+
+# MPL-2.0 for option-ext alone, as in deny.toml.
+[option-ext]
+accepted = ["MPL-2.0"]

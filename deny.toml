@@ -17,9 +17,16 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
-    "MPL-2.0",
     "Unlicense",
 ]
+
+# MPL-2.0 is allowed for option-ext alone, so a second MPL-2.0 crate needs a ruling. It asks
+# that its text go with the program and people be told where its source is (both in the
+# notices), that nothing limit their rights in that source, and that changes to its files be
+# shared under MPL-2.0 (Bolt changes none). It works file by file: the rest of Bolt is untouched.
+[[licenses.exceptions]]
+allow = ["MPL-2.0"]
+crate = "option-ext"
 
 # libFuzzer's sources, bundled in libfuzzer-sys, keep LLVM's old NCSA license. Only fuzz/ uses it.
 [[licenses.exceptions]]
