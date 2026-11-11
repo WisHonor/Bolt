@@ -97,7 +97,7 @@ The fingerprints prove that the download wasn't damaged and matches what was put
 
 Your PATH is the list of folders your terminal looks in when you type a command's name. Unpack the archive and put the program in one of those folders.
 
-- **Windows:** unpack the `.zip` (right-click it, then "Extract All"). Move `bolt.exe` to a folder of your own, such as `C:\Users\<you>\bin`. Open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", "New", and add that folder. Open a new terminal.
+- **Windows:** unpack the `.zip` (right-click it, then "Extract All"). Move `bolt.exe` to a folder of your own, such as `C:\Users\<you>\bin` (make the folder first if it isn't there). Open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", "New", and add that folder. Open a new terminal.
 - **macOS and Linux:** in a terminal, in the folder that holds the archive, unpack it, make a folder for your own programs, `~/.local/bin` (`~` is your home folder), and move `bolt` there. On Linux, for example:
 
   ```text

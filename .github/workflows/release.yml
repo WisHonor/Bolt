@@ -474,6 +474,19 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Write-Host '::endgroup::'
           }
+      - name: The first run, as the download page and the guide say
+        if: runner.os != 'Windows'
+        run: |
+          bash .github/release/first-run.sh "$RUNNER_TEMP/download" "$VERSION" "$TARGET" \
+            "$GITHUB_WORKSPACE/docs/releases/download-page.md"
+      - name: The first run, as the download page and the guide say
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\first-run.ps1 `
+            -From $env:RUNNER_TEMP\download -Version $env:VERSION `
+            -Page $env:GITHUB_WORKSPACE\docs\releases\download-page.md
+          exit $LASTEXITCODE
 
   # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
   release:
