@@ -195,6 +195,16 @@ fn short_names_of_gitmodules_match_what_git_fsck_flags() {
 }
 
 #[test]
+fn a_slash_ends_a_part_but_a_backslash_starts_another() {
+    for name in [".git/", "GIT~1/x", "/\\.git", "./\\GIT~1", "\t/0\\.Git"] {
+        assert!(is_git_alias(name), "{name:?}");
+    }
+    for name in ["x/.git", "x/.git\\y"] {
+        assert!(!is_git_alias(name), "{name:?}");
+    }
+}
+
+#[test]
 fn ordinary_names_are_answered_at_once() {
     for name in ["Player.cs", "README", "src", "名前", "x\\y"] {
         assert!(!is_git_alias(name), "{name:?}");

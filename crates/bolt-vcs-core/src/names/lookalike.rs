@@ -7,17 +7,16 @@
 use std::borrow::Cow;
 use std::ops::RangeInclusive;
 
-/// Whether some Windows or macOS drive could take `name` for `.git`, as Git judges it. A `/`
-/// ends the name.
+/// Whether some Windows or macOS drive could take `name` for `.git`, as Git judges it.
 pub fn is_git_alias(name: &str) -> bool {
     if !may_spell(name, b'g') && !name.contains('\\') {
         return false;
     }
-    let name = name.split('/').next().unwrap_or(name);
-    // Git checks every `\`-separated part on NTFS, but HFS+ only from the start.
-    hfs_spells(name, ".git")
+    // Git checks the start and every part after a `\` on NTFS, each ending at a `/` or `\`, but
+    // HFS+ only from the start.
+    hfs_spells(name.split('/').next().unwrap_or(name), ".git")
         || name.split('\\').any(|part| {
-            let part = ntfs_form(part);
+            let part = ntfs_form(part.split('/').next().unwrap_or(part));
             part.eq_ignore_ascii_case(".git") || short_name(part, b"git", b'1'..=b'1')
         })
 }
