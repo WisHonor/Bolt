@@ -313,10 +313,172 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
 
+  # Each archive on fresh runners and in bare containers, with the oldest system each build
+  # claims; then, on each runner, a first run that follows the download page and the guide.
+  clean-machine:
+    needs: [prepare, sums]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            containers: mcr.microsoft.com/windows/servercore:ltsc2022
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+            # AlmaLinux 9 has glibc 2.34, the oldest the guide claims.
+            containers: almalinux:9 ubuntu:22.04 debian:12
+          # Also the oldest Apple-silicon runner GitHub offers: macos-14 was retired in November 2026.
+          - os: macos-15
+            target: aarch64-apple-darwin
+            ext: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # gh run download, for the archive and SHA256SUMS.
+      actions: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+      CONTAINERS: ${{ matrix.containers }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.run_id }}
+      REPO: ${{ github.repository }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the archive and SHA256SUMS into a new folder
+        run: |
+          dl="$RUNNER_TEMP/download"
+          mkdir "$dl"
+          gh run download "$RUN_ID" --repo "$REPO" --name "$ARCHIVE" --dir "$dl"
+          gh run download "$RUN_ID" --repo "$REPO" --name sha256sums --dir "$dl"
+          ls -l "$dl"
+      - name: Check it with the guide's command, and unpack it
+        if: runner.os != 'Windows'
+        run: |
+          cd "$RUNNER_TEMP/download"
+          # The guide's line names the Apple silicon archive for both Macs.
+          if [ "$RUNNER_OS" = macOS ]; then
+            line="grep bolt-$VERSION-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c"
+          else
+            line="grep bolt-$VERSION-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c"
+          fi
+          if ! grep -qF -- "$line" "$GITHUB_WORKSPACE/docs/guide.md"; then
+            echo "::error::No longer in the guide: $line"
+            exit 1
+          fi
+          said=$(eval "${line/bolt-$VERSION-aarch64-apple-darwin.tar.gz/$ARCHIVE}")
+          echo "$said"
+          [ "$said" = "$ARCHIVE: OK" ]
+          mkdir "$RUNNER_TEMP/pkg"
+          tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP/pkg"
+          ls -lR "$RUNNER_TEMP/pkg"
+      - name: Check it with the guide's command, and unpack it
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:RUNNER_TEMP\download
+          $line = "(Get-FileHash .\$env:ARCHIVE -Algorithm SHA256).Hash"
+          if (-not (Select-String -LiteralPath $env:GITHUB_WORKSPACE\docs\guide.md -SimpleMatch -CaseSensitive -Pattern $line -Quiet)) {
+            Write-Host "::error::No longer in the guide: $line"
+            exit 1
+          }
+          $hash = Invoke-Expression $line
+          $listed = @(Get-Content SHA256SUMS | Where-Object { $_.EndsWith(" $env:ARCHIVE") })
+          Write-Host $hash
+          Write-Host $listed
+          if ($listed.Count -ne 1 -or $hash -ne $listed[0].Split(' ')[0]) {
+            Write-Host "::error::$env:ARCHIVE doesn't match SHA256SUMS"
+            exit 1
+          }
+          Expand-Archive -LiteralPath $env:ARCHIVE -DestinationPath $env:RUNNER_TEMP\pkg
+          Get-ChildItem -Recurse $env:RUNNER_TEMP\pkg | Select-Object -ExpandProperty FullName
+      - name: What the program declares, against what the guide says it needs
+        if: runner.os != 'Windows'
+        run: |
+          bin="$RUNNER_TEMP/pkg/bolt"
+          if [ "$RUNNER_OS" = Linux ]; then
+            grep -qF 'glibc 2.34 or newer' docs/guide.md
+            newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+            echo "Newest glibc symbol it needs: $newest (the guide says glibc 2.34 or newer)"
+            if [ "$(printf '%s\n' "$newest" GLIBC_2.34 | sort -V | tail -n 1)" != GLIBC_2.34 ]; then
+              echo "::error::The program needs $newest, newer than the guide's glibc 2.34"
+              exit 1
+            fi
+          else
+            grep -qF 'macOS 11 or later' docs/guide.md
+            otool -l "$bin" | grep -E -A 4 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+            minos=$(otool -l "$bin" | awk '
+              /LC_BUILD_VERSION/ { b = 1 } b && $1 == "minos" { print $2; exit }
+              /LC_VERSION_MIN_MACOSX/ { v = 1 } v && $1 == "version" { print $2; exit }')
+            echo "The macOS version it declares: $minos (the guide says macOS 11 or later)"
+            # Above 11.0 would break the guide's promise; below it is fine.
+            if [ -z "$minos" ] || ! awk -v v="$minos" 'BEGIN { split(v, p, "."); exit !(p[1] < 11 || (p[1] == 11 && p[2] + 0 == 0)) }'; then
+              echo "::error::The program declares macOS $minos, not 11.0 or older"
+              exit 1
+            fi
+          fi
+      - name: Make a small Git repository
+        run: bash .github/release/make-git-repo.sh "$RUNNER_TEMP/repo"
+      - name: The clean-machine script
+        if: runner.os != 'Windows'
+        run: bash .github/release/clean-machine.sh "$RUNNER_TEMP/pkg/bolt" "$VERSION" "$RUNNER_TEMP/repo"
+      - name: The clean-machine script
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\clean-machine.ps1 `
+            -Bolt $env:RUNNER_TEMP\pkg\bolt.exe -Version $env:VERSION -GitRepo $env:RUNNER_TEMP\repo
+          exit $LASTEXITCODE
+      - name: In bare containers
+        if: matrix.containers && runner.os != 'Windows'
+        run: |
+          mount="$RUNNER_TEMP/mount"
+          mkdir "$mount"
+          cp -R "$RUNNER_TEMP/pkg" "$RUNNER_TEMP/repo" .github/release/clean-machine.sh "$mount/"
+          for image in $CONTAINERS; do
+            echo "::group::$image"
+            docker run --rm -v "$mount:/w:ro" "$image" bash /w/clean-machine.sh /w/pkg/bolt "$VERSION" /w/repo
+            echo "::endgroup::"
+          done
+      - name: In bare containers
+        if: matrix.containers && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $mount = "$env:RUNNER_TEMP\mount"
+          New-Item -ItemType Directory $mount | Out-Null
+          Copy-Item -Recurse -Force $env:RUNNER_TEMP\pkg, $env:RUNNER_TEMP\repo, .github\release\clean-machine.ps1 $mount
+          # Docker's progress on stderr is not an error; its exit code says.
+          $ErrorActionPreference = 'Continue'
+          foreach ($image in $env:CONTAINERS -split ' ') {
+            Write-Host "::group::$image"
+            docker run --rm -v "${mount}:C:\w" $image powershell -NoProfile -ExecutionPolicy Bypass `
+              -File C:\w\clean-machine.ps1 -Bolt C:\w\pkg\bolt.exe -Version $env:VERSION -GitRepo C:\w\repo
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host '::endgroup::'
+          }
+
   # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
   release:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    needs: [prepare, build, sums]
+    needs: [prepare, build, sums, clean-machine]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency: release
