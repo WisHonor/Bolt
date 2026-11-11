@@ -319,6 +319,8 @@ modified  notes.txt  +1 -1  (6 B → 12 B)
 
 A line starting with `-` was taken out, and one starting with `+` was put in.
 
+On Windows, in the Windows PowerShell that comes with Windows (version 5.1), `echo "hello" > notes.txt` writes the file in UTF-16, a form of text Bolt doesn't read as text. The sizes are then larger (`16 B → 28 B`) and `bolt changes` says `(binary: no lines shown)` instead of showing the lines. Bolt still saves the file exactly. To see the lines, write both versions as UTF-8: `"hello" | Set-Content -Encoding utf8 notes.txt` in place of the first `echo` line, and `"hello again" | Set-Content -Encoding utf8 notes.txt` in place of the second. Each line then starts with `\u{feff}`, the mark Windows PowerShell puts at the start of a UTF-8 file. PowerShell 7's `>` writes UTF-8 without that mark.
+
 ### Save again, and look back
 
 ```sh
