@@ -282,7 +282,8 @@ jobs:
             exit 1
           fi
           if command -v sha256sum > /dev/null; then hash=(sha256sum); else hash=(shasum -a 256); fi
-          sum=$("${hash[@]}" "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)
+          # From stdin: given a path with backslashes, sha256sum puts a backslash before the hash.
+          sum=$("${hash[@]}" < "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)
           echo "SHA-256 of $archive: $sum"
           echo "sha256-$TARGET=$sum" >> "$GITHUB_OUTPUT"
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
