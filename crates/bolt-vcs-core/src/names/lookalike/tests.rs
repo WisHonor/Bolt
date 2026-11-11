@@ -160,11 +160,15 @@ fn short_names_of_gitmodules_match_what_git_fsck_flags() {
         "GiTmOd~2",
         "gitmod~1 . ",
         "gitmod~1 :x",
-        "x\\gitmod~1",
         "gi7eba~1",
         "Gi7EbA~9",
         "gi7eba~1.",
         "gi7eba~1:",
+        // A longer counter takes letters off the start, as NTFS does.
+        "gi7eb~10",
+        "gi7e~123",
+        "~1234567",
+        "gi7eb~10:x",
     ] {
         assert!(short(name), "{name:?}");
     }
@@ -182,11 +186,12 @@ fn short_names_of_gitmodules_match_what_git_fsck_flags() {
         "gi7ebb~1",
         "gitmod~1\u{200c}",
         ".gitmodules",
+        "gi7eb~09",
+        "gi7eb~100",
+        "gitmod~1\\",
     ] {
         assert!(!short(name), "{name:?}");
     }
-    // Stricter than Git, which lets a `\` follow a short name.
-    assert!(short("gitmod~1\\"));
 }
 
 #[test]

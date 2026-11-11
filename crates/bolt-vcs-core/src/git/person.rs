@@ -9,7 +9,7 @@ use crate::save::{MAX_PERSON_FIELD_BYTES, Person};
 /// email is all name.
 pub fn parse_person(line: &[u8]) -> Person {
     let Some((name, after)) = split_at_byte(line, b'<') else {
-        return person(line, b"", 0, 0);
+        return person(trim_end(line), b"", 0, 0);
     };
     let name = trim_end(name);
     let Some((email, _)) = split_at_byte(after, b'>') else {

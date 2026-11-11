@@ -2,8 +2,9 @@
 
 /// `src` tidied as Git tidies a path: runs of separators become one `/`, `.` parts go, and `..`
 /// takes away the part before it. `None` when a `..` has no part to take away. The path's root
-/// is kept as it is (with `/` for `\`): a leading `/`, and on Windows (`windows`) a drive (any
-/// one character and `:`, with the `/` after it) or a network share's `//server/share/`.
+/// is kept as it is (with `/` for `\`): a leading `/`, and on Windows (`windows`) a drive (one
+/// character and `:`, with the `/` after it) or a network share's `//server/share/`. A NUL
+/// ends the path, as in C.
 pub(crate) fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
     let is_sep = |b: u8| b == b'/' || (windows && b == b'\\');
     let root = if windows {
@@ -11,7 +12,8 @@ pub(crate) fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
     } else {
         usize::from(src.first() == Some(&b'/'))
     };
-    let (root, mut rest) = src.split_at_checked(root)?;
+    let (root, rest) = src.split_at_checked(root)?;
+    let mut rest = rest.split(|&b| b == 0).next().unwrap_or_default();
     let mut out: Vec<u8> = root
         .iter()
         .map(|&b| if is_sep(b) { b'/' } else { b })
@@ -51,18 +53,18 @@ pub(crate) fn tidy_path(src: &[u8], windows: bool) -> Option<Vec<u8>> {
     }
 }
 
-/// How many bytes of `src` are its root on Windows. A drive is the first character (by its
-/// UTF-8 lead byte) and `:`, with one separator after it. A network path is two separators,
-/// the server, a separator, the share and the separator after it, if any; one without a
-/// separator after the server has no root, so its leading separators go as any others do.
+/// How many bytes of `src` are its root on Windows. A drive is an ASCII byte but NUL, or one to four
+/// bytes outside ASCII, then `:` and one separator after it if there is one. A network path is
+/// two separators, the server, a separator, the share and the separator after it, if any, with
+/// a NUL ending the share; one without a separator after the server has no root, so its leading
+/// separators go as any others do.
 fn windows_root(src: &[u8], is_sep: impl Fn(u8) -> bool) -> usize {
     let first = match src.first() {
-        Some(0xF0..) => 4,
-        Some(0xE0..) => 3,
-        Some(0xC0..) => 2,
-        _ => 1,
+        Some(0) => 0,
+        Some(b) if b.is_ascii() => 1,
+        _ => src.iter().take_while(|b| !b.is_ascii()).count(),
     };
-    if src.get(first) == Some(&b':') {
+    if (1..=4).contains(&first) && src.get(first) == Some(&b':') {
         return first + 1 + usize::from(src.get(first + 1).is_some_and(|&b| is_sep(b)));
     }
     let sep_after = |from: usize| {
@@ -73,7 +75,12 @@ fn windows_root(src: &[u8], is_sep: impl Fn(u8) -> bool) -> usize {
     match src {
         [a, b, ..] if is_sep(*a) && is_sep(*b) => match sep_after(2) {
             Some(server_end) => {
-                sep_after(server_end + 1).map_or(src.len(), |share_end| share_end + 1)
+                let share = src.get(server_end + 1..).unwrap_or_default();
+                match share.iter().position(|&b| is_sep(b) || b == 0) {
+                    Some(at) if share.get(at) == Some(&0) => server_end + 1 + at,
+                    Some(at) => server_end + 2 + at,
+                    None => src.len(),
+                }
             }
             None => 0,
         },

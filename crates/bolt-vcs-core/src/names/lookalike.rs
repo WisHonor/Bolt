@@ -4,13 +4,16 @@
 //! answers to 8.3 short names. HFS+ ignores letter case and skips the characters Apple's TN1150
 //! lists as ignorable, anywhere in a name. Git for Windows also reads `\` as a separator.
 
+use std::borrow::Cow;
 use std::ops::RangeInclusive;
 
-/// Whether some Windows or macOS drive could take `name` (no `/`) for `.git`, as Git judges it.
+/// Whether some Windows or macOS drive could take `name` for `.git`, as Git judges it. A `/`
+/// ends the name.
 pub fn is_git_alias(name: &str) -> bool {
     if !may_spell(name, b'g') && !name.contains('\\') {
         return false;
     }
+    let name = name.split('/').next().unwrap_or(name);
     // Git checks every `\`-separated part on NTFS, but HFS+ only from the start.
     hfs_spells(name, ".git")
         || name.split('\\').any(|part| {
@@ -19,40 +22,56 @@ pub fn is_git_alias(name: &str) -> bool {
         })
 }
 
-/// Whether some Windows or macOS drive could take `name` for `.bolt`. `\` ends the name, as on
-/// Windows; what follows it is another name, which Windows refuses anyway.
+/// Whether some Windows or macOS drive could take `name` for `.bolt`: its part before any `/` or
+/// `\`, without the characters HFS+ ignores, as NTFS opens it.
 pub fn is_bolt_alias(name: &str) -> bool {
     if !may_spell(name, b'b') {
         return false;
     }
-    let first = name.split('\\').next().unwrap_or(name);
-    let part = ntfs_form(first);
-    hfs_spells(name, ".bolt")
-        || part.eq_ignore_ascii_case(".bolt")
-        || short_name(part, b"bolt", b'1'..=b'4')
+    let part = name.split(['/', '\\']).next().unwrap_or(name);
+    let kept: Cow<'_, str> = if part.chars().any(hfs_ignores) {
+        Cow::Owned(part.chars().filter(|&c| !hfs_ignores(c)).collect())
+    } else {
+        Cow::Borrowed(part)
+    };
+    let part = ntfs_form(&kept);
+    part.eq_ignore_ascii_case(".bolt") || short_name(part, b"bolt", b'1'..=b'4')
 }
 
 /// Whether `name` is NTFS's hashed short name with this six-byte start (two letters of the long
-/// name and four hex digits of its hash), `~` and a digit 1 to 9, in any letter case, with any
-/// stream suffix and trailing dots and spaces; in any `\`-separated part, as Git checks.
+/// name and four hex digits of its hash), in any letter case, with any stream suffix and
+/// trailing dots and spaces. That is the start, `~` and a digit 1 to 9; or, for a longer
+/// counter, as much of the start as leaves eight characters with `~` and the counter, which
+/// starts with 1 to 9.
 pub(crate) fn is_hashed_short_name(name: &str, prefix: &[u8]) -> bool {
-    any_short_name(name, prefix, b'1'..=b'9')
+    let starts = |b: u8| b == b'~' || prefix.first().is_some_and(|p| p.eq_ignore_ascii_case(&b));
+    if !name.bytes().next().is_some_and(starts) {
+        return false;
+    }
+    let Some((start, counter)) = ntfs_form(name).split_once('~') else {
+        return false;
+    };
+    let (start, counter) = (start.as_bytes(), counter.as_bytes());
+    let start_fits = prefix
+        .get(..start.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(start));
+    match counter {
+        [b'1'..=b'9'] => start.len() == prefix.len() && start_fits,
+        [b'1'..=b'9', rest @ ..] => {
+            start_fits && rest.iter().all(u8::is_ascii_digit) && start.len() + counter.len() == 7
+        }
+        _ => false,
+    }
 }
 
 /// Whether `name` is NTFS's plain short name with this start (the long name's first six
-/// letters), `~` and a digit 1 to 4, which NTFS uses before it turns to hashed names; read as
-/// [`is_hashed_short_name`] reads one.
+/// letters), `~` and a digit 1 to 4, which NTFS uses before it turns to hashed names; in any
+/// letter case, with any stream suffix and trailing dots and spaces.
 pub(crate) fn is_plain_short_name(name: &str, prefix: &[u8; 6]) -> bool {
-    any_short_name(name, prefix, b'1'..=b'4')
-}
-
-fn any_short_name(name: &str, prefix: &[u8], digits: RangeInclusive<u8>) -> bool {
-    let starts = |b: u8| prefix.first().is_some_and(|p| p.eq_ignore_ascii_case(&b));
-    if !name.bytes().next().is_some_and(starts) && !name.contains('\\') {
-        return false;
-    }
-    name.split('\\')
-        .any(|part| short_name(ntfs_form(part), prefix, digits.clone()))
+    name.bytes()
+        .next()
+        .is_some_and(|b| b.eq_ignore_ascii_case(&prefix[0]))
+        && short_name(ntfs_form(name), prefix, b'1'..=b'4')
 }
 
 /// The cheap first look: a spelling starts with `.`, the short name's first letter, or an
