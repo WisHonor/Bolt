@@ -1,7 +1,6 @@
 //! The user guide, the README and SECURITY.md against the program: every command the guide shows
 //! runs, every link points somewhere, and nothing that ships points into the private repository.
-//! And the manifests: no crate can be published, and each
-//! names the license.
+//! And the manifests: no crate can be published, and each names the license.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::{BTreeSet, HashMap};
@@ -300,11 +299,15 @@ fn nothing_that_ships_points_into_the_repository() {
 
     let mut wrong = Vec::new();
     for rel in &shipped {
-        // The website's documents are written later, so one not there yet is passed over.
-        let Ok(doc) = std::fs::read_to_string(repo_root().join(rel)) else {
-            continue;
+        // The website's own documents are written later, so one not there yet is passed over.
+        let doc = match std::fs::read_to_string(repo_root().join(rel)) {
+            Ok(doc) => doc,
+            Err(_) if rel.starts_with("docs/releases/") => continue,
+            Err(e) => panic!("{rel}: {e}"),
         };
-        if doc.to_lowercase().contains("github.com/wishonor") {
+        let lower = doc.to_lowercase();
+        // Also catches git@github.com:WisHonor/Bolt and raw.githubusercontent.com/WisHonor/Bolt.
+        if lower.contains("github.com/wishonor") || lower.contains("wishonor/bolt") {
             wrong.push(format!("{rel}: holds the repository's address"));
         }
         // The README ships beside the guide and the agreement; the others link only to themselves.

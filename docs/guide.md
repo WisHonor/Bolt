@@ -89,9 +89,9 @@ On Linux:
 grep bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c
 ```
 
-`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was uploaded: don't run the program, delete it and download it again. Anything other than the file's name followed by `OK` means the same, whatever else it says (a complaint that it found no checksum lines, for example, means the name you typed isn't in `SHA256SUMS`).
+`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was put on the page: don't run the program, delete it and download it again. Anything other than the file's name followed by `OK` means the same, whatever else it says (a complaint that it found no checksum lines, for example, means the name you typed isn't in `SHA256SUMS`).
 
-The fingerprints prove that the download wasn't damaged and matches what was uploaded. They don't prove who made it, because v0.1 isn't signed (below).
+The fingerprints prove that the download wasn't damaged and matches what was put on the page. They don't prove who made it, because v0.1 isn't signed (below).
 
 ### Put `bolt` on your PATH
 
@@ -128,7 +128,7 @@ bolt 0.1.0
 
 **If it prints only a number,** such as `5.2.1`, another program named bolt comes first on your PATH: Puppet Bolt, a tool for running tasks on servers, installs a `bolt` command too. Put your folder ahead of it:
 
-- **Windows:** in the same dialog where you added your folder, select it and choose "Move Up" until it is above Puppet's (`C:\Program Files\Puppet Labs\Bolt\bin`). Open a new terminal.
+- **Windows:** in PowerShell, `Get-Command bolt -All` (or `where.exe bolt`) lists every `bolt` in the order Windows tries them. Windows searches the computer's Path (the system one) before your account's, so moving your folder up in your account's Path helps only when Puppet's folder (`C:\Program Files\Puppet Labs\Bolt\bin`) is in your account's Path too: then select yours, choose "Move Up" until it is above Puppet's, and open a new terminal. Two ways always work: run Bolt by its full path, such as `C:\Users\<you>\bin\bolt.exe`, or, with administrator rights, add your folder to the system Path ("Edit the system environment variables", then "Environment Variables", `Path` under "System variables") and move it above Puppet's there.
 - **macOS and Linux:** the line you added above puts `~/.local/bin` first, ahead of Puppet's folders (`/opt/puppetlabs/bin`, and `/usr/local/bin` on Linux). If it still loses, a later line in the same file puts one of them in front: move your line below it, and open a new terminal.
 
 ### Windows and macOS warn about Bolt
@@ -137,7 +137,7 @@ v0.1 is not signed. Signing means a company or a developer buys a certificate an
 
 The warning means only "nobody we know vouched for this program". It doesn't mean something bad was found. Check the download against `SHA256SUMS` first, as above; that is the check you can make yourself.
 
-- **Windows.** A program unpacked with "Extract All" keeps the mark Windows puts on downloads. Started from a terminal, as this guide does, it usually runs with no warning. Started from Explorer, SmartScreen shows "Windows protected your PC": choose "More info", then "Run anyway". To remove the mark, in PowerShell, in the folder that holds it: `Unblock-File .\bolt.exe`.
+- **Windows.** A program unpacked with "Extract All" keeps the mark Windows puts on downloads. Started from a terminal, as this guide does, it usually runs with no warning. Started from Explorer, SmartScreen shows "Windows protected your PC": choose "More info", then "Run anyway". If Smart App Control is on (Windows 11), Windows blocks Bolt from Explorer and from a terminal alike, with no "Run anyway"; it can be turned off only in Windows Security. To remove the mark, in PowerShell, in the folder that holds it: `Unblock-File .\bolt.exe`.
 - **macOS.** Unpacking with `tar` in Terminal, as above, leaves no mark, so nothing is blocked. If you unpacked by double-clicking the `.tar.gz` in Finder instead, `bolt` carries the download mark, and macOS blocks its first run, even from Terminal. To allow it, within about an hour of the block: open System Settings (System Preferences before macOS 13), then Privacy & Security (Security & Privacy in System Preferences); near the bottom it names `bolt` and offers "Open Anyway". Choose it and enter your password, then run `bolt --version` again. Control-clicking and choosing Open no longer works since macOS 15. Or, in Terminal, in the folder that holds it, remove the mark: `xattr -d com.apple.quarantine bolt`.
 
 ### Folders that sync (OneDrive and the like)
@@ -1359,15 +1359,18 @@ Removing Bolt doesn't touch your projects: each keeps its files and its `.bolt` 
   rm -r ~/.config/bolt
   ```
 
-  On macOS and Linux, if you put `bolt` in `/usr/local/bin` instead, the first line is `sudo rm /usr/local/bin/bolt`. Then take `~/.local/bin` off your PATH by deleting the `export PATH="$HOME/.local/bin:$PATH"` line from `~/.zshrc` or `~/.bashrc`, unless other programs live in that folder.
+  On macOS and Linux, if you put `bolt` in `/usr/local/bin` instead, the first line is `sudo rm /usr/local/bin/bolt`. Then take `~/.local/bin` off your PATH by deleting the `export PATH="$HOME/.local/bin:$PATH"` line from `~/.zshrc` or `~/.bashrc`, but only if you added that line yourself for Bolt and no other program lives in that folder.
 
 ### Leaving a project without losing its files
 
-A project's files are ordinary files in an ordinary folder. Bolt keeps its history beside them, in the `.bolt` folder, and nothing else of yours.
+A project's files are ordinary files in an ordinary folder. Bolt keeps everything else in the hidden `.bolt` folder beside them.
 
-1. **Bring your work into the folder.** `bolt shelf --list` shows your shelves: bring each back with `bolt unshelf` and save it, or it stays inside `.bolt`. Then `bolt status` should say "Nothing changed since then"; if not, save.
-2. **Keep the history, if it matters.** Copy the whole project folder, `.bolt` included, somewhere safe. A later Bolt reads it: what v0.1 writes on disk never changes meaning.
-3. **Delete `.bolt`.** The folder is then an ordinary folder, and `bolt.toml` and `.boltignore`, if the project has them, are ordinary files you may keep or delete. Deleting `.bolt` loses the history, the shelves and everything `bolt undo` could take back. In the project's folder:
+**Only the files of the save you are on are in the folder.** Everything else lives only in `.bolt`, and goes when `.bolt` goes: every earlier save, the other lines and their saves, the newest saves of your line if you went back to an older one, your shelves, and everything `bolt undo` could take back. v0.1 can't combine lines or export to Git, so nothing carries that work out for you. Before you delete anything:
+
+1. **Go to the files you want to keep.** `bolt line` lists your lines, and `bolt status` says where you are. Go to the line or save whose files you want in the folder, such as `bolt goto main`.
+2. **Bring back your shelves.** `bolt shelf --list` shows them: bring each back with `bolt unshelf` and save it. Then `bolt status` should say "Nothing changed since then"; if not, save.
+3. **Keep the history, if any of it matters.** Copy the whole project folder, `.bolt` included, somewhere safe: another line, an older save or a shelf can then still be had from the copy. A later Bolt reads it: what v0.1 writes on disk never changes meaning.
+4. **Delete `.bolt`.** The folder is then an ordinary folder, and `bolt.toml` and `.boltignore`, if the project has them, are ordinary files you may keep or delete. In the project's folder:
 
    ```text
    Remove-Item -Recurse -Force .bolt
