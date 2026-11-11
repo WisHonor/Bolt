@@ -28,6 +28,8 @@ jobs:
     timeout-minutes: 20
     outputs:
       version: ${{ steps.version.outputs.version }}
+      # The website zip's SHA-256, so the last job can tell it's the file made here.
+      website-sha256: ${{ steps.website.outputs.sha256 }}
     env:
       ABOUT_URL: https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.3/cargo-about-0.9.3-x86_64-unknown-linux-musl.tar.gz
       ABOUT_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
@@ -78,11 +80,16 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
       - name: Make the website copies
+        id: website
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          bash .github/release/website.sh "$VERSION" "$RUNNER_TEMP/bolt-$VERSION-website.zip"
-          unzip -l "$RUNNER_TEMP/bolt-$VERSION-website.zip"
+          zip="$RUNNER_TEMP/bolt-$VERSION-website.zip"
+          bash .github/release/website.sh "$VERSION" "$zip"
+          unzip -l "$zip"
+          sum=$(sha256sum "$zip" | cut -d ' ' -f 1)
+          echo "SHA-256 of bolt-$VERSION-website.zip: $sum"
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: website
@@ -115,6 +122,12 @@ jobs:
             ext: tar.gz
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # Each archive's SHA-256, one key per target, so later jobs can tell it's the file built here.
+    outputs:
+      sha256-x86_64-pc-windows-msvc: ${{ steps.pack.outputs.sha256-x86_64-pc-windows-msvc }}
+      sha256-x86_64-unknown-linux-gnu: ${{ steps.pack.outputs.sha256-x86_64-unknown-linux-gnu }}
+      sha256-aarch64-apple-darwin: ${{ steps.pack.outputs.sha256-aarch64-apple-darwin }}
+      sha256-x86_64-apple-darwin: ${{ steps.pack.outputs.sha256-x86_64-apple-darwin }}
     permissions:
       contents: read
       # gh run download, for the notices.
@@ -217,6 +230,7 @@ jobs:
           set +x
           echo "smoke test passed: $TARGET"
       - name: Pack
+        id: pack
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
@@ -267,6 +281,10 @@ jobs:
             echo "::error::$archive doesn't hold exactly its six files"
             exit 1
           fi
+          if command -v sha256sum > /dev/null; then hash=(sha256sum); else hash=(shasum -a 256); fi
+          sum=$("${hash[@]}" "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)
+          echo "SHA-256 of $archive: $sum"
+          echo "sha256-$TARGET=$sum" >> "$GITHUB_OUTPUT"
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -288,6 +306,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.run_id }}
       REPO: ${{ github.repository }}
+      BUILT: ${{ toJSON(needs.build.outputs) }}
     steps:
       - name: Collect the archives and write SHA256SUMS
         run: |
@@ -300,6 +319,14 @@ jobs:
             name="bolt-$VERSION-$t"
             mv "$down/$name/$name" "$dist/$name"
             names+=("$name")
+            # Only what the build job hashed goes into SHA256SUMS.
+            built=$(jq -r --arg k "sha256-${t%%.*}" '.[$k] // ""' <<< "$BUILT")
+            got=$(sha256sum "$dist/$name" | cut -d ' ' -f 1)
+            echo "$name: built $built, downloaded $got"
+            if ! [[ "$built" =~ ^[0-9a-f]{64}$ ]] || [ "$got" != "$built" ]; then
+              echo "::error::$name isn't the file its build job made"
+              exit 1
+            fi
           done
           if [ -n "$(find "$down" -type f)" ]; then
             echo "::error::Unexpected files among the archives"
@@ -327,12 +354,17 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             ext: zip
-            containers: mcr.microsoft.com/windows/servercore:ltsc2022
+            # Server Core ltsc2022, by digest so a changed image can't pass unnoticed.
+            containers: mcr.microsoft.com/windows/servercore:ltsc2022@sha256:301d571fc0cffed67083d4cc7a10167f551212f76b3f91eb7457e89aa5a183da
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: tar.gz
             # AlmaLinux 9 has glibc 2.34, the oldest the guide claims.
-            containers: almalinux:9 ubuntu:22.04 debian:12
+            # almalinux:9, ubuntu:22.04 and debian:12, each by digest.
+            containers: >-
+              almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+              ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
+              debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
           # Also the oldest Apple-silicon runner GitHub offers: macos-14 was retired in November 2026.
           - os: macos-15
             target: aarch64-apple-darwin
@@ -556,12 +588,16 @@ jobs:
     permissions:
       contents: write
       actions: read
+      # The commit's CI results.
+      checks: read
     env:
       TAG: v${{ needs.prepare.outputs.version }}
       VERSION: ${{ needs.prepare.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.run_id }}
       REPO: ${{ github.repository }}
+      BUILT: ${{ toJSON(needs.build.outputs) }}
+      WEBSITE_SHA256: ${{ needs.prepare.outputs.website-sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -577,6 +613,22 @@ jobs:
           releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[] | .tag_name, .name')
           if grep -qx -- "$TAG" <<< "$releases"; then
             echo "::error::A release named $TAG already exists"
+            exit 1
+          fi
+      # Pull requests are tested against an older main, so the merged commit is checked here.
+      - name: Check that CI passed on this commit
+        run: |
+          runs=$(gh api --paginate "repos/$REPO/commits/$GITHUB_SHA/check-runs" \
+            --jq '.check_runs[] | [.name, .started_at, .conclusion // "pending"] | @tsv')
+          bad=0
+          for name in "test (windows-latest)" "test (macos-latest)" "test (ubuntu-latest)" deny; do
+            # The latest attempt counts, so a rerun that passed is enough.
+            last=$(awk -F '\t' -v n="$name" '$1 == n' <<< "$runs" | sort -t $'\t' -k 2 | tail -n 1 | cut -f 3)
+            echo "$name: ${last:-not run}"
+            if [ "$last" != success ]; then bad=1; fi
+          done
+          if [ "$bad" = 1 ]; then
+            echo "::error::CI hasn't passed on $GITHUB_SHA"
             exit 1
           fi
       - name: Collect the files
@@ -596,6 +648,22 @@ jobs:
             exit 1
           fi
           (cd "$dist" && sha256sum --check --strict SHA256SUMS)
+          # Each file against the hash the job that made it gave, not only against SHA256SUMS.
+          for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
+                   aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz website.zip; do
+            name="bolt-$VERSION-$t"
+            if [ "$t" = website.zip ]; then
+              made=$WEBSITE_SHA256
+            else
+              made=$(jq -r --arg k "sha256-${t%%.*}" '.[$k] // ""' <<< "$BUILT")
+            fi
+            got=$(sha256sum "$dist/$name" | cut -d ' ' -f 1)
+            echo "$name: made $made, downloaded $got"
+            if ! [[ "$made" =~ ^[0-9a-f]{64}$ ]] || [ "$got" != "$made" ]; then
+              echo "::error::$name isn't the file the job that made it hashed"
+              exit 1
+            fi
+          done
           ls -l "$dist"
           want=$(printf '%s\n' SHA256SUMS "bolt-$VERSION-website.zip" "bolt-$VERSION-x86_64-pc-windows-msvc.zip" \
             "bolt-$VERSION-"{x86_64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-apple-darwin}.tar.gz | sort)
