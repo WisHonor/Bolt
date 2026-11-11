@@ -32,10 +32,14 @@ pub struct Verdict {
 
 /// Whether `pattern` matches the whole of `text`, `/` matched only by `/` and by a `**` that is
 /// a whole folder name. With `casefold`, ASCII letters match without regard to case, as Git does
-/// with `core.ignoreCase`.
+/// with `core.ignoreCase`. A NUL ends the pattern and the text, as in Git.
 #[must_use]
 pub fn wildmatch(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
-    compile(pattern).is_some_and(|p| p.matches(text, casefold))
+    compile(to_nul(pattern)).is_some_and(|p| p.matches(to_nul(text), casefold))
+}
+
+fn to_nul(bytes: &[u8]) -> &[u8] {
+    bytes.split(|&c| c == 0).next().unwrap_or_default()
 }
 
 /// One piece of a pattern.
@@ -227,7 +231,8 @@ fn compile(pattern: &[u8]) -> Option<Pat> {
                 } else if let Some(after) = rest.strip_prefix(b"/") {
                     rest = after;
                     toks.push(Tok::Dirs);
-                } else if rest.is_empty() {
+                } else if rest.is_empty() || rest.starts_with(b"\\/") {
+                    // Before an escaped `/` it takes any run, and the `/` must follow.
                     toks.push(Tok::All);
                 } else {
                     toks.push(Tok::Star);

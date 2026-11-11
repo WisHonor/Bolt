@@ -248,6 +248,26 @@ fn double_stars_cross_folders_only_as_whole_folder_names() {
             // Git 2.52 and later: a `**` after other bytes of a name is a `*`.
             ("a**/b", &["ax/b", "a/b"], &["ax/y/b"]),
             ("a/b**", &["a/bc"], &["a/bc/d"]),
+            // Before an escaped `/`, a whole-name `**` takes any run, but not nothing.
+            ("**\\/b", &["a/x/b", "x/b"], &["b"]),
+            ("x\\/**\\/y", &["x/k/y", "x/k/l/y"], &["x/y", "xy"]),
+            ("**\\/", &["///", "a/"], &["a"]),
+            ("a/**\\x", &["a/bx", "a/x"], &["a/b/x"]),
+        ],
+        false,
+    );
+    let m = matcher(PLAIN, &[("", "**\\/*\n")]);
+    assert_eq!(m.decide("a/a/a", false), Decision::Ignored);
+    assert_eq!(m.decide("a", false), Decision::NoRule);
+}
+
+#[test]
+fn a_nul_ends_what_wildmatch_is_given() {
+    check_wildmatch(
+        &[
+            ("\0", &["", "\0", "\0x"], &["x"]),
+            ("a*\0b", &["a", "ax\0y"], &["xa"]),
+            ("a\0[", &["a"], &[]),
         ],
         false,
     );
