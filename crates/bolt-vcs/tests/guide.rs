@@ -299,8 +299,8 @@ fn nothing_that_ships_points_into_the_repository() {
 
     let mut wrong = Vec::new();
     for rel in &shipped {
-        let doc = std::fs::read_to_string(repo_root().join(rel))
-            .unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let doc =
+            std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         let lower = doc.to_lowercase();
         // Also catches git@github.com:WisHonor/Bolt and raw.githubusercontent.com/WisHonor/Bolt.
         if lower.contains("github.com/wishonor") || lower.contains("wishonor/bolt") {
