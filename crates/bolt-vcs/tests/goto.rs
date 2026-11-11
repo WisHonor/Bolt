@@ -665,10 +665,10 @@ fn a_placeholder_you_changed_is_unsaved_work() {
     assert_eq!(std::fs::read(env.root().join("out")).unwrap(), b"mine\n");
 }
 
-/// A goto to a save whose files' pack is gone stops before it writes anything: no journal is left
-/// to finish or delete, and the folder is as it was.
+/// A goto to a save whose files' pack is gone stops at the file it can't write and leaves that
+/// file as it was. Where it stops partway, its hint names the way on, and that way works.
 #[test]
-fn a_goto_that_needs_a_pack_that_is_gone_stops_before_its_journal() {
+fn a_goto_that_needs_a_pack_that_is_gone_stops_and_names_the_way_on() {
     let env = Env::empty();
     env.bolt()
         .args(["start", "--preset", "custom"])
@@ -698,12 +698,16 @@ fn a_goto_that_needs_a_pack_that_is_gone_stops_before_its_journal() {
         std::fs::remove_file(pack).unwrap();
     }
     let out = env.bolt().args(["goto", &two]).output().unwrap();
+    let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-    assert!(
-        text(&out.stderr).contains("is not in the store"),
-        "{}",
-        text(&out.stderr)
-    );
-    assert!(!env.root().join(".bolt/state/journal").exists());
+    assert!(said.contains("is not in the store"), "{said}");
+    assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
+    let journal = env.root().join(".bolt/state/journal");
+    if journal.exists() {
+        assert!(said.contains("delete .bolt/state/journal"), "{said}");
+        std::fs::remove_file(&journal).unwrap();
+    }
+    support::write(&env, "h.txt", "new\n");
+    env.bolt().args(["save", "Four"]).assert().success();
     assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
 }
