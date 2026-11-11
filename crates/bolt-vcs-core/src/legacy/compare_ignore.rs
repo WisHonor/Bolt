@@ -252,7 +252,7 @@ fn rule_file() -> impl Strategy<Value = Vec<u8>> {
                     t.extend_from_slice(end);
                 }
             }
-            unescape_slash(&t)
+            t
         })
 }
 
@@ -480,10 +480,8 @@ fn hand_made_patterns_agree() {
     check_rows(rows);
 }
 
-/// A NUL byte ends the pattern and the text for the old code and is an ordinary byte for the
-/// new: they differ here until that is ruled on. No rule line or path reaches it with a NUL.
+/// A NUL byte in the pattern or the text, given straight to `wildmatch`.
 #[test]
-#[ignore = "old and new differ on NUL bytes"]
 fn nul_patterns_agree() {
     let rows: &[(&[u8], &[u8])] = &[
         (b"\x00", b""),
@@ -493,45 +491,54 @@ fn nul_patterns_agree() {
         (b"a", b"a\x00b"),
         (b"?", b"\x00"),
         (b"[\x00]", b"\x00"),
+        (b"?*", b"\x00\x00"),
+        (b"\x00", b"\x00"),
+        (b"a\x00b", b"a\x00b"),
+        (b"*", b"a\x00b"),
+        (b"**", b"\x00"),
+        (b"\\\x00", b"\x00"),
     ];
     check_rows(rows);
 }
 
-/// After `**`, an escaped slash `\/` lets the old code's `**` cross any number of folders, as
-/// `git check-ignore` does, and the new code's only one. They differ here until that is fixed.
+/// An escaped slash after `**`: `git check-ignore` lets the `**` cross any number of folders.
 #[test]
-#[ignore = "old and new differ on an escaped slash after **"]
 fn stars_before_escaped_slash_agree() {
     let rows: &[(&[u8], &[u8])] = &[
         (b"**\\/", b"///"),
         (b"**\\/b", b"a/x/b"),
         (b"**\\/*", b"a/a/a"),
         (b"a/**\\/b", b"a/x/y/b"),
+        (b"**\\/", b"a/"),
+        (b"**\\/b", b"b"),
+        (b"**\\/b", b"a/b"),
+        (b"a/**\\/b", b"a/b"),
+        (b"a/**\\/b", b"a/x/b"),
+        (b"\\/**\\/b", b"/x/b"),
+        (b"a**\\/b", b"a/x/b"),
+        (b"**\\\\/b", b"x\\/b"),
     ];
     check_rows(rows);
-    let w = Walk {
-        drive: (false, false),
-        stops: vec![stop(&[], &[(b"**\\/b\n", true)], &[("a/x/b", false)])],
-    };
-    if let Err(e) = run_walk(&w) {
-        panic!("{e}");
-    }
-}
-
-/// `*\/` written `*/`, so that the generators don't keep finding the difference above.
-fn unescape_slash(p: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(p.len());
-    let mut i = 0;
-    while i < p.len() {
-        if p[i..].starts_with(b"*\\/") {
-            out.extend_from_slice(b"*/");
-            i += 3;
-        } else {
-            out.push(p[i]);
-            i += 1;
+    for rule in [&b"**\\/b\n"[..], b"**\\/*\n", b"a/**\\/b\n"] {
+        for g in [true, false] {
+            let w = Walk {
+                drive: (false, false),
+                stops: vec![stop(
+                    &[],
+                    &[(rule, g)],
+                    &[
+                        ("a/x/b", false),
+                        ("a/x/y/b", false),
+                        ("a/a/a", false),
+                        ("a/b", false),
+                    ],
+                )],
+            };
+            if let Err(e) = run_walk(&w) {
+                panic!("{e}");
+            }
         }
     }
-    out
 }
 
 fn check_rows(rows: &[(&[u8], &[u8])]) {
@@ -603,10 +610,7 @@ proptest! {
 
     #[test]
     fn wildmatch_agrees((p, t) in text_for(), fold in any::<bool>()) {
-        // NUL bytes are left to `nul_patterns_agree`; rule lines still carry them in `walks_agree`.
-        let p: Vec<u8> = p.into_iter().filter(|&b| b != 0).collect();
-        let t: Vec<u8> = t.into_iter().filter(|&b| b != 0).collect();
-        check_wild(&unescape_slash(&p), &t, fold)?;
+        check_wild(&p, &t, fold)?;
     }
 
     #[test]
