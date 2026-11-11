@@ -21,7 +21,10 @@ use support::{Env, changed, copy_dir, main_tip, text};
 /// it.
 fn project(files: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in files {
         let at = env.root().join(path);
         fs::create_dir_all(at.parent().unwrap()).unwrap();
@@ -94,7 +97,10 @@ fn change_ids_cache(root: &Path) -> std::path::PathBuf {
 /// oldest first. `bolt history` has filled the change-ID cache.
 fn saves(count: usize) -> (Env, Vec<(Id, String)>) {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let mut made = Vec::new();
     for n in 0..count {
         add_save(&env, n, &mut made);
@@ -153,14 +159,22 @@ impl Copies {
     }
 }
 
-/// `undo --list`'s lines without the diary entries' own IDs, which hold the time each was made.
+/// `undo --list`'s lines without the diary entries' own IDs, which hold the time each was made,
+/// and without the project folder's name in its heading.
 fn without_entry_ids(said: &str) -> String {
     said.lines()
-        .map(|line| match line.splitn(3, "  ").collect::<Vec<_>>()[..] {
-            [step, id, rest] if id.len() == 12 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                format!("{step}  {rest}\n")
+        .map(|line| {
+            if line.starts_with("Undo diary for ") {
+                return "Undo diary\n".to_string();
             }
-            _ => format!("{line}\n"),
+            let kept: Vec<&str> = line
+                .split("  ")
+                .filter(|part| {
+                    let id = part.trim();
+                    !(id.len() == 12 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+                })
+                .collect();
+            format!("{}\n", kept.join("  "))
         })
         .collect()
 }
@@ -321,7 +335,10 @@ fn a_file_changed_within_two_seconds_is_read_again() {
     // Its time a minute ahead, so it is too new to trust however slowly the save runs: the cache
     // the save leaves doesn't vouch for it.
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let a = env.root().join("a.txt");
     fs::write(&a, "one").unwrap();
     set_time(&a, SystemTime::now() + Duration::from_secs(60));

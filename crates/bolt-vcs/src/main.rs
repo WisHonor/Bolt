@@ -1,17 +1,28 @@
 //! The `bolt` command-line tool.
 
+mod git_words;
+mod goto_output;
+mod help;
+mod history_output;
 mod import_output;
 mod output;
+mod progress;
+mod setup_output;
+mod shelf_output;
+mod show_output;
+mod style;
+mod undo_output;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::io::{BufRead, IsTerminal, Write};
+use std::ffi::OsString;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bolt_core::changes::{Lines, save_changes, unsaved_changes};
 use bolt_core::config::{
-    ConfigError, Identity, git_excludes_file, git_lfs_storage, ignored_identity_note,
+    ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
 };
 use bolt_core::diary::{Action, DiaryEntry, Position};
@@ -21,11 +32,13 @@ use bolt_core::history::{
     LineIds, ResolveError, current_save, for_each_on_line, resolve, short_change_id,
 };
 use bolt_core::id::{ChangeId, Id};
-use bolt_core::import::{ImportError, ImportRequest, import_git};
+use bolt_core::import::{ImportError, ImportPass, ImportRequest, import_git};
 use bolt_core::lines::resolve_target;
 use bolt_core::names::{GivenPathError, project_given, project_path};
+use bolt_core::presets::{Looked, Preset, suggested};
 use bolt_core::repo::{RepoError, Repository, elevated_only_note, resolved};
 use bolt_core::save::Save;
+use bolt_core::setup::{SetupError, apply_setup, look_at, plan_setup};
 use bolt_core::shelf::{self, Shelved};
 use bolt_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_folder};
 use bolt_core::status::{PathChange, status, why_stopped};
@@ -34,9 +47,11 @@ use bolt_core::switch::{SwitchError, discard, goto};
 use bolt_core::text::escape;
 use bolt_core::tidy;
 use bolt_core::undo::{self, StepInfo, StepRequest};
+use bolt_core::verify;
 use bolt_core::warning::{self, Warning};
 use bolt_core::writeout::unfinished_warning;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use git_words::Typed;
 use output::{BOLT_JSON, Failure};
 use serde_json::json;
 
@@ -57,7 +72,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Make this folder a Bolt project.
-    Start,
+    Start {
+        /// What kind of project: code, game, or custom (Bolt's plain defaults, no rule files).
+        #[arg(long, value_enum, value_name = "PRESET")]
+        preset: Option<PresetArg>,
+    },
+    /// Show the project's rules as Bolt reads them, or change them to a preset's.
+    Setup {
+        /// Show the lines this preset would change, then change them.
+        #[arg(long, value_enum, value_name = "PRESET")]
+        preset: Option<PresetArg>,
+        /// Make the changes without asking.
+        #[arg(long, requires = "preset")]
+        yes: bool,
+    },
     /// Bring the Git repository in this folder into Bolt, with all its history.
     Import,
     /// Save the current state of your files: all of them, or only these files, folders and
@@ -75,20 +103,28 @@ enum Command {
         /// The save to show, by line name, change ID or fingerprint, against its first parent.
         #[arg(long, value_name = "SAVE")]
         save: Option<String>,
+        /// Only these files and folders.
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
     /// List the saves on this line.
     History,
     /// Show one save.
-    Show { save: Option<String> },
+    Show {
+        /// The save, by line name, change ID or fingerprint; the one you're at if left out.
+        save: Option<String>,
+    },
     /// List the lines, marking the one you're on, then the server lines.
     Line,
     /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
-    Goto { target: String },
+    Goto {
+        /// The line or save to go to.
+        target: String,
+    },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
     /// of each changed or new file is kept.
     Discard {
+        /// Only in these files and folders.
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
@@ -131,11 +167,33 @@ enum Command {
     /// Free the space nothing needs any more: saves no line, shelf or tag reaches, and what only
     /// steps older than the undo window (undo-window-days in your settings, 30 by default) needed.
     Tidy,
+    /// Check everything Bolt has stored, and that the project has everything it needs. Changes
+    /// nothing.
+    Verify,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum PresetArg {
+    Code,
+    Game,
+    Custom,
+}
+
+impl From<PresetArg> for Preset {
+    fn from(p: PresetArg) -> Preset {
+        match p {
+            PresetArg::Code => Preset::Code,
+            PresetArg::Game => Preset::Game,
+            PresetArg::Custom => Preset::Custom,
+        }
+    }
 }
 
 #[derive(clap::Args)]
 struct SaveArgs {
+    /// What the save holds, in a few words.
     message: Option<String>,
+    /// Save only these files, folders and patterns.
     #[arg(value_name = "PATH")]
     paths: Vec<PathBuf>,
     /// After an import, save files Git wrote with CRLF line endings as they are.
@@ -237,6 +295,16 @@ impl From<std::io::Error> for Failure {
     }
 }
 
+impl From<SetupError> for Failure {
+    fn from(e: SetupError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
 impl From<ImportError> for Failure {
     fn from(e: ImportError) -> Failure {
         Failure {
@@ -279,11 +347,119 @@ fn with_users_key(mut repo: Repository) -> Repository {
     repo
 }
 
-fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+/// The preset `bolt start` begins with: `None` where the folder has a `bolt.toml` of its own,
+/// which stays. Asks when it may and `asked` is `None`; stops before anything is made otherwise.
+fn preset_to_start(
+    json: bool,
+    asked: Option<Preset>,
+    looked: &Looked,
+    has_rules_file: bool,
+) -> Result<Option<Preset>, Failure> {
+    if has_rules_file {
+        return match asked {
+            None => Ok(None),
+            Some(preset) => Err(Failure {
+                message: "Nothing was started: this folder already has a bolt.toml, and a start \
+                          keeps the rules it holds, so --preset can't be used here."
+                    .into(),
+                hint: Some(format!(
+                    "Run bolt start without --preset to keep them; to switch to the preset's \
+                     rules afterwards, run: bolt setup --preset {}",
+                    preset.name()
+                )),
+                printed: false,
+            }),
+        };
+    }
+    if let Some(preset) = asked {
+        return Ok(Some(preset));
+    }
+    let suggestion = suggested(&looked.found);
+    let stop = |message: &str| Failure {
+        message: message.to_owned(),
+        hint: Some(format!(
+            "Name the kind of project: bolt start --preset code, bolt start --preset game or bolt \
+             start --preset custom. Bolt would suggest --preset {}: it {}.",
+            suggestion.name(),
+            setup_output::found_words(looked)
+        )),
+        printed: false,
+    };
+    if !style::may_ask() {
+        let why = if json {
+            "Nothing was started: Bolt can't ask what kind of project this is with --json."
+        } else {
+            "Nothing was started: Bolt can't ask what kind of project this is without a terminal."
+        };
+        return Err(stop(why));
+    }
+    match ask_preset(looked, suggestion) {
+        Some(preset) => Ok(Some(preset)),
+        None => Err(stop("Nothing was started: no kind of project was chosen.")),
+    }
+}
+
+/// Asks in the terminal which preset to start with, at most three times; `None` if no answer
+/// named one, or the input ended.
+fn ask_preset(looked: &Looked, suggestion: Preset) -> Option<Preset> {
+    const CHOICES: [(Preset, &str); 3] = [
+        (Preset::Code, "apps, websites, libraries"),
+        (Preset::Game, "Unity, Unreal, Godot, big assets"),
+        (Preset::Custom, "Bolt's plain defaults, no rule files"),
+    ];
+    let e = style::err();
+    output::tell(&setup_output::look_line(looked));
+    output::tell("");
+    output::tell("What kind of project is this?");
+    output::tell("");
+    let mut default = 1;
+    for (n, (preset, gloss)) in (1..).zip(CHOICES) {
+        let mut line = format!("    {n}. {:<8} {gloss}", setup_output::title(preset));
+        if preset == suggestion {
+            default = n;
+            let mark = format!("{} suggested", e.sym(style::Sym::Back));
+            line += &format!("   {}", e.paint(style::Role::Dim, &mark));
+        }
+        output::tell(&line);
+    }
+    output::tell("");
+    for _ in 0..3 {
+        let _ = write!(std::io::stderr(), "Choice [{default}]: ");
+        let mut answer = String::new();
+        if !matches!(std::io::stdin().lock().read_line(&mut answer), Ok(1..)) {
+            return None;
+        }
+        let answer = answer.trim().to_ascii_lowercase();
+        let picked = match answer.as_str() {
+            "" => Some(suggestion),
+            "1" => Some(Preset::Code),
+            "2" => Some(Preset::Game),
+            "3" => Some(Preset::Custom),
+            name => Preset::from_name(name),
+        };
+        if picked.is_some() {
+            output::tell("");
+            return picked;
+        }
+        output::tell("Answer 1, 2 or 3, or a preset's name: code, game or custom.");
+    }
+    None
+}
+
+fn start(
+    json: bool,
+    asked: Option<Preset>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
-    // The user's own settings may name this folder, so the first save is theirs too.
+    // Before anything is asked: a folder that can't be a project is refused at once.
+    Repository::check_new(&root)?;
+    // The user's own settings may name this folder, so the first save is theirs too. Read before
+    // the question, so nobody answers it only to be refused.
     let who = now_person(&load_identity(Some(&root))?);
-    let repo: &Repository = opened.insert(with_users_key(Repository::init(&root, &who)?));
+    let (looked, has_rules_file) = look_at(&root)?;
+    let preset = preset_to_start(json, asked, &looked, has_rules_file)?;
+    let repo = opened.insert(with_users_key(Repository::init(&root, &who)?));
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
         .map(|note| Warning::new(warning::ELEVATED_ONLY, note))
         .into_iter()
@@ -303,57 +479,235 @@ fn start(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
             None
         }
     };
+    // The rule files are a second step, which `bolt undo` takes back.
+    let mut rules_written = Vec::new();
+    let mut unwritten = None;
+    if let Some(preset) = preset.filter(|p| *p != Preset::Custom) {
+        let wrote = git_excludes_file(&root)
+            .map_err(Failure::from)
+            .and_then(|excludes| {
+                let plan = plan_setup(&root, preset)?;
+                let _working = progress::Working::start("Writing rule files");
+                Ok(apply_setup(
+                    repo,
+                    &plan,
+                    &who,
+                    excludes.as_deref(),
+                    &mut waiting,
+                )?)
+            });
+        match wrote {
+            Ok(done) => {
+                rules_written = done.written;
+                warnings.extend(done.warnings);
+            }
+            Err(problem) => {
+                unwritten = Some(Failure {
+                    message: format!(
+                        "The project was started, but its rule files weren't written: {}",
+                        problem.message
+                    ),
+                    hint: Some(format!(
+                        "Run bolt setup --preset {} to write them.",
+                        preset.name()
+                    )),
+                    printed: false,
+                });
+            }
+        }
+    }
+    let rules = repo.read_rules();
+    warnings.extend(rules.warnings());
     warnings.extend(repo.store().warnings());
-    let text = if json {
+    if json {
         let save = first.as_ref().map_or(json!(null), |(id, save, short)| {
             output::save_json(id, save, short)
         });
         let document = json!({
             "bolt_json": BOLT_JSON,
             "root": root.display().to_string(),
-            "line": "main",
+            "position": output::position_json(&Position::OnLine("main".into())),
             "save": save,
+            "preset": preset.map(Preset::name),
+            "found": setup_output::found_json(&looked.found),
+            "rules_written": rules_written,
             "warnings": output::warnings_json(&warnings),
         });
+        let Some(failure) = unwritten else {
+            return output::print_done(&format!("{document}\n"), &warnings);
+        };
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        let in_document = Failure {
+            printed: true,
+            ..failure
+        };
+        return output::ended(Some(in_document), String::new, &warnings, None);
+    }
+    if let Some(failure) = unwritten {
+        // The warnings it found, then the failure.
+        return output::ended(Some(failure), String::new, &warnings, None);
+    }
+    // The folder's name came from outside Bolt, like any name in a project.
+    let shown = escape(&root.display().to_string(), false);
+    let short = first.as_ref().map(|(_, _, short)| short.as_str());
+    let text = setup_output::started(&shown, preset, &looked.found, &rules.rules, short);
+    output::print_done(&text, &warnings)?;
+    if short.is_some() {
+        let e = style::err();
+        style::next(&format!(
+            "change some files, then run: {}",
+            e.command("bolt save \"describe your change\"")
+        ));
+    }
+    Ok(())
+}
+
+fn setup_command(
+    json: bool,
+    preset: Option<Preset>,
+    yes: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let Some(preset) = preset else {
+        let read = repo.read_rules();
+        let block = bolt_core::setup::boltignore_block_lines(repo.root())?;
+        let mut warnings = read.warnings();
+        warnings.extend(repo.store().warnings());
+        if json {
+            let mut document = setup_output::rules_json(&read, block);
+            document["bolt_json"] = BOLT_JSON.into();
+            document["warnings"] = output::warnings_json(&warnings);
+            return output::print_quietly(&format!("{document}\n"), &warnings);
+        }
+        output::print_quietly(&setup_output::rules_shown(&read, block), &warnings)?;
+        let e = style::err();
+        style::next(&format!(
+            "edit bolt.toml or .boltignore to change a rule, or switch presets with: {}",
+            e.command("bolt setup --preset <name>")
+        ));
+        return Ok(());
+    };
+    let plan = plan_setup(repo.root(), preset)?;
+    let title = setup_output::title(preset);
+    let mut document = json!({
+        "bolt_json": BOLT_JSON,
+        "preset": preset.name(),
+        "found": setup_output::found_json(&plan.found),
+        "files": setup_output::changes_json(&plan.changes),
+        "applied": false,
+    });
+    if plan.changes.is_empty() {
+        let warnings = repo.store().warnings();
+        let text = if json {
+            document["warnings"] = output::warnings_json(&warnings);
+            format!("{document}\n")
+        } else {
+            format!(
+                "Nothing to change: the rule files already are what the {title} preset writes.\n"
+            )
+        };
+        return output::print_quietly(&text, &warnings);
+    }
+    if !json {
+        let mut preview =
+            format!("Switching to {title} settings changes these files:\n\n").into_bytes();
+        setup_output::write_preview(&mut preview, &plan.changes)?;
+        output::print_out(&String::from_utf8_lossy(&preview));
+    }
+    if !yes && style::may_ask() && !ask_apply() {
+        return output::print_quietly("\nNothing was changed.\n", &repo.store().warnings());
+    }
+    if !yes && !style::may_ask() {
+        let failure = Failure {
+            message: if json {
+                "Nothing was changed: Bolt can't ask whether to apply these changes with --json."
+                    .into()
+            } else {
+                "Nothing was changed: Bolt can't ask whether to apply these changes without a \
+                 terminal."
+                    .into()
+            },
+            hint: Some(format!(
+                "If they are what you want, run: bolt setup --preset {} --yes",
+                preset.name()
+            )),
+            printed: false,
+        };
+        if !json {
+            return Err(failure);
+        }
+        let warnings = repo.store().warnings();
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        let in_document = Failure {
+            printed: true,
+            ..failure
+        };
+        return output::ended(Some(in_document), String::new, &warnings, None);
+    }
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let done = {
+        let _working = progress::Working::start("Writing rule files");
+        apply_setup(repo, &plan, &who, git_excludes.as_deref(), &mut waiting)
+    }?;
+    let mut warnings = done.warnings;
+    warnings.extend(repo.store().warnings());
+    // Every file changed while Bolt worked: nothing was written.
+    let applied = !done.written.is_empty();
+    let text = if json {
+        document["applied"] = applied.into();
+        document["warnings"] = output::warnings_json(&warnings);
         format!("{document}\n")
     } else {
-        // The folder's name came from outside Bolt, like any name in a project.
-        let shown = escape(&root.display().to_string(), false);
-        let mut text = format!("Started a Bolt project in {shown}.\n");
-        if let Some((_, _, short)) = &first {
-            text += &format!("Your first save is {short}, on line main.\n");
-            text += "Next: change some files, then run: bolt save \"describe your change\"\n";
-        }
-        text
+        // After the preview.
+        setup_output::switched(preset, &plan.changes, &done.written)
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    if applied {
+        style::changed_your_mind();
+    }
+    Ok(())
+}
+
+/// Asks in the terminal whether to apply a preset's changes. Only a yes is one.
+fn ask_apply() -> bool {
+    let _ = write!(std::io::stderr(), "Apply these changes? [y/N] ");
+    let mut answer = String::new();
+    if std::io::stdin().lock().read_line(&mut answer).is_err() {
+        return false;
+    }
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let root = resolved(&std::env::current_dir()?);
     let who = now_person(&load_identity(Some(&root))?);
-    let lfs_storage = git_lfs_storage(&root)?;
-    let mut reading = output::Progress::new("Reading Git's history", "commits");
-    let mut importing = output::Progress::new("Importing commits", "commits");
+    let git_settings = git_import_settings(&root)?;
+    let mut bar = progress::Bar::new("Reading Git's history");
     let imported = import_git(
         &root,
         &mut ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: Some(&lfs_storage),
-            // The first pass can't say how many commits there are; the second can.
-            progress: &mut |done, total| match total {
-                None => reading.update(done, None),
-                Some(_) => {
-                    reading.finish();
-                    importing.update(done, total);
-                }
+            git_settings: Some(&git_settings),
+            progress: &mut |pass, done, total| {
+                bar.set_label(match pass {
+                    ImportPass::ReadingHistory => "Reading Git's history",
+                    ImportPass::CheckingLfs => "Checking Git LFS files",
+                    ImportPass::Importing => "Importing commits",
+                });
+                bar.update(done, total, false);
             },
         },
         opened,
     );
-    reading.finish();
-    importing.finish();
+    bar.finish();
     let report = imported?;
     // A project made from an import opens only where one made by `start` would.
     let mut warnings: Vec<Warning> = elevated_only_note(&root)
@@ -364,15 +718,24 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let text = if json {
         format!("{}\n", import_output::import_json(&report, &warnings))
     } else {
+        let s = style::out();
         let standing = match &report.position {
-            Position::OnLine(line) => format!("You're on line {}.", escape(line, false)),
+            Position::OnLine(line) => {
+                format!(
+                    "You're on line {}.",
+                    s.paint(style::Role::Line, &escape(line, false))
+                )
+            }
             Position::AtSave(id) => {
                 // By change ID, as everywhere else; by fingerprint if the save can't be read now.
                 let short = opened.as_ref().and_then(|repo| {
                     let save = repo.store().save(id, repo.signatures_allowed()).ok()?;
                     Some(short_or_whole(repo, id, &save.change_id, &mut warnings))
                 });
-                let short = short.unwrap_or_else(|| id.to_hex());
+                let short = match short {
+                    Some(short) => s.paint(style::Role::ChangeId, &short),
+                    None => s.paint(style::Role::Fingerprint, &id.to_hex()),
+                };
                 format!(
                     "You're at save {short}, where Git's HEAD was detached: not on a line. Saving \
                      here asks for a new line's name."
@@ -381,17 +744,26 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
         };
         import_output::import_text(&report, &standing)
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    style::next(&format!(
+        "look around with: {}",
+        style::err().command("bolt status")
+    ));
+    Ok(())
 }
 
-/// Asks in the terminal for the new line's name; `None` if there is no terminal to ask in.
-fn ask_line_name() -> Result<Option<String>, Failure> {
-    if !std::io::stdin().is_terminal() {
+/// Asks in the terminal for the new line's name, with `working` off the screen meanwhile; `None`
+/// if there is no terminal to ask in.
+fn ask_line_name(working: &progress::Working) -> Result<Option<String>, Failure> {
+    if !style::may_ask() {
         return Ok(None);
     }
+    working.pause();
     let _ = write!(std::io::stderr(), "Name a new line for this save: ");
     let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
+    let read = std::io::stdin().lock().read_line(&mut answer);
+    working.resume();
+    read?;
     let answer = answer.trim();
     if answer.is_empty() {
         return Err(Failure {
@@ -406,7 +778,7 @@ fn ask_line_name() -> Result<Option<String>, Failure> {
 /// Asks in the terminal whether to make a save that adds this much; `None` if there is no
 /// terminal to ask in. An answer that can't be read is a no.
 fn ask_large(large: &LargeSave) -> Option<bool> {
-    if !std::io::stdin().is_terminal() {
+    if !style::may_ask() {
         return None;
     }
     let _ = write!(std::io::stderr(), "{large} Save them? [y/N] ");
@@ -461,26 +833,30 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
         amend,
     };
     let mut on_wait = waiting;
+    let working = progress::Working::start("Saving");
     // With --json nothing is asked, so a large save stops and names --yes.
     let mut said_no = false;
     let mut confirm = |large: &LargeSave| {
         if yes || json {
             return yes;
         }
+        working.pause();
         let answer = ask_large(large);
+        working.resume();
         said_no = answer == Some(false);
         answer.unwrap_or(false)
     };
     let asked;
     let saved = match save_folder(repo, &req, &mut on_wait, &mut confirm) {
         // Only now is it known that the save is at a save: a stopped switch may have moved it.
-        Err(SaveError::NeedsLineName) if !json && let Some(name) = ask_line_name()? => {
+        Err(SaveError::NeedsLineName) if !json && let Some(name) = ask_line_name(&working)? => {
             asked = name;
             req.new_line = Some(&asked);
             save_folder(repo, &req, &mut on_wait, &mut confirm)
         }
         done => done,
     };
+    drop(working);
     let outcome = match saved {
         Err(SaveError::LargeSave(_)) if said_no => {
             return Err(Failure {
@@ -514,20 +890,44 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 });
                 format!("{}\n", with_ignored(document, ignored.as_ref()))
             } else {
-                let title = escape(save.message.lines().next().unwrap_or_default(), false);
+                let s = style::out();
                 let counted = match changed_files {
-                    Some(1) => "(1 file)".to_owned(),
-                    Some(n) => format!("({n} files)"),
+                    Some(n) => format!("({})", output::files(n)),
                     None => "(couldn't count the changed files)".to_owned(),
                 };
-                let made = if replaced.is_some() {
-                    "Amended"
-                } else {
-                    "Saved"
+                let made = match replaced {
+                    Some(_) => format!("{} save", s.paint(style::Role::Ok, "Updated")),
+                    None => s.paint(style::Role::Ok, "Saved"),
                 };
-                let mut text = format!("{made} {short}  \"{title}\"  {counted}\n");
+                let on = save.line().map_or(String::new(), |line| {
+                    format!(" on {}", s.paint(style::Role::Line, &escape(line, false)))
+                });
+                let mut text = format!(
+                    "{made} {} {}{on}  {}\n",
+                    s.paint(style::Role::ChangeId, &short),
+                    output::quoted_title(&save),
+                    s.paint(style::Role::Dim, &counted)
+                );
+                let mut details = Vec::new();
+                if replaced.is_some() {
+                    details.push("The ID stays the same.".to_owned());
+                }
                 if let Some(line) = req.new_line {
-                    text += &format!("You're on the new line {}.\n", escape(line, false));
+                    let line = style::whole(&escape(line, false));
+                    details.push(format!("You're on the new line {line}."));
+                }
+                if only.is_some() {
+                    details.push(format!(
+                        "Only what you named was saved: {} lists the changes left out.",
+                        s.command("bolt status")
+                    ));
+                }
+                if !details.is_empty() {
+                    text += "\n";
+                }
+                for detail in details {
+                    text += &s.detail(None, &detail);
+                    text.push('\n');
                 }
                 text
             };
@@ -541,7 +941,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 warnings.extend(repo.store().warnings());
                 let document = json!({
                     "bolt_json": BOLT_JSON,
-                    "result": "nothing-changed",
+                    "result": "nothing_changed",
                     "paths": paths,
                     "warnings": output::warnings_json(&warnings),
                 });
@@ -550,20 +950,23 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 let last = repo.store().save(&current, repo.signatures_allowed())?;
                 let short = short_or_whole(repo, &current, &last.change_id, &mut warnings);
                 warnings.extend(repo.store().warnings());
+                let s = style::out();
+                let last_save = format!(
+                    "your last save, {} {}",
+                    s.paint(style::Role::ChangeId, &short),
+                    output::quoted_title(&last)
+                );
                 let mut text = if amend {
                     let what = if paths.is_empty() {
                         "your files match"
                     } else {
                         "what you named matches"
                     };
-                    format!(
-                        "Nothing to amend: {what} your last save ({short}), and so does the \
-                         message.\n"
-                    )
+                    format!("Nothing to amend: {what} {last_save}, and so does the message.\n")
                 } else if paths.is_empty() {
-                    format!("Nothing to save: no changes since your last save ({short}).\n")
+                    format!("Nothing to save: no changes since {last_save}.\n")
                 } else {
-                    format!("Nothing to save there: it matches your last save ({short}).\n")
+                    format!("Nothing to save there: it matches {last_save}.\n")
                 };
                 if req.new_line.is_some() {
                     text += "No line was made: a new line starts with a save, so change a file \
@@ -665,35 +1068,67 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                     "position": output::position_json(&found.position),
                     "save": output::save_json(id, save, &short),
                     "changes": changes,
-                    "not_written_here": found.not_written_here,
-                    "unfinished_switch": found.unfinished_switch,
+                    "not_written": found.not_written_here,
+                    "unfinished_switch": found.unfinished_switch.is_some(),
                     "warnings": output::warnings_json(&warnings),
                 })
             );
         }
+        let s = style::out();
+        let at = format!(
+            "{} {}",
+            s.paint(style::Role::ChangeId, &short),
+            output::quoted_title(save)
+        );
+        let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
+        let when = s.paint(style::Role::Dim, &format!("({when})"));
         match &found.position {
-            Position::OnLine(line) => writeln!(out, "On line {}.", escape(line, false))?,
-            Position::AtSave(_) => writeln!(out, "At save {short}, not on a line.")?,
+            Position::OnLine(line) => {
+                let line = s.paint(style::Role::Line, &escape(line, false));
+                writeln!(out, "On line {line} at save {at}  {when}")?;
+            }
+            Position::AtSave(_) => writeln!(out, "At save {at}, not on a line  {when}")?,
         }
         if found.changes.is_empty() {
-            writeln!(out, "Nothing changed since {short}.")?;
-        }
-        for c in &found.changes {
-            writeln!(out, "{}", output::change_line(&file_change(c)))?;
+            writeln!(out, "Nothing changed since then.")?;
+        } else {
+            let count = output::files(found.changes.len());
+            let count = s.paint(style::Role::Dim, &format!("({count})"));
+            writeln!(out, "\nChanged since then {count}:\n")?;
+            let rows: Vec<output::Row> = found
+                .changes
+                .iter()
+                .map(|c| output::Row::of(&file_change(c)))
+                .collect();
+            let mut columns = output::Columns::default();
+            rows.iter().for_each(|row| columns.fit(row));
+            columns.settle(s, &rows);
+            for row in &rows {
+                writeln!(out, "{}", columns.line(s, row))?;
+            }
         }
         if !found.not_written_here.is_empty() {
             writeln!(
                 out,
-                "Not written here, because this computer can't hold them as they are (saves keep \
-                 them as they were):"
+                "\nNot written here, because this computer can't hold them as they are (saves keep \
+                 them as they were):\n"
             )?;
             for path in &found.not_written_here {
-                writeln!(out, "  {}", escape(path, false))?;
+                let room = s.width.map_or(usize::MAX, |w| w.saturating_sub(4));
+                let path = s.fit_path(&escape(path, false), room);
+                writeln!(out, "    {}", s.paint(style::Role::Path, &path))?;
             }
         }
         Ok(())
     })();
-    output::ended(None, String::new, &warnings, None)
+    output::ended(None, String::new, &warnings, None)?;
+    if !json && !found.changes.is_empty() {
+        style::next(&format!(
+            "save them with: {}",
+            style::err().command("bolt save \"describe your change\"")
+        ));
+    }
+    Ok(())
 }
 
 /// Why `bolt changes` stopped: a file couldn't be read, or what it shows couldn't be written.
@@ -751,12 +1186,6 @@ fn changes_command(
         Some(_) => None,
         None => git_excludes_file(repo.root())?,
     };
-    // The older Windows console shows colour codes as text until a console call turns them on,
-    // and that call is unsafe code for the platform crate: no colour on Windows for now.
-    let color = !cfg!(windows)
-        && !json
-        && std::io::stdout().is_terminal()
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     let timed_out = RefCell::new(Vec::new());
     let shown = Cell::new(0_usize);
     let note = |path: &str, lines: &Lines| {
@@ -825,17 +1254,18 @@ fn changes_command(
         walk(&mut |path, c, lines| {
             note(path, &lines);
             if shown.get() > 1 {
-                wrote(writeln!(out))?;
+                wrote(writeln!(out, "{}", output::between_files()))?;
             }
-            wrote(output::write_lines(
-                &mut out,
-                &file_change(c),
-                &lines,
-                color,
-            ))
+            wrote(output::write_lines(&mut out, &file_change(c), &lines))
         })
         .and_then(|()| {
             let (warnings, short) = warnings();
+            let s = style::out();
+            let short = format!(
+                "{} {}",
+                s.paint(style::Role::ChangeId, &short),
+                output::quoted_title(&saved)
+            );
             if shown.get() == 0 {
                 let said = match (save, only) {
                     (Some(_), None) => writeln!(out, "Save {short} changed no files."),
@@ -879,14 +1309,11 @@ fn history_to(
     unfinished: Option<Warning>,
 ) -> Result<Vec<Warning>, Failure> {
     if json {
-        let line = match &repo.current()?.1.state.position {
-            bolt_core::diary::Position::OnLine(name) => json!(name),
-            bolt_core::diary::Position::AtSave(_) => json!(null),
-        };
+        let position = output::position_json(&repo.current()?.1.state.position);
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         return output::stream_document(
             out,
-            &format!("{{\"bolt_json\":{BOLT_JSON},\"line\":{line},\"saves\":["),
+            &format!("{{\"bolt_json\":{BOLT_JSON},\"position\":{position},\"saves\":["),
             |each| {
                 for_each_on_line(repo, |id, save, short| {
                     each(&output::save_json(id, save, short))
@@ -900,17 +1327,32 @@ fn history_to(
         );
     }
     let now = now_ms();
-    for_each_on_line(repo, |_, s, short| {
-        let when = output::relative_time(s.author.time_ms, s.author.tz_offset_min, now);
-        let title = s.message.lines().next().unwrap_or_default();
-        writeln!(
-            out,
-            "{short}  {when}  {}  {}",
-            escape(&s.author.name, false),
-            escape(title, false)
-        )?;
+    let (_, entry) = repo.current()?;
+    let mut listed = history_output::History::new(match &entry.state.position {
+        Position::OnLine(line) => Some(escape(line, false)),
+        Position::AtSave(_) => None,
+    });
+    // Each save's lines, found once: an import can bring thousands.
+    let mut heads: HashMap<Id, Vec<String>> = HashMap::new();
+    for (name, tip) in &entry.state.lines {
+        heads.entry(*tip).or_default().push(escape(name, false));
+    }
+    let walked = for_each_on_line(repo, |id, s, short| {
+        let row = history_output::SaveRow {
+            short: short.to_owned(),
+            when: output::relative_time(s.author.time_ms, s.author.tz_offset_min, now),
+            author: escape(&s.author.name, false),
+            title: escape(s.message.lines().next().unwrap_or_default(), false),
+            lines: heads.remove(id).unwrap_or_default(),
+        };
+        listed.add(out, row)?;
         Ok::<(), Failure>(())
-    })?;
+    });
+    // What was read before a damaged save is still shown, before the error, which is the one
+    // told even if that writing fails too.
+    let finished = listed.finish(out);
+    walked?;
+    finished?;
     let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
     warnings.extend(repo.store().warnings());
     Ok(warnings)
@@ -928,15 +1370,27 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let early = unfinished.clone();
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
-    let old_root = match save.parents.first() {
-        Some(p) => Some(store.save(p, repo.signatures_allowed())?.root),
-        None => None,
+    // Of the parent, only what is shown and the root the walk compares with.
+    let (old_root, parent_title) = match save.parents.first() {
+        Some(p) => {
+            let parent = store.save(p, repo.signatures_allowed())?;
+            (Some(parent.root), output::quoted_title(&parent))
+        }
+        None => (None, String::new()),
     };
     // Counting first holds the saves to the limits and reads them for damage before anything is
-    // printed, so a save that can't be listed prints only the error. The changes are then
-    // printed as the walk finds them, and none is kept.
-    let count = count_changes(store, old_root, save.root)?;
+    // printed, so a save that can't be listed prints only the error. It also sets the table's
+    // columns. The changes are then printed as the walk finds them, and none is kept.
+    let (mut count, mut columns) = (0_usize, output::Columns::default());
+    for_each_change(store, old_root, save.root, |c| {
+        count += 1;
+        if !json {
+            columns.fit(&output::Row::of(&c));
+        }
+        Ok::<(), StoreError>(())
+    })?;
     let mut out = output::Stdout::new();
+    let mut shown_as = String::new();
     let done = (|| -> Result<Vec<Warning>, Failure> {
         if json {
             // The document `json!` would make, in pieces: serde_json writes an object's keys in
@@ -964,32 +1418,24 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         }
         let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
         let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-        let when = output::relative_time(save.author.time_ms, save.author.tz_offset_min, now_ms());
-        writeln!(
-            out,
-            "Save {short} · {} · {when}",
-            escape(&save.author.name, false)
-        )?;
-        // Indented, as Git does, so that no line of the message can pass for a change below it.
-        for line in escape(save.message.trim_end(), true).lines() {
-            if line.trim().is_empty() {
-                writeln!(out)?;
-            } else {
-                writeln!(out, "    {line}")?;
-            }
-        }
-        writeln!(out)?;
+        shown_as.clone_from(&short);
+        show_output::write_head(&mut out, &id, &save, &short, &parent_title, count, now_ms())?;
+        let s = style::out();
         for_each_change(store, old_root, save.root, |c| {
-            writeln!(out, "{}", output::change_line(&c))?;
+            writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;
             Ok::<(), Failure>(())
         })?;
-        if count == 0 {
-            writeln!(out, "  (no file changes)")?;
-        }
         warnings.extend(store.warnings());
         Ok(warnings)
     })();
-    output::listed(done, || so_far(early, repo))
+    output::listed(done, || so_far(early, repo))?;
+    if !json && count > 0 {
+        style::next(&format!(
+            "see its lines with: {}",
+            style::err().command(&format!("bolt changes --save {shown_as}"))
+        ));
+    }
+    Ok(())
 }
 
 fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -1013,26 +1459,53 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         let lines: Vec<&String> = entry.state.lines.keys().collect();
         let document = json!({
             "bolt_json": BOLT_JSON,
-            "current": current,
+            "position": output::position_json(&entry.state.position),
             "lines": lines,
             "server_lines": server_lines,
             "warnings": output::warnings_json(&warnings),
         });
         return output::print_quietly(&format!("{document}\n"), &warnings);
     }
-    let mut shown = String::new();
+    let s = style::out();
+    let project = escape(&project_name(repo), false);
+    let mut shown = match &entry.state.position {
+        Position::OnLine(_) => format!("Lines in {project}:\n"),
+        Position::AtSave(id) => format!(
+            "Lines in {project}. You are at save {}, not on a line.\n",
+            s.paint(style::Role::Fingerprint, &id.short_hex())
+        ),
+    };
+    if !entry.state.lines.is_empty() {
+        shown.push('\n');
+    }
     for line in entry.state.lines.keys() {
         let mark = if current == Some(line.as_str()) {
-            '*'
+            s.paint(style::Role::Bold, s.sym(style::Sym::Marker))
         } else {
-            ' '
+            " ".to_owned()
         };
-        shown += &format!("{mark} {}\n", escape(line, false));
+        let line = s.paint(style::Role::Line, &escape(line, false));
+        shown += &format!("{mark} {line}\n");
     }
-    for line in &server_lines {
-        shown += &format!("  {}\n", escape(line, false));
+    for (server, lines) in &servers.servers {
+        let server = escape(server, false);
+        let named = s.paint(style::Role::Dim, &format!("({server})"));
+        shown += &format!("\nOn the server {named}:\n");
+        for line in lines.keys() {
+            let line = format!("{}@{server}", escape(line, false));
+            shown += &format!("  {}\n", s.paint(style::Role::Line, &line));
+        }
     }
     output::print_quietly(&shown, &warnings)
+}
+
+/// The name of the project's folder, as the system writes it.
+fn project_name(repo: &Repository) -> String {
+    let root = repo.root();
+    root.file_name().map_or_else(
+        || root.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Result<(), Failure> {
@@ -1042,14 +1515,17 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
     let target = resolve_target(repo, text)?;
-    let done = goto(
-        repo,
-        &target,
-        &who,
-        "goto",
-        git_excludes.as_deref(),
-        &mut waiting,
-    )?;
+    let done = {
+        let _working = progress::Working::start("Writing files");
+        goto(
+            repo,
+            &target,
+            &who,
+            "goto",
+            git_excludes.as_deref(),
+            &mut waiting,
+        )
+    }?;
     let mut warnings = done.applied.warnings.clone();
     // The switch has happened, so a save that can't be read back only goes unnamed.
     let save = repo
@@ -1075,33 +1551,20 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             "removed": done.applied.removed,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
-            "files_in_use": done.applied.in_use,
             "safety_copies": done.safety_copies,
+            "recorded": done.recorded,
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")
     } else {
-        let mut text = match done.carried {
-            0 => String::new(),
-            1 => "Your unsaved changes in 1 file came along.\n".to_owned(),
-            n => format!("Your unsaved changes in {n} files came along.\n"),
-        };
-        match &done.position {
-            Position::OnLine(line) => text += &format!("You're on line {}.\n", escape(line, false)),
-            Position::AtSave(id) => {
-                text += &format!(
-                    "You're at save {short}, not on a line. Saving here asks for a new line's \
-                     name.\n"
-                );
-                if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
-                    let line = escape(line, false);
-                    text += &format!("To keep saving on {line}: bolt goto {line}\n");
-                }
-            }
-        }
-        text
+        goto_output::switched(&done, &short, save.as_ref(), &lines)
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    // A goto to where the project already is records no step, so has nothing to undo.
+    if !json && done.recorded {
+        style::changed_your_mind();
+    }
+    Ok(())
 }
 
 fn discard_command(
@@ -1118,25 +1581,27 @@ fn discard_command(
         .collect::<Result<Vec<_>, _>>()?;
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = discard(
-        repo,
-        (!paths.is_empty()).then_some(&paths[..]),
-        &who,
-        "discard",
-        git_excludes.as_deref(),
-        &mut waiting,
-    )?;
+    let done = {
+        let _working = progress::Working::start("Writing files");
+        discard(
+            repo,
+            (!paths.is_empty()).then_some(&paths[..]),
+            &who,
+            "discard",
+            git_excludes.as_deref(),
+            &mut waiting,
+        )
+    }?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
     let text = if json {
         let document = json!({
             "bolt_json": BOLT_JSON,
-            "restored": done.restored,
-            "removed": done.removed,
+            "restored_paths": done.restored,
+            "removed_paths": done.removed,
             "folders": done.folders,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
-            "files_in_use": done.applied.in_use,
             "safety_copies": done.safety_copies,
             "warnings": output::warnings_json(&warnings),
         });
@@ -1144,7 +1609,11 @@ fn discard_command(
     } else {
         output::discarded(&done, paths.is_empty())
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    if !json && done.restored.len() + done.removed.len() + done.folders > 0 {
+        style::changed_your_mind();
+    }
+    Ok(())
 }
 
 /// `bolt undo`, `bolt redo`, and `bolt undo --to <entry>` (`to`).
@@ -1167,11 +1636,13 @@ fn undo_command(
         git_excludes: git_excludes.as_deref(),
     };
     let on_wait = &mut waiting;
+    let working = progress::Working::start("Writing files");
     let done = match to {
         Some(to) => undo::undo_to(repo, to, &req, on_wait),
         None if redo => undo::redo(repo, &req, on_wait),
         None => undo::undo(repo, &req, on_wait),
     };
+    drop(working);
     let (taken, shelved, finished, head_lost, mut warnings, failure) = match done {
         Ok(done) => (
             done.taken,
@@ -1199,61 +1670,83 @@ fn undo_command(
     let to = to.map(|to| escape(to, false));
     // The text output; problems met naming its saves go to `into`.
     let text_of = |into: &mut Vec<Warning>| {
+        let s = style::out();
         let mut text = String::new();
+        // The shelves were made first, as part of the first step.
+        for (label, _) in &shelved {
+            text += &format!(
+                "{} your unsaved changes in the way on shelf {}.\n",
+                s.paint(style::Role::Ok, "Shelved"),
+                escape(label, false)
+            );
+        }
         let mut named = |id: &Id| named_save(repo, id, into);
+        let mut rows = Vec::new();
         for t in &taken {
             if head_lost {
                 text += &output::picked_up_line(t, &mut named);
+                text.push('\n');
             } else {
                 // A step `undo --to` took records only `undo`: say where it went.
                 let went = undo::went_to(repo, &t.entry).ok().flatten();
-                text += &output::step_line(t, went.as_ref(), &shelved, &mut named);
+                rows.push(output::step_line(t, went.as_ref(), &shelved, &mut named));
             }
-            text.push('\n');
         }
-        for (label, _) in &shelved {
-            let label = escape(label, false);
-            text += &format!("Set your unsaved changes in the way aside on shelf {label}.\n");
+        // On the way to an entry the steps are all undos, or all redos.
+        let verb = match (&to, taken.first().map(|t| &t.action)) {
+            (Some(_), Some(Action::Redo(_))) => "Redid",
+            (Some(_), _) => "Undid",
+            (None, _) => verb,
+        };
+        let k = rows.len();
+        let some = |k: usize| if k == 1 { "step" } else { "steps" };
+        // Several steps, or fewer than asked for, are counted first, then listed.
+        let counted = match (failed, &to) {
+            _ if k == 0 => None,
+            (true, Some(to)) => Some(format!(
+                "{k} {} on the way to entry {to} before one stopped:",
+                some(k)
+            )),
+            (true, None) => Some(format!("{k} of the {} steps asked for:", steps.n)),
+            (false, None) if k < req.n => Some(format!("{k} {} (all there were):", some(k))),
+            _ if k > 1 => Some(format!("{k} steps:")),
+            _ => None,
+        };
+        match counted {
+            Some(counted) => {
+                text += &format!("{} {counted}\n\n", s.paint(style::Role::Ok, verb));
+                for (_, row) in &rows {
+                    text += &format!("    {row}\n");
+                }
+            }
+            None => {
+                for (verb, row) in &rows {
+                    text += &format!("{} {row}\n", s.paint(style::Role::Ok, verb));
+                }
+            }
         }
         if finished {
             let what = finished_switch(repo).unwrap_or_else(|| "switch".to_owned());
+            let done = s.paint(style::Role::Ok, "Finished");
             text += &match &to {
                 Some(to) => format!(
-                    "Finished the {what} that was stopped, so nothing more was done. Running \
+                    "{done} the {what} that was stopped, so nothing more was done. Running \
                      bolt undo --to {to} again goes on from there.\n"
                 ),
                 None => format!(
-                    "Finished the {what} that was stopped, so nothing more was {list}. Running \
+                    "{done} the {what} that was stopped, so nothing more was {list}. Running \
                      bolt {command} again takes one more step.\n"
                 ),
             };
         }
-        match (failed, &to) {
-            (true, Some(to)) if !taken.is_empty() => {
-                // On the way to an entry the steps are all undos, or all redos.
-                let verb = match taken.first().map(|t| &t.action) {
-                    Some(Action::Redo(_)) => "Redid",
-                    _ => "Undid",
-                };
-                let k = taken.len();
-                let steps = if k == 1 { "step" } else { "steps" };
-                text +=
-                    &format!("{verb} {k} {steps} on the way to entry {to} before one stopped.\n");
-            }
-            (true, None) if !taken.is_empty() => {
-                let (k, n) = (taken.len(), steps.n);
-                text += &format!("{verb} {k} of the {n} steps asked for.\n");
-            }
-            (false, Some(to)) if !finished && taken.is_empty() => {
+        match &to {
+            _ if failed || finished || !taken.is_empty() => {}
+            Some(to) => {
                 text += &format!(
                     "Nothing changed: things are already as they were right after entry {to}.\n"
                 );
             }
-            (false, None) if !finished && taken.len() < req.n => {
-                let more = if taken.is_empty() { "" } else { " more" };
-                text += &format!("Nothing{more} to {command}.\n");
-            }
-            _ => {}
+            None => text += &format!("Nothing to {command}.\n"),
         }
         text
     };
@@ -1296,7 +1789,22 @@ fn undo_command(
     match failure {
         None => {
             warnings.extend(repo.store().warnings());
-            output::print_done(&text, &told_once(warnings))
+            output::print_done(&text, &told_once(warnings))?;
+            // One shelf made is the newest, which `bolt unshelf` brings back; each step of
+            // several can make one.
+            let e = style::err();
+            match shelved.len() {
+                0 => {}
+                1 => style::next(&format!(
+                    "bring your changes back with: {}",
+                    e.command("bolt unshelf")
+                )),
+                _ => style::next(&format!(
+                    "see the shelves with: {}",
+                    e.command("bolt shelf --list")
+                )),
+            }
+            Ok(())
         }
         Some(failure) => {
             output::print_out(&text);
@@ -1319,42 +1827,21 @@ fn shelf_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut waiting)?;
+    let working = progress::Working::start("Writing files");
+    let done = shelf::shelf(repo, message, &who, git_excludes.as_deref(), &mut waiting);
+    drop(working);
+    let done = done?;
     let made = match &done {
         Shelved::Made(made) => Some(made),
         Shelved::Nothing { .. } => None,
     };
-    let applied = made.map(|d| d.applied.clone()).unwrap_or_default();
-    let mut warnings = applied.warnings.clone();
+    let mut warnings = made.map(|d| d.applied.warnings.clone()).unwrap_or_default();
     warnings.extend(repo.store().warnings());
     let text = if json {
-        let shelf =
-            made.map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
-        let document = json!({
-            "bolt_json": BOLT_JSON,
-            "shelf": shelf,
-            "written": applied.written,
-            "removed": applied.removed,
-            "not_written": applied.not_written,
-            "placeholders": applied.placeholders,
-            "files_in_use": applied.in_use,
-            "warnings": output::warnings_json(&warnings),
-        });
-        format!("{document}\n")
+        format!("{}\n", output::shelved_json(&done, &warnings))
     } else {
         match &done {
-            Shelved::Made(d) => {
-                let files = match d.files {
-                    0 => String::new(),
-                    1 => " in 1 file".to_owned(),
-                    n => format!(" in {n} files"),
-                };
-                let label = escape(&d.label, false);
-                format!(
-                    "Set your unsaved changes{files} aside on shelf {label}: bolt unshelf brings \
-                     them back.\n"
-                )
-            }
+            Shelved::Made(d) => shelf_output::shelved(d),
             // The warnings that follow name what stayed, and say why.
             Shelved::Nothing {
                 changed_again: true,
@@ -1370,7 +1857,13 @@ fn shelf_command(
             }
         }
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    // The new shelf is the newest, which `bolt unshelf` brings back.
+    if !json && made.is_some() {
+        let unshelf = style::err().command("bolt unshelf");
+        style::next(&format!("bring them back with: {unshelf}"));
+    }
+    Ok(())
 }
 
 /// `bolt shelf --list`.
@@ -1389,18 +1882,8 @@ fn shelf_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(),
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")
-    } else if list.is_empty() {
-        "No shelves: bolt shelf sets your unsaved changes aside on one.\n".to_owned()
     } else {
-        let now = now_ms();
-        let width = list
-            .iter()
-            .map(|s| escape(&s.label, false).chars().count())
-            .max()
-            .unwrap_or(0);
-        list.iter()
-            .map(|s| output::shelf_line(s, width, now) + "\n")
-            .collect()
+        shelf_output::listed(&list, now_ms())
     };
     output::print_quietly(&text, &warnings)
 }
@@ -1416,7 +1899,10 @@ fn unshelf_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;
-    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut waiting)?;
+    let working = progress::Working::start("Writing files");
+    let done = shelf::unshelf(repo, number, &who, git_excludes.as_deref(), &mut waiting);
+    drop(working);
+    let done = done?;
     let mut warnings = done.applied.warnings.clone();
     warnings.extend(repo.store().warnings());
     let text = if json {
@@ -1431,7 +1917,6 @@ fn unshelf_command(
             "carried": done.carried,
             "not_written": done.applied.not_written,
             "placeholders": done.applied.placeholders,
-            "files_in_use": done.applied.in_use,
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")
@@ -1459,37 +1944,22 @@ fn unshelf_command(
             ),
         };
         format!(
-            "Finished the {what} that was stopped, so no shelf was brought back this time.{next}\n"
+            "{} the {what} that was stopped, so no shelf was brought back this time.{next}\n",
+            style::out().paint(style::Role::Ok, "Finished")
         )
     } else {
         let title = repo
             .store()
             .save(&done.save, repo.signatures_allowed())
-            .map(|s| {
-                let first = s.message.lines().next().unwrap_or_default().to_owned();
-                format!(" \"{}\"", escape(&first, false))
-            })
+            .map(|s| format!(" {}", output::quoted_title(&s)))
             .unwrap_or_default();
-        let count = |n: usize| match n {
-            1 => "1 file".to_owned(),
-            n => format!("{n} files"),
-        };
-        let what = match (done.applied.written, done.applied.removed) {
-            (0, 0) => "your files already held its changes".to_owned(),
-            (0, removed) => format!("{} removed", count(removed)),
-            (written, 0) => format!("{} written", count(written)),
-            (written, removed) => format!("{} written, {removed} removed", count(written)),
-        };
-        let label = escape(&done.label, false);
-        let mut text = format!("Brought back shelf {label}{title}: {what}.\n");
-        match done.carried {
-            0 => {}
-            1 => text += "Your other unsaved changes in 1 file stayed as they are.\n",
-            n => text += &format!("Your other unsaved changes in {n} files stayed as they are.\n"),
-        }
-        text
+        shelf_output::unshelved(&done, &title)
     };
-    output::print_done(&text, &warnings)
+    output::print_done(&text, &warnings)?;
+    if !json && !done.finished {
+        style::changed_your_mind();
+    }
+    Ok(())
 }
 
 /// `bolt tidy`.
@@ -1498,15 +1968,17 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         &std::env::current_dir()?,
     )?));
     let window = undo_window_days()?;
-    let terminal = std::io::stderr().is_terminal();
+    let working = progress::Working::start("Tidying");
     let done = tidy::tidy(repo, window, now_ms(), &mut waiting, &mut |to_free| {
-        if terminal {
+        if style::for_people() {
             output::tell(&format!(
                 "Tidying: about {} to free",
-                output::format_size(to_free)
+                bolt_core::text::bytes(to_free)
             ));
         }
-    })?;
+    });
+    drop(working);
+    let done = done?;
     let warnings = repo.store().warnings();
     let text = if json {
         let document = json!({
@@ -1524,6 +1996,44 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         output::tidied(&done)
     };
     output::print_done(&text, &warnings)
+}
+
+/// `bolt verify`. Problems found end it with exit code 1, the outcome line being the error.
+fn verify_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository =
+        opened.insert(Repository::discover_untouched(&std::env::current_dir()?)?);
+    let window = undo_window_days()?;
+    let mut bar = progress::Bar::new("Checking stored objects");
+    let done = verify::verify(repo, window, now_ms(), &mut |read, total| {
+        bar.update(read, Some(total), true);
+    });
+    bar.finish();
+    let warnings = done.warnings.clone();
+    // The folder's name came from outside Bolt, like any name in a project.
+    let project = escape(&project_name(repo), false);
+    let failure = (done.problems_total > 0).then(|| Failure {
+        message: output::verify_outcome(&done, &project),
+        hint: Some(output::verify_hint(&done)),
+        printed: true,
+    });
+    if json {
+        let document = output::verified_json(&done);
+        let Some(failure) = failure else {
+            return output::print_quietly(&format!("{document}\n"), &warnings);
+        };
+        let document = output::failed_document(document, &failure, &warnings);
+        output::print_out(&format!("{document}\n"));
+        return output::ended(Some(failure), String::new, &warnings, None);
+    }
+    output::print_out(&output::verified(&done, &project));
+    output::ended(None, String::new, &warnings, None)?;
+    let Some(failure) = failure else {
+        return Ok(());
+    };
+    if let Some(hint) = &failure.hint {
+        output::tell_hint(hint);
+    }
+    Err(failure)
 }
 
 /// How many of the steps undo can take `bolt undo --list` shows.
@@ -1578,34 +2088,28 @@ fn undo_list_to(
         writeln!(out, "{document}")?;
         return Ok(warnings);
     }
-    let redo = list.redo.iter().enumerate().rev();
-    let redo = redo.map(|(i, s)| (format!("undone {}", i + 1), s));
-    // Undo can't take the diary's first entry, so it gets no number.
-    let undo = list
-        .undo
-        .iter()
-        .enumerate()
-        .map(|(i, s)| match s.diary.parent {
-            Some(_) => ((i + 1).to_string(), s),
-            None => (String::new(), s),
-        });
-    let shown: Vec<(String, &StepInfo)> = redo.chain(undo).collect();
-    let width = shown.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let now = now_ms();
     let (mut named, unshortened) = names(repo);
     warnings.extend(unshortened);
     let files = &mut |from, to| files_between(repo, from, to);
-    for (n, s) in &shown {
-        let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
-        let (entry, when) = (s.entry.short_hex(), when(&s.diary, now));
-        writeln!(out, "{n:>width$}  {entry}  {when}  {what}")?;
-    }
-    if list.more {
-        writeln!(
-            out,
-            "and more: bolt undo --list --all shows the whole diary"
-        )?;
-    }
+    let mut step = |label: String, s: &StepInfo| undo_output::Step {
+        label,
+        entry: s.entry.short_hex(),
+        when: when(&s.diary, now),
+        what: output::entry_line(&s.diary, &s.effects, &mut named, files),
+    };
+    let redo: Vec<undo_output::Step> = (list.redo.iter().enumerate().rev())
+        .map(|(i, s)| step(format!("redo {}", i + 1), s))
+        .collect();
+    // Undo can't take the diary's first entry, so it gets no number.
+    let undo: Vec<undo_output::Step> = (list.undo.iter().enumerate())
+        .map(|(i, s)| match s.diary.parent {
+            Some(_) => step(format!("undo {}", i + 1), s),
+            None => step(String::new(), s),
+        })
+        .collect();
+    let project = escape(&project_name(repo), false);
+    undo_output::write_list(out, &project, &redo, &undo, list.more)?;
     warnings.extend(repo.store().warnings());
     Ok(told_once(warnings))
 }
@@ -1638,9 +2142,15 @@ fn whole_diary_to(
     let (mut named, unshortened) = names(repo);
     warnings.extend(unshortened);
     let files = &mut |from, to| files_between(repo, from, to);
+    let s = style::out();
     undo::whole_diary(repo, |id, entry, effects| {
         let what = output::entry_line(entry, effects, &mut named, files);
-        writeln!(out, "{}  {}  {what}", id.short_hex(), when(entry, now))?;
+        writeln!(
+            out,
+            "{}  {}  {what}",
+            s.paint(style::Role::Fingerprint, &id.short_hex()),
+            s.paint(style::Role::Dim, &when(entry, now))
+        )?;
         Ok::<(), Failure>(())
     })?;
     warnings.extend(repo.store().warnings());
@@ -1686,13 +2196,14 @@ fn stopped_at_to(
         // There is no current line to shorten change IDs against.
         let mut named = |id: &Id| named_by(repo, id, ChangeId::to_letters);
         let files = &mut |from, to| files_between(repo, from, to);
+        let screen = style::out();
         for s in &ends {
             let what = output::entry_line(&s.diary, &s.effects, &mut named, files);
             writeln!(
                 out,
                 "{}  {}  {what}",
-                s.entry.short_hex(),
-                when(&s.diary, now)
+                screen.paint(style::Role::Fingerprint, &s.entry.short_hex()),
+                screen.paint(style::Role::Dim, &when(&s.diary, now))
             )?;
         }
         writeln!(
@@ -1799,13 +2310,58 @@ fn finished_switch(repo: &Repository) -> Option<String> {
     Some(format!("{what} of {}", escape(&step.command, false)))
 }
 
+/// What a command line clap stopped at prints: Bolt's own help when help was asked for, or when
+/// no command was given, which still ends with 2; clap's own message for anything else.
+fn help_or_usage_error(e: &clap::Error, args: &[OsString], json: bool) -> ExitCode {
+    use clap::error::ErrorKind;
+    let code = match e.kind() {
+        ErrorKind::DisplayHelp => 0,
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 2,
+        _ => e.exit(),
+    };
+    style::find_out(json);
+    // The command asked about: the first word that isn't an option, or the one after `help`.
+    let mut words = args
+        .iter()
+        .filter(|a| !a.to_string_lossy().starts_with('-'));
+    let first = words.next();
+    let named = if first.is_some_and(|w| w == "help") {
+        words.next()
+    } else {
+        first
+    };
+    let page = named.and_then(|name| help::page(&mut Cli::command(), &name.to_string_lossy()));
+    output::print_out(&page.unwrap_or_else(help::overview));
+    ExitCode::from(code)
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut typed = std::env::args_os();
+    let program = typed.next().unwrap_or_else(|| "bolt".into());
+    let typed: Vec<OsString> = typed.collect();
+    let json = typed.iter().any(|a| a == "--json");
+    let (args, shortcut) = match git_words::translate(typed) {
+        Typed::Bolt(args) => (args, None),
+        Typed::Shortcut { word, args } => (args, Some(word)),
+        Typed::Explain(text) => {
+            style::find_out(json);
+            git_words::explain(text);
+            return ExitCode::from(2);
+        }
+    };
+    let cli = match Cli::try_parse_from(std::iter::once(program).chain(args.iter().cloned())) {
+        Ok(cli) => cli,
+        Err(e) => return help_or_usage_error(&e, &args, json),
+    };
+    style::find_out(cli.json);
     // The project a command opens is kept here, so that if the command fails, the error can list
     // what the project's store had noticed by then.
     let mut opened = None;
     let result = match cli.command {
-        Command::Start => start(cli.json, &mut opened),
+        Command::Start { preset } => start(cli.json, preset.map(Preset::from), &mut opened),
+        Command::Setup { preset, yes } => {
+            setup_command(cli.json, preset.map(Preset::from), yes, &mut opened)
+        }
         Command::Import => import(cli.json, &mut opened),
         Command::Save(args) => save(cli.json, args, &mut opened),
         Command::Line => line_command(cli.json, &mut opened),
@@ -1828,13 +2384,85 @@ fn main() -> ExitCode {
         Command::Shelf { message, .. } => shelf_command(cli.json, message.as_deref(), &mut opened),
         Command::Unshelf { number } => unshelf_command(cli.json, number.as_deref(), &mut opened),
         Command::Tidy => tidy_command(cli.json, &mut opened),
+        Command::Verify => verify_command(cli.json, &mut opened),
     };
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             let noticed = opened.map_or_else(Vec::new, |repo| repo.store().warnings());
             output::print_error(cli.json, &failure, &noticed);
             ExitCode::from(1)
         }
+    };
+    if let Some(word) = shortcut {
+        git_words::teach(word);
+    }
+    code
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn commit_knows_every_option_of_save_that_takes_a_value() {
+        let cli = Cli::command();
+        let save = cli.find_subcommand("save").unwrap();
+        let mut taking: Vec<String> = save
+            .get_opts()
+            .filter(|o| o.get_action().takes_values())
+            .map(|o| format!("--{}", o.get_long().unwrap()))
+            .collect();
+        taking.sort();
+        assert_eq!(taking, git_words::SAVE_VALUE_OPTIONS);
+    }
+
+    /// `line` split as a shell would: at spaces, except inside double quotes.
+    fn words(line: &str) -> Vec<String> {
+        let mut words = vec![String::new()];
+        let mut quoted = false;
+        for c in line.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => words.push(String::new()),
+                c => words.last_mut().unwrap().push(c),
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn each_commands_help_leads_with_examples_that_parse() {
+        let cli = Cli::command();
+        for command in cli.get_subcommands() {
+            let name = command.get_name();
+            let examples = help::examples(name);
+            assert!(!examples.is_empty(), "{name}");
+            for (line, does) in examples {
+                assert!(!does.is_empty(), "{line}");
+                let words = words(line);
+                assert_eq!(words[..2], ["bolt", name], "{line}");
+                let parsed = Cli::try_parse_from(&words);
+                assert!(parsed.is_ok(), "{line}: {:?}", parsed.err());
+            }
+        }
+        assert!(help::examples("commit").is_empty());
+    }
+
+    #[test]
+    fn the_overview_names_every_command_once_and_no_other() {
+        let mut named: Vec<&str> = help::GROUPS
+            .iter()
+            .flat_map(|(_, rows)| rows.iter())
+            .flat_map(|(name, _, beside)| std::iter::once(*name).chain(*beside))
+            .collect();
+        named.sort_unstable();
+        let mut commands: Vec<String> = Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        commands.sort();
+        assert_eq!(named, commands);
     }
 }

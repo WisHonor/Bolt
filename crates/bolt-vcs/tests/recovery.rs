@@ -11,7 +11,7 @@ use bolt_core::pack::PackReader;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, head, text, write};
+use support::{Env, head, masked, text, write};
 
 fn read(env: &Env, path: &str) -> Vec<u8> {
     fs::read(env.root().join(path)).unwrap()
@@ -66,7 +66,7 @@ fn packs(env: &Env) -> Vec<String> {
 /// A project whose diary is `start`, then saves `One` and `Two` of `a.txt`: the three entries.
 fn project() -> (Env, [Id; 3]) {
     let env = Env::empty();
-    ok(&env, &["start"]);
+    ok(&env, &["start", "--preset", "custom"]);
     let start = head(&env).0;
     write(&env, "a.txt", "one\n");
     ok(&env, &["save", "One"]);
@@ -415,7 +415,15 @@ fn status_and_history_say_when_a_stopped_switch_left_only_its_journal() {
         assert!(said.contains(pending), "{args:?}: {said}");
     }
     let status = json(&env, &["status"]);
-    let message = status["unfinished_switch"].as_str().unwrap();
+    assert_eq!(status["unfinished_switch"], true, "{status}");
+    let message = status["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["kind"] == "switch_unfinished")
+        .unwrap()["message"]
+        .as_str()
+        .unwrap();
     assert!(
         message.starts_with("A switch between saves was stopped just after"),
         "{status}"
@@ -456,7 +464,7 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
         "{said}"
     );
     assert!(
-        text(&out.stdout).contains("You're at save"),
+        text(&out.stdout).contains("You are not on a line."),
         "{}",
         text(&out.stdout)
     );
@@ -524,6 +532,33 @@ fn undo_to_with_a_lost_head_refuses_an_entry_whose_saves_cant_be_read() {
 }
 
 #[test]
+fn a_pick_up_refuses_an_entry_whose_tag_list_or_server_lines_cannot_be_read() {
+    for what in ["tag list", "server lines"] {
+        let (env, [_, _, two]) = project();
+        // A crashed command's entry naming records the store doesn't hold.
+        let broken = plant_end(&env, two, |e| match what {
+            "tag list" => e.state.tags = Some(Id([0x77; 32])),
+            _ => e.state.server_lines = Some(Id([0x77; 32])),
+        });
+        fs::remove_file(head_file(&env)).unwrap();
+        let stored = packs(&env);
+        let (_, said) = refused(&env, &["undo", "--to", &broken.to_hex()[..8]]);
+        let why = format!(
+            "error: Diary entry {} can't be made current: its {what} can't be read (",
+            broken.short_hex()
+        );
+        assert!(said.contains(&why), "{said}");
+        assert!(
+            said.contains("hint: Pick another: bolt undo --list shows"),
+            "{said}"
+        );
+        assert!(!head_file(&env).exists());
+        assert_eq!(packs(&env), stored);
+        ok(&env, &["undo", "--to", &two.to_hex()[..8]]);
+    }
+}
+
+#[test]
 fn undo_list_with_a_lost_head_goes_on_past_an_entry_whose_pack_is_gone() {
     let (env, [start, one, two]) = project();
     // The middle entry is lost with its pack, and the head too.
@@ -579,7 +614,7 @@ fn undo_list_with_a_lost_head_passes_over_a_pack_it_cannot_read() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-fn a_stopped_switch_from_a_lost_head_is_left_alone() {
+fn a_stopped_switch_from_a_lost_head_is_dropped_without_writing_a_file() {
     let (env, [_, one, two]) = project();
     let save = entry(&env, one).state.lines["main"];
     // A goto stopped after its first change; then the entry it was made from is lost.
@@ -594,19 +629,66 @@ fn a_stopped_switch_from_a_lost_head_is_left_alone() {
     assert!(journal.exists());
     remove_pack_holding(&env, two);
     let folder = read(&env, "a.txt");
-    // Nothing is judged against the lost head: the pick-up finishes no switch.
+    // Nothing is judged against the lost head: the pick-up drops the switch and writes no file.
     ok(&env, &["undo", "--to", &one.to_hex()[..8]]);
     assert_eq!(head(&env).1.parent, Some(one));
     assert_eq!(read(&env, "a.txt"), folder);
-    assert!(journal.exists());
-    // The journal now belongs to no switch of this project, and status says so.
+    assert!(!journal.exists());
     let out = env.bolt().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let said = text(&out.stderr);
-    assert!(
-        said.contains("was made for another save than the one the project is on"),
-        "{said}"
-    );
+    assert_eq!(text(&out.stderr), "");
+}
+
+/// A pick-up that fails once it has dropped a stopped switch still says it dropped it, and the
+/// next one goes on.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_pick_up_that_fails_after_dropping_a_switch_still_says_so() {
+    let dropped = "A switch between saves was stopped, and the project's head was lost";
+    for json_out in [false, true] {
+        let (env, [_, one, _]) = project();
+        let save = entry(&env, one).state.lines["main"];
+        let out = env
+            .bolt()
+            .args(["goto", &save.to_hex()])
+            .env("BOLT_FAULT_FAIL", "switch:changed")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        fs::remove_file(head_file(&env)).unwrap();
+        let to = one.to_hex()[..8].to_owned();
+        let mut args = vec!["undo", "--to", &to];
+        if json_out {
+            args.insert(0, "--json");
+        }
+        let out = env
+            .bolt()
+            .args(&args)
+            .env("BOLT_FAULT_FAIL", "journal:removed")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        assert!(!env.root().join(".bolt/state/journal").exists());
+        let said = text(&out.stderr);
+        if json_out {
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            let kinds: Vec<&str> = doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| w["kind"].as_str().unwrap())
+                .collect();
+            assert!(kinds.contains(&"switch_dropped"), "{doc}");
+        } else {
+            let (warned, failed) = (said.find(dropped), said.find("error:"));
+            assert!(
+                warned.is_some() && failed.is_some() && warned < failed,
+                "{said}"
+            );
+        }
+        ok(&env, &["undo", "--to", &to]);
+        assert_eq!(head(&env).1.parent, Some(one));
+    }
 }
 
 #[cfg(feature = "fault-injection")]
@@ -717,7 +799,7 @@ fn undo_two_over_a_step_that_changes_files_then_one_that_doesnt_leaves_no_stale_
     assert_eq!(out.status.code(), Some(1), "{said}");
     let shown = text(&out.stdout);
     assert!(
-        shown.contains("Undid 1 of the 2 steps asked for."),
+        shown.starts_with("Undid 1 of the 2 steps asked for:\n\n    goto: "),
         "{shown}"
     );
     assert_eq!(head(&env).1.action, Action::Undo(goto));
@@ -748,4 +830,18 @@ fn undo_list_with_a_lost_head_goes_on_past_a_parent_that_is_no_entry() {
     let ends = doc["ends"].as_array().unwrap();
     let listed = ends.iter().find(|e| e["entry"] == odd.to_hex()).unwrap();
     assert_eq!(listed["effects"], serde_json::json!([]), "{doc}");
+}
+
+#[test]
+fn undo_list_json_with_a_lost_head_matches_its_snapshot() {
+    let (env, _) = project();
+    fs::remove_file(head_file(&env)).unwrap();
+    let out = env
+        .bolt()
+        .args(["undo", "--list", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    insta::assert_json_snapshot!(masked(doc));
 }

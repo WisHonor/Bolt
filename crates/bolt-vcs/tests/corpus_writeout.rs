@@ -163,7 +163,10 @@ fn a_save_naming_a_spelling_of_bolt_is_refused_whole() {
 #[test]
 fn a_spelling_of_bolt_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let shown = [
         (".boltignore", File, b"ignored/\n" as &[u8]),
         ("a.txt", File, b"a\n"),
@@ -226,7 +229,10 @@ fn a_spelling_of_bolt_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_tha
 #[test]
 fn a_spelling_of_bolt_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let files: [(&str, &[u8]); 2] = [("a.txt", b"a\n"), ("b.txt", b"b\n")];
     // Saves to go to, one without the bad listing and one sharing it, then the save the project
     // is on. Reading the folder skips `.git`, so the plan's later comparisons meet it first.

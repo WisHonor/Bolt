@@ -1,0 +1,39 @@
+---
+source: crates/bolt-vcs/tests/undo.rs
+expression: "doc(&[\"redo\"])"
+---
+{
+  "bolt_json": 1,
+  "finished": false,
+  "position": {
+    "save": "[redacted]"
+  },
+  "redone": [
+    {
+      "action": "redo",
+      "command": "goto",
+      "effects": [
+        {
+          "from": {
+            "line": "main"
+          },
+          "kind": "position",
+          "to": {
+            "save": "[redacted]"
+          }
+        },
+        {
+          "from": "[redacted]",
+          "kind": "files",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "removed": 0,
+      "time_ms": "[redacted]",
+      "written": 3
+    }
+  ],
+  "shelved": [],
+  "warnings": []
+}

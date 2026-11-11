@@ -3,8 +3,9 @@
 //! 031 and 039), and `lfs.storage`, which can keep Git LFS's files elsewhere. Includes aren't
 //! followed, as Git's own format check doesn't follow them, but whether there are any is noted:
 //! they can set `core.sparsecheckout` (decision 043). The user's own Git settings are read with
-//! the same parser, for their ignore list (decisions 047 and 060) and `lfs.storage`, and so are
-//! those the environment gives, with the variables that place them.
+//! the same parser, for their ignore list (decisions 047 and 060), `lfs.storage` and
+//! `core.sparsecheckout`, and so are those the environment gives, with the variables that place
+//! them.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use super::{GitError, HashKind, Refusal, broken, is_git_space};
@@ -62,7 +63,8 @@ pub(super) fn read_worktree(text: &[u8], file: &'static str) -> Result<Worktree,
 }
 
 /// A setting in the user's own Git settings that Bolt reads: one that decides their ignore list
-/// (decisions 047 and 060), or `lfs.storage`, which can keep Git LFS's files elsewhere.
+/// (decisions 047 and 060), `lfs.storage`, which can keep Git LFS's files elsewhere, or
+/// `core.sparsecheckout`, which an import refuses.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UserSetting {
     /// A `core.excludesfile`.
@@ -71,6 +73,8 @@ pub(crate) enum UserSetting {
     Include(Vec<u8>),
     /// An `lfs.storage`, empty for one with no value.
     LfsStorage(Vec<u8>),
+    /// A `core.sparsecheckout`, `None` for a value Git refuses.
+    SparseCheckout(Option<bool>),
 }
 
 /// The settings in `text`, the user's own Git settings, that Bolt reads, in order, or the number
@@ -99,6 +103,7 @@ fn user_setting(name: &[u8], value: Option<&[u8]>) -> Result<Option<UserSetting>
         b"core.excludesfile" => UserSetting::ExcludesFile(path()?),
         b"include.path" => UserSetting::Include(path()?),
         b"lfs.storage" => UserSetting::LfsStorage(value.unwrap_or_default().to_vec()),
+        b"core.sparsecheckout" => UserSetting::SparseCheckout(parse_bool(value)),
         _ => return Ok(None),
     }))
 }

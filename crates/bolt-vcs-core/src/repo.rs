@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, TryLockError};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +22,7 @@ use crate::keyed::KEY_LEN;
 use crate::listing::Listing;
 use crate::names::NameError;
 use crate::pack::{ObjectKind, PackError, PackSet};
+use crate::rules::{self, RulesRead};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::store::{Store, StoreError, is_damage};
@@ -72,6 +73,13 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     OwnerLookupFailed { path: PathBuf, source: io::Error },
+    /// `refusal`, though safe-folders lists `entry`, which never counts for `why`.
+    #[error("{refusal} {}", passed_over(entry, why))]
+    SafeFolderPassedOver {
+        entry: PathBuf,
+        why: &'static str,
+        refusal: Box<RepoError>,
+    },
     #[error(
         "The .bolt folder at {} changed while Bolt looked at it.",
         escape(&root.display().to_string(), false)
@@ -192,6 +200,7 @@ impl RepoError {
             | RepoError::OwnerUnknown { path }
             | RepoError::OwnerLookupFailed { path, .. }
             | RepoError::AdminsNotElevated { path } => Some(path.as_path()),
+            RepoError::SafeFolderPassedOver { refusal, .. } => refusal.trust_path(),
             _ => None,
         }
     }
@@ -199,6 +208,9 @@ impl RepoError {
     /// What the user can do next, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
+        if let RepoError::SafeFolderPassedOver { refusal, .. } = self {
+            return refusal.hint();
+        }
         if let Some(path) = self.trust_path() {
             let trust = config::trust_hint(path);
             return Some(if matches!(self, RepoError::AdminsNotElevated { .. }) {
@@ -265,12 +277,22 @@ impl RepoError {
                      then records the folder as it is at that time."
                 }
                 RepoError::SwitchStopped { source, .. } => {
-                    let damage = if matches!(**source, RepoError::Damaged { .. }) {
-                        " Bolt's copy of it looks damaged: ask for help before trying to repair \
-                         the project."
-                    } else {
-                        ""
+                    // Damage stops every later try too, so name the way on without that data.
+                    let copy = match **source {
+                        RepoError::Damaged { .. }
+                        | RepoError::Store(StoreError::WrongKind { .. } | StoreError::Decode(_)) => {
+                            Some("looks damaged")
+                        }
+                        RepoError::Store(StoreError::Missing(_)) => Some("is missing"),
+                        _ => None,
                     };
+                    let damage = copy.map_or(String::new(), |copy| {
+                        format!(
+                            " Bolt's copy of it {copy}: ask for help before trying to repair the \
+                             project. To go on without it, delete .bolt/state/journal: your files \
+                             stay as they are, and the next command goes on from there."
+                        )
+                    });
                     return Some(format!(
                         "The switch isn't finished: what it already wrote stays, and the next \
                          command that changes the project finishes it once that is fixed.{damage}"
@@ -546,8 +568,10 @@ pub(crate) fn counts_as_users(owner: &io::Result<Owner>) -> bool {
 }
 
 /// Whether Bolt may use the project at `root`, given who owns the folder and its `.bolt` (or why
-/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. The
-/// Administrators group is the user's only while it is switched on in this terminal.
+/// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. An
+/// entry that is itself a link never counts: whoever can swap a trusted folder for one would move
+/// the trust to wherever it leads. The Administrators group is the user's only while it is
+/// switched on in this terminal.
 pub(crate) fn owner_allows(
     owners: impl IntoIterator<Item = io::Result<Owner>>,
     root: &Path,
@@ -566,12 +590,67 @@ pub(crate) fn owner_allows(
             source,
         }),
     });
-    match refusal {
-        Some(refusal) if !safe.iter().any(|folder| config::same_folder(folder, root)) => {
-            Err(refusal)
+    let Some(refusal) = refusal else {
+        return Ok(());
+    };
+    // Each entry is judged from one open of it, by the identity of the folder that open holds, so
+    // swapping it for a link between two looks can't win. A link above its last part, such as
+    // macOS's `/var`, is followed as usual.
+    let project = safe_fs::folder_id(root).ok();
+    let mut passed_over = None;
+    for folder in safe {
+        let why = if folder.components().any(|c| c == Component::ParentDir) {
+            DOT_DOT
+        } else {
+            match (safe_fs::folder_id(folder), project) {
+                (Ok(id), Some(project)) if same_identity(id, project) => return Ok(()),
+                (Ok(id), Some(project)) if id.1 == 0 || project.1 == 0 => NO_IDENTITY,
+                (Err(e), _) if bolt_platform::dir::is_link_refusal(&e) => A_LINK,
+                _ => continue,
+            }
+        };
+        // Named only when it leads to the project, so the refusal says why that didn't count.
+        if passed_over.is_none() && config::same_folder(folder, root) {
+            passed_over = Some((folder.clone(), why));
         }
-        _ => Ok(()),
     }
+    Err(match passed_over {
+        Some((entry, why)) => RepoError::SafeFolderPassedOver {
+            entry,
+            why,
+            refusal: Box::new(refusal),
+        },
+        None => refusal,
+    })
+}
+
+/// Whether two folders' identities (drive, file number) say they are one. A file number of 0 is
+/// what some shares give everything, so it never matches.
+fn same_identity(a: (u64, u128), b: (u64, u128)) -> bool {
+    a.1 != 0 && a == b
+}
+
+/// Why an entry on a drive that gives no file numbers never counts.
+const NO_IDENTITY: &str =
+    "its drive doesn't tell its folders apart, so safe-folders can't vouch for a folder on it";
+
+/// Why an entry with `..` in it never counts.
+const DOT_DOT: &str = "it has `..` in it, which the system resolves through any link before it";
+
+/// Why a link entry never counts: what the check refuses there.
+const A_LINK: &str = if cfg!(windows) {
+    "it is a link, a junction, a mounted volume or another reparse point"
+} else {
+    "it is a link"
+};
+
+/// What a refusal adds when safe-folders lists the folder only through `entry`, passed over for
+/// `why`.
+pub(crate) fn passed_over(entry: &Path, why: &str) -> String {
+    format!(
+        "Its safe-folders entry {} doesn't count: {why}, and Bolt never trusts a folder that way.",
+        escape(&entry.display().to_string(), false)
+    )
 }
 
 /// What `bolt start` tells the user when the project at `root` will open only from an
@@ -720,6 +799,38 @@ fn head_lost(detail: impl Into<String>) -> RepoError {
     }
 }
 
+/// The diary entry `id`, which `state/head` names, from `store`. One that can't be had is a lost
+/// head, unless it couldn't be read for a reason that isn't damage.
+pub(crate) fn head_entry(store: &Store, id: Id) -> Result<(Id, DiaryEntry), RepoError> {
+    let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
+    let bytes = match store.read_record(&id, ObjectKind::DiaryEntry) {
+        Ok(bytes) => bytes,
+        Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+            return Err(lost("which the store doesn't hold".to_owned()));
+        }
+        Err(StoreError::Pack(e)) if is_damage(&e) => {
+            return Err(lost(format!("which can't be read ({e})")));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let entry =
+        DiaryEntry::decode(&bytes).map_err(|e| lost(format!("which can't be read ({e})")))?;
+    Ok((id, entry))
+}
+
+/// The diary entry `id` in `store`. One the store lacks, holds as another kind of record, or
+/// can't decode, is damage to the diary, named.
+pub(crate) fn entry_in(store: &Store, id: &Id) -> Result<DiaryEntry, RepoError> {
+    let bytes = match store.read_record(id, ObjectKind::DiaryEntry) {
+        Ok(bytes) => bytes,
+        Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
+            return Err(damaged(format!("the diary has no entry {id}")));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    DiaryEntry::decode(&bytes).map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
+}
+
 /// Proof that this process holds the change lock; dropping it releases the lock.
 pub struct ChangeLock {
     _file: File,
@@ -738,6 +849,8 @@ pub struct Repository {
     head: Option<Id>,
     /// The user's own key, which seals the caches; without it none is read or written.
     cache_key: Option<[u8; KEY_LEN]>,
+    /// The project's `bolt.toml`, as the change lock last read it.
+    rules: RulesRead,
 }
 
 /// `path` with its links, `..` and short names resolved. Windows' `\\?\` in front is left off
@@ -1076,6 +1189,7 @@ impl Repository {
             format: parse_format(FORMAT_TEXT)?,
             head: None,
             cache_key: None,
+            rules: RulesRead::default(),
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
         // `start` too.
@@ -1125,16 +1239,31 @@ impl Repository {
         Repository::discover_with(start, &check_owner)
     }
 
+    /// [`Repository::discover`] for a command that changes nothing, `verify`: the leftovers in
+    /// `tmp/` are left as they are, and the lock file isn't touched.
+    pub fn discover_untouched(start: &Path) -> Result<Repository, RepoError> {
+        Repository::search(start, &check_owner, Repository::open_untouched)
+    }
+
     /// `discover`, with the search's owner check given (a stand-in in tests).
     fn discover_with(
         start: &Path,
         owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<Repository, RepoError> {
+        Repository::search(start, owner_check, Repository::open)
+    }
+
+    /// `discover`, opening the project found with `open`.
+    fn search(
+        start: &Path,
+        owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
+        open: fn(&Path) -> Result<Repository, RepoError>,
+    ) -> Result<Repository, RepoError> {
         let start = resolved(start);
         let mut unfinished = None;
         for folder in start.ancestors() {
             if has_project(folder, owner_check)? {
-                return Repository::open(folder);
+                return open(folder);
             }
             if unfinished.is_none() {
                 unfinished = unfinished_here(folder);
@@ -1145,6 +1274,14 @@ impl Repository {
 
     /// Opens the project whose top folder is `root` (the folder holding `.bolt`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
+        let repo = Repository::open_untouched(root)?;
+        repo.clean_tmp()?;
+        Ok(repo)
+    }
+
+    /// [`Repository::open`] without removing the leftovers in `tmp/`, and so without trying the
+    /// change lock.
+    pub fn open_untouched(root: &Path) -> Result<Repository, RepoError> {
         let bolt = root.join(".bolt");
         if !check_bolt(root, &check_owner)? {
             return Err(RepoError::NotAProject);
@@ -1192,7 +1329,7 @@ impl Repository {
             state,
             packs: packs_dir,
         };
-        let repo = Repository {
+        Ok(Repository {
             root: root.to_owned(),
             bolt,
             tmp,
@@ -1202,9 +1339,8 @@ impl Repository {
             store,
             head,
             cache_key: None,
-        };
-        repo.clean_tmp()?;
-        Ok(repo)
+            rules: RulesRead::default(),
+        })
     }
 
     /// Deletes leftovers of interrupted commands. A file in `tmp/` is only a leftover when no
@@ -1333,6 +1469,27 @@ impl Repository {
         &mut self.store
     }
 
+    /// The project's rules as the last `lock_for_change` read them; Bolt's own before that.
+    #[must_use]
+    pub fn rules(&self) -> &RulesRead {
+        &self.rules
+    }
+
+    /// Reads the project's `bolt.toml` now, for a command that takes no lock.
+    #[must_use]
+    pub fn read_rules(&self) -> RulesRead {
+        match Dir::open_top(&self.root) {
+            Ok(top) => rules::read(&top),
+            Err(e) => RulesRead {
+                skipped: Some(format!(
+                    "Bolt couldn't open the project folder to read it: {}",
+                    escape(&e.to_string(), false)
+                )),
+                ..RulesRead::default()
+            },
+        }
+    }
+
     /// `store/packs`, held open.
     pub(crate) fn packs_folder(&self) -> &Arc<Dir> {
         &self.held.packs
@@ -1367,34 +1524,13 @@ impl Repository {
             Some(id) => id,
             None => self.head()?,
         };
-        let lost = |why: String| head_lost(format!("names diary entry {}, {why}", id.short_hex()));
-        let bytes = match self.store.read_record(&id, ObjectKind::DiaryEntry) {
-            Ok(bytes) => bytes,
-            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
-                return Err(lost("which the store doesn't hold".to_owned()));
-            }
-            Err(StoreError::Pack(e)) if is_damage(&e) => {
-                return Err(lost(format!("which can't be read ({e})")));
-            }
-            Err(e) => return Err(e.into()),
-        };
-        let entry =
-            DiaryEntry::decode(&bytes).map_err(|e| lost(format!("which can't be read ({e})")))?;
-        Ok((id, entry))
+        head_entry(&self.store, id)
     }
 
     /// The diary entry `id`. One the store lacks, holds as another kind of record, or can't
     /// decode, is damage to the diary, named.
     pub fn entry(&self, id: &Id) -> Result<DiaryEntry, RepoError> {
-        let bytes = match self.store.read_record(id, ObjectKind::DiaryEntry) {
-            Ok(bytes) => bytes,
-            Err(StoreError::Missing(_) | StoreError::WrongKind { .. }) => {
-                return Err(damaged(format!("the diary has no entry {id}")));
-            }
-            Err(e) => return Err(e.into()),
-        };
-        DiaryEntry::decode(&bytes)
-            .map_err(|e| damaged(format!("diary entry {id} can't be read: {e}")))
+        entry_in(&self.store, id)
     }
 
     /// The tags of `state`; empty if it has none.
@@ -1465,6 +1601,9 @@ impl Repository {
         // the command at `current`, unless it is the `undo --to` that picks one up.
         self.head = read_head(&self.held.state, &self.bolt)?.id();
         self.store.refresh()?;
+        // Once per command, under the lock, before anything is stored.
+        self.rules = self.read_rules();
+        self.store.set_chunk_from(self.rules.rules.chunk_files_over);
         Ok(lock)
     }
 
@@ -1692,7 +1831,7 @@ mod tests {
             assert!(
                 warnings
                     .iter()
-                    .any(|w| w.kind == "damaged_pack" && w.message.contains(junk_name)),
+                    .any(|w| w.kind == "pack_damaged" && w.message.contains(junk_name)),
                 "{junk_name}: {warnings:?}"
             );
             let missing = repo
@@ -2510,13 +2649,13 @@ mod tests {
                 [Ok(Owner::User), failed()],
             ]
         };
-        // Listing the project folder trusts both, as Git's safe.directory does, however it is
-        // written; a folder above it or beside it trusts nothing.
+        // Listing the project folder trusts both, as Git's safe.directory does; written with `..`
+        // it trusts nothing, and nor does a folder above it or beside it.
         for owners in refused() {
             assert!(allows(owners, std::slice::from_ref(&root)).is_ok());
         }
         for owners in refused() {
-            assert!(allows(owners, &[sibling.join("..").join("project")]).is_ok());
+            assert!(allows(owners, &[sibling.join("..").join("project")]).is_err());
         }
         for owners in refused() {
             assert!(allows(owners, &[dir.path().to_owned(), sibling.clone()]).is_err());
@@ -3480,6 +3619,13 @@ mod tests {
                     path: PathBuf::from(HOSTILE),
                 }),
             },
+            RepoError::SafeFolderPassedOver {
+                entry: PathBuf::from(HOSTILE),
+                why: A_LINK,
+                refusal: Box::new(RepoError::NotYours {
+                    path: PathBuf::from(HOSTILE),
+                }),
+            },
             RepoError::Unfinished {
                 root: PathBuf::from(HOSTILE),
                 stored: false,
@@ -3503,6 +3649,7 @@ mod tests {
                     | RepoError::AdminsNotElevated { .. }
                     | RepoError::OwnerLookupFailed { .. }
                     | RepoError::StartStopped { .. }
+                    | RepoError::SafeFolderPassedOver { .. }
             ) {
                 assert_hostile_text_escaped(&e.hint().unwrap());
             }
@@ -3739,5 +3886,182 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&head).unwrap(), format!("{b}\n"));
         let tmp = std::fs::read_dir(dir.path().join(".bolt").join("tmp")).unwrap();
         assert_eq!(tmp.count(), 0);
+    }
+
+    #[test]
+    fn a_switch_stopped_by_damage_or_a_missing_object_names_the_way_on() {
+        let stopped = |source| RepoError::SwitchStopped {
+            path: "a.txt".into(),
+            source: Box::new(source),
+        };
+        let damaged = stopped(damaged("bad copy".to_owned()));
+        let missing = stopped(RepoError::Store(StoreError::Missing(Id([9; 32]))));
+        for (e, copy) in [(damaged, "looks damaged"), (missing, "is missing")] {
+            let hint = e.hint().unwrap();
+            assert!(
+                hint.contains(&format!("Bolt's copy of it {copy}")),
+                "{hint}"
+            );
+            assert!(
+                hint.contains(
+                    "To go on without it, delete .bolt/state/journal: your files stay as they \
+                     are, and the next command goes on from there."
+                ),
+                "{hint}"
+            );
+        }
+        // Another stop is fixed where it is, so the switch can still finish.
+        let other = stopped(RepoError::Io(std::io::Error::other("no space")));
+        assert!(!other.hint().unwrap().contains("state/journal"));
+    }
+
+    /// A link at `link` to the folder `target`: a junction on Windows, a symbolic link elsewhere.
+    fn folder_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        crate::test_support::junction(link, target);
+        #[cfg(unix)]
+        assert!(crate::test_support::symlink(target, link));
+    }
+
+    /// `folder_link`, for a test that races it: a link that can't be made is left unmade.
+    fn try_folder_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        let _ = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(target, link);
+    }
+
+    /// Fails unless `entry` is passed over for `root`, whose owner isn't the user, saying `why`.
+    fn passed_over_for(root: &Path, entry: &Path, why: &str) {
+        let owners = [Ok(Owner::Other), Ok(Owner::User)];
+        let Err(e) = owner_allows(owners, root, &[entry.to_owned()]) else {
+            panic!("{} counted", entry.display());
+        };
+        match &e {
+            RepoError::SafeFolderPassedOver {
+                entry: named,
+                refusal,
+                ..
+            } => {
+                assert_eq!(named, entry);
+                assert!(matches!(**refusal, RepoError::NotYours { .. }), "{e:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let said = e.to_string();
+        assert!(
+            said.starts_with("The project at ")
+                && said.contains("belongs to another user account. Its safe-folders entry ")
+                && said.contains(&format!("doesn't count: {why}")),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("safe-folders"), "{e:?}");
+    }
+
+    #[test]
+    fn a_safe_folders_entry_that_is_a_link_does_not_count() {
+        let dir = tempdir();
+        let (root, link) = (dir.path().join("project"), dir.path().join("trusted"));
+        std::fs::create_dir(&root).unwrap();
+        folder_link(&link, &root);
+        let slashed = PathBuf::from(format!("{}{}", link.display(), std::path::MAIN_SEPARATOR));
+        for entry in [&link, &slashed] {
+            passed_over_for(&root, entry, A_LINK);
+        }
+        // A symbolic link to a folder, where this account may make one.
+        #[cfg(windows)]
+        {
+            let symbolic = dir.path().join("symbolic");
+            if crate::test_support::symlink(&root, &symbolic) {
+                passed_over_for(&root, &symbolic, A_LINK);
+            }
+        }
+    }
+
+    /// `..` is resolved by the system, through any link before it, so it never counts.
+    #[test]
+    fn a_safe_folders_entry_with_dot_dot_does_not_count() {
+        let dir = tempdir();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let why = "it has `..` in it";
+        passed_over_for(&root, &root.join("sub").join(".."), why);
+    }
+
+    #[test]
+    fn a_safe_folders_entry_that_is_a_real_folder_still_counts() {
+        let dir = tempdir();
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let owners = || [Ok(Owner::Other), Ok(Owner::User)];
+        assert!(owner_allows(owners(), &root, std::slice::from_ref(&root)).is_ok());
+        // A link above the entry's own folder is followed, as on macOS, where `/var` is one.
+        let above = dir.path().join("above");
+        folder_link(&above, dir.path());
+        assert!(owner_allows(owners(), &root, &[above.join("project")]).is_ok());
+        // Another real folder doesn't count for it.
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(owner_allows(owners(), &root, &[other]).is_err());
+    }
+
+    /// The trusted folder swapped back and forth between a real folder and a link to someone
+    /// else's project: whatever is there when Bolt looks, that project is never trusted.
+    #[test]
+    fn a_safe_folders_entry_swapped_for_a_link_never_trusts_the_link_target() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempdir();
+        let (theirs, entry) = (dir.path().join("theirs"), dir.path().join("trusted"));
+        std::fs::create_dir(&theirs).unwrap();
+        std::fs::create_dir(&entry).unwrap();
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (theirs, entry, done) = (theirs.clone(), entry.clone(), done.clone());
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    // Errors are fine: a swap that fails leaves one or the other there.
+                    let _ = std::fs::remove_dir(&entry);
+                    try_folder_link(&entry, &theirs);
+                    let _ = std::fs::remove_dir(&entry);
+                    let _ = std::fs::remove_file(&entry);
+                    let _ = std::fs::create_dir(&entry);
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let owners = || [Ok(Owner::Other), Ok(Owner::User)];
+        for _ in 0..100_000 {
+            let checked = owner_allows(owners(), &theirs, std::slice::from_ref(&entry));
+            assert!(checked.is_err(), "trusted through a swapped link");
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        swapper.join().unwrap();
+    }
+
+    /// Two folders are one only by an identity the drive really gives: a file number of 0, which
+    /// some shares give everything, never matches.
+    #[test]
+    fn a_folder_identity_of_file_number_zero_never_matches() {
+        assert!(same_identity((3, 42), (3, 42)));
+        assert!(!same_identity((3, 42), (3, 43)));
+        assert!(!same_identity((3, 42), (4, 42)));
+        assert!(!same_identity((3, 0), (3, 0)));
+        assert!(!same_identity((3, 0), (3, 42)));
+        assert!(!same_identity((3, 42), (3, 0)));
+        let said = passed_over(Path::new("Z:/mine"), NO_IDENTITY);
+        assert_eq!(
+            said,
+            "Its safe-folders entry Z:/mine doesn't count: its drive doesn't tell its folders \
+             apart, so safe-folders can't vouch for a folder on it, and Bolt never trusts a \
+             folder that way."
+        );
     }
 }

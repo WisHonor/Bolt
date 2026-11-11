@@ -9,17 +9,19 @@ use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
 use crate::drive::Drive;
+use crate::fsio::Done;
 use crate::history::tip_of;
 use crate::id::{Id, is_hex_start};
+use crate::journal::Journal;
 use crate::kept;
 use crate::pack::ObjectKind;
-use crate::repo::{ChangeLock, RepoError, Repository};
+use crate::repo::{ChangeLock, RepoError, Repository, entry_in};
 use crate::save::Person;
 use crate::shelf::{free_label, within_limit};
-use crate::store::{StoreError, is_damage};
+use crate::store::{Store, StoreError, is_damage};
 use crate::switch::{self, Earlier, Switch, SwitchError};
 use crate::timeline;
-use crate::warning::Warning;
+use crate::warning::{self, Warning};
 use crate::writeout::{self, Applied, Plan};
 
 /// What one step taken did.
@@ -330,13 +332,38 @@ fn pick_up(
         }
     };
     let entry = repo.entry(&to)?;
-    // Every save its state names must read, so that the pick never strands the project.
-    let unusable = |detail: String| SwitchError::EntryUnusable { entry: to, detail };
-    let tip = tip_of(&entry).map_err(|e| unusable(e.to_string()))?;
+    // Every record its state names must read, so that the pick never strands the project.
+    let unusable = |what, detail: String| SwitchError::EntryUnusable {
+        entry: to,
+        what,
+        detail,
+    };
+    let saves = "one of its saves";
+    let tip = tip_of(&entry).map_err(|e| unusable(saves, e.to_string()))?;
     let shelved = entry.state.shelves.iter().map(|(_, save)| save);
     for save in entry.state.lines.values().chain(shelved).chain([&tip]) {
         let read = repo.store().save(save, repo.signatures_allowed());
-        read.map_err(|e| unusable(e.to_string()))?;
+        read.map_err(|e| unusable(saves, e.to_string()))?;
+    }
+    repo.tag_list(&entry.state)
+        .map_err(|e| unusable("its tag list", e.to_string()))?;
+    repo.server_lines(&entry.state)
+        .map_err(|e| unusable("its server lines", e.to_string()))?;
+    // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.
+    // Dropped before the new entry, so a crash between them never leaves it to refuse every command.
+    // Told through the store at once, so a pick-up that then fails still says so.
+    if !matches!(Journal::read_front(repo), Ok(None)) {
+        let done = Journal::remove(repo, lock)?;
+        repo.store().note(Warning::new(
+            warning::SWITCH_DROPPED,
+            "A switch between saves was stopped, and the project's head was lost before it was \
+             finished, so no command could finish it: Bolt dropped it, writing no file. The files \
+             it had already written show as unsaved changes, and what it would have written over \
+             is kept in that switch's own saves.",
+        ));
+        if let Done::NotFlushed(e) = done {
+            return Err(RepoError::from(e).into());
+        }
     }
     let made = DiaryEntry {
         parent: Some(to),
@@ -371,17 +398,17 @@ fn stored_entries(repo: &Repository) -> Result<HashSet<Id>, RepoError> {
 /// time: where the diary may have stopped, for a lost `head`. One that can't be read is left
 /// out, since it couldn't be made current either.
 pub fn diary_ends(repo: &Repository) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
-    ends_among(repo, stored_entries(repo)?)
+    ends_among(repo.store(), stored_entries(repo)?)
 }
 
-/// [`diary_ends`] among the entries `ids`.
+/// [`diary_ends`] among the entries `ids`, read from `store`.
 pub(crate) fn ends_among(
-    repo: &Repository,
-    ids: HashSet<Id>,
+    store: &Store,
+    ids: impl IntoIterator<Item = Id>,
 ) -> Result<Vec<(Id, DiaryEntry)>, RepoError> {
     let (mut followed, mut found) = (HashSet::new(), Vec::new());
     for id in ids {
-        match repo.entry(&id) {
+        match entry_in(store, &id) {
             Ok(entry) => {
                 followed.extend(entry.parent);
                 found.push((Reverse(entry.who.time_ms), id));
@@ -395,7 +422,7 @@ pub(crate) fn ends_among(
     // Read again rather than held: a store can hold any number of entries.
     found
         .into_iter()
-        .map(|(_, id)| Ok((id, repo.entry(&id)?)))
+        .map(|(_, id)| Ok((id, entry_in(store, &id)?)))
         .collect()
 }
 

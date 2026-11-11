@@ -1,0 +1,248 @@
+name: Release
+
+# Started by hand only. A pull request that changes this file, the notices' settings or the
+# release notes runs everything but the last job, so a change is tried before the real start.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - about.toml
+      - about.hbs
+      - "docs/releases/**"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  # The version, read once, and the notices for the crates Bolt is built from.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      ABOUT_URL: https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.3/cargo-about-0.9.3-x86_64-unknown-linux-musl.tar.gz
+      ABOUT_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the version from Cargo.toml
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "bolt-vcs") | .version')
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a plain version: $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+      - name: Download cargo-about and check its SHA-256
+        run: |
+          dir="$RUNNER_TEMP/cargo-about"
+          mkdir "$dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$dir/cargo-about.tar.gz" "$ABOUT_URL"
+          echo "$ABOUT_SHA256  $dir/cargo-about.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$dir/cargo-about.tar.gz" -C "$dir" --strip-components=1
+          "$dir/cargo-about" --version
+      - name: Write THIRD-PARTY-LICENSES.html
+        run: |
+          "$RUNNER_TEMP/cargo-about/cargo-about" generate --locked -c about.toml \
+            -m crates/bolt-vcs/Cargo.toml -o THIRD-PARTY-LICENSES.html about.hbs
+          if grep -q 'bolt-vcs' THIRD-PARTY-LICENSES.html; then
+            echo "::error::Bolt's own crates are in the notices"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: third-party-licenses
+          path: THIRD-PARTY-LICENSES.html
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            exe: .exe
+            ext: zip
+          - target: x86_64-unknown-linux-gnu
+            # The oldest Ubuntu GitHub offers, so the program runs on older glibc too.
+            os: ubuntu-22.04
+            exe: ""
+            ext: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            exe: ""
+            ext: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            exe: ""
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # gh run download, for the notices.
+      actions: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      EXE: ${{ matrix.exe }}
+      EXT: ${{ matrix.ext }}
+      # The C runtime linked in, so the Windows program needs nothing installed. Only this
+      # target reads it; it stays out of everyone's local builds.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: a release is built from the sources alone.
+      - name: Build
+        run: |
+          cargo build --release --locked -p bolt-vcs --target "$TARGET"
+          if [ "$RUNNER_OS" = Linux ]; then
+            ldd --version | head -n 1
+            echo "Newest glibc symbol it needs: $(objdump -T "target/$TARGET/release/bolt" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+          fi
+          if [ "$RUNNER_OS" = macOS ]; then file "target/$TARGET/release/bolt"; fi
+      - name: Smoke test
+        run: |
+          bin="$GITHUB_WORKSPACE/target/$TARGET/release/bolt$EXE"
+          scratch=$(mktemp -d)
+          if command -v cygpath > /dev/null; then scratch=$(cygpath -m "$scratch"); fi
+          export BOLT_CONFIG_DIR="$scratch/config"
+          unset BOLT_USER_NAME BOLT_USER_EMAIL
+          mkdir "$BOLT_CONFIG_DIR" "$scratch/project"
+          printf '[user]\nname = "Release Smoke Test"\nemail = "smoke@example.invalid"\n' \
+            > "$BOLT_CONFIG_DIR/config.toml"
+          cd "$scratch/project"
+          set -x
+          said=$("$bin" --version)
+          [ "$said" = "bolt $VERSION" ]
+          "$bin" start --preset custom
+          echo "Hello" > hello.txt
+          "$bin" save "First"
+          "$bin" history
+          "$bin" verify
+          set +x
+          echo "smoke test passed: $TARGET"
+      - name: Pack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage/docs"
+          gh run download "$RUN_ID" --repo "$REPO" --name third-party-licenses --dir "$stage"
+          cp "target/$TARGET/release/bolt$EXE" "$stage/"
+          cp README.md "$stage/"
+          cp docs/guide.md "$stage/docs/"
+          archive="bolt-$VERSION-$TARGET.$EXT"
+          files=("bolt$EXE" README.md docs/guide.md THIRD-PARTY-LICENSES.html)
+          if [ "$EXT" = zip ]; then
+            (cd "$stage" && 7z a -tzip -bd "$RUNNER_TEMP/$archive" "${files[@]}" > /dev/null)
+            listing=$(7z l -ba -slt "$RUNNER_TEMP/$archive" | sed -n 's/^Path = //p' | tr '\\' /)
+          else
+            # Owner 0/0 by number, so the archive names no runner's account.
+            if tar --version | grep -q GNU; then
+              owner=(--owner=0 --group=0 --numeric-owner)
+            else
+              owner=(--uid 0 --gid 0 --numeric-owner)
+            fi
+            COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/$archive" "${owner[@]}" -C "$stage" "${files[@]}"
+            tar -tvzf "$RUNNER_TEMP/$archive"
+            # GNU tar lists the owner as 0/0, bsdtar as 0 0.
+            if ! tar -tvzf "$RUNNER_TEMP/$archive" \
+                | awk '{ if (!($2 == "0/0" || ($3 == "0" && $4 == "0"))) bad = 1 } END { exit bad }'; then
+              echo "::error::$archive names an owner other than 0/0"
+              exit 1
+            fi
+            listing=$(tar -tzf "$RUNNER_TEMP/$archive")
+          fi
+          echo "$archive holds:"
+          echo "$listing"
+          if [ "$(sort <<< "$listing")" != "$(printf '%s\n' "${files[@]}" | sort)" ]; then
+            echo "::error::$archive doesn't hold exactly its four files"
+            exit 1
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ runner.temp }}/${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency: release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TAG: v0.1.0
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.run_id }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the version and that v0.1.0 is free
+        run: |
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "::error::Cargo.toml says $VERSION, but this release is $TAG"
+            exit 1
+          fi
+          tags=$(gh api "repos/$REPO/git/matching-refs/tags/$TAG" --jq '.[].ref')
+          if grep -qx "refs/tags/$TAG" <<< "$tags"; then
+            echo "::error::A tag named $TAG already exists"
+            exit 1
+          fi
+          # Drafts included: they have a tag name but no tag yet.
+          releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[] | .tag_name, .name')
+          if grep -qx -- "$TAG" <<< "$releases"; then
+            echo "::error::A release named $TAG already exists"
+            exit 1
+          fi
+      - name: Collect the archives and write SHA256SUMS
+        run: |
+          down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
+          mkdir "$dist"
+          gh run download "$RUN_ID" --repo "$REPO" --pattern "bolt-$VERSION-*" --dir "$down"
+          names=()
+          for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
+                   aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz; do
+            name="bolt-$VERSION-$t"
+            mv "$down/$name/$name" "$dist/$name"
+            names+=("$name")
+          done
+          if [ -n "$(find "$down" -type f)" ]; then
+            echo "::error::Unexpected files among the archives"
+            exit 1
+          fi
+          (cd "$dist" && sha256sum -- "${names[@]}" > SHA256SUMS && cat SHA256SUMS)
+      - name: Make the draft release
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          gh release create "$TAG" --repo "$REPO" --draft --target "$GITHUB_SHA" \
+            --title "Bolt $VERSION" --notes-file "docs/releases/$TAG.md" \
+            "$dist"/bolt-"$VERSION"-* "$dist/SHA256SUMS"

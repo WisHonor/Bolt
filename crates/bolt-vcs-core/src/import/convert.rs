@@ -13,7 +13,6 @@ use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest as _, Sha256};
 
 use super::{ImportError, LfsElsewhere};
-use crate::chunks::{is_cut, is_too_long_to_cut};
 use crate::diary::{
     self, MAX_GIT_TAG_OBJECT_BYTES, MAX_GIT_TAG_OBJECTS, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, TagList,
 };
@@ -36,8 +35,8 @@ use crate::save::{
 };
 use crate::store::Store;
 
-/// Blobs up to this size are read whole; bigger ones stream through once, or twice if they are
-/// too long to cut.
+/// Blobs up to this size are read whole; bigger ones stream through once, or twice if they
+/// aren't cut.
 const MAX_WHOLE_BLOB: u64 = 64 << 20;
 
 /// The biggest commit a save can keep exactly: its header lines, the empty line and its message
@@ -988,7 +987,7 @@ impl<'r> Converter<'r> {
         // The header only picks how to read it: the bytes are checked against the ID. A big file
         // Git stored as a delta brings its whole family in.
         let (kind, size) = self.git.header(id).map_err(|e| at(e, place))?;
-        if kind == ObjectType::Blob && is_cut(size) {
+        if kind == ObjectType::Blob && self.store.is_cut(size) {
             self.family(id, &place)?;
             if let Some(done) = self.met(id, file, commit, path) {
                 return Ok(done);
@@ -1052,7 +1051,7 @@ impl<'r> Converter<'r> {
         let lookalikes = &mut self.lookalike_members;
         let mut each = |member: &GitId, data: &[u8]| -> Result<(), ImportError> {
             // Each one stored has cost a MiB of the work allowed, which bounds how many there are.
-            if !is_cut(data.len() as u64) || blobs.contains_key(&(*member, true)) {
+            if !store.is_cut(data.len() as u64) || blobs.contains_key(&(*member, true)) {
                 return Ok(());
             }
             let stored = ingest::store_held(packs, store, data);
@@ -1117,7 +1116,7 @@ impl<'r> Converter<'r> {
 
     /// Stores the object of the Git LFS pointer `p` from `.git/lfs/objects` as any file is stored,
     /// computing its SHA-256 as it is read, and gives its content ID only once that is found to
-    /// be the oid. One too long to cut is read twice: once for both hashes, then again to store
+    /// be the oid. One that isn't cut is read twice: once for both hashes, then again to store
     /// it unless a good copy is stored already, which refuses any other bytes.
     fn lfs_object(
         &mut self,
@@ -1135,7 +1134,7 @@ impl<'r> Converter<'r> {
             inner: file,
             hasher: Sha256::new(),
         };
-        let long = is_too_long_to_cut(p.size);
+        let long = self.store.is_streamed(p.size);
         let content = if long {
             let mut hasher = ContentHasher::new();
             let read = io::copy(&mut reading, &mut Hashing(&mut hasher));
@@ -1167,7 +1166,7 @@ impl<'r> Converter<'r> {
     }
 
     /// Stores a blob too big to read whole, of the `size` its header gives, reading it once, and
-    /// gives its first bytes too, as `Start` keeps them. One too long to cut is read twice: once
+    /// gives its first bytes too, as `Start` keeps them. One that isn't cut is read twice: once
     /// to learn its content ID, then again to store it unless a good copy is stored already.
     fn stream(
         &mut self,
@@ -1175,7 +1174,7 @@ impl<'r> Converter<'r> {
         size: u64,
         place: &dyn Fn() -> String,
     ) -> Result<(Id, u64, Vec<u8>), ImportError> {
-        if !is_too_long_to_cut(size) {
+        if self.store.is_cut(size) {
             let mut blob = Start::new(self.git.blob_reader(id).map_err(|e| at(e, place))?);
             let stored = ingest::store_bytes(self.packs, self.store, &mut blob, size);
             return Ok((
@@ -2625,7 +2624,7 @@ mod tests {
         );
     }
 
-    /// A Git LFS object too long to cut is read once for both its hashes, then again to store it
+    /// A Git LFS object that isn't cut is read once for both its hashes, then again to store it
     /// whole. One whose SHA-256 isn't its pointer's stops the import before anything is stored;
     /// bytes that change between the reads are refused by `add_content_from`, which stores nothing
     /// that isn't the ID it was given.

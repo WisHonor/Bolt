@@ -1,0 +1,15 @@
+---
+source: crates/bolt-vcs/tests/setup.rs
+expression: doc
+---
+{
+  "applied": false,
+  "bolt_json": 1,
+  "files": [],
+  "found": {
+    "engines": [],
+    "languages": []
+  },
+  "preset": "code",
+  "warnings": []
+}

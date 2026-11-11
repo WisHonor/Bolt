@@ -63,25 +63,24 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
-/// A size for people, in powers of 1,000 as drives are sold: 950 bytes, 2.3 GB, 150 MB.
+/// A measured size for people, 1,024 bytes to the KiB: 512 B, 31 KiB, 1.2 GiB.
 #[must_use]
 pub fn bytes(n: u64) -> String {
     const UNITS: [(u64, &str); 4] = [
-        (1_000, "KB"),
-        (1_000_000, "MB"),
-        (1_000_000_000, "GB"),
-        (1_000_000_000_000, "TB"),
+        (1 << 10, "KiB"),
+        (1 << 20, "MiB"),
+        (1 << 30, "GiB"),
+        (1 << 40, "TiB"),
     ];
-    let rounded = |unit: u64| n.saturating_add(unit / 2) / unit;
-    // The biggest unit `n` reaches, or the next one up when rounding makes it 1,000 of this one.
-    let Some(&(mut unit, mut name)) = UNITS.iter().rev().find(|(unit, _)| n >= *unit) else {
-        return if n == 1 {
-            "1 byte".to_owned()
-        } else {
-            format!("{n} bytes")
-        };
+    let rounded = |unit: u64| {
+        let whole = (u128::from(n) + u128::from(unit / 2)) / u128::from(unit);
+        u64::try_from(whole).unwrap_or(u64::MAX)
     };
-    if rounded(unit) >= 1_000
+    // The biggest unit `n` reaches, or the next one up when rounding makes it 1,024 of this one.
+    let Some(&(mut unit, mut name)) = UNITS.iter().rev().find(|(unit, _)| n >= *unit) else {
+        return format!("{} B", thousands(n));
+    };
+    if rounded(unit) >= 1 << 10
         && let Some(&(up, up_name)) = UNITS.iter().find(|(u, _)| *u > unit)
     {
         (unit, name) = (up, up_name);
@@ -122,33 +121,31 @@ mod tests {
         let sizes = [
             0,
             1,
-            999,
-            1_000,
-            2_349_999_999,
-            9_960_000,
-            150_000_000,
-            100_000_001,
-            999_499,
-            999_950,
-            999_999_999,
+            1023,
+            1024,
+            1536,
+            100_000_000,
+            (10 << 20) - (1 << 20) / 20,
+            (1 << 20) - 513,
+            (1 << 20) - 512,
+            (1 << 30) - 1,
             u64::MAX,
         ]
         .map(bytes);
         assert_eq!(
             sizes,
             [
-                "0 bytes",
-                "1 byte",
-                "999 bytes",
-                "1.0 KB",
-                "2.3 GB",
-                "10 MB",
-                "150 MB",
-                "100 MB",
-                "999 KB",
-                "1.0 MB",
-                "1.0 GB",
-                "18,446,744 TB"
+                "0 B",
+                "1 B",
+                "1,023 B",
+                "1.0 KiB",
+                "1.5 KiB",
+                "95 MiB",
+                "10 MiB",
+                "1,023 KiB",
+                "1.0 MiB",
+                "1.0 GiB",
+                "16,777,216 TiB"
             ]
         );
     }

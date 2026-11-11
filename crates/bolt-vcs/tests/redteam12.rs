@@ -76,7 +76,10 @@ fn rt12_2_a_scattered_small_read_costs_a_small_read() {
 
     const CHUNKS: usize = 20_000;
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let bytes: Vec<Vec<u8>> = (0..CHUNKS as u64)
         .map(|j| j.to_le_bytes().to_vec())
         .collect();
@@ -140,7 +143,10 @@ fn rt12_3_goto_of_a_full_id_no_save_has_says_no_save_matches() {
     use bolt_core::repo::Repository;
 
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for n in 0..2 {
         std::fs::write(env.root().join("f"), format!("v{n}")).unwrap();
         env.bolt()

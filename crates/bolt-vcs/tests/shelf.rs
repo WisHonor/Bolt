@@ -11,7 +11,9 @@ use bolt_core::listing::EntryKind;
 use bolt_core::repo::Repository;
 
 mod support;
-use support::{Env, Files, changed, files, head, holding, main_tip, saved_files, text, write};
+use support::{
+    Env, Files, changed, files, head, holding, main_tip, masked, saved_files, text, write,
+};
 
 /// `files` with `changes` made: a path set to what it holds, or removed with `None`.
 fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
@@ -28,7 +30,10 @@ fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in entries {
         write(&env, path, bytes);
     }
@@ -109,7 +114,7 @@ fn shelf_sets_every_unsaved_change_aside_and_cleans_the_folder() {
     let said = ok(&env, &["shelf"]);
     assert_eq!(
         said,
-        "Set your unsaved changes in 5 files aside on shelf 1: bolt unshelf brings them back.\n"
+        "Shelved your unsaved changes in 5 files on shelf 1.\n"
     );
     // The folder is the save again, but for what Bolt ignores.
     let clean = with(&holding(SAVED), &[("build.log", Some("log\n"))]);
@@ -166,7 +171,7 @@ fn unshelf_brings_the_newest_back_and_drops_it() {
     assert_eq!(labels(&env), ["2", "1"]);
     let first = state(&env).shelves[1].clone();
     let said = ok(&env, &["unshelf"]);
-    assert_eq!(said, "Brought back shelf 2 \"Second\": 1 file written.\n");
+    assert_eq!(said, "Unshelved shelf 2 \"Second\": 1 file written.\n");
     assert_eq!(
         files(env.root()),
         with(&holding(SAVED), &[("b.txt", Some("other\n"))])
@@ -718,8 +723,9 @@ fn shelf_list_shows_number_message_line_time_and_files() {
     let said = ok(&env, &["shelf", "--list"]);
     assert_eq!(
         said,
-        "2  just now  at a save  1 file  \"Shelved\"\n\
-         1  just now  on main  2 files  \"Work on login\"\n"
+        "2 shelves, newest first:\n\n    \
+         2  \"Shelved\"        1 file   just now  at a save\n    \
+         1  \"Work on login\"  2 files  just now  on main\n"
     );
     let doc = json(&env, &["shelf", "--list"]);
     assert_eq!(doc["bolt_json"], 1);
@@ -928,4 +934,22 @@ fn a_shelf_or_unshelf_stopped_at_every_write_is_finished_by_the_next_command() {
         |env, n| assert!(labels(env).is_empty(), "unshelf {n}"),
         |env, n| assert_eq!(labels(env), ["1"], "unshelf {n}"),
     );
+}
+
+#[test]
+fn shelf_and_unshelf_json_match_their_snapshots() {
+    let (env, _, _) = with_unsaved_work();
+    let doc = |args: &[&str]| -> serde_json::Value {
+        let out = env.bolt().args(args).arg("--json").output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stdout)
+        );
+        masked(serde_json::from_slice(&out.stdout).unwrap())
+    };
+    insta::assert_json_snapshot!("shelf", doc(&["shelf", "Mine"]));
+    insta::assert_json_snapshot!("shelf_list", doc(&["shelf", "--list"]));
+    insta::assert_json_snapshot!("unshelf", doc(&["unshelf"]));
 }

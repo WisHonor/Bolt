@@ -61,8 +61,8 @@ fn import(dir: &Path) -> Result<ImportReport, ImportError> {
         &mut ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: None,
-            progress: &mut |_, _| {},
+            git_settings: None,
+            progress: &mut |_, _, _| {},
         },
         &mut None,
     )

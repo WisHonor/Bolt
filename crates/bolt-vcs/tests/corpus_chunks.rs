@@ -83,15 +83,15 @@ fn refused(doc: &Value, p: &Planted, before: &str, why: &str) {
     for told in [p.pack.as_str(), file.as_str(), why] {
         assert!(said.contains(told), "{told} in {said}");
     }
-    assert_eq!(kinds(doc), ["damaged_pack"], "{doc}");
-    assert!(message(doc, "damaged_pack").contains(&p.pack), "{doc}");
+    assert_eq!(kinds(doc), ["pack_damaged"], "{doc}");
+    assert!(message(doc, "pack_damaged").contains(&p.pack), "{doc}");
 }
 
 /// The warnings of a document that read the file from a good copy.
 fn read_well(doc: &Value, p: &Planted, named: bool) {
     if named {
-        assert_eq!(kinds(doc), ["damaged_pack"], "{doc}");
-        assert!(message(doc, "damaged_pack").contains(&p.pack), "{doc}");
+        assert_eq!(kinds(doc), ["pack_damaged"], "{doc}");
+        assert!(message(doc, "pack_damaged").contains(&p.pack), "{doc}");
     } else {
         assert!(kinds(doc).is_empty(), "{doc}");
     }
@@ -110,6 +110,13 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
         Expect::Refused(why) => {
             assert_eq!(code, Some(1), "{doc}");
             refused(&doc, &p, stopped, why);
+            // The damage stops every later try too, so the hint names the way on.
+            let hint = doc["error"]["hint"].as_str().unwrap();
+            assert!(
+                hint.contains("delete .bolt/state/journal: your files stay as they are"),
+                "{hint}"
+            );
+            assert!(case.root().join(".bolt/state/journal").exists());
             assert!(project_entries(&case.env).is_empty());
         }
         Expect::Good { named } => {
@@ -146,7 +153,7 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
         }
         Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
-            assert_eq!(doc["changes"][0]["lines"], "binary", "{doc}");
+            assert_eq!(doc["changes"][0]["content"], "binary", "{doc}");
             read_well(&doc, &p, *named);
         }
     }
@@ -160,7 +167,7 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
         }
         Expect::Good { named } => {
             assert_eq!(code, Some(0), "{doc}");
-            assert_eq!(doc["restored"], json!(["big.bin"]), "{doc}");
+            assert_eq!(doc["restored_paths"], json!(["big.bin"]), "{doc}");
             read_well(&doc, &p, *named);
             assert_eq!(project_entries(&case.env), holding(&big()));
         }

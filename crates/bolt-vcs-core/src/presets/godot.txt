@@ -1,0 +1,7 @@
+# Godot: caches, export settings and crash files.
+.godot/
+.import/
+export.cfg
+export_credentials.cfg
+.mono/
+mono_crash.*.json

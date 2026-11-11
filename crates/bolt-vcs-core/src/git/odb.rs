@@ -351,19 +351,8 @@ impl Repo {
         entry: &Entry,
         base: &[u8],
     ) -> Result<Vec<u8>, GitError> {
-        let damaged = |why: String| {
-            broken(format!(
-                "the delta at offset {at} in {} {why}",
-                pack.path.display()
-            ))
-        };
-        let failed = |e: DeltaError| match e {
-            DeltaError::Damaged(why) => damaged(why),
-            DeltaError::Read(e) => e.downcast::<GitError>().unwrap_or_else(|e| GitError::Io {
-                path: pack.path.clone(),
-                source: e,
-            }),
-        };
+        let damaged = |why: String| delta_error(&pack.path, at, DeltaError::Damaged(why));
+        let failed = |e: DeltaError| delta_error(&pack.path, at, e);
         self.spend(entry.size)?;
         if entry.size > MAX_IN_MEMORY_OBJECT {
             return Err(damaged(format!(
@@ -434,6 +423,20 @@ impl Repo {
         let mut hasher = Hasher::object(self.hash, kind, data.len() as u64);
         hasher.update(data);
         verify(id, hasher)
+    }
+}
+
+/// What `e` stopping the delta at `at` in the pack at `path` is told as: damage, or a read error
+/// through the reader's one mapping, which says when Bolt ran out of memory.
+fn delta_error(path: &Path, at: u64, e: DeltaError) -> GitError {
+    match e {
+        DeltaError::Damaged(why) => broken(format!(
+            "the delta at offset {at} in {} {why}",
+            path.display()
+        )),
+        DeltaError::Read(e) => e
+            .downcast::<GitError>()
+            .unwrap_or_else(|e| read_error(path, e)),
     }
 }
 
@@ -2163,5 +2166,29 @@ mod tests {
         );
         assert_eq!(cache.depth((0, 4)), Some(0));
         assert_eq!(cache.bytes, 10);
+    }
+
+    /// The hint for running out of memory, not the `git fsck` one or the permissions one.
+    fn says_out_of_memory(e: &GitError) {
+        assert!(matches!(e, GitError::OutOfMemory { .. }), "{e:?}");
+        let hint = e.hint().unwrap();
+        assert!(hint.contains("free memory"), "{hint}");
+        assert!(
+            !hint.contains("fsck") && !hint.contains("may read"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn running_out_of_memory_building_a_delta_says_so() {
+        let path = Path::new("objects/pack/pack-1.pack");
+        says_out_of_memory(&delta_error(path, 12, DeltaError::no_memory()));
+    }
+
+    #[test]
+    fn a_raw_delta_read_that_ran_out_of_memory_says_so() {
+        let path = Path::new("objects/pack/pack-1.pack");
+        let e = io::Error::new(io::ErrorKind::OutOfMemory, "inflating");
+        says_out_of_memory(&delta_error(path, 12, DeltaError::Read(e)));
     }
 }

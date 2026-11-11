@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 017](017-commands-and-output.md) (Git's words are hidden shortcuts; the first use names Bolt's word once; a Git word with no Bolt equivalent is explained)
+- **Refined by:** [decision 124](124-restore-is-explained-and-a-shortcut-takes-nothing-for-what-it-isnt.md) (`restore` is explained, never run, and each shortcut runs only the Git forms that mean the same in Bolt)
 
 ## Context
 

@@ -169,3 +169,10 @@ path = "fuzz_targets/cut_chunks.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_rules"
+path = "fuzz_targets/parse_rules.rs"
+test = false
+doc = false
+bench = false

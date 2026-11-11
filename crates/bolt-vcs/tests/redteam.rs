@@ -67,7 +67,7 @@ fn mkfifo(path: &Path) {
 #[test]
 fn rt1_symlinked_bolt_tmp_does_not_delete_files_outside_the_project() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let victim = tempfile::tempdir().unwrap(); // say, ~/Documents
     std::fs::write(victim.path().join("thesis.docx"), "four years of work").unwrap();
     let tmp = env.root().join(".bolt/tmp");
@@ -88,7 +88,7 @@ fn rt1_symlinked_bolt_tmp_does_not_delete_files_outside_the_project() {
 #[test]
 fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let victim = tempfile::tempdir().unwrap();
     std::fs::write(victim.path().join("thesis.docx"), "four years of work").unwrap();
     let tmp = env.root().join(".bolt").join("tmp");
@@ -105,7 +105,7 @@ fn rt1_windows_junctioned_bolt_tmp_does_not_delete_files_outside_the_project() {
 fn win_junction_in_project_is_not_walked_into() {
     use bolt_core::repo::Repository;
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "hunter2").unwrap();
     support::junction(&env.root().join("j"), outside.path());
@@ -127,7 +127,7 @@ fn win_junction_in_project_is_not_walked_into() {
 #[test]
 fn rt2_symlinked_packs_folder_does_not_make_save_write_outside_the_project() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let outside = tempfile::tempdir().unwrap();
     let packs = env.root().join(".bolt/store/packs");
     for e in std::fs::read_dir(&packs).unwrap() {
@@ -152,7 +152,7 @@ fn rt2_symlinked_packs_folder_does_not_make_save_write_outside_the_project() {
 #[test]
 fn rt2_symlinked_lock_file_does_not_create_files_outside_the_project() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let outside = tempfile::tempdir().unwrap();
     let target = outside.path().join("created-by-bolt");
     let lock = env.root().join(".bolt/state/lock");
@@ -171,7 +171,11 @@ fn rt2_start_does_not_build_a_repository_through_a_symlinked_bolt_folder() {
     let env = Env::new();
     let outside = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(outside.path(), env.root().join(".bolt")).unwrap();
-    let _ = env.bolt().arg("start").output().unwrap();
+    let _ = env
+        .bolt()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(
         std::fs::read_dir(outside.path()).unwrap().count(),
         0,
@@ -185,7 +189,7 @@ fn rt2_start_does_not_build_a_repository_through_a_symlinked_bolt_folder() {
 #[test]
 fn rt3_fifo_as_state_head_does_not_hang_history() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let head = env.root().join(".bolt/state/head");
     std::fs::remove_file(&head).unwrap();
     mkfifo(&head);
@@ -202,7 +206,7 @@ fn rt3_fifo_as_state_head_does_not_hang_history() {
 #[test]
 fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     mkfifo(&env.root().join(".bolt/store/packs/zz.pack"));
     // History may never reach the FIFO, since packs are opened only when searched.
     let mut cmd = env.bolt();
@@ -247,7 +251,7 @@ fn rt3_fifo_named_like_a_pack_does_not_hang_history() {
 #[test]
 fn rt3_fifo_as_project_config_does_not_hang_save() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     mkfifo(&env.root().join(".bolt/config.toml"));
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     // Without an identity the save stops before it reads the project's settings.
@@ -274,7 +278,7 @@ fn rt3_fifo_as_project_config_does_not_hang_save() {
 #[test]
 fn rt4_state_head_pointing_at_dev_zero_is_refused_not_read_forever() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let head = env.root().join(".bolt/state/head");
     std::fs::remove_file(&head).unwrap();
     std::os::unix::fs::symlink("/dev/zero", &head).unwrap();
@@ -290,7 +294,7 @@ fn rt4_state_head_pointing_at_dev_zero_is_refused_not_read_forever() {
 #[test]
 fn rt4_project_config_pointing_at_dev_zero_is_refused_not_read_forever() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     std::os::unix::fs::symlink("/dev/zero", env.root().join(".bolt/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let mut cmd = bolt_capped(env.config(), env.root(), &["save", "add a"]);
@@ -316,7 +320,7 @@ fn rt5_save_never_stores_the_target_of_a_file_swapped_for_a_symlink() {
 
     const SECRET: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY----- hunter2";
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let outside = tempfile::tempdir().unwrap();
     let secret = outside.path().join("id_ed25519");
     std::fs::write(&secret, SECRET).unwrap();
@@ -398,7 +402,7 @@ fn plant_deep_save(root: &Path, depth: usize) {
 #[test]
 fn rt6_deeply_nested_listings_do_not_crash_show() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     plant_deep_save(env.root(), 100_000);
     let mut cmd = env.bolt();
     cmd.arg("show");
@@ -412,7 +416,7 @@ fn rt6_deeply_nested_listings_do_not_crash_show() {
 #[test]
 fn rt6_deeply_nested_listings_do_not_crash_the_next_save() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     plant_deep_save(env.root(), 100_000);
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     let mut cmd = env.bolt();
@@ -431,7 +435,7 @@ fn rt6_deeply_nested_listings_do_not_crash_the_next_save() {
 #[test]
 fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     plant_save(env.root(), |pack| {
         let names: Vec<String> = (0..1000).map(|i| format!("n{i:03}")).collect();
         let empty = pack.add_content(b"").unwrap();
@@ -458,7 +462,7 @@ fn rt10_tree_bomb_does_not_exhaust_memory_in_show() {
 #[test]
 fn rt7_bidi_override_in_a_file_name_is_not_printed_raw() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     // Shows as "invoice_exe.pdf" in a bidi-aware terminal; really ends in ".exe".
     std::fs::write(env.root().join("invoice_\u{202E}fdp.exe"), "MZ").unwrap();
     env.ok(&["save", "add the invoice\u{2028}  removed   payroll.xlsx"]);
@@ -480,7 +484,11 @@ fn rt8_start_does_not_print_escape_sequences_from_the_folder_name() {
     let env = Env::new();
     let dir: std::path::PathBuf = env.root().join("proj\u{1b}]0;pwned\u{7}\u{1b}[2J");
     std::fs::create_dir(&dir).unwrap();
-    let out = env.bolt_in(&dir).arg("start").output().unwrap();
+    let out = env
+        .bolt_in(&dir)
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -501,7 +509,7 @@ fn rt9_project_config_cannot_override_the_users_own_identity() {
     .unwrap();
     assert!(
         env.bolt_anonymous(env.root())
-            .arg("start")
+            .args(["start", "--preset", "custom"])
             .status()
             .unwrap()
             .success()

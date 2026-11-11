@@ -153,6 +153,73 @@ pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Escape codes Bolt itself never prints, so any found raw came from the project: one clears the
+/// screen, the other sets the window's title.
+pub const CLEAR: &str = "\u{1b}[2J";
+pub const TITLE: &str = "\u{1b}]0;pwned\u{7}";
+
+/// `said` without Bolt's own colour codes and line erase.
+pub fn without_bolts_codes(said: &str) -> String {
+    const OWN: [&str; 14] = [
+        "\x1b[0m",
+        "\x1b[1;32m",
+        "\x1b[1;31m",
+        "\x1b[1;33m",
+        "\x1b[1;36m",
+        "\x1b[36m",
+        "\x1b[1;35m",
+        "\x1b[34m",
+        "\x1b[32m",
+        "\x1b[31m",
+        "\x1b[33m",
+        "\x1b[2m",
+        "\x1b[1m",
+        "\x1b[2K",
+    ];
+    OWN.iter()
+        .fold(said.to_owned(), |s, code| s.replace(code, ""))
+}
+
+/// Fails if `said`, once Bolt's own colour codes are taken out, holds a control character other
+/// than a newline or a carriage return (progress redraws with those, so a raw one from the project
+/// would pass too), or one of three characters that hide or reorder text: U+202E, U+2028 and
+/// U+200B. Other hidden characters pass, so a test's hostile text must use these three.
+pub fn assert_escaped(said: &str, what: &str) {
+    for c in without_bolts_codes(said).chars() {
+        let hides = matches!(c, '\u{202e}' | '\u{2028}' | '\u{200b}');
+        assert!(
+            !hides && (!c.is_control() || c == '\n' || c == '\r'),
+            "{what}: {c:?} in {said:?}"
+        );
+    }
+}
+
+/// A `--json` document with what changes from run to run redacted, for a snapshot: every
+/// fingerprint (64 hex digits), and the change IDs, times and time zones of saves and entries.
+pub fn masked(mut doc: serde_json::Value) -> serde_json::Value {
+    fn mask(value: &mut serde_json::Value) {
+        let id = value
+            .as_str()
+            .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if id {
+            *value = "[redacted]".into();
+        } else if let Some(list) = value.as_array_mut() {
+            list.iter_mut().for_each(mask);
+        } else if let Some(fields) = value.as_object_mut() {
+            for (key, value) in fields {
+                match key.as_str() {
+                    "change_id" | "change_id_short" | "time_ms" | "tz_offset_min" => {
+                        *value = "[redacted]".into()
+                    }
+                    _ => mask(value),
+                }
+            }
+        }
+    }
+    mask(&mut doc);
+    doc
+}
+
 /// The Git commit a save was imported from.
 pub fn git_commit(repo: &Repository, save: &Id) -> String {
     let save = repo.store().save(save, false).unwrap();
@@ -537,7 +604,10 @@ pub fn with_bolt_spelling_under_git(pack: &mut PackSet, files: &[(&str, &[u8])])
 /// another, each holding its entries as for [`listings`]; their IDs. `bolt goto` then writes each.
 pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = main_tip(&env).to_hex();
     env.bolt().args(["goto", &first]).assert().success();
     let mut ids = Vec::new();
@@ -915,6 +985,8 @@ impl Env {
     pub fn refused_import(&self) -> String {
         let out = self.bolt().arg("import").output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+        // It had nothing to show, so stdout gets nothing, not even a heading.
+        assert_eq!(text(&out.stdout), "", "{}", text(&out.stderr));
         text(&out.stderr)
     }
 

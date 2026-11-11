@@ -142,6 +142,10 @@ pub(super) fn file_meta(file: &File) -> io::Result<EntryMeta> {
     meta(file.as_handle())
 }
 
+pub(super) fn own_meta(dir: &OwnedHandle) -> io::Result<EntryMeta> {
+    meta(dir.as_handle())
+}
+
 pub(super) fn open_file(dir: &OwnedHandle, name: &OsStr) -> io::Result<File> {
     let (handle, what) = open_entry(dir, name, FILE_GENERIC_READ, 0)?;
     match kind_of(what.FileAttributes, what.ReparseTag) {

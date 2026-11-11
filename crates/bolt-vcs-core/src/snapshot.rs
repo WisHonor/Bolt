@@ -12,7 +12,6 @@ use std::sync::Arc;
 use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
-use crate::chunks::is_too_long_to_cut;
 use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
@@ -28,6 +27,7 @@ use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::otherlines::OtherLines;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
+use crate::rules::Rules;
 use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, Person, Save};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
@@ -88,11 +88,6 @@ pub enum SaveOutcome {
         warnings: Vec<Warning>,
     },
 }
-
-/// A save asks first when it adds more than this many bytes or files that the save it builds on
-/// doesn't hold (decision 056).
-const ASK_OVER_BYTES: u64 = 100_000_000;
-const ASK_OVER_FILES: u64 = 10_000;
 
 /// What a save adds that the save it builds on doesn't hold, when that is unusually much.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,9 +371,10 @@ impl SaveError {
             SaveError::LineEndingsChanged { .. } => {
                 return Some(
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
-                     run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git \
-                     reset --hard`, and save again. To save the files with CRLF anyway, run the \
-                     same command again with --accept-crlf."
+                     run `git config core.autocrlf false`, `git rm --cached -r -q :/` and `git \
+                     reset --hard`, and save again. Files `.gitattributes` marks `eol=crlf` stay \
+                     CRLF after those steps, and --accept-crlf then saves just those. To save the \
+                     files with CRLF anyway, run the same command again with --accept-crlf."
                         .to_owned(),
                 );
             }
@@ -511,6 +507,7 @@ pub fn save_folder(
         ..
     } = scan?;
     fsio::fault_point("save:walked").map_err(RepoError::from)?;
+    warnings.extend(repo.rules().warnings());
     let imported = parent.extra.contains_key(EXTRA_GIT_COMMIT);
     // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
     // it is by the next save, which doesn't look. Told after the save's own checks.
@@ -532,7 +529,7 @@ pub fn save_folder(
     if imported && !req.accept_crlf {
         endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
     }
-    if let Some(large) = large_save(repo.store(), drive, &folders, &old)? {
+    if let Some(large) = large_save(repo.store(), &repo.rules().rules, drive, &folders, &old)? {
         // New files mean something to save, so a missing line name is asked for now: the
         // question comes after it, and what is stored is stored once.
         if line.is_none() {
@@ -895,9 +892,10 @@ fn each_file_with_saved<'f>(
 /// What the save would add, from the walk's sizes, if it is more than a save adds without asking.
 /// A file is new where the base save holds no file under a name `drive` takes as its own, so a
 /// changed file, or one renamed only in letter case on a drive that ignores case, doesn't count.
-/// Only listings are read.
+/// Only listings are read. The project's rules say how much is more.
 fn large_save(
     store: &Store,
+    rules: &Rules,
     drive: Drive,
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
@@ -915,7 +913,7 @@ fn large_save(
         }
         Ok(())
     })?;
-    if new_bytes <= ASK_OVER_BYTES && new_files <= ASK_OVER_FILES {
+    if new_bytes <= rules.ask_over_bytes && new_files <= rules.ask_over_files {
         return Ok(None);
     }
     let mut biggest: Vec<(String, u64)> = by_top
@@ -1357,7 +1355,7 @@ impl Job {
 struct Jobs<'a> {
     handles: &'a mut Handles,
     todo: std::vec::IntoIter<(&'a str, &'a Child)>,
-    storing: bool,
+    storing: Option<&'a Store>,
 }
 
 impl Iterator for Jobs<'_> {
@@ -1380,7 +1378,12 @@ impl Iterator for Jobs<'_> {
         };
         Some(match c.kind {
             Kind::Symlink => Job::Link(at),
-            _ if self.storing && c.meta.is_some_and(|m| !ingest::is_small(m.size)) => Job::Big(at),
+            _ if self
+                .storing
+                .is_some_and(|s| c.meta.is_some_and(|m| !s.is_small(m.size))) =>
+            {
+                Job::Big(at)
+            }
             // One the walk has no details of fails as it is opened, as any file does.
             _ => Job::File(at),
         })
@@ -1477,7 +1480,7 @@ fn build_reading(
         let jobs = Jobs {
             handles: &mut *handles,
             todo: todo.into_iter(),
-            storing,
+            storing: store,
         };
         let built = workers.results(
             jobs,
@@ -1795,7 +1798,7 @@ pub(crate) fn store_file(
     let changed = || SaveError::ChangedDuringSave {
         path: rel.to_owned(),
     };
-    if seen.is_some_and(|seen| is_too_long_to_cut(seen.size)) {
+    if seen.is_some_and(|seen| store.is_streamed(seen.size)) {
         // Hashed first, then stored whole unless the store holds it already.
         let (mut file, id, size) = hash_scanned(dir, name, rel, seen, after_read)?;
         let again = || {
@@ -1824,7 +1827,7 @@ pub(crate) fn store_file(
 const READ_BUFFER: usize = 1 << 20;
 
 /// Reads the file `name` in `dir` through and gives it, still open, with its content ID and size:
-/// to know the ID, or as the first of two reads of a file too long to cut. It must stay the file
+/// to know the ID, or as the first of two reads of a file that isn't cut. It must stay the file
 /// the walk saw (`seen`) until read, which is checked once `after_read` has run.
 fn hash_scanned(
     dir: &Dir,
@@ -2455,7 +2458,7 @@ mod tests {
         let root = saved_root(save_now(&mut repo).unwrap());
         let name = pack.file_name().unwrap().to_str().unwrap();
         let warnings = repo.store().warnings();
-        let named = |w: &Warning| w.kind == warning::DAMAGED_PACK && w.message.contains(name);
+        let named = |w: &Warning| w.kind == warning::PACK_DAMAGED && w.message.contains(name);
         assert!(warnings.iter().any(named), "{warnings:?}");
         let fresh = Repository::open(dir.path()).unwrap();
         assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
@@ -3888,7 +3891,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "This save adds 100 MB in 4 new files, most in: art/ (100 MB), docs/ (5 bytes), the top folder (4 bytes)."
+            "This save adds 95 MiB in 4 new files, most in: art/ (95 MiB), docs/ (5 B), the top folder (4 B)."
         );
         assert!(err.hint().unwrap().contains("--yes"), "{err:?}");
         // A partial save counts only what it saves.

@@ -13,6 +13,8 @@ use bolt_platform::dir::{Dir, EntryType};
 pub const MAX_FORMAT_BYTES: u64 = 4096;
 pub const MAX_HEAD_BYTES: u64 = 65;
 pub const MAX_LOCK_INFO_BYTES: u64 = 4096;
+/// `state/tidied`: a number of milliseconds and an LF.
+pub const MAX_TIDIED_BYTES: u64 = 32;
 pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
 /// One `.gitignore` or `.boltignore`.
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1 << 20;
@@ -134,6 +136,15 @@ pub fn read_at(file: &File, buf: &mut [u8], pos: u64) -> io::Result<usize> {
     {
         std::os::windows::fs::FileExt::seek_read(file, buf, pos)
     }
+}
+
+/// The drive and file number of the folder at `path`, from one open of it that doesn't follow its
+/// last name: a link, junction or other reparse point there is refused
+/// (`bolt_platform::dir::is_link_refusal`). Links before the last name are followed. A trailing
+/// separator is dropped first, since on Unix it would make the system follow a link.
+pub fn folder_id(path: &Path) -> io::Result<(u64, u128)> {
+    let tidied: std::path::PathBuf = path.components().collect();
+    Ok(Dir::open_top(&tidied)?.own_meta()?.file_id)
 }
 
 /// Checks that `path` is a real folder: not a link, junction or other reparse point, and not a

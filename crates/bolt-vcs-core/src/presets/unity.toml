@@ -1,0 +1,11 @@
+
+# Unity scenes and prefabs.
+[[rule]]
+files = ["*.unity", "*.prefab"]
+lockable = true
+conflict-markers = false
+
+# Unity's .meta files never get conflict markers.
+[[rule]]
+files = ["*.meta"]
+conflict-markers = false

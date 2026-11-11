@@ -4,7 +4,9 @@ expression: history
 ---
 {
   "bolt_json": 1,
-  "line": "main",
+  "position": {
+    "line": "main"
+  },
   "saves": [
     {
       "author": {

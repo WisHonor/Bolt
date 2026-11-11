@@ -34,7 +34,7 @@ fn ok(env: &Env, args: &[&str]) {
 /// A project that has saved `big.bin`, `size` bytes made from `seed`, and the file's ID.
 fn with_a_big_file(seed: u64, size: u64) -> (Env, Id) {
     let env = Env::empty();
-    ok(&env, &["start"]);
+    ok(&env, &["start", "--preset", "custom"]);
     let id = write_noise(&env.root().join("big.bin"), seed, size);
     write(&env, "small.txt", "small\n");
     ok(&env, &["save", "Big"]);
@@ -104,6 +104,23 @@ fn chunking_changes_no_ids() {
     }
 }
 
+/// With no `bolt.toml`, files are cut from exactly 1 MiB, as before projects had rules.
+#[test]
+fn a_project_without_a_rules_file_cuts_files_from_exactly_1_mib() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let cut = write_noise(&env.root().join("cut.bin"), 21, MIB);
+    let whole = write_noise(&env.root().join("whole.bin"), 22, MIB - 1);
+    let out = env.bolt().args(["save", "--json", "Two"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = doc["warnings"].as_array().unwrap();
+    assert!(warnings.is_empty(), "{doc}");
+    assert_eq!(copies_of(env.root(), &cut), [ObjectKind::ChunkList]);
+    assert_eq!(ObjectKind::ChunkList as u8, 18);
+    assert_eq!(copies_of(env.root(), &whole), [ObjectKind::Content]);
+}
+
 #[test]
 fn big_files_go_to_and_come_back_byte_for_byte() {
     let (env, first) = with_a_big_file(1, 3 * MIB);
@@ -140,6 +157,95 @@ fn discard_and_shelf_keep_a_big_file_as_chunks() {
     assert_eq!(id_of(&big), edited);
 }
 
+/// A project whose `bolt.toml` cuts files from 8 MiB, having saved `big.bin`, 3 MiB made from
+/// `seed`, and the file's ID.
+fn with_a_file_under_a_raised_threshold(seed: u64) -> (Env, Id) {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    write(&env, "bolt.toml", "chunk-files-over = \"8 MiB\"\n");
+    let id = write_noise(&env.root().join("big.bin"), seed, 3 * MIB);
+    ok(&env, &["save", "Big"]);
+    (env, id)
+}
+
+#[test]
+fn a_file_between_1_mib_and_a_raised_threshold_is_stored_whole_and_reads_back() {
+    let (env, first) = with_a_file_under_a_raised_threshold(31);
+    let one = main_tip(&env);
+    let big = env.root().join("big.bin");
+    let second = edit(&big);
+    ok(&env, &["save", "Edited"]);
+    let two = main_tip(&env);
+    for id in [first, second] {
+        assert_eq!(copies_of(env.root(), &id), [ObjectKind::Content]);
+    }
+    ok(&env, &["goto", &one.to_hex()]);
+    assert_eq!(id_of(&big), first);
+    ok(&env, &["goto", &two.to_hex()]);
+    assert_eq!(id_of(&big), second);
+}
+
+#[test]
+fn files_on_either_side_of_both_cuts_come_back_byte_for_byte() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    write(&env, "bolt.toml", "chunk-files-over = \"4 MiB\"\n");
+    let sizes = [MIB - 1, MIB, 2 * MIB, 4 * MIB - 1, 4 * MIB];
+    let files: Vec<(String, Id)> = (0u64..)
+        .zip(sizes)
+        .map(|(seed, size)| {
+            let name = format!("f{size}.bin");
+            (
+                name.clone(),
+                write_noise(&env.root().join(&name), 40 + seed, size),
+            )
+        })
+        .collect();
+    ok(&env, &["save", "Sizes"]);
+    let first = main_tip(&env);
+    for ((name, id), size) in files.iter().zip(sizes) {
+        let kind = if size >= 4 * MIB {
+            ObjectKind::ChunkList
+        } else {
+            ObjectKind::Content
+        };
+        assert_eq!(copies_of(env.root(), id), [kind], "{name}");
+    }
+    let edited: Vec<Id> = files
+        .iter()
+        .map(|(name, _)| edit(&env.root().join(name)))
+        .collect();
+    ok(&env, &["save", "Edited"]);
+    ok(&env, &["goto", &first.to_hex()]);
+    for (name, id) in &files {
+        assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
+    }
+    ok(&env, &["goto", "main"]);
+    for ((name, _), id) in files.iter().zip(&edited) {
+        assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
+    }
+    let out = env.bolt().args(["--json", "verify"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["problems"], serde_json::json!([]), "{doc}");
+}
+
+#[test]
+fn safety_copies_stream_such_a_file_too() {
+    let (env, saved) = with_a_file_under_a_raised_threshold(32);
+    let big = env.root().join("big.bin");
+    let edited = edit(&big);
+    ok(&env, &["discard", "big.bin"]);
+    assert_eq!(id_of(&big), saved);
+    assert_eq!(copies_of(env.root(), &edited), [ObjectKind::Content]);
+    ok(&env, &["undo"]);
+    assert_eq!(id_of(&big), edited);
+    ok(&env, &["shelf"]);
+    assert_eq!(id_of(&big), saved);
+    ok(&env, &["unshelf"]);
+    assert_eq!(id_of(&big), edited);
+}
+
 /// What this thread has read from files so far, in bytes.
 #[cfg(target_os = "linux")]
 fn bytes_read() -> u64 {
@@ -163,8 +269,8 @@ fn an_import_reads_each_big_blob_once() {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
-        lfs_storage: None,
-        progress: &mut |_, _| {},
+        git_settings: None,
+        progress: &mut |_, _, _| {},
     };
     import_git(env.root(), &mut req, &mut None).unwrap();
     // Git's copy of each once, and a little besides: reading one twice passes 130 MiB.
@@ -214,8 +320,8 @@ fn a_long_history_of_a_big_file_imports_within_the_allowance() {
     let mut req = ImportRequest {
         who: &who,
         command: "import",
-        lfs_storage: None,
-        progress: &mut |_, _| {},
+        git_settings: None,
+        progress: &mut |_, _, _| {},
     };
     let imported = import_git(env.root(), &mut req, &mut None);
     set_test_delta_limits(None);
@@ -253,8 +359,8 @@ fn a_history_past_the_allowance_imports_once_git_stores_big_files_whole() {
         let mut req = ImportRequest {
             who: &who,
             command: "import",
-            lfs_storage: None,
-            progress: &mut |_, _| {},
+            git_settings: None,
+            progress: &mut |_, _, _| {},
         };
         set_test_delta_limits(Some((4 * MIB, DELTA_BASE_CACHE)));
         let imported = import_git(env.root(), &mut req, &mut None);

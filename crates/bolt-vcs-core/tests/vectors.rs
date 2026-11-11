@@ -9,6 +9,8 @@ use bolt_core::id::{ChangeId, Id, hash_content};
 use bolt_core::link::ProjectLink;
 use bolt_core::listing::{Entry, EntryKind, Listing};
 use bolt_core::pack::{ObjectKind, PackReader, PackWriter};
+use bolt_core::presets::{self, Engine, Found, Language, Preset};
+use bolt_core::rules::{self, Rule, Rules};
 use bolt_core::save::{MoveNote, Person, Save};
 use bolt_core::store::Store;
 use serde::Deserialize;
@@ -1156,5 +1158,137 @@ fn chunk_lists_that_break_a_rule_are_refused() {
     for vector in &v.invalid {
         let refused = ChunkList::decode(&unhex(&vector.hex));
         assert!(refused.is_err(), "{}: {refused:?}", vector.name);
+    }
+}
+
+#[derive(Deserialize)]
+struct RulesVector {
+    name: String,
+    toml: String,
+    skipped: bool,
+    preset: Option<String>,
+    chunk_files_over: u64,
+    ask_before_saving_over: u64,
+    ask_before_saving_files_over: u64,
+    rules: Vec<RuleVector>,
+    ignored: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RuleVector {
+    files: Vec<String>,
+    lockable: Option<bool>,
+    conflict_markers: Option<bool>,
+}
+
+#[test]
+fn every_vector_reads_as_it_says() {
+    let path = format!("{}/tests/vectors/rules.json", env!("CARGO_MANIFEST_DIR"));
+    let vectors: Vec<RulesVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors.len(), 50);
+    for v in &vectors {
+        let parsed = rules::parse(v.toml.as_bytes());
+        let (read, ignored) = match parsed {
+            Ok(_) if v.skipped => panic!("{}: read, though it isn't TOML", v.name),
+            Err(why) if !v.skipped => panic!("{}: passed over: {why}", v.name),
+            Ok((read, ignored)) => (read, ignored),
+            Err(_) => (Rules::default(), vec![]),
+        };
+        let expected = Rules {
+            preset: v.preset.clone(),
+            chunk_files_over: v.chunk_files_over,
+            ask_over_bytes: v.ask_before_saving_over,
+            ask_over_files: v.ask_before_saving_files_over,
+            rules: v
+                .rules
+                .iter()
+                .map(|r| Rule {
+                    files: r.files.clone(),
+                    lockable: r.lockable,
+                    conflict_markers: r.conflict_markers,
+                })
+                .collect(),
+        };
+        assert_eq!(read, expected, "{}", v.name);
+        let names: Vec<&str> = ignored.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, v.ignored, "{}", v.name);
+        assert!(ignored.iter().all(|(_, why)| !why.is_empty()), "{}", v.name);
+    }
+}
+
+#[derive(Deserialize)]
+struct PresetVectors {
+    presets: Vec<PresetVector>,
+    boltignore_edits: Vec<BoltignoreEdit>,
+}
+
+#[derive(Deserialize)]
+struct PresetVector {
+    name: String,
+    preset: String,
+    found: Vec<String>,
+    bolt_toml: String,
+    boltignore_block: String,
+}
+
+#[derive(Deserialize)]
+struct BoltignoreEdit {
+    name: String,
+    before: Option<String>,
+    block: Option<String>,
+    after: Option<String>,
+}
+
+fn preset_vectors() -> PresetVectors {
+    let path = format!("{}/tests/vectors/presets.json", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn every_preset_vector_is_written_byte_for_byte() {
+    let vectors = preset_vectors().presets;
+    assert_eq!(vectors.len(), 8);
+    for v in &vectors {
+        let preset = Preset::from_name(&v.preset).unwrap();
+        let found = Found {
+            engines: Engine::ALL
+                .into_iter()
+                .filter(|e| v.found.iter().any(|f| f == e.name()))
+                .collect(),
+            languages: Language::ALL
+                .into_iter()
+                .filter(|l| v.found.iter().any(|f| f == l.name()))
+                .collect(),
+        };
+        assert_eq!(found.engines.len() + found.languages.len(), v.found.len());
+        assert_eq!(
+            presets::bolt_toml(preset, &found).as_deref(),
+            Some(v.bolt_toml.as_str()),
+            "{}",
+            v.name
+        );
+        assert_eq!(
+            presets::boltignore_block(preset, &found).as_deref(),
+            Some(v.boltignore_block.as_str()),
+            "{}",
+            v.name
+        );
+    }
+}
+
+#[test]
+fn every_boltignore_edit_gives_its_vector() {
+    let vectors = preset_vectors().boltignore_edits;
+    assert_eq!(vectors.len(), 16);
+    for v in &vectors {
+        let after =
+            presets::edit_boltignore(v.before.as_ref().map(String::as_bytes), v.block.as_deref());
+        assert_eq!(
+            after.as_deref(),
+            v.after.as_ref().map(String::as_bytes),
+            "{}",
+            v.name
+        );
     }
 }

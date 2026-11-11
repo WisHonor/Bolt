@@ -74,7 +74,10 @@ fn rt13_1_small_reads_in_pairs_cost_small_reads() {
     // Columns of pairs, each over 64 KiB, so the next pair is always in another block.
     const COLUMNS: usize = 15;
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let bytes: Vec<Vec<u8>> = (0..CHUNKS as u64)
         .map(|j| j.to_le_bytes().to_vec())
         .collect();

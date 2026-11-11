@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-02
 - **Agenda topic:** none (a question left by milestone 1's second red-team session, settled with the milestone 2 plan)
-- **Refined by:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (a `safe-folders` entry that is itself a link doesn't count)
+- **Refined by:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (a `safe-folders` entry that is itself a link doesn't count); [decision 125](125-a-safe-folders-entry-is-judged-by-one-look.md) (an entry is judged by one look, by the folder's identity; one with `..` in it, or on a drive that gives no identity, doesn't count)
 - **Decided by:** the owner, by approving the milestone 2 plan on 2026-11-02, which settled the question. Built in milestone 2 (2026-11-03).
 - **Refines:** [decision 026](026-ownership-check-details.md), [decision 027](027-project-folder-must-be-yours.md) and [decision 030](030-administrators-only-when-elevated.md) (their refusals end with a hint that offers `safe-folders`)
 

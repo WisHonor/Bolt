@@ -109,7 +109,8 @@ impl ContentHasher {
     }
 }
 
-/// A random 128-bit change ID, written as 32 letters `k`-`z`.
+/// A random 128-bit change ID, written as 32 letters as Jujutsu writes them: `z` for 0 down to
+/// `k` for 15.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ChangeId(pub [u8; 16]);
 
@@ -126,14 +127,14 @@ impl ChangeId {
         self.0
             .iter()
             .flat_map(|b| [b >> 4, b & 0x0f])
-            .map(|half| char::from(b'k' + half))
+            .map(|half| char::from(b'z' - half))
             .collect()
     }
 
-    /// Exactly 32 letters `k`-`z`.
+    /// Exactly 32 lowercase letters `k`-`z`.
     #[must_use]
     pub fn from_letters(s: &str) -> Option<ChangeId> {
-        from_halves(s.as_bytes(), |c| c.checked_sub(b'k'))
+        from_halves(s.as_bytes(), |c| c)
     }
 
     /// The change ID Jujutsu's rule gives a Git commit without a `change-id` header: the last 16
@@ -151,18 +152,18 @@ impl ChangeId {
     /// The change ID a `change-id` header gives, if it spells 16 bytes in Jujutsu's letters.
     #[must_use]
     pub fn from_jujutsu(letters: &[u8]) -> Option<ChangeId> {
-        // Jujutsu's letters run the other way, `z` for 0, and it reads them in either case.
-        from_halves(letters, |c| b'z'.checked_sub(c.to_ascii_lowercase()))
+        // Jujutsu reads its header's letters in either case.
+        from_halves(letters, |c| c.to_ascii_lowercase())
     }
 }
 
-/// 32 letters as 16 bytes, two to a byte; `half` gives each letter's value, which must be under
-/// 16.
-fn from_halves(s: &[u8], half: impl Fn(u8) -> Option<u8>) -> Option<ChangeId> {
+/// 32 letters as 16 bytes, two to a byte, each letter `z` minus its value; `fold` maps a byte
+/// before it is read.
+fn from_halves(s: &[u8], fold: impl Fn(u8) -> u8) -> Option<ChangeId> {
     if s.len() != 32 {
         return None;
     }
-    let half = |c| half(c).filter(|h| *h < 16);
+    let half = |c| b'z'.checked_sub(fold(c)).filter(|h| *h < 16);
     let mut out = [0u8; 16];
     for (o, pair) in out.iter_mut().zip(s.chunks(2)) {
         *o = half(pair[0])? << 4 | half(pair[1])?;
@@ -240,14 +241,26 @@ mod tests {
     }
 
     #[test]
-    fn change_id_letters() {
-        assert_eq!(ChangeId([0x00; 16]).to_letters(), "k".repeat(32));
-        assert_eq!(ChangeId([0xff; 16]).to_letters(), "z".repeat(32));
+    fn zero_is_z_and_fifteen_is_k() {
+        assert_eq!(ChangeId([0x00; 16]).to_letters(), "z".repeat(32));
+        assert_eq!(ChangeId([0xff; 16]).to_letters(), "k".repeat(32));
         let mut b = [0u8; 16];
         b[0] = 0x0f;
         b[1] = 0xf0;
-        assert!(ChangeId(b).to_letters().starts_with("kzzk"));
+        assert!(ChangeId(b).to_letters().starts_with("zkkz"));
         assert_eq!(ChangeId::from_letters("kka"), None);
+        assert_eq!(ChangeId::from_letters(&"j".repeat(32)), None);
+    }
+
+    #[test]
+    fn only_a_header_may_spell_a_change_id_in_capitals() {
+        let lower = "zyxwvutsrqponmlk".repeat(2);
+        let upper = lower.to_ascii_uppercase();
+        let id = ChangeId::from_letters(&lower).unwrap();
+        assert_eq!(id.0[0], 0x01);
+        assert_eq!(ChangeId::from_jujutsu(upper.as_bytes()), Some(id));
+        assert_eq!(ChangeId::from_jujutsu(lower.as_bytes()), Some(id));
+        assert_eq!(ChangeId::from_letters(&upper), None);
     }
 
     proptest! {
@@ -257,7 +270,7 @@ mod tests {
         }
 
         #[test]
-        fn letters_round_trip(bytes in any::<[u8; 16]>()) {
+        fn letters_read_back_to_the_same_bytes(bytes in any::<[u8; 16]>()) {
             prop_assert_eq!(ChangeId::from_letters(&ChangeId(bytes).to_letters()), Some(ChangeId(bytes)));
         }
     }

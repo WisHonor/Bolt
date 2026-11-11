@@ -4,12 +4,12 @@ expression: doc
 ---
 {
   "bolt_json": 1,
-  "files_in_use": [],
   "not_written": [],
   "placeholders": [],
   "position": {
     "line": "feature"
   },
+  "recorded": true,
   "removed": 2,
   "safety_copies": 0,
   "save": {

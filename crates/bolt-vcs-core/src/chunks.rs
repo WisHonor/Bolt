@@ -38,6 +38,16 @@ pub fn is_cut(size: u64) -> bool {
     (from..=up_to).contains(&size)
 }
 
+/// `is_cut`, with files cut from `from` bytes on, unless a test set the sizes on this thread.
+#[must_use]
+pub(crate) fn is_cut_from(from: u64, size: u64) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if TEST_CUT_SIZES.get().is_some() {
+        return is_cut(size);
+    }
+    (from..=CHUNK_UP_TO).contains(&size)
+}
+
 /// Whether a file of `size` bytes is too long to cut, so it is stored whole.
 #[must_use]
 pub fn is_too_long_to_cut(size: u64) -> bool {

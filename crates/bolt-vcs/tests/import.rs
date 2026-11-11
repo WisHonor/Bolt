@@ -28,15 +28,15 @@ fn a_simple_repository_imports() {
     assert_eq!(history.status.code(), Some(0), "{}", text(&history.stderr));
     let history = text(&history.stdout);
     let lines: Vec<&str> = history.lines().collect();
-    assert_eq!(lines.len(), 2, "{history}");
-    assert!(lines[0].contains("Ada Lovelace") && lines[0].contains("Second save"));
-    assert!(lines[1].contains("Ada Lovelace") && lines[1].contains("First save"));
+    assert_eq!(lines.len(), 4, "{history}");
+    assert!(lines[2].contains("Ada Lovelace") && lines[2].contains("Second save"));
+    assert!(lines[3].contains("Ada Lovelace") && lines[3].contains("First save"));
 
     let show = env.bolt().arg("show").output().unwrap();
     assert_eq!(show.status.code(), Some(0), "{}", text(&show.stderr));
     let show = text(&show.stdout);
     assert!(show.contains("Ada Lovelace") && show.contains("    With a body."));
-    assert!(show.contains("added     b.txt"), "{show}");
+    assert!(show.contains("    added  b.txt  "), "{show}");
 
     let (repo, state) = env.state();
     assert_eq!(state.position, Position::OnLine("main".into()));
@@ -48,6 +48,37 @@ fn a_simple_repository_imports() {
     assert_eq!(v1.message, "Version 1\n");
     assert_eq!(v1.git_tags.len(), 1);
     assert!(state.server_lines.is_none());
+}
+
+/// The outcome line first, with the counts; what was renamed or left out indented under it; then
+/// where you are. A log gets nothing on stderr.
+#[test]
+fn the_import_summary_leads_with_imported_and_its_counts() {
+    let env = Env::new();
+    let first = env.commit("a.txt", "a\n", "First");
+    env.commit("b.txt", "b\n", "Second");
+    env.git(&["tag", "v1", &first]);
+    let (out, err) = env.import();
+    assert_eq!(
+        out,
+        "Imported 2 commits from Git: 1 line, 1 tag.\n\nYou're on line main.\n"
+    );
+    assert_eq!(err, "");
+
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    env.git(&["branch", "feature+x"]);
+    env.git(&["branch", "two+x"]);
+    env.git(&["update-ref", "refs/notes/commits", "HEAD"]);
+    let (out, err) = env.import();
+    assert_eq!(
+        out,
+        "Imported 1 commit from Git: 3 lines, 0 tags.\n\n    Renamed 2 names that Bolt's \
+         names don't allow:\n        feature+x -> feature-x\n        two+x -> two-x\n    \
+         Didn't import 1 ref (only branches, server branches and tags come in): \
+         refs/notes/commits\n\nYou're on line main.\n"
+    );
+    assert_eq!(err, "");
 }
 
 #[test]
@@ -95,8 +126,8 @@ fn names_bolt_refuses_are_renamed_and_listed() {
         out.contains("Renamed 2 names that Bolt's names don't allow:\n"),
         "{out}"
     );
-    assert!(out.contains("\n  feature → feature-2\n"), "{out}");
-    assert!(out.contains("\n  feature+x → feature-x\n"), "{out}");
+    assert!(out.contains("\n        feature -> feature-2\n"), "{out}");
+    assert!(out.contains("\n        feature+x -> feature-x\n"), "{out}");
     let (_, state) = env.state();
     let lines: Vec<&str> = state.lines.keys().map(String::as_str).collect();
     assert_eq!(lines, ["Feature", "feature-2", "feature-x", "main"]);
@@ -130,9 +161,12 @@ fn refs_left_out_are_listed_up_to_100_and_counted() {
         out.contains("Didn't import 150 refs (only branches, server branches and tags come in):"),
         "{out}"
     );
-    assert!(out.contains(&format!("\n  {}\n", pulls[99])), "{out}");
-    assert!(!out.contains(&format!("\n  {}\n", pulls[100])), "{out}");
-    assert!(out.contains("\n  and 50 more\n"), "{out}");
+    assert!(out.contains(&format!("\n        {}\n", pulls[99])), "{out}");
+    assert!(
+        !out.contains(&format!("\n        {}\n", pulls[100])),
+        "{out}"
+    );
+    assert!(out.contains("\n        and 50 more\n"), "{out}");
 
     let copy = Env::new();
     copy.commit("a.txt", "a\n", "First");
@@ -169,13 +203,16 @@ fn renamed_names_and_skipped_tags_are_listed_up_to_100_and_counted() {
         "Didn't import 150 tags:\n",
     ] {
         let list = &out[out.find(heading).unwrap() + heading.len()..];
-        let items: Vec<&str> = list.lines().take_while(|l| l.starts_with("  ")).collect();
+        let items: Vec<&str> = list
+            .lines()
+            .take_while(|l| l.starts_with("        "))
+            .collect();
         assert_eq!(items.len(), 101, "{out}");
-        assert_eq!(items[100], "  and 50 more", "{out}");
+        assert_eq!(items[100], "        and 50 more", "{out}");
     }
-    assert!(out.contains("\n  b+000 → b-000\n"), "{out}");
+    assert!(out.contains("\n        b+000 -> b-000\n"), "{out}");
     assert!(
-        out.contains("\n  t000, as it tags a folder (a Git tree), not a commit\n"),
+        out.contains("\n        t000, as it tags a folder (a Git tree), not a commit\n"),
         "{out}"
     );
 
@@ -234,7 +271,7 @@ fn a_detached_head_puts_you_at_its_save() {
     // `history` starts from there.
     let history = env.bolt().arg("history").output().unwrap();
     let history = text(&history.stdout);
-    assert_eq!(history.lines().count(), 1, "{history}");
+    assert_eq!(history.lines().count(), 3, "{history}");
     // A save there needs a new line, and the hint says how to name it.
     env.overwrite("a.txt", "changed\n");
     let out = env.save(&["Change it"]);
@@ -242,7 +279,7 @@ fn a_detached_head_puts_you_at_its_save() {
     let err = text(&out.stderr);
     assert!(
         err.contains(
-            "error: You're at a save, not on a line, so this save needs a new line to go on.\n\
+            "error: You're at a save, not on a line, so this save needs a new line to go on.\n\n\
              hint: Nothing was saved. Name it: bolt save --line <name> \"message\"\n"
         ),
         "{err}"
@@ -370,7 +407,10 @@ fn import_and_start_refuse_a_project_that_lost_only_its_format() {
     env.import();
     refused_over_saves(env.root(), "import");
     let started = tempfile::tempdir().unwrap();
-    env.bolt_in(started.path()).arg("start").assert().success();
+    env.bolt_in(started.path())
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     refused_over_saves(started.path(), "start");
 }
 
@@ -392,7 +432,7 @@ fn a_git_lfs_repository_stops_before_anything_is_written() {
         assert!(
             err.contains(&format!(
                 "error: A Git LFS file in this history isn't in .git/lfs/objects:\n  \
-                 `art/big.psd` in commit `{commit}` (12 KB)\n"
+                 `art/big.psd` in commit `{commit}` (12 KiB)\n"
             )),
             "{sign}: {err}"
         );
@@ -428,13 +468,17 @@ fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
         "{}",
         text(&out.stderr)
     );
-    let out = env.bolt().arg("start").output().unwrap();
+    let out = env
+        .bolt()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
     assert!(
         err.contains(
             "error: An import began a Bolt project here and didn't finish, and bolt start won't \
-             make an empty project over what it stored.\nhint: Run `bolt import` again to finish \
+             make an empty project over what it stored.\n\nhint: Run `bolt import` again to finish \
              the import.\n"
         ),
         "{err}"
@@ -529,7 +573,10 @@ fn a_bolt_git_tracks_is_named_whatever_it_holds() {
 fn import_inside_another_project_is_refused() {
     let env = Env::new();
     let outer = tempfile::tempdir().unwrap();
-    env.bolt_in(outer.path()).arg("start").assert().success();
+    env.bolt_in(outer.path())
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let inner = outer.path().join("repo");
     std::fs::create_dir(&inner).unwrap();
     git(&inner, &["init", "-q"]);
@@ -577,6 +624,40 @@ fn the_same_repository_imports_to_the_same_saves_anywhere() {
             .collect::<Vec<_>>()
     };
     assert_eq!(saves(env.root()), saves(copy.path()));
+}
+
+/// A commit Jujutsu made shows in Bolt with the letters of its `change-id` header.
+#[test]
+fn an_imported_save_shows_the_letters_its_change_id_header_has() {
+    let env = Env::new();
+    let blob = env.git_input(&["hash-object", "-w", "--stdin"], b"a\n");
+    let tree = env.git_input(
+        &["mktree"],
+        format!("100644 blob {blob}\ta.txt\n").as_bytes(),
+    );
+    let letters = "zyxwvutsrqponmlkzyxwvutsrqponmlk";
+    let raw = format!(
+        "tree {tree}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\
+         change-id {letters}\n\nFirst\n"
+    );
+    let args = [
+        "hash-object",
+        "-t",
+        "commit",
+        "--literally",
+        "-w",
+        "--stdin",
+    ];
+    let commit = env.git_input(&args, raw.as_bytes());
+    env.git(&["update-ref", "refs/heads/main", &commit]);
+    env.git(&["reset", "-q", "--hard"]);
+    env.import();
+
+    let out = env.bolt().args(["--json", "history"]).output().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["saves"][0]["change_id"], letters);
+    let shown = text(&env.bolt().arg("history").output().unwrap().stdout);
+    assert!(shown.contains("\n> zyxw "), "{shown}");
 }
 
 #[test]
@@ -686,9 +767,10 @@ fn import_json_output() {
 }
 
 const CRLF_HINT: &str = "To keep history as Git stored it, commit or stash your changes in Git, \
-    then run `git config core.autocrlf false`, `git rm --cached -r -q .` and `git reset --hard`, \
-    and save again. To save the files with CRLF anyway, run the same command again with \
-    --accept-crlf.";
+    then run `git config core.autocrlf false`, `git rm --cached -r -q :/` and `git reset --hard`, \
+    and save again. Files `.gitattributes` marks `eol=crlf` stay CRLF after those steps, and \
+    --accept-crlf then saves just those. To save the files with CRLF anyway, run the same \
+    command again with --accept-crlf.";
 
 /// A repository as Git for Windows leaves it: stored with LF, written out with CRLF.
 fn converted_by_git() -> Env {
@@ -724,7 +806,7 @@ fn converted_line_endings_stop_the_first_save() {
     // Nothing was written: not a save, not an object.
     assert_eq!(env.standing(), before);
     let history = env.bolt().arg("history").output().unwrap();
-    assert_eq!(text(&history.stdout).lines().count(), 3);
+    assert_eq!(text(&history.stdout).lines().count(), 5);
 
     let out = env
         .bolt()
@@ -837,7 +919,7 @@ fn following_the_line_ending_hint_saves_what_git_stored() {
     // What the hint says, in its order: the change committed first, which Git stores with LF.
     crlf(&["commit", "-q", "-a", "-m", "Add a line"]);
     env.git(&["config", "core.autocrlf", "false"]);
-    env.git(&["rm", "--cached", "-r", "-q", "."]);
+    env.git(&["rm", "--cached", "-r", "-q", ":/"]);
     env.git(&["reset", "--hard"]);
     let read = |file: &str| std::fs::read(env.root().join(file)).unwrap();
     assert_eq!(read("a.txt"), b"one\ntwo\nthree\n");
@@ -853,6 +935,48 @@ fn following_the_line_ending_hint_saves_what_git_stored() {
     let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(json["changes"][0]["path"], "a.txt");
     assert_eq!(json["changes"][0]["new_size"], 14);
+}
+
+/// The hint's steps run from a subfolder still reach the whole repository, and leave only the
+/// files `.gitattributes` keeps CRLF for `--accept-crlf`.
+#[test]
+fn the_line_ending_hint_names_the_whole_repository_and_eol_crlf_files() {
+    let env = Env::new();
+    env.commit(".gitattributes", "*.bat eol=crlf\n", "Attributes");
+    env.commit("a.txt", "one\ntwo\n", "First");
+    env.commit("src/b.txt", "three\nfour\n", "Second");
+    env.commit("run.bat", "@echo off\n", "Third");
+    env.import();
+    for file in ["a.txt", "src/b.txt", "run.bat"] {
+        std::fs::remove_file(env.root().join(file)).unwrap();
+    }
+    env.git(&["-c", "core.autocrlf=true", "checkout", "--", "."]);
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("error: 3 files differ"), "{err}");
+    assert!(err.contains(&format!("hint: {CRLF_HINT}\n")), "{err}");
+
+    let src = env.root().join("src");
+    git(&src, &["config", "core.autocrlf", "false"]);
+    git(&src, &["rm", "--cached", "-r", "-q", ":/"]);
+    git(&src, &["reset", "--hard"]);
+    let read = |file: &str| std::fs::read(env.root().join(file)).unwrap();
+    assert_eq!(read("a.txt"), b"one\ntwo\n");
+    assert_eq!(read("run.bat"), b"@echo off\r\n");
+
+    let out = env.save(&["Save it"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("error: 1 file differs"), "{err}");
+    assert!(err.contains("  run.bat\n"), "{err}");
+    let out = env.save(&["--accept-crlf", "Keep the batch file"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("(1 file)"),
+        "{}",
+        text(&out.stdout)
+    );
 }
 
 /// Not bytes the tests wrote: a file as Git itself writes it out with `core.autocrlf`.
@@ -875,4 +999,79 @@ fn a_file_git_wrote_with_crlf_is_found() {
         err.contains("error: 1 file differs from what Git stored only in line endings"),
         "{err}"
     );
+}
+
+/// Turned on in the user's own Git settings, a sparse checkout stops the import as one in the
+/// repository's own does, and the repository's own setting wins over it, as in Git.
+#[test]
+fn a_sparse_checkout_in_the_users_git_settings_stops_an_import() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let sparse = "[core]\n\tsparseCheckout = true\n";
+    std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
+    let err = env.refused_import();
+    assert!(
+        err.contains(
+            "error: Git leaves some files out of this folder on purpose (a sparse checkout)"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: Turn it off with `git sparse-checkout disable`"),
+        "{err}"
+    );
+    assert!(!env.root().join(".bolt").exists());
+
+    std::fs::write(
+        env.config().join(".gitconfig"),
+        "[core]\n\tsparseCheckout = maybe\n",
+    )
+    .unwrap();
+    let err = env.refused_import();
+    assert!(
+        err.contains("core.sparseCheckout isn't true or false"),
+        "{err}"
+    );
+
+    std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
+    env.git(&["config", "core.sparseCheckout", "false"]);
+    env.import();
+}
+
+/// What the environment gives through `GIT_CONFIG_COUNT` comes last, as in Git: it can turn a
+/// sparse checkout on, and off over the user's own setting.
+#[test]
+fn a_sparse_checkout_given_through_git_config_count_counts_last() {
+    let given = |on: &str| {
+        [
+            ("GIT_CONFIG_COUNT", "1".to_owned()),
+            ("GIT_CONFIG_KEY_0", "core.sparseCheckout".to_owned()),
+            ("GIT_CONFIG_VALUE_0", on.to_owned()),
+        ]
+    };
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let out = env
+        .bolt()
+        .arg("import")
+        .envs(given("true"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("(a sparse checkout)"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!env.root().join(".bolt").exists());
+
+    let sparse = "[core]\n\tsparseCheckout = true\n";
+    std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
+    let out = env
+        .bolt()
+        .arg("import")
+        .envs(given("false"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 }

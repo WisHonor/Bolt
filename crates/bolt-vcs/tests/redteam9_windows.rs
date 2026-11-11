@@ -67,7 +67,10 @@ fn without_home_a_save_applies_the_ignore_list_git_for_windows_applies() {
         text(&status.stdout).replace('\n', " ")
     );
 
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let mut save = env.bolt_process_in(env.root());
     save.args(["save", "First"]);
     with_home_drive(&mut save, home.path());

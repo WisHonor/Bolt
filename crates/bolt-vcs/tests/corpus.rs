@@ -87,7 +87,10 @@ fn history_of(env: &Env) -> Vec<u8> {
 fn save_ends_with(case: &[&str], code: i32) -> bool {
     let env = Env::empty();
     let root = env.root();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     std::fs::write(root.join("good.txt"), "good").unwrap();
     env.bolt().args(["save", "good save"]).assert().success();
     if !create_all(root, case) {

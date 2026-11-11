@@ -33,6 +33,8 @@ pub struct GotoOutcome {
     pub safety_copies: usize,
     /// Unsaved changes that came along to the new save; 0 when there was nothing to switch.
     pub carried: usize,
+    /// Whether this goto recorded a step of its own; not when the project already was there.
+    pub recorded: bool,
 }
 
 /// What `discard` did.
@@ -109,14 +111,18 @@ pub enum SwitchError {
         listed(entries.iter().map(Id::to_hex).take(NAMED), entries.len() as u64)
     )]
     EntryAmbiguous { text: String, entries: Vec<Id> },
-    /// A lost `head` can't be picked up from `entry`: a save its state names can't be read.
+    /// A lost `head` can't be picked up from `entry`: `what` its state names (one of its saves,
+    /// its tag list or its server lines) can't be read.
     #[error(
-        "Diary entry {} can't be made current: one of its saves can't be read ({}), so nothing \
-         was changed.",
+        "Diary entry {} can't be made current: {what} can't be read ({}), so nothing was changed.",
         entry.short_hex(),
         escape(detail, false)
     )]
-    EntryUnusable { entry: Id, detail: String },
+    EntryUnusable {
+        entry: Id,
+        what: &'static str,
+        detail: String,
+    },
     /// The saves of a step can't be read: `tidy` removed them, or they were lost.
     #[error(
         "The step of diary entry {} can't be undone or redone: what it changed can't be read \
@@ -640,6 +646,7 @@ fn go(
             applied: switch_warnings(plan, Applied::default(), earlier),
             safety_copies: 0,
             carried: 0,
+            recorded: false,
         });
     }
     let carried = plan.carried;
@@ -663,6 +670,7 @@ fn go(
         applied,
         safety_copies,
         carried,
+        recorded: true,
     })
 }
 

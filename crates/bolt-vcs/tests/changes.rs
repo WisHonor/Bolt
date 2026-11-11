@@ -12,7 +12,10 @@ use support::{Env, text};
 /// A started project with `files` saved.
 fn project(files: &[(&str, &[u8])]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (name, bytes) in files {
         fs::write(env.root().join(name), bytes).unwrap();
     }
@@ -121,7 +124,8 @@ fn a_file_of_too_many_lines_shows_without_lines_quickly() {
 fn nothing_matching_is_said_plainly() {
     // The first save, of an empty folder, changed no files.
     let env = project(&[]);
-    let short = |out: &str| out.split_whitespace().nth(1).unwrap().to_owned();
+    // The save's change ID, then its message.
+    let short = |out: &str| out.split(" changed").next().unwrap()[5..].to_owned();
     let first = env.state().1.lines["main"].to_hex();
     let save = changes(&env, &["--save", &first]);
     assert!(
@@ -163,7 +167,11 @@ fn a_reader_that_goes_away_ends_it_quietly() {
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
     // No error: only the warnings it had found by then, such as a diff cut at its deadline.
-    assert!(said.lines().all(|l| l.starts_with("warning: ")), "{said}");
+    assert!(
+        said.lines()
+            .all(|l| l.is_empty() || l.starts_with("warning: ")),
+        "{said}"
+    );
 }
 
 #[test]
@@ -296,7 +304,10 @@ fn a_stdout_that_fails_mid_document_ends_it_with_the_error_on_stderr() {
 #[test]
 fn a_spelling_of_bolt_in_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     support::plant_save(env.root(), |pack| {
         support::with_bolt_spelling_under_git(pack, &[("a.txt", b"a\n")])
     });

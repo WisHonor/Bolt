@@ -257,19 +257,22 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
     git_excludes_file_in(&UserGit::from_env(project_root))
 }
 
-/// The `lfs.storage` the user's own Git settings set, for `bolt import` in `top`, which reads it
-/// only to tell whether Git LFS keeps its files elsewhere.
-pub fn git_lfs_storage(top: &Path) -> Result<UserLfsStorage, ConfigError> {
-    git_lfs_storage_in(&UserGit::from_env(top))
+/// What the user's own Git settings set that `bolt import` in `top` reads: `lfs.storage`, only to
+/// tell whether Git LFS keeps its files elsewhere, and `core.sparseCheckout`, which it refuses.
+pub fn git_import_settings(top: &Path) -> Result<UserImportSettings, ConfigError> {
+    git_import_settings_in(&UserGit::from_env(top))
 }
 
-/// The last `lfs.storage` in the user's own Git settings files, which the repository's own
-/// setting overrides, and the last the environment gives through `GIT_CONFIG_COUNT`, which
-/// overrides that in turn, as in Git: each with where it is set, and empty for one with no value.
+/// The user's own Git settings an import reads. The last `lfs.storage` in the user's own Git
+/// settings files, which the repository's own setting overrides, and the last the environment
+/// gives through `GIT_CONFIG_COUNT`, which overrides that in turn, as in Git: each with where it is
+/// set, and empty for one with no value. The last `core.sparseCheckout` in each comes alike.
 #[derive(Debug, Default)]
-pub struct UserLfsStorage {
+pub struct UserImportSettings {
     pub files: Option<(Vec<u8>, String)>,
     pub variables: Option<(Vec<u8>, String)>,
+    pub sparse_files: Option<bool>,
+    pub sparse_variables: Option<bool>,
 }
 
 /// Where Git finds the user's own settings: the home folder and `XDG_CONFIG_HOME`'s folder, if
@@ -464,7 +467,7 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
         if let UserSetting::ExcludesFile(value) = setting {
             // Git expands the values in order once all are loaded, so with no home folder the
             // first `~/` one stops it, even where a later one overrides it.
-            if git.home.is_none() && stop.is_none() && from_home(&value) {
+            if git.home.is_none() && stop.is_none() && from_home(optional(&value).0) {
                 stop = Some((value.clone(), place.clone()));
             }
             named = Some((value, place.clone()));
@@ -474,36 +477,72 @@ fn git_excludes_file_in(git: &UserGit) -> Result<Option<PathBuf>, ConfigError> {
     // stops it first.
     git.read_files(&mut take)?;
     git.read_variables(&mut take)?;
+    let unset = || git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore"));
     let Some((value, place)) = stop.or(named) else {
-        return Ok(git.xdg.as_ref().map(|xdg| xdg.join("git").join("ignore")));
+        return Ok(unset());
     };
-    let value = utf8(value, "core.excludesFile", &place)?;
+    let (value, optional) = optional(&value);
+    let value = utf8(value.to_vec(), "core.excludesFile", &place)?;
     // Git reads no list from an empty setting, which is how one turns it off.
     if value.is_empty() {
-        return Ok(None);
+        return Ok(if optional { unset() } else { None });
     }
-    git_path(
+    let path = git_path(
         &value,
         "core.excludesFile",
         git.home.as_deref(),
         Some(git.top),
         &place,
-    )
+    )?;
+    // An optional file that isn't there counts as no setting at all, as in Git.
+    let missing = |p: &PathBuf| matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    if optional && path.as_ref().is_some_and(missing) {
+        return Ok(unset());
+    }
+    Ok(path)
 }
 
-/// `git_lfs_storage` with the places given, so tests can choose them.
-fn git_lfs_storage_in(git: &UserGit) -> Result<UserLfsStorage, ConfigError> {
-    let mut found = UserLfsStorage::default();
-    git.read_files(&mut |setting, place| last_lfs_storage(&mut found.files, setting, place))?;
-    let variables = &mut found.variables;
-    git.read_variables(&mut |setting, place| last_lfs_storage(variables, setting, place))?;
-    Ok(found)
+/// `value` without Git's `:(optional)` in front, and whether it had one.
+fn optional(value: &[u8]) -> (&[u8], bool) {
+    match value.strip_prefix(b":(optional)".as_slice()) {
+        Some(rest) => (rest, true),
+        None => (value, false),
+    }
 }
 
-/// Keeps `setting`, set at `place`, in `last` if it is an `lfs.storage`.
-fn last_lfs_storage(last: &mut Option<(Vec<u8>, String)>, setting: UserSetting, place: &Place) {
-    if let UserSetting::LfsStorage(value) = setting {
-        *last = Some((value, place.to_string()));
+/// `git_import_settings` with the places given, so tests can choose them.
+fn git_import_settings_in(git: &UserGit) -> Result<UserImportSettings, ConfigError> {
+    let mut found = UserImportSettings::default();
+    let mut refused = None;
+    let (files, sparse) = (&mut found.files, &mut found.sparse_files);
+    git.read_files(&mut |setting, place| last(files, sparse, &mut refused, setting, place))?;
+    let (variables, sparse) = (&mut found.variables, &mut found.sparse_variables);
+    git.read_variables(&mut |setting, place| {
+        last(variables, sparse, &mut refused, setting, place)
+    })?;
+    refused.map_or(Ok(found), Err)
+}
+
+/// Keeps `setting`, set at `place`, in `storage` if it is an `lfs.storage`, or in `sparse` if it
+/// is a `core.sparseCheckout`; the first of those Git refuses goes in `refused`.
+fn last(
+    storage: &mut Option<(Vec<u8>, String)>,
+    sparse: &mut Option<bool>,
+    refused: &mut Option<ConfigError>,
+    setting: UserSetting,
+    place: &Place,
+) {
+    match setting {
+        UserSetting::LfsStorage(value) => *storage = Some((value, place.to_string())),
+        UserSetting::SparseCheckout(Some(on)) => *sparse = Some(on),
+        UserSetting::SparseCheckout(None) => {
+            refused.get_or_insert_with(|| {
+                let detail =
+                    "its core.sparseCheckout isn't true or false to Git, which refuses it too";
+                place.error(detail.to_owned())
+            });
+        }
+        _ => {}
     }
 }
 
@@ -756,21 +795,30 @@ fn git_path(
     if names_no_file(value.as_bytes(), cfg!(windows)) {
         return Ok(None);
     }
+    // Git puts the folder it is installed in there.
+    if value.starts_with("%(prefix)/") {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}: %(prefix)/ stands for the folder Git is \
+             installed in, which Bolt can't tell; write the full path instead"
+        )));
+    }
     let Some(rest) = value.strip_prefix('~') else {
         return match folder {
             Some(folder) => Ok(Some(folder.join(value))),
             None if Path::new(value).has_root() => Ok(Some(PathBuf::from(value))),
-            // Git puts the folder it is installed in there.
-            None if value.starts_with("%(prefix)/") => Err(place.error(format!(
-                "Bolt can't expand its {setting}, {value}: %(prefix)/ stands for the folder Git is \
-                 installed in, which Bolt can't tell; write the full path instead"
-            ))),
             None => Err(place.error(format!(
                 "its {setting}, `{value}`, is a relative path, which Git takes only from a file \
                  and refuses here too"
             ))),
         };
     };
+    // Someone writing `~\x` on Windows most likely meant their own home folder.
+    if let Some(after) = rest.strip_prefix('\\') {
+        return Err(place.error(format!(
+            "Bolt can't expand its {setting}, {value}: only `~/` names your home folder, and Git \
+             stops at this too; write `~/{after}` or the whole path instead"
+        )));
+    }
     // Git looks `~user/` up in the system's accounts, which Bolt doesn't read.
     if !from_home(value.as_bytes()) {
         return Err(place.error(format!(
@@ -791,10 +839,10 @@ fn git_path(
     ))
 }
 
-/// Whether Git puts the home folder at the start of `value`: `~` alone or before a separator.
+/// Whether Git puts the home folder at the start of `value`: `~` alone or before a `/`. Git takes
+/// `~\x` as a user's name even on Windows, and stops there.
 fn from_home(value: &[u8]) -> bool {
-    let separator = |&c: &u8| std::path::is_separator(char::from(c));
-    value.first() == Some(&b'~') && value.get(1).is_none_or(separator)
+    value.first() == Some(&b'~') && value.get(1).is_none_or(|&c| c == b'/')
 }
 
 /// The home folder Git v2.56.0 takes `~` and its own files from: `HOME`, whatever it is set to;
@@ -1518,7 +1566,7 @@ mod tests {
         };
         let xdg = home.join("xdg");
         let find = |vars: &[(&str, &str)]| {
-            as_git_finds((home, &xdg, home), vars, git_lfs_storage_in).unwrap()
+            as_git_finds((home, &xdg, home), vars, git_import_settings_in).unwrap()
         };
         let system = set(&home.join("system"), "/system");
         let gitconfig = set(&home.join(".gitconfig"), "/home");
@@ -1999,6 +2047,75 @@ mod tests {
         );
         assert!(!said.contains("refuses"), "{said}");
         assert_eq!(variable_named(e), "GIT_CONFIG_VALUE_0");
+    }
+
+    #[test]
+    fn a_prefix_path_stops_wherever_it_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let gitconfig = home.join(".gitconfig");
+        for list in ["%(prefix)/ignore", ":(optional)%(prefix)/ignore"] {
+            excludes_file_set(&gitconfig, list);
+            let said = excludes(home, &home.join("xdg"), home, &[])
+                .unwrap_err()
+                .to_string();
+            assert!(said.contains("%(prefix)/ stands for the folder"), "{said}");
+        }
+        std::fs::write(&gitconfig, "[include]\n\tpath = %(prefix)/etc/gitconfig\n").unwrap();
+        let said = excludes(home, &home.join("xdg"), home, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("%(prefix)/ stands for the folder"), "{said}");
+    }
+
+    /// Only `~/` is the home folder: Git for Windows 2.50.1 says "failed to expand user dir in:
+    /// '~\ign'", as it says for `~user/`.
+    #[test]
+    fn tilde_backslash_stops_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let gitconfig = home.join(".gitconfig");
+        excludes_file_set(&gitconfig, "~\\\\ign");
+        let said = excludes(home, &home.join("xdg"), home, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.contains("~\\ign: only `~/` names your home folder")
+                && said.contains("write `~/ign` or the whole path"),
+            "{said}"
+        );
+        std::fs::write(&gitconfig, "[include]\n\tpath = ~\\\\inc\n").unwrap();
+        let said = excludes(home, &home.join("xdg"), home, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.contains("~\\inc: only `~/` names your home folder")
+                && said.contains("write `~/inc` or the whole path"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn an_optional_excludes_file_that_is_not_there_counts_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let xdg = home.join("xdg");
+        let system = excludes_file_set(&home.join("etc/gitconfig"), "~/system");
+        excludes_file_set(&home.join(".gitconfig"), ":(optional)~/nope");
+        // It undoes the earlier setting too, so Git's own default list is read.
+        let vars = [("GIT_CONFIG_SYSTEM", system.as_str())];
+        let found = excludes(home, &xdg, home, &vars).unwrap();
+        assert_eq!(found, Some(xdg.join("git").join("ignore")));
+    }
+
+    #[test]
+    fn an_optional_excludes_file_that_is_there_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(home.join("list"), "*.log\n").unwrap();
+        excludes_file_set(&home.join(".gitconfig"), ":(optional)~/list");
+        let found = excludes(home, &home.join("xdg"), home, &[]).unwrap();
+        assert_eq!(found, Some(home.join("list")));
     }
 
     #[test]

@@ -14,7 +14,10 @@ use support::{Env, changed, files, head, holding, main_tip, saved_files, text, w
 /// A project with `entries` saved on `main` as "Files".
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (path, bytes) in entries {
         write(&env, path, bytes);
     }
@@ -91,7 +94,9 @@ fn amend_replaces_the_newest_save_keeping_change_id_parents_and_author() {
     let said = text(&out.stdout);
     assert_eq!(
         said,
-        format!("Amended {short}  \"Files, and b\"  (2 files)\n")
+        format!(
+            "Updated save {short} \"Files, and b\" on main  (2 files)\n\n    The ID stays the same.\n"
+        )
     );
     // The line holds the new save in the old one's place, with nothing left unsaved.
     assert!(changed(&env).is_empty());
@@ -117,7 +122,7 @@ fn amend_with_only_a_message_rewords() {
     let env = project(&[("a.txt", "a\n")]);
     let old = save_of(&env, main_tip(&env));
     let said = ok(&env, &["save", "--amend", "Better words"]);
-    assert!(said.starts_with("Amended "), "{said}");
+    assert!(said.starts_with("Updated save "), "{said}");
     let new = save_of(&env, main_tip(&env));
     assert_eq!(new.root, old.root);
     assert_eq!(new.message, "Better words");
@@ -151,20 +156,20 @@ fn amend_with_nothing_new_says_so() {
     let before = env.standing();
     let said = ok(&env, &["save", "--amend"]);
     assert!(
-        said.starts_with("Nothing to amend: your files match your last save (")
-            && said.ends_with("), and so does the message.\n"),
+        said.starts_with("Nothing to amend: your files match your last save, ")
+            && said.ends_with(" \"Files\", and so does the message.\n"),
         "{said}"
     );
     let said = ok(&env, &["save", "--amend", "Files"]);
     assert!(said.starts_with("Nothing to amend: "), "{said}");
     let doc = json(&env, &["save", "--amend"]);
-    let nothing = json!({"bolt_json": 1, "result": "nothing-changed", "paths": [], "warnings": []});
+    let nothing = json!({"bolt_json": 1, "result": "nothing_changed", "paths": [], "warnings": []});
     assert_eq!(doc, nothing);
     // With paths, only what they name counts.
     write(&env, "b.txt", "b\n");
     let said = ok(&env, &["save", "--amend", "", "a.txt"]);
     assert!(
-        said.starts_with("Nothing to amend: what you named matches your last save ("),
+        said.starts_with("Nothing to amend: what you named matches your last save, "),
         "{said}"
     );
     assert_eq!(env.standing(), before);

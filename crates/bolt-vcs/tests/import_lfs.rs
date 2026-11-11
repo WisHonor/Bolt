@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use bolt_core::git::craft::lfs_pointer_to;
 use bolt_core::id::hash_content;
+use bolt_core::import::{ImportError, LfsElsewhere};
 use bolt_core::pack::{ObjectKind, PackReader};
 use bolt_core::repo::Repository;
 use bolt_core::text::bytes;
@@ -191,7 +192,7 @@ fn without_a_sign_a_missing_object_stops_the_second_pass() {
     assert!(
         err.contains(&format!(
             "error: A Git LFS file in this history isn't in .git/lfs/objects:\n  `art/big.psd` in \
-             commit `{commit}` (14 bytes)\n"
+             commit `{commit}` (14 B)\n"
         )),
         "{err}"
     );
@@ -345,6 +346,98 @@ fn a_pointer_with_extensions_stops_the_import() {
     let err = env.refused_import();
     assert!(err.contains(&says(&commit)), "{err}");
     committed_nothing(&env, &err);
+}
+
+/// Each Git LFS stop is an `error:` in the import's own words, then its hint, whole, after an
+/// empty line; stdout gets nothing, and no hint names a flag of Bolt's.
+#[test]
+fn each_git_lfs_stop_keeps_its_words_and_names_no_flag() {
+    let path = || "art/big.psd".to_owned();
+    let mut stops = Vec::new();
+
+    let env = tracked();
+    let commit = env.commit("art/big.psd", &pointer(b"a picture\n"), "Add a picture");
+    let first = vec![(commit, path(), 10)];
+    let missing = ImportError::LfsMissing {
+        first,
+        count: 1,
+        bytes: 10,
+        config_includes: false,
+    };
+    stops.push((env.refused_import(), missing));
+
+    let env = tracked();
+    let real = b"the real picture\n";
+    let commit = env.commit("art/big.psd", &keep(&env, real), "Add a picture");
+    std::fs::write(object_path(&env, real), b"the fake picture\n").unwrap();
+    let (_, object) = lfs_pointer_to(real);
+    let oid = object.rsplit('/').next().unwrap().to_owned();
+    let mismatch = ImportError::Unfinished {
+        stop: Box::new(ImportError::LfsMismatch {
+            commit,
+            path: path(),
+            oid,
+        }),
+        committed: false,
+    };
+    stops.push((env.refused_import(), mismatch));
+
+    let env = tracked();
+    let version = "version https://git-lfs.github.com/spec/v1\n";
+    let kept = keep(&env, real);
+    let extended = format!(
+        "{version}ext-0-foo sha256:{}\n{}",
+        "f".repeat(64),
+        kept.strip_prefix(version).unwrap()
+    );
+    let commit = env.commit("art/big.psd", &extended, "Add a picture");
+    let extension = ImportError::LfsExtension {
+        commit,
+        path: path(),
+    };
+    stops.push((env.refused_import(), extension));
+
+    let env = tracked();
+    env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
+    let commit = env.commit("art/big.psd", &keep(&env, real), "Add a picture");
+    let kept = LfsElsewhere::Storage {
+        value: "/mnt/shared-lfs".into(),
+        file: ".git/config".into(),
+    };
+    let setting = ImportError::LfsElsewhere {
+        kept,
+        commit,
+        path: path(),
+    };
+    stops.push((env.refused_import(), setting));
+
+    let env = tracked();
+    let elsewhere = env.config().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    link_folder(&elsewhere, &env.root().join(".git").join("lfs"));
+    let commit = env.commit("art/big.psd", &pointer(real), "Add a picture");
+    let kept = LfsElsewhere::Linked {
+        folder: ".git/lfs".into(),
+    };
+    let linked = ImportError::LfsElsewhere {
+        kept,
+        commit,
+        path: path(),
+    };
+    stops.push((env.refused_import(), linked));
+
+    for (said, stop) in stops {
+        let hint = stop.hint().unwrap();
+        assert_eq!(said, format!("error: {stop}\n\nhint: {hint}\n"));
+        // The only options named are Git's, in the commands it runs.
+        for word in said.split_whitespace().filter(|w| w.contains("--")) {
+            let word = word.trim_matches(|c| matches!(c, '`' | ',' | '.'));
+            assert!(
+                ["--all", "--everything", "--include=\"*\""].contains(&word),
+                "{word} in: {said}"
+            );
+        }
+    }
 }
 
 /// What an import that stops at `art/big.psd` in `commit` says when `lfs.storage` is set to
@@ -518,7 +611,7 @@ fn the_summary_counts_commits_holding_lfs_files() {
         "{out}"
     );
     assert!(
-        out.contains("Brought in 1 Git LFS file (12 bytes) from .git/lfs/objects.\n"),
+        out.contains("Brought in 1 Git LFS file (12 B) from .git/lfs/objects.\n"),
         "{out}"
     );
     let json = imported_json(&history());

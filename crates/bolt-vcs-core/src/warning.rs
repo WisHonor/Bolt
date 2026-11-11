@@ -4,7 +4,7 @@
 use crate::text::escape;
 
 /// A pack holding a copy that failed a check was passed over.
-pub const DAMAGED_PACK: &str = "damaged_pack";
+pub const PACK_DAMAGED: &str = "pack_damaged";
 /// A stored copy couldn't be read for a reason other than damage, though another copy worked.
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
 /// A pack couldn't be opened or searched for a reason other than damage, such as no permission.
@@ -68,13 +68,22 @@ pub const LINKS_LEFT: &str = "links_left";
 pub const SWITCH_UNFINISHED: &str = "switch_unfinished";
 /// A command finished a switch between saves that was stopped, before doing its own work.
 pub const SWITCH_FINISHED: &str = "switch_finished";
+/// Picking up a lost `head` dropped a stopped switch that no command could finish any more.
+pub const SWITCH_DROPPED: &str = "switch_dropped";
 /// A file's diff ran out of time, so its changes show in bigger pieces than they could.
 pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
+/// The project's `bolt.toml` couldn't be used at all, so Bolt's own values apply.
+pub const RULES_FILE_SKIPPED: &str = "rules_file_skipped";
+/// Parts of `bolt.toml` couldn't be used and were passed over; the rest of it counts.
+pub const RULES_IGNORED: &str = "rules_ignored";
+/// `tidy` passed over a diary cut off from the current entry that names an entry the store lacks,
+/// keeping what it reached from its end.
+pub const DIARY_END_UNREADABLE: &str = "diary_end_unreadable";
 
 /// Whether people see a warning of `kind` when the command then fails: it tells of files
 /// already written, by a switch the command finished first or by the command itself before it
-/// stopped, or of a step whose head had moved, which happened all the same. Others are only in
-/// `--json`.
+/// stopped, of a step whose head had moved, or of a stopped switch a pick-up dropped, which
+/// happened all the same. Others are only in `--json`.
 #[must_use]
 pub fn told_on_failure(kind: &str) -> bool {
     [
@@ -83,6 +92,7 @@ pub fn told_on_failure(kind: &str) -> bool {
         PLACEHOLDERS_WRITTEN,
         NOT_WRITTEN_HERE,
         HEAD_NOT_FLUSHED,
+        SWITCH_DROPPED,
     ]
     .contains(&kind)
 }
@@ -115,8 +125,8 @@ mod tests {
 
     #[test]
     fn a_message_is_escaped_but_keeps_the_lines_bolt_wrote() {
-        let warning = Warning::new(DAMAGED_PACK, "pack a\u{1b}[2Jb is damaged.\nSecond line.");
-        assert_eq!(warning.kind, "damaged_pack");
+        let warning = Warning::new(PACK_DAMAGED, "pack a\u{1b}[2Jb is damaged.\nSecond line.");
+        assert_eq!(warning.kind, "pack_damaged");
         assert_eq!(warning.message, "pack a\\x1b[2Jb is damaged.\nSecond line.");
         // Escaping what is escaped changes nothing.
         assert_eq!(Warning::new(warning.kind, &warning.message), warning);

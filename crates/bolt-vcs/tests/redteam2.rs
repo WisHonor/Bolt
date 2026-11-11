@@ -97,7 +97,7 @@ fn plant_for_script() {
     let var = |k: &str| std::env::var(k).unwrap_or_default();
     let n: usize = var("RT2_N").parse().unwrap();
     let st = Command::new(assert_cmd::cargo::cargo_bin("bolt"))
-        .arg("start")
+        .args(["start", "--preset", "custom"])
         .current_dir(&dir)
         .env("BOLT_USER_NAME", "Test")
         .env("BOLT_USER_EMAIL", "test@example.com")
@@ -130,7 +130,7 @@ fn largest_message() -> String {
 #[test]
 fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let message = largest_message();
     plant_chain(env.root(), 2000, 0, |s| s.message = message);
     let packs = pack_bytes(env.root());
@@ -148,7 +148,7 @@ fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
 #[test]
 fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let message = largest_message();
     plant_chain(env.root(), 2000, 0, |s| s.message = message);
     let before = Repository::open(env.root()).unwrap().head().unwrap();
@@ -171,7 +171,7 @@ fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing(
 #[test]
 fn rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     plant_chain(env.root(), 300, 99_999, |_| {});
     let packs = pack_bytes(env.root());
     let mut cmd = env.bolt();
@@ -190,7 +190,7 @@ fn rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line() {
 #[test]
 fn rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let invisible = [
         '\u{200b}',
         '\u{2060}',
@@ -232,7 +232,7 @@ fn shown_paths(env: &Env) -> Vec<String> {
 #[test]
 fn rt2_4_braces_in_boltignore_are_literal_as_in_git() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     std::fs::write(env.root().join(".boltignore"), "{prod,dev}.env\n").unwrap();
     std::fs::write(env.root().join("{prod,dev}.env"), "API_KEY=hunter2").unwrap();
     std::fs::write(env.root().join("prod.env"), "kept by Git").unwrap();
@@ -250,7 +250,7 @@ fn rt2_4_braces_in_boltignore_are_literal_as_in_git() {
 #[test]
 fn win_rt2_9_boltignore_ignores_case_like_git_on_case_insensitive_systems() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     std::fs::write(env.root().join(".boltignore"), "*.env\nsecrets/\n").unwrap();
     std::fs::write(env.root().join("PROD.ENV"), "API_KEY=hunter2").unwrap();
     std::fs::create_dir(env.root().join("Secrets")).unwrap();
@@ -286,7 +286,7 @@ fn plant_sparse_pack(root: &Path, size: u64) {
 #[test]
 fn rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     plant_sparse_pack(env.root(), 2 << 30);
     let mut cmd = env.bolt();
     cmd.arg("history");
@@ -305,7 +305,7 @@ fn rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size() {
 #[test]
 fn rt2_6_nested_boltignore_files_do_not_exhaust_memory_in_save() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let mut rules = String::new();
     for i in 0.. {
         if rules.len() > (1 << 20) - 300 {
@@ -371,7 +371,7 @@ fn plant_lying_pack(root: &Path, kind: ObjectKind, id: &bolt_core::id::Id, data:
 #[test]
 fn rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     // Content the attacker can predict: a standard licence, a vendored library, an engine DLL.
     let licence = b"MIT License\n\nPermission is hereby granted, free of charge, to any person\n";
     let id = bolt_core::id::hash_content(licence);
@@ -454,7 +454,7 @@ fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) 
 #[test]
 fn rt2_7_a_planted_copy_claiming_a_huge_size_does_not_slow_save() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let licence = b"MIT License\n\nPermission is hereby granted, free of charge, to any person\n";
     let id = bolt_core::id::hash_content(licence);
     // Records 1 TiB, takes about 32 MiB on disk.
@@ -481,7 +481,7 @@ fn rt2_7_a_planted_copy_claiming_a_huge_size_does_not_slow_save() {
 #[test]
 fn rt2_7_planted_copies_claiming_huge_sizes_do_not_slow_history() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     plant_chain(env.root(), 1000, 0, |_| {});
     let mut ids = Vec::new();
     let repo = Repository::open(env.root()).unwrap();
@@ -508,7 +508,7 @@ fn rt2_7_planted_copies_claiming_huge_sizes_do_not_slow_history() {
 #[test]
 fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
     let env = Env::new();
-    env.ok(&["start"]);
+    env.ok(&["start", "--preset", "custom"]);
     let first = Repository::open(env.root())
         .unwrap()
         .current()

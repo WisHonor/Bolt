@@ -55,7 +55,10 @@ fn warning_kinds(env: &Env, args: &[&str]) -> (Vec<String>, serde_json::Value) {
 /// stopped before `head` moved would leave it.
 fn stopped_switch() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = Repository::open(env.root()).unwrap().head().unwrap();
     env.overwrite("a.txt", "a");
     env.bolt().args(["save", "A"]).assert().success();
@@ -89,15 +92,15 @@ fn read_only_commands_say_a_switch_is_unfinished() {
         );
     }
     let (_, doc) = warning_kinds(&env, &["status"]);
-    assert!(doc["unfinished_switch"].is_string(), "{doc}");
+    assert_eq!(doc["unfinished_switch"], true, "{doc}");
 
     // The next command that changes the project finishes it, and says so.
     let (kinds, doc) = warning_kinds(&env, &["save", "B"]);
-    assert_eq!(doc["result"], "nothing-changed", "{doc}");
+    assert_eq!(doc["result"], "nothing_changed", "{doc}");
     assert_eq!(kinds, ["switch_finished"]);
     let (kinds, doc) = warning_kinds(&env, &["status"]);
     assert!(kinds.is_empty(), "{doc}");
-    assert!(doc["unfinished_switch"].is_null());
+    assert_eq!(doc["unfinished_switch"], false, "{doc}");
     assert!(!env.root().join(".bolt/state/journal").exists());
 }
 
@@ -211,14 +214,17 @@ fn goto_json(env: &Env, target: &str) -> serde_json::Value {
 fn goto_a_line_and_back_restores_every_file_byte_for_byte() {
     let env = two_lines();
     let said = goto(&env, "feature");
-    assert!(said.contains("You're on line feature."), "{said}");
+    assert!(
+        said.starts_with("Switched to line feature at save "),
+        "{said}"
+    );
     assert_eq!(files(env.root()), holding(FEATURE));
     assert!(!env.root().join("dir").exists());
     assert_eq!(env.state().1.position, Position::OnLine("feature".into()));
     assert!(changed(&env).is_empty());
 
     let said = goto(&env, "main");
-    assert!(said.contains("You're on line main."), "{said}");
+    assert!(said.starts_with("Switched to line main at save "), "{said}");
     assert_eq!(files(env.root()), holding(MAIN));
     assert!(!env.root().join("new").exists());
     assert!(changed(&env).is_empty());
@@ -231,7 +237,10 @@ fn goto_carries_unsaved_changes_that_dont_collide() {
     env.overwrite("a.txt", "mine\n");
     env.overwrite("n.txt", "new\n");
     let said = goto(&env, "feature");
-    assert!(said.contains("You're on line feature."), "{said}");
+    assert!(
+        said.starts_with("Switched to line feature at save "),
+        "{said}"
+    );
     assert!(said.contains("2 files"), "{said}");
     let mut wanted = holding(FEATURE);
     wanted.insert("a.txt".into(), b"mine\n".to_vec());
@@ -324,13 +333,16 @@ fn plant_with_change_id(root: &Path, change_id: ChangeId) {
 #[test]
 fn an_ambiguous_target_lists_the_saves() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let mut second = [0; 16];
     second[15] = 1;
     plant_with_change_id(env.root(), ChangeId([0; 16]));
     plant_with_change_id(env.root(), ChangeId(second));
     let before = env.standing();
-    let out = env.bolt().args(["goto", "kkkk"]).output().unwrap();
+    let out = env.bolt().args(["goto", "zzzz"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let said = text(&out.stderr);
     assert!(said.contains("matches more than one save"), "{said}");
@@ -379,12 +391,17 @@ fn goto_json_matches_its_snapshot() {
         }
     }
     insta::assert_json_snapshot!(doc);
+    // Going where the project already is records no step.
+    assert_eq!(goto_json(&env, "feature")["recorded"], false);
 }
 
 /// A project whose line `main` holds `second`, on the save before, which holds `first`.
 fn on_first_of_two(first: &[(&str, &str)], second: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_all(&env, first);
     env.bolt().args(["save", "First"]).assert().success();
     let saved = env.state().1.lines["main"];
@@ -489,7 +506,7 @@ fn goto_where_the_project_is_carries_nothing_along() {
     );
     let before = env.standing();
     let said = goto(&env, "main");
-    assert!(said.contains("You're on line main."), "{said}");
+    assert!(said.starts_with("Already on line main, at save "), "{said}");
     assert!(!said.contains("came along"), "{said}");
     assert_eq!(env.standing(), before);
 }
@@ -515,7 +532,7 @@ fn a_goto_with_a_file_in_use_fails_and_the_next_one_finishes() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let said = text(&out.stderr);
     assert!(said.contains("error:") && said.contains("b.txt"), "{said}");
-    assert!(!text(&out.stdout).contains("You're on line"));
+    assert!(text(&out.stdout).is_empty());
     let out = env
         .bolt()
         .args(["goto", "feature", "--json"])
@@ -646,4 +663,51 @@ fn a_placeholder_you_changed_is_unsaved_work() {
         "{said}"
     );
     assert_eq!(std::fs::read(env.root().join("out")).unwrap(), b"mine\n");
+}
+
+/// A goto to a save whose files' pack is gone stops at the file it can't write and leaves that
+/// file as it was. Where it stops partway, its hint names the way on, and that way works.
+#[test]
+fn a_goto_that_needs_a_pack_that_is_gone_stops_and_names_the_way_on() {
+    let env = Env::empty();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let packs = |env: &Env| -> Vec<std::path::PathBuf> {
+        let folder = env.root().join(".bolt/store/packs");
+        std::fs::read_dir(folder)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    };
+    let started = packs(&env);
+    support::write(&env, "f.txt", "x\n");
+    support::write(&env, "g.txt", "a\n");
+    env.bolt().args(["save", "One"]).assert().success();
+    let first: Vec<_> = packs(&env)
+        .into_iter()
+        .filter(|p| !started.contains(p))
+        .collect();
+    support::write(&env, "g.txt", "b\n");
+    env.bolt().args(["save", "Two"]).assert().success();
+    let two = support::main_tip(&env).to_hex();
+    support::write(&env, "f.txt", "z\n");
+    env.bolt().args(["save", "Three"]).assert().success();
+    for pack in first {
+        std::fs::remove_file(pack).unwrap();
+    }
+    let out = env.bolt().args(["goto", &two]).output().unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(said.contains("is not in the store"), "{said}");
+    assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
+    let journal = env.root().join(".bolt/state/journal");
+    if journal.exists() {
+        assert!(said.contains("delete .bolt/state/journal"), "{said}");
+        std::fs::remove_file(&journal).unwrap();
+    }
+    support::write(&env, "h.txt", "new\n");
+    env.bolt().args(["save", "Four"]).assert().success();
+    assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
 }

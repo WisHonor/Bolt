@@ -16,7 +16,10 @@ use support::{Env, plant_save, text};
 /// A project with `files` saved, each last changed an hour ago so the cache can vouch for it.
 fn project(files: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     for (name, content) in files {
         write_old(&env.root().join(name), content.as_bytes());
     }
@@ -106,7 +109,7 @@ fn status_lists_added_modified_removed_and_kind_changes() {
     ];
     if kind_changed {
         let kind = if cfg!(unix) { "executable" } else { "symlink" };
-        expected.push(change("c", "kind-changed", kind));
+        expected.push(change("c", "kind_changed", kind));
     }
     expected.push(change("new\u{202e}.txt", "added", "file"));
     expected.push(change("sub/s.txt", "removed", "file"));
@@ -118,14 +121,17 @@ fn status_lists_added_modified_removed_and_kind_changes() {
     let out = env.bolt().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let said = text(&out.stdout);
-    assert!(said.starts_with("On line main.\n"), "{said}");
-    for line in [
-        "  modified  a.txt",
-        "  removed   b.txt",
-        "  added     new\\u{202e}.txt",
-        "  removed   sub/s.txt",
+    assert!(said.starts_with("On line main at save "), "{said}");
+    // The kind column is as wide as its widest word: "kind changed" where a kind changed.
+    let width = if kind_changed { 12 } else { 8 };
+    for (kind, path) in [
+        ("modified", "a.txt"),
+        ("removed", "b.txt"),
+        ("added", "new\\u{202e}.txt"),
+        ("removed", "sub/s.txt"),
     ] {
-        assert!(said.contains(line), "{line:?} in {said}");
+        let line = format!("    {kind:<width$}  {path} ");
+        assert!(said.contains(&line), "{line:?} in {said}");
     }
     assert!(!said.contains('\u{202e}'), "{said}");
     // Saving makes it clean again.
@@ -408,9 +414,12 @@ fn plant_links(root: &Path) {
 }
 
 #[test]
-fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
+fn entries_this_computer_cant_hold_are_listed_as_not_written() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_old(&env.root().join("a.txt"), b"a");
     plant_links(env.root());
     // `deps` is gone from disk, and its link stays where the save has it.
@@ -420,15 +429,12 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
         [change("deps/x.txt", "removed", "file")],
         "{doc}"
     );
-    assert_eq!(
-        doc["not_written_here"],
-        serde_json::json!(["deps/lib", "lib"])
-    );
+    assert_eq!(doc["not_written"], serde_json::json!(["deps/lib", "lib"]));
     let said = text(&env.bolt().arg("status").output().unwrap().stdout);
     assert!(
         said.ends_with(
             "Not written here, because this computer can't hold them as they are (saves keep \
-             them as they were):\n  deps/lib\n  lib\n"
+             them as they were):\n\n    deps/lib\n    lib\n"
         ),
         "{said}"
     );
@@ -436,10 +442,7 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
     write_old(&env.root().join("deps/x.txt"), b"a");
     let doc = status_json(&env, &[]);
     assert!(changes(&doc).is_empty(), "{doc}");
-    assert_eq!(
-        doc["not_written_here"],
-        serde_json::json!(["deps/lib", "lib"])
-    );
+    assert_eq!(doc["not_written"], serde_json::json!(["deps/lib", "lib"]));
     let said = text(&env.bolt().arg("status").output().unwrap().stdout);
     assert!(said.contains("Nothing changed since "), "{said}");
 }
@@ -447,7 +450,10 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written_here() {
 #[test]
 fn status_says_in_its_own_words_why_it_stops() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_old(&env.root().join("a.txt"), b"a");
     plant_links(env.root());
     // The save keeps deps/lib as it is, so deps can't be a file.
@@ -458,14 +464,17 @@ fn status_says_in_its_own_words_why_it_stops() {
         text(&out.stderr),
         "error: Bolt can't show the status: deps: the last save has a folder there holding \
          deps/lib, which every save keeps as it was because this computer can't hold it as it \
-         is, and a save can't hold both under one name.\nhint: Rename or move deps.\n"
+         is, and a save can't hold both under one name.\n\nhint: Rename or move deps.\n"
     );
 }
 
 #[test]
 fn a_save_holding_a_spelling_of_bolt_is_named() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // No listing Bolt makes holds `.BOLT`, so it is spelled `-BOLT`, then the bytes are changed.
     plant_save(env.root(), |pack| {
         let id = pack.add_content(b"x").unwrap();
@@ -490,7 +499,7 @@ fn a_save_holding_a_spelling_of_bolt_is_named() {
         text(&out.stderr),
         format!(
             "error: Save {} holds a name spelled like Bolt's own folder (.bolt), which Bolt never \
-             writes, so it can't be used.\nhint: Bolt never makes such a save, so another program \
+             writes, so it can't be used.\n\nhint: Bolt never makes such a save, so another program \
              put it there. Nothing was changed: ask for help before trying to repair it.\n",
             planted.short_hex()
         )

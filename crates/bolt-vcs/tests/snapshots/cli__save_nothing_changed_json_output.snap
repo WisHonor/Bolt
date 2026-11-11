@@ -1,0 +1,10 @@
+---
+source: crates/bolt-vcs/tests/cli.rs
+expression: json
+---
+{
+  "bolt_json": 1,
+  "paths": [],
+  "result": "nothing_changed",
+  "warnings": []
+}

@@ -46,7 +46,10 @@ fn rt9_1_without_home_bolt_applies_only_the_git_settings_git_applies() {
     let env = Env::new();
     write(&env, "art.psd", "a picture\n");
     write(&env, "readme.txt", "hello\n");
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let git_status = || {
         let mut status = Command::new("git");
         without_home(&mut status, xdg.path())

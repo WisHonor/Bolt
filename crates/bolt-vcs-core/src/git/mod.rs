@@ -288,8 +288,8 @@ impl GitError {
 }
 
 /// A `NotYours` message: it names the `.git` folder, whose owner was asked.
-fn owner_message(git: &Path, refusal: &RepoError) -> String {
-    let git = escape(&git.display().to_string(), false);
+fn owner_message(path: &Path, refusal: &RepoError) -> String {
+    let git = escape(&path.display().to_string(), false);
     match refusal {
         RepoError::NotYours { .. } => {
             format!("The Git repository at {git} belongs to another user account.")
@@ -306,6 +306,17 @@ fn owner_message(git: &Path, refusal: &RepoError) -> String {
             "Bolt couldn't find out who owns the Git repository at {git}: {}",
             escape(&source.to_string(), false)
         ),
+        RepoError::SafeFolderPassedOver {
+            entry,
+            why,
+            refusal,
+        } => {
+            format!(
+                "{} {}",
+                owner_message(path, refusal),
+                repo::passed_over(entry, why)
+            )
+        }
         // The user's settings, which hold safe-folders, can't be read.
         other => other.to_string(),
     }
@@ -437,6 +448,8 @@ pub struct Repo {
     includes: bool,
     /// The last `lfs.storage` its config sets, and the file that sets it.
     lfs_storage: Option<(Vec<u8>, &'static str)>,
+    /// The last `core.sparsecheckout` its config sets; never true, which `open` refuses.
+    sparse: Option<bool>,
     objects: odb::Objects,
 }
 
@@ -478,6 +491,7 @@ impl Repo {
             hash: format.hash,
             includes: format.includes,
             lfs_storage: format.lfs_storage,
+            sparse: format.sparse,
             objects: odb::Objects::default(),
         })
     }
@@ -519,6 +533,13 @@ impl Repo {
     pub fn lfs_storage(&self) -> Option<(&[u8], &'static str)> {
         let (value, file) = self.lfs_storage.as_ref()?;
         Some((value, file))
+    }
+
+    /// The `core.sparsecheckout` this repository's own config sets, as Git reads it; never true,
+    /// which `open` refuses. It wins over the user's own Git settings.
+    #[must_use]
+    pub fn sparse_checkout(&self) -> Option<bool> {
+        self.sparse
     }
 
     /// Which of `.git/lfs` and `.git/lfs/objects` is a link, or isn't a folder, if one is: Git
@@ -1084,6 +1105,30 @@ mod tests {
     }
 
     /// Running out of memory says so and how to free some, not that the file may be locked.
+    /// A `.git` refused although safe-folders lists the folder through a link names the `.git` and
+    /// the entry passed over, and keeps the trust hint.
+    #[test]
+    fn a_git_refusal_names_a_safe_folders_entry_it_passed_over() {
+        let e = GitError::NotYours {
+            git: "work/.git".into(),
+            refusal: RepoError::SafeFolderPassedOver {
+                entry: "trusted".into(),
+                why: "it is a link",
+                refusal: Box::new(RepoError::NotYours {
+                    path: "work".into(),
+                }),
+            },
+        };
+        let said = e.to_string();
+        assert!(
+            said.starts_with("The Git repository at work")
+                && said.contains("belongs to another user account. Its safe-folders entry trusted")
+                && said.contains("doesn't count: it is a link"),
+            "{said}"
+        );
+        assert!(e.hint().unwrap().contains("safe-folders"), "{e:?}");
+    }
+
     #[test]
     fn running_out_of_memory_says_so() {
         let path = Path::new("objects/pack/pack-1.pack");
@@ -1145,6 +1190,14 @@ mod tests {
                 refusal: RepoError::OwnerLookupFailed {
                     path: "x".into(),
                     source: io::Error::other(HOSTILE),
+                },
+            },
+            GitError::NotYours {
+                git: "x".into(),
+                refusal: RepoError::SafeFolderPassedOver {
+                    entry: HOSTILE.into(),
+                    why: "it is a link",
+                    refusal: Box::new(RepoError::NotYours { path: "x".into() }),
                 },
             },
             GitError::Changed {

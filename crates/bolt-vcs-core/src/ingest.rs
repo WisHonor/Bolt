@@ -4,7 +4,7 @@
 
 use std::io::{self, Read};
 
-use crate::chunks::{Chunk, ChunkList, Cutter, is_cut, is_too_long_to_cut};
+use crate::chunks::{Chunk, ChunkList, Cutter};
 use crate::id::{ContentHasher, Id, hash_content};
 use crate::pack::{self, ObjectKind, PackError, PackSet, Prepared};
 use crate::store::{Store, StoreError};
@@ -33,18 +33,18 @@ impl From<StoreError> for IngestError {
 }
 
 /// Stores the `size` bytes `reader` gives, reading them once, and gives their ID. Fewer or more
-/// bytes than `size` is `Changed`. A file too long to cut is stored whole by `store_long`, which
-/// needs its ID first.
+/// bytes than `size` is `Changed`. A bigger file that isn't cut is stored whole by `store_long`,
+/// which needs its ID first.
 pub(crate) fn store_bytes(
     packs: &mut PackSet,
     store: &Store,
     reader: &mut dyn Read,
     size: u64,
 ) -> Result<Id, IngestError> {
-    if is_cut(size) {
+    if store.is_cut(size) {
         return cut(packs, store, reader, size);
     }
-    if is_too_long_to_cut(size) {
+    if !store.is_small(size) {
         return Err(PackError::TooLarge.into());
     }
     let bytes = read_whole(reader, size)?;
@@ -58,13 +58,13 @@ pub(crate) fn store_held(
     bytes: &[u8],
 ) -> Result<Id, IngestError> {
     let size = bytes.len() as u64;
-    if is_cut(size) {
+    if store.is_cut(size) {
         return cut(packs, store, &mut &*bytes, size);
     }
     store_whole(packs, store, bytes)
 }
 
-/// Stores whole a file too long to cut, of `size` bytes and the ID `id` (from a first read, or a
+/// Stores whole a file that isn't cut, of `size` bytes and the ID `id` (from a first read, or a
 /// plan), unless the pack being built or the store holds it. `open` gives its bytes, which are
 /// compared with `id` as they are stored; `false` if they aren't `id`'s any more.
 pub(crate) fn store_long<R: Read, E: From<PackError> + From<StoreError>>(
@@ -92,11 +92,6 @@ fn store_whole(packs: &mut PackSet, store: &Store, bytes: &[u8]) -> Result<Id, I
         return Ok(id);
     }
     add_ready(packs, &ready_new(id, bytes)?)
-}
-
-/// Whether a file of `size` bytes is read whole: neither cut nor too long to cut.
-pub(crate) fn is_small(size: u64) -> bool {
-    !is_cut(size) && !is_too_long_to_cut(size)
 }
 
 /// The `size` bytes `reader` gives, read whole. Fewer or more is `Changed`.
@@ -239,7 +234,7 @@ fn cut(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::chunks::{MAX_CHUNK, set_test_cut_sizes};
+    use crate::chunks::{MAX_CHUNK, is_cut, is_too_long_to_cut, set_test_cut_sizes};
     use crate::pack::{IndexEntry, PackReader, WRITER_PACK_OBJECTS};
     use crate::test_support::noise;
     use bolt_platform::dir::Dir;
@@ -433,7 +428,7 @@ mod tests {
         }
     }
 
-    /// A file too long to cut is stored whole only if its bytes are its ID's, and not read again
+    /// A file that isn't cut is stored whole only if its bytes are its ID's, and not read again
     /// once held.
     #[test]
     fn a_file_too_long_to_cut_is_stored_whole_once() {

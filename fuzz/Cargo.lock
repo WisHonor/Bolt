@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "bolt-vcs-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "bolt-vcs-platform",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "bolt-vcs-platform"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "rustix",

@@ -22,7 +22,10 @@ const MOST_BYTES: u64 = 500_000_000;
 #[ignore = "slow: builds a 100,000-file project"]
 fn status_on_an_unchanged_100_000_file_project() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     // An hour old, so the cache can vouch for every file.
     let then = SystemTime::now() - Duration::from_secs(3600);
     for i in 0..FILES {
@@ -64,7 +67,10 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
     }
     // Both folders go when `env` is dropped, after a failed assert too.
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     write_incompressible(&env.root().join("big.bin"));
     let mut save = env.bolt_process_in(env.root());
     save.args(["save", "A 10 GiB file", "--yes"]);
@@ -101,7 +107,10 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
 #[ignore = "slow: saves the deepest chain of folders, a file in each"]
 fn the_deepest_chain_of_folders_with_a_file_in_each() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let first = main_tip(&env).to_hex();
     let Some(_chain) = Chain::make(env.root(), 2048) else {
         return;

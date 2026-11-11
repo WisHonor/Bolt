@@ -7,12 +7,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::config::UserLfsStorage;
+use crate::config::UserImportSettings;
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList, TagListWriter};
 use crate::encoding::DecodeError;
 use crate::git::{
-    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, lfs_pointer, parse_tag,
-    parse_tree, shown,
+    self, GitError, GitId, Head, MAX_LFS_POINTER_BYTES, ObjectType, Refs, Refusal, lfs_pointer,
+    parse_tag, parse_tree, shown,
 };
 use crate::id::{ChangeId, Id, hash_record};
 use crate::listing::{EntryKind, SaveLimits};
@@ -44,12 +44,24 @@ pub struct ImportRequest<'a> {
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
-    /// The `lfs.storage` the user's own Git settings set (`config::git_lfs_storage`), around
-    /// which the repository's own setting comes, as in Git.
-    pub lfs_storage: Option<&'a UserLfsStorage>,
-    /// Called as the first pass reads each commit, with how many it has read and `None`, then
-    /// after each commit is converted, with how many are done and how many there are.
-    pub progress: &'a mut dyn FnMut(u64, Option<u64>),
+    /// What the user's own Git settings set that an import reads, `lfs.storage` and
+    /// `core.sparseCheckout` (`config::git_import_settings`), around which the repository's own
+    /// settings come, as in Git.
+    pub git_settings: Option<&'a UserImportSettings>,
+    /// Called as each pass goes: with how many commits it has done, and how many there are once
+    /// that is known.
+    pub progress: &'a mut dyn FnMut(ImportPass, u64, Option<u64>),
+}
+
+/// Which pass an import is in, for its progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportPass {
+    /// Reading Git's history: how many commits there are isn't known yet.
+    ReadingHistory,
+    /// Looking at every commit's Git LFS files, when the repository shows a sign of Git LFS.
+    CheckingLfs,
+    /// Converting each commit.
+    Importing,
 }
 
 /// What an import brought in, and what it left out (decision 033's summary). Names and paths
@@ -328,7 +340,10 @@ pub enum LfsElsewhere {
 /// then what the environment gives (`users` holds the first and last), set to anything but nothing
 /// or `lfs`, Git LFS's own place. A path is never resolved, since Bolt never reads there. The links
 /// `LfsRules` looks for wait for the first Git LFS file.
-fn lfs_storage_elsewhere(git: &git::Repo, users: Option<&UserLfsStorage>) -> Option<LfsElsewhere> {
+fn lfs_storage_elsewhere(
+    git: &git::Repo,
+    users: Option<&UserImportSettings>,
+) -> Option<LfsElsewhere> {
     let files = users.and_then(|u| u.files.as_ref());
     let variables = users.and_then(|u| u.variables.as_ref());
     let (value, file) = match (variables, git.lfs_storage(), files) {
@@ -427,7 +442,7 @@ pub fn import_git(
     opened: &mut Option<Repository>,
 ) -> Result<ImportReport, ImportError> {
     let root = &repo::resolved(root);
-    let plan = plan(root, req.lfs_storage, req.progress)?;
+    let plan = plan(root, req.git_settings, req.progress)?;
     let (repo, lock) = Repository::begin(root).map_err(|e| begun(root, e))?;
     let repo = opened.insert(repo);
     carry_out(plan, repo, &lock, req).map_err(|e| after_begin(root, e))
@@ -445,6 +460,7 @@ fn begun(root: &Path, e: RepoError) -> ImportError {
         | RepoError::AdminsNotElevated { .. }
         | RepoError::OwnerUnknown { .. }
         | RepoError::OwnerLookupFailed { .. }
+        | RepoError::SafeFolderPassedOver { .. }
         | RepoError::Config(_) => starting(e),
         other => after_begin(root, other.into()),
     }
@@ -488,16 +504,21 @@ struct Plan {
 }
 
 /// The steps that only read, so that the refusals they make come before anything is written.
-/// `lfs_storage` is what the user's own Git settings set; `progress` hears how many commits the
+/// `users` is what the user's own Git settings set; `progress` hears how many commits the
 /// first pass has read.
 fn plan(
     root: &Path,
-    lfs_storage: Option<&UserLfsStorage>,
-    progress: &mut dyn FnMut(u64, Option<u64>),
+    users: Option<&UserImportSettings>,
+    progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<Plan, ImportError> {
     Repository::check_new(root).map_err(|e| refused(root, e))?;
     let git = git::Repo::open(root)?;
-    let lfs_storage = lfs_storage_elsewhere(&git, lfs_storage);
+    // As in Git: the environment's, then the repository's, then the user's own files.
+    let sparse = users.map_or((None, None), |u| (u.sparse_variables, u.sparse_files));
+    if sparse.0.or(git.sparse_checkout()).or(sparse.1) == Some(true) {
+        return Err(GitError::Refused(Refusal::SparseCheckout).into());
+    }
+    let lfs_storage = lfs_storage_elsewhere(&git, users);
     let refs = git.refs()?;
     let names = Names::of(&refs)?;
     let mut tag_budget = TagBudget::new();
@@ -522,7 +543,14 @@ fn plan(
     }
     let (order, own_change_ids) = in_order(&git, &roots, MAX_EXTRA_PARENTS, progress)?;
     let setting = lfs_storage.as_ref();
-    check_lfs_objects(&git, &head_commit, &order, setting, &SaveLimits::default)?;
+    check_lfs_objects(
+        &git,
+        &head_commit,
+        &order,
+        setting,
+        &SaveLimits::default,
+        progress,
+    )?;
     let grafts = git.has_grafts()?;
     let skipped_refs = refs.other.iter().take(MAX_LISTED);
     Ok(Plan {
@@ -567,7 +595,7 @@ fn carry_out(
     let total = order.len() as u64;
     for (done, id) in (1..).zip(&order) {
         converter.commit(id)?;
-        (req.progress)(done, Some(total));
+        (req.progress)(ImportPass::Importing, done, Some(total));
     }
     converter.finish()?;
     // Each tag goes into the list as it is read, in the list's order, and is let go: the tags
@@ -856,7 +884,7 @@ fn in_order(
     git: &git::Repo,
     roots: &BTreeSet<GitId>,
     most_extra: u64,
-    progress: &mut dyn FnMut(u64, Option<u64>),
+    progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<(Vec<GitId>, HashSet<ChangeId>), ImportError> {
     let mut walk = FirstPass {
         git,
@@ -898,7 +926,7 @@ fn in_order(
 /// stack: a commit on the way down costs 4 bytes for each parent it still has to go into.
 struct FirstPass<'g> {
     git: &'g git::Repo,
-    progress: &'g mut dyn FnMut(u64, Option<u64>),
+    progress: &'g mut dyn FnMut(ImportPass, u64, Option<u64>),
     /// Commits read so far.
     read: u64,
     most_extra: u64,
@@ -951,7 +979,7 @@ impl FirstPass<'_> {
         }
         let commit = outline(self.git, &id)?;
         self.read = self.read.saturating_add(1);
-        (self.progress)(self.read, None);
+        (self.progress)(ImportPass::ReadingHistory, self.read, None);
         let mut parents = commit.parents;
         self.headers.extend(commit.change_id);
         self.extra = self
@@ -1096,13 +1124,15 @@ const MAX_MISSING_LISTED: usize = 20;
 /// Without one, the converter stops at the first missing object it meets. Each pointer goes
 /// through the `LfsRules` the converter follows, from `setting`, so what stops one stops the
 /// other. Each commit's walk counts only trees not walked before, against fresh `limits`, so it
-/// may let through a commit the converter will refuse; past them it stops looking.
+/// may let through a commit the converter will refuse; past them it stops looking. `progress`
+/// hears how many commits it has looked at.
 fn check_lfs_objects(
     git: &git::Repo,
     head: &GitId,
     order: &[GitId],
     setting: Option<&LfsElsewhere>,
     limits: &dyn Fn() -> SaveLimits,
+    progress: &mut dyn FnMut(ImportPass, u64, Option<u64>),
 ) -> Result<(), ImportError> {
     let tree = outline(git, head)?.tree;
     if !git.has_lfs_folder()? && !lfs_attribute(git, &tree)? {
@@ -1119,10 +1149,12 @@ fn check_lfs_objects(
         count: 0,
         bytes: 0,
     };
-    for commit in order {
+    let total = order.len() as u64;
+    for (done, commit) in (1..).zip(order) {
         if !check.commit(commit, limits())? {
             break;
         }
+        progress(ImportPass::CheckingLfs, done, Some(total));
     }
     if check.count == 0 {
         return Ok(());
@@ -1401,8 +1433,8 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
-                progress: &mut |_, _| {},
+                git_settings: None,
+                progress: &mut |_, _, _| {},
             },
             &mut None,
         )
@@ -1596,8 +1628,11 @@ mod tests {
         let mut want = vec![a, b, c];
         want.sort();
         want.extend([merge, tip]);
-        assert_eq!(in_order(&repo, &roots, 3, &mut |_, _| {}).unwrap().0, want);
-        let e = in_order(&repo, &roots, 2, &mut |_, _| {}).unwrap_err();
+        assert_eq!(
+            in_order(&repo, &roots, 3, &mut |_, _, _| {}).unwrap().0,
+            want
+        );
+        let e = in_order(&repo, &roots, 2, &mut |_, _, _| {}).unwrap_err();
         assert!(
             e.to_string()
                 .contains("more than 2 parents beyond their first"),
@@ -1629,7 +1664,10 @@ mod tests {
             ([two, tip_two], [one, tip_one])
         };
         let want: Vec<GitId> = [shared].into_iter().chain(first).chain(second).collect();
-        assert_eq!(in_order(&repo, &roots, 0, &mut |_, _| {}).unwrap().0, want);
+        assert_eq!(
+            in_order(&repo, &roots, 0, &mut |_, _, _| {}).unwrap().0,
+            want
+        );
     }
 
     /// Bolt doesn't follow a config's includes, so an import of a repository whose config has one
@@ -1660,12 +1698,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (git, first) = one_commit(dir.path());
         let own = ChangeId::from_git_commit(first.as_bytes());
-        // The same ID in Jujutsu's letters, which run from `z` for 0.
-        let letters: String = own
-            .to_letters()
-            .bytes()
-            .map(|c| char::from(b'k' + b'z' - c))
-            .collect();
+        let letters = own.to_letters();
         let tree = git.tree(&[]);
         // A root on another branch, made to come before `main`'s in the import's order.
         let side = (0..)
@@ -1893,8 +1926,8 @@ mod tests {
         let head = id(Commit, second.as_bytes()).to_hex();
         git.loose_ref("refs/heads/main", &format!("{head}\n"));
         // Once the first commit is converted, after the first pass.
-        let mut progress = |done: u64, total: Option<u64>| {
-            if total.is_some() && done == 1 {
+        let mut progress = |pass, done: u64, _: Option<u64>| {
+            if pass == ImportPass::Importing && done == 1 {
                 std::fs::remove_file(&later).unwrap();
             }
         };
@@ -1904,7 +1937,7 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
+                git_settings: None,
                 progress: &mut progress,
             },
             &mut opened,
@@ -1966,7 +1999,7 @@ mod tests {
         };
         let scan = |dir: &Path, commit: &GitId, limits: &dyn Fn() -> SaveLimits| {
             let repo = git::Repo::open(dir).unwrap();
-            check_lfs_objects(&repo, commit, &[*commit], None, limits)
+            check_lfs_objects(&repo, commit, &[*commit], None, limits, &mut |_, _, _| {})
         };
         let small = |depth, entries| move || SaveLimits::new(depth, entries);
         let missing = |r| matches!(r, Err(ImportError::LfsMissing { count: 1, .. }));
@@ -2022,7 +2055,14 @@ mod tests {
         };
         let (dir, commit) = made(b"120000");
         let repo = git::Repo::open(dir.path()).unwrap();
-        let first = check_lfs_objects(&repo, &commit, &[commit], None, &SaveLimits::default);
+        let first = check_lfs_objects(
+            &repo,
+            &commit,
+            &[commit],
+            None,
+            &SaveLimits::default,
+            &mut |_, _, _| {},
+        );
         assert!(first.is_ok(), "{first:?}");
         drop(repo);
         let report = import(dir.path()).unwrap();
@@ -2044,7 +2084,14 @@ mod tests {
         assert_eq!(target, pointer);
         let (dir, commit) = made(b"100644");
         let repo = git::Repo::open(dir.path()).unwrap();
-        let first = check_lfs_objects(&repo, &commit, &[commit], None, &SaveLimits::default);
+        let first = check_lfs_objects(
+            &repo,
+            &commit,
+            &[commit],
+            None,
+            &SaveLimits::default,
+            &mut |_, _, _| {},
+        );
         assert!(matches!(
             first,
             Err(ImportError::LfsMissing { count: 1, .. })
@@ -2078,7 +2125,7 @@ mod tests {
         let order = [one, two, three];
         let scan = |entries| {
             let limits = move || SaveLimits::new(10, entries);
-            check_lfs_objects(&repo, &three, &order, None, &limits)
+            check_lfs_objects(&repo, &three, &order, None, &limits, &mut |_, _, _| {})
         };
         assert!(matches!(
             scan(3),
@@ -2122,7 +2169,14 @@ mod tests {
         std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
         let repo = git::Repo::open(dir.path()).unwrap();
         let order = [first, second];
-        match check_lfs_objects(&repo, &second, &order, None, &SaveLimits::default) {
+        match check_lfs_objects(
+            &repo,
+            &second,
+            &order,
+            None,
+            &SaveLimits::default,
+            &mut |_, _, _| {},
+        ) {
             Err(ImportError::LfsMissing {
                 first: listed,
                 count,
@@ -2154,12 +2208,122 @@ mod tests {
             &mut ImportRequest {
                 who: &who(),
                 command: "import",
-                lfs_storage: None,
-                progress: &mut |done, total| heard.push((done, total)),
+                git_settings: None,
+                progress: &mut |pass, done, total| heard.push((pass, done, total)),
             },
             &mut None,
         );
         assert_eq!(report.unwrap().commits, 2);
-        assert_eq!(heard, [(1, None), (2, None), (1, Some(2)), (2, Some(2))]);
+        use ImportPass::{Importing, ReadingHistory};
+        assert_eq!(
+            heard,
+            [
+                (ReadingHistory, 1, None),
+                (ReadingHistory, 2, None),
+                (Importing, 1, Some(2)),
+                (Importing, 2, Some(2))
+            ]
+        );
+    }
+
+    /// With a sign of Git LFS, the look for its files says how many commits it has looked at.
+    #[test]
+    fn an_import_reports_its_first_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Craft::new(dir.path(), HashKind::Sha1);
+        std::fs::create_dir(dir.path().join(".git/lfs")).unwrap();
+        let tree = git.tree(&[]);
+        let first = commit_on(&git, &tree, &[], "one\n");
+        let second = commit_on(&git, &tree, &[first], "two\n");
+        git.loose_ref("refs/heads/main", &format!("{}\n", second.to_hex()));
+        let mut heard = Vec::new();
+        import_git(
+            dir.path(),
+            &mut ImportRequest {
+                who: &who(),
+                command: "import",
+                git_settings: None,
+                progress: &mut |pass, done, total| heard.push((pass, done, total)),
+            },
+            &mut None,
+        )
+        .unwrap();
+        let checking: Vec<_> = heard
+            .iter()
+            .filter(|(pass, ..)| *pass == ImportPass::CheckingLfs)
+            .map(|&(_, done, total)| (done, total))
+            .collect();
+        assert_eq!(checking, [(1, Some(2)), (2, Some(2))]);
+    }
+
+    /// The `bolt.toml` of the Git checkout an import runs in decides which files it cuts, and so
+    /// does a project's for the safety copies of a discard.
+    #[test]
+    fn safety_copies_and_imports_use_the_threshold_too() {
+        use crate::journal::{Action, Change, Expected};
+        use crate::listing::EntryKind;
+        use crate::pack::{ObjectKind, PackReader};
+        use crate::test_support::noise;
+
+        let big = noise(9, 2 << 20);
+        let mine = noise(10, 2 << 20);
+        for (rules, cut) in [
+            (Some("chunk-files-over = \"4 MiB\"\n"), false),
+            (None, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let git = Craft::new(dir.path(), HashKind::Sha1);
+            let blob = git.object(ObjectType::Blob, &big);
+            let tree = git.tree(&[(b"100644", b"big", blob)]);
+            let raw = format!(
+                "tree {}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 \
+                 +0000\n\nOne\n",
+                tree.to_hex()
+            );
+            let commit = git.commit(raw.as_bytes());
+            git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
+            if let Some(rules) = rules {
+                std::fs::write(dir.path().join("bolt.toml"), rules).unwrap();
+            }
+            import(dir.path()).unwrap();
+            let packs = std::fs::read_dir(dir.path().join(".bolt/store/packs")).unwrap();
+            let lists: usize = packs
+                .map(|p| p.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|e| e == "pack"))
+                .map(|p| {
+                    let pack = PackReader::open(&p).unwrap();
+                    let entries = pack.entries().map(|e| e.unwrap());
+                    entries.filter(|e| e.kind == ObjectKind::ChunkList).count()
+                })
+                .sum();
+            assert_eq!(lists, usize::from(cut), "{rules:?}");
+
+            let mut repo = Repository::open(dir.path()).unwrap();
+            std::fs::write(dir.path().join("mine"), &mine).unwrap();
+            let id = crate::id::hash_content(&mine);
+            let actions = vec![Action {
+                path: "mine".into(),
+                change: Change::RemoveFile,
+                expected: Some(Expected {
+                    kind: EntryKind::File,
+                    id,
+                    size: mine.len() as u64,
+                }),
+            }];
+            let from = crate::history::current_save(&repo).unwrap();
+            let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+            let drive = crate::drive::probe(repo.tmp_folder()).unwrap();
+            let mut packs = repo.new_packs().unwrap();
+            let copies =
+                crate::writeout::keep_safety_copies(&repo, &actions, from, drive, &mut packs)
+                    .unwrap();
+            assert_eq!(copies.len(), 1);
+            let kind = if cut {
+                ObjectKind::ChunkList
+            } else {
+                ObjectKind::Content
+            };
+            assert_eq!(packs.kind_of(&id), Some(kind), "{rules:?}");
+        }
     }
 }

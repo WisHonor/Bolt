@@ -729,6 +729,13 @@ pub(super) enum DeltaError {
     Damaged(String),
 }
 
+impl DeltaError {
+    /// No memory for what the delta builds: told as running out of memory, not as damage.
+    pub(super) fn no_memory() -> DeltaError {
+        DeltaError::Read(io::ErrorKind::OutOfMemory.into())
+    }
+}
+
 /// The object `delta` builds on `base`, with every instruction checked; `Err` says what is wrong
 /// with the delta. For `Craft` and the delta fuzz target: imports apply deltas as they inflate.
 #[cfg(any(test, feature = "test-support"))]
@@ -771,11 +778,8 @@ pub(super) fn build_delta(
     }
     let size = usize::try_from(size).unwrap_or(usize::MAX);
     let mut out = Vec::new();
-    out.try_reserve_exact(size).map_err(|_| {
-        damaged(format!(
-            "would build {size} bytes, more memory than Bolt could get"
-        ))
-    })?;
+    out.try_reserve_exact(size)
+        .map_err(|_| DeltaError::no_memory())?;
     let cut = || DeltaError::Damaged("ends inside an instruction".to_owned());
     let mut inserted = [0u8; 0x7f];
     while let Some(op) = next_byte(delta)? {
@@ -918,6 +922,7 @@ mod tests {
             hash: HashKind::Sha1,
             includes: false,
             lfs_storage: None,
+            sparse: None,
             objects: Default::default(),
         }
     }

@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use bolt_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
-use crate::chunks::{is_cut, is_too_long_to_cut};
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
 use crate::drive::{self, Drive};
@@ -401,7 +400,7 @@ pub fn keep_safety_copies(
         }
     });
     // A small file is read on the workers; a link, and a file too big to read whole, here.
-    let on_worker = |e: Expected| e.kind != EntryKind::Symlink && ingest::is_small(e.size);
+    let on_worker = |e: Expected| e.kind != EntryKind::Symlink && store.is_small(e.size);
     let cost = |&(_, e): &(&str, Expected)| match e.kind {
         _ if on_worker(e) => ingest::cost(e.size),
         EntryKind::Symlink => 0,
@@ -438,7 +437,8 @@ pub fn keep_safety_copies(
                 } else {
                     // A big file is relied on as held only once it is cut again, which `copy_in`
                     // does.
-                    (!is_cut(e.size) && store.has_good_copy(&e.id, ObjectKind::Content, e.size)?)
+                    (!store.is_cut(e.size)
+                        && store.has_good_copy(&e.id, ObjectKind::Content, e.size)?)
                         || copy_in(&mut disk, path, e, store, packs)?
                 };
                 if kept {
@@ -544,7 +544,7 @@ fn copy_in(
     let Some(mut file) = open_to_copy(dir, name, path)? else {
         return Ok(false);
     };
-    if is_too_long_to_cut(e.size) {
+    if store.is_streamed(e.size) {
         // Stored whole, and compared with the plan's ID as it is read.
         return ingest::store_long(packs, store, e.id, e.size, || Ok(file));
     }
@@ -1838,8 +1838,9 @@ fn cant_link(e: &io::Error) -> bool {
 
 /// Whether another program holds the file open: a sharing or lock violation on Windows.
 fn in_use(e: &io::Error) -> bool {
-    // A project file in use (32) or locked (33) is left for the next run; a refusal (5) may be real.
-    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+    // A project file in use (32), locked (33) or deleted while still held open (303, on FAT and
+    // exFAT) is left for the next run; a refusal (5) may be real.
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33 | 303))
 }
 
 /// `act`, tried again while another program holds the file.

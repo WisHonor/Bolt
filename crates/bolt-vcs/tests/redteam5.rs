@@ -12,7 +12,10 @@ use support::{Env, text};
 
 fn project() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     env
 }
 

@@ -27,7 +27,7 @@ expression: doc
       "path": "c.txt"
     }
   ],
-  "not_written_here": [],
+  "not_written": [],
   "position": {
     "line": "main"
   },
@@ -50,6 +50,6 @@ expression: doc
       "tz_offset_min": "[redacted]"
     }
   },
-  "unfinished_switch": null,
+  "unfinished_switch": false,
   "warnings": []
 }

@@ -26,7 +26,10 @@ fn ok(env: &Env, args: &[&str]) -> (String, String) {
 /// nothing reaches, as a crash can leave them.
 fn with_garbage() -> Env {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     fs::write(env.root().join("a.txt"), "one").unwrap();
     ok(&env, &["save", "One"]);
     let mut repo = Repository::open(env.root()).unwrap();
@@ -88,12 +91,118 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     age(&env, 48);
     let (said, told) = ok(&env, &["tidy"]);
     assert!(
-        said.starts_with("Freed ") && said.contains(" KB ("),
+        said.starts_with("Freed ") && said.contains(" KiB  ("),
         "{said}"
     );
-    assert!(said.ends_with(" packs removed, 1 written).\n"), "{said}");
+    assert!(said.ends_with(" packs removed, 1 written)\n"), "{said}");
     assert_eq!(said.lines().count(), 1, "{said}");
     assert_eq!(told, "");
+}
+
+/// A second tidy a day later rewrites the small pack the first wrote, which frees nothing: that is
+/// nothing to free, not something it couldn't free.
+#[test]
+fn a_routine_tidy_with_nothing_to_free_says_so() {
+    let env = with_garbage();
+    age(&env, 48);
+    ok(&env, &["tidy"]);
+    age(&env, 48);
+    let (said, told) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert_eq!(told, "");
+    // Old enough to rewrite, so the estimate is worked out, not 0 for packs too young.
+    age(&env, 48);
+    let doc: Value =
+        serde_json::from_slice(&env.bolt().args(["tidy", "--json"]).output().unwrap().stdout)
+            .unwrap();
+    assert_eq!(doc["packs_young"], 0, "{doc}");
+    assert_eq!(doc["to_free"], 0, "{doc}");
+}
+
+#[test]
+fn tidy_says_freed_and_how_many_packs() {
+    let env = with_garbage();
+    age(&env, 48);
+    let packs = env.standing().1.len();
+    let (said, _) = ok(&env, &["tidy"]);
+    let (freed, packed) = said
+        .strip_prefix("Freed ")
+        .unwrap()
+        .split_once("  ")
+        .unwrap();
+    assert!(freed.ends_with(" KiB"), "{said}");
+    assert_eq!(packed, format!("({packs} packs removed, 1 written)\n"));
+    // Run again at once, it has nothing to free, says how much is stored, and why the pack it
+    // just wrote stays as it is.
+    let (said, _) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert!(
+        said.contains(".\n\n    Left 1 pack changed in the last 24 hours as it is: "),
+        "{said}"
+    );
+}
+
+/// Something to free, but every pack it would remove stays: it says nothing could be freed, never
+/// that there was nothing to free, and the warnings say why.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn tidy_that_frees_nothing_it_found_says_nothing_could_be_freed() {
+    let env = with_garbage();
+    age(&env, 48);
+    let out = env
+        .bolt()
+        .arg("tidy")
+        .env("BOLT_FAULT_FAIL", "tidy:removing")
+        .output()
+        .unwrap();
+    let (said, told) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{told}");
+    assert!(
+        said.starts_with("Nothing could be freed: storage still holds ") && said.ends_with(".\n"),
+        "{said}"
+    );
+    assert!(
+        told.starts_with("warning: Bolt couldn't remove pack "),
+        "{told}"
+    );
+}
+
+#[test]
+fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
+    let env = with_garbage();
+    fs::write(
+        env.root().join(".bolt/store/packs/zz.pack"),
+        vec![b'x'; 200],
+    )
+    .unwrap();
+    age(&env, 48);
+    let out = env.bolt().arg("tidy").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "");
+    let said = text(&out.stderr);
+    let (error, hint) = said.split_once("\n\n").unwrap();
+    // Every word of the error but the pack's path, which is the system's own spelling of it.
+    let pack = error
+        .strip_prefix("error: Bolt can't tidy this project: pack ")
+        .and_then(|rest| rest.strip_suffix(" is damaged (the file does not start with BOLTPACK)."))
+        .unwrap_or_else(|| panic!("{said}"));
+    let named = std::path::Path::new(pack);
+    assert!(
+        named.ends_with(".bolt/store/packs/zz.pack") && named.is_absolute(),
+        "{said}"
+    );
+    assert_eq!(
+        hint,
+        "hint: Nothing was removed. Check the pack's permissions. If it is damaged for good, \
+         moving it out of .bolt/store/packs lets `bolt tidy` run, losing what only it holds, and \
+         the chunks only its chunk lists name.\n"
+    );
 }
 
 #[test]
@@ -102,12 +211,16 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
     let before = env.standing();
     let (said, _) = ok(&env, &["tidy"]);
     let young = before.1.len();
-    assert_eq!(
-        said,
-        format!(
-            "Freed 0 B (0 packs removed, 0 written).\nLeft {young} packs changed in the last 24 \
-             hours as they are: a later bolt tidy frees what they hold that nothing needs.\n"
-        )
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(&format!(
+            " KiB.\n\n    Left {young} packs changed in the last 24 hours as they are: a later \
+             bolt tidy frees what they hold that nothing needs.\n"
+        )),
+        "{said}"
     );
     assert_eq!(env.standing(), before);
 }
@@ -115,7 +228,10 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
 #[test]
 fn tidy_keeps_every_chunk_of_the_big_files_it_keeps() {
     let env = Env::empty();
-    env.bolt().arg("start").assert().success();
+    env.bolt()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
     let big = env.root().join("big.bin");
     let first = write_noise(&big, 1, 2 << 20);
     ok(&env, &["save", "Big"]);
@@ -180,5 +296,20 @@ fn a_bad_undo_window_stops_tidy_naming_the_settings_file() {
     }
     fs::write(&config, "undo-window-days = 1\n").unwrap();
     let (said, _) = ok(&env, &["tidy"]);
-    assert!(said.contains("written)."), "{said}");
+    assert!(said.contains("written)\n"), "{said}");
+}
+
+#[test]
+fn tidy_json_matches_its_snapshot() {
+    let env = with_garbage();
+    age(&env, 48);
+    let out = env.bolt().args(["tidy", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let mut doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Sizes on disk depend on the times in the records, which differ from run to run.
+    for key in ["to_free", "bytes_before", "bytes_after"] {
+        assert!(doc[key].is_u64(), "{doc}");
+        doc[key] = "[redacted]".into();
+    }
+    insta::assert_json_snapshot!(doc);
 }
