@@ -5,6 +5,9 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 mod config;
+// Reached by the comparison with the old reader.
+#[cfg(test)]
+pub(crate) use config::{read_format as read_config_format, read_worktree as read_config_worktree};
 #[cfg(any(test, feature = "test-support"))]
 pub mod craft;
 mod id;

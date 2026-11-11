@@ -2,6 +2,8 @@
 #![allow(dead_code)]
 
 #[cfg(test)]
+mod compare_git_config;
+#[cfg(test)]
 mod compare_ignore;
 pub(crate) mod git_config;
 pub(crate) mod git_path;
