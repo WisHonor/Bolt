@@ -1,3 +1,8 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+disallowed-types = [
+    { path = "std::net::TcpStream", reason = "Bolt sends nothing (decision 142)" },
+    { path = "std::net::TcpListener", reason = "Bolt sends nothing (decision 142)" },
+    { path = "std::net::UdpSocket", reason = "Bolt sends nothing (decision 142)" },
+]

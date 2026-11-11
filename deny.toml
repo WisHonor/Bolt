@@ -28,6 +28,40 @@ crate = "libfuzzer-sys"
 
 [bans]
 multiple-versions = "warn"
+# Crates whose purpose is the network. Bolt sends nothing.
+deny = [
+    { crate = "reqwest", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "hyper", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "hyper-util", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "h2", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "h3", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "quinn", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "ureq", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "curl", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "curl-sys", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "isahc", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "attohttpc", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "surf", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "mio", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "socket2", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "tokio", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "async-std", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "async-net", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "native-tls", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "openssl", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "openssl-sys", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "rustls", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "hickory-resolver", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "trust-dns-resolver", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "tungstenite", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "websocket", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "ssh2", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "libssh2-sys", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "git2", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "gix-transport", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "sentry", reason = "Bolt sends nothing (decision 142)" },
+    { crate = "opentelemetry", reason = "Bolt sends nothing (decision 142)" },
+]
 
 [sources]
 unknown-registry = "deny"
