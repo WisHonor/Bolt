@@ -34,7 +34,7 @@ try {
     '[user]', 'name = "Clean Machine"', 'email = "clean@example.invalid"')
 
   Step "bolt --version prints bolt $Version"
-  $said = Run-Bolt --version
+  $said = (Run-Bolt --version) -join "`n"
   Write-Host $said
   Check ($said -ceq "bolt $Version")
 
@@ -67,20 +67,20 @@ try {
   Run-Bolt goto $first
 
   Step 'the file holds the first contents'
-  Check ((Get-Content notes.txt) -ceq 'first')
+  Check (((Get-Content notes.txt) -join "`n") -ceq 'first')
 
   Step 'undo: the second contents are back'
   Run-Bolt undo
-  Check ((Get-Content notes.txt) -ceq 'second')
+  Check (((Get-Content notes.txt) -join "`n") -ceq 'second')
 
   Step 'redo: the first contents again'
   Run-Bolt redo
-  Check ((Get-Content notes.txt) -ceq 'first')
+  Check (((Get-Content notes.txt) -join "`n") -ceq 'first')
 
   Step 'a change, put aside with shelf: the folder is clean again'
   Set-Content notes.txt third
   Run-Bolt shelf Third
-  Check ((Get-Content notes.txt) -ceq 'first')
+  Check (((Get-Content notes.txt) -join "`n") -ceq 'first')
   $now = Run-Bolt status --json | Out-String
   Write-Host $now
   Check (@(($now | ConvertFrom-Json).changes).Count -eq 0)

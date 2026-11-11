@@ -4,6 +4,7 @@
 # before it runs. Changes this computer's home folder: run it only on a throwaway runner.
 # Usage: first-run.sh <folder with the archive and SHA256SUMS> <version> <target> <download-page.md>
 set -eEuo pipefail
+[ "${GITHUB_ACTIONS:-}" = true ] || { echo "first-run.sh removes Bolt and its settings from this account and edits ~/.bashrc or ~/.zshrc: it runs only in CI" >&2; exit 2; }
 
 from=$1 version=$2 target=$3 page=$4
 archive="bolt-$version-$target.tar.gz"
@@ -60,6 +61,8 @@ run "mkdir -p ~/.local/bin"
 run "mv bolt ~/.local/bin/"
 
 step "the guide: add ~/.local/bin to the PATH in ~/$rc"
+# Not found before, so the guide's line is what puts it there.
+if new_shell "command -v bolt"; then echo "bolt is found before the PATH line is added" >&2; false; fi
 line="echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
 in_doc "$guide" "$line"
 in_doc "$guide" "on Linux, write \`~/.bashrc\` in its place"
@@ -98,6 +101,9 @@ cat "$config/config.toml"
 step "the guide: the first five minutes, in a new folder"
 mkdir "$HOME/practice"
 cd "$HOME/practice"
+# The ten lines below are every line of the section's sh blocks; one added there fails here.
+count=$(awk '/^## 3\./ { s = 1 } /^## 4\./ { s = 0 } s && /^```/ { b = b ? 0 : ($0 == "```sh"); next } s && b' "$guide" | wc -l | tr -d ' ')
+[ "$count" = 10 ]
 run 'bolt start --preset code'
 run 'echo "hello" > notes.txt'
 run 'bolt save "First notes"'
@@ -122,13 +128,20 @@ fi
 in_doc "$guide" "Then take \`~/.local/bin\` off your PATH by deleting the \`export PATH=\"\$HOME/.local/bin:\$PATH\"\` line from \`~/.zshrc\` or \`~/.bashrc\`, but only if you added that line yourself for Bolt and no other program lives in that folder."
 if [ -z "$(ls -A ~/.local/bin)" ]; then
   # The editor's work: that one line deleted.
-  grep -vxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/$rc" > "$HOME/$rc.new" || true
+  grep -vxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/$rc" > "$HOME/$rc.new" || [ $? = 1 ]
   mv "$HOME/$rc.new" "$HOME/$rc"
+  gone=yes
 else
   echo "Other programs live in ~/.local/bin, so the line stays."
+  gone=no
 fi
 
 step "in a new terminal, bolt is no longer found"
+newpath=$(new_shell 'printf %s "$PATH"')
+echo "PATH: $newpath"
+if [ "$gone" = yes ]; then
+  case ":$newpath:" in *":$HOME/.local/bin:"*) echo "~/.local/bin is still on the PATH" >&2; false ;; esac
+fi
 if new_shell "command -v bolt"; then false; fi
 
 rm -rf "$downloads" "$HOME/practice" "$(dirname "$guide")"

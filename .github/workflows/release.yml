@@ -351,9 +351,6 @@ jobs:
       TARGET: ${{ matrix.target }}
       ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
       CONTAINERS: ${{ matrix.containers }}
-      GH_TOKEN: ${{ github.token }}
-      RUN_ID: ${{ github.run_id }}
-      REPO: ${{ github.repository }}
     defaults:
       run:
         shell: bash
@@ -361,7 +358,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The token stays in this step: the program under test never sees it.
       - name: Download the archive and SHA256SUMS into a new folder
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
         run: |
           dl="$RUNNER_TEMP/download"
           mkdir "$dl"

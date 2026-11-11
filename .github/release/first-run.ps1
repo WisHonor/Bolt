@@ -6,6 +6,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Version,
   [Parameter(Mandatory = $true)][string]$Page
 )
+if ($env:GITHUB_ACTIONS -ne 'true') { Write-Host 'first-run.ps1 removes Bolt and its settings from this account and edits its Path: it runs only in CI'; exit 2 }
 $ErrorActionPreference = 'Stop'
 $script:current = ''
 $zip = "bolt-$Version-x86_64-pc-windows-msvc.zip"
@@ -24,8 +25,10 @@ function Run($line) {
   Write-Host "> $line"
   $ErrorActionPreference = 'Continue'
   $global:LASTEXITCODE = 0
+  $errors = $global:Error.Count
   Invoke-Expression $line | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "exited with $LASTEXITCODE" }
+  if ($global:Error.Count -gt $errors) { throw $global:Error[0] }
 }
 # What a new terminal gets: the Path rebuilt from the registry.
 function New-TerminalPath {
@@ -75,6 +78,9 @@ try {
 
   Step "the guide: add that folder to the account's Path"
   InDoc $guide 'Open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", "New", and add that folder. Open a new terminal.'
+  # Not found before, so the folder added is what puts it there.
+  New-TerminalPath
+  Check (-not (Get-Command bolt -ErrorAction SilentlyContinue))
   # The dialog's work, in the registry.
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   $userPath = (@($userPath -split ';' | Where-Object { $_ }) + $bin) -join ';'
@@ -86,7 +92,7 @@ try {
   Write-Host "found: $found"
   Check ($found -eq (Join-Path $bin bolt.exe))
   InDoc $guide 'bolt --version'
-  $said = powershell -NoProfile -Command 'bolt --version'
+  $said = (powershell -NoProfile -Command 'bolt --version') -join "`n"
   Write-Host $said
   Check ($said -ceq "bolt $Version")
 
@@ -103,6 +109,14 @@ try {
   $practice = Join-Path $HOME practice
   New-Item -ItemType Directory -Path $practice | Out-Null
   Set-Location -LiteralPath $practice
+  # The ten lines below are every line of the section's sh blocks; one added there fails here.
+  $in3 = $false; $inSh = $false; $count = 0
+  foreach ($l in Get-Content -LiteralPath $guide -Encoding UTF8) {
+    if ($l -match '^## 3\.') { $in3 = $true } elseif ($l -match '^## 4\.') { $in3 = $false }
+    if (-not $in3) { continue }
+    if ($l.StartsWith('```')) { $inSh = (-not $inSh) -and ($l -ceq '```sh') } elseif ($inSh) { $count++ }
+  }
+  Check ($count -eq 10)
   Run 'bolt start --preset code'
   Run 'echo "hello" > notes.txt'
   Run 'bolt save "First notes"'
@@ -113,7 +127,7 @@ try {
   Run 'bolt save "More notes"'
   Run 'bolt history'
   Run 'bolt undo'
-  Check ((Get-Content notes.txt) -ceq 'hello again')
+  Check (((Get-Content notes.txt) -join "`n") -ceq 'hello again')
 
   Step 'the guide: removing Bolt from a computer'
   Set-Location -LiteralPath $HOME
@@ -129,6 +143,8 @@ try {
 
   Step 'in a new terminal, bolt is no longer found'
   New-TerminalPath
+  Write-Host "Path: $env:Path"
+  Check (-not (@($env:Path -split ';') -contains $bin))
   Check (-not (Get-Command bolt -ErrorAction SilentlyContinue))
 
   Remove-Item -LiteralPath $reading, $practice, $unpacked -Recurse -Force

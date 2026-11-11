@@ -253,6 +253,8 @@ Your first save is wxyn on line main.
 Next: change some files, then run: bolt save "describe your change"
 ```
 
+On Windows, in a terminal run as administrator, Bolt first warns `This project belongs to the Administrators group, so it opens only from an administrator terminal.`, and the project will then open only from such a terminal. Start your projects from a normal terminal ([section 11](#11-personal-settings), `safe-folders`, says why).
+
 Bolt made three things:
 
 - a hidden folder `.bolt`, where it keeps everything it stores;
@@ -319,7 +321,7 @@ modified  notes.txt  +1 -1  (6 B → 12 B)
 
 A line starting with `-` was taken out, and one starting with `+` was put in.
 
-On Windows, in the Windows PowerShell that comes with Windows (version 5.1), `echo "hello" > notes.txt` writes the file in UTF-16, a form of text Bolt doesn't read as text. The sizes are then larger (`16 B → 28 B`) and `bolt changes` says `(binary: no lines shown)` instead of showing the lines. Bolt still saves the file exactly. To see the lines, write both versions as UTF-8: `"hello" | Set-Content -Encoding utf8 notes.txt` in place of the first `echo` line, and `"hello again" | Set-Content -Encoding utf8 notes.txt` in place of the second. Each line then starts with `\u{feff}`, the mark Windows PowerShell puts at the start of a UTF-8 file. PowerShell 7's `>` writes UTF-8 without that mark.
+On Windows, in the Windows PowerShell that comes with Windows (version 5.1), `echo "hello" > notes.txt` writes the file in UTF-16, a form of text Bolt doesn't read as text. The sizes are then larger (`16 B -> 28 B`; that console shows `->` for `→`) and `bolt changes` says `(binary: no lines shown)` instead of showing the lines. Bolt still saves the file exactly. To see the lines, write both versions as UTF-8 (if one is UTF-16, the change still shows as binary): `"hello" | Set-Content -Encoding utf8 notes.txt` in place of the first `echo` line, and `"hello again" | Set-Content -Encoding utf8 notes.txt` in place of the second. The changed line then starts with `\u{feff}`, the mark Windows PowerShell puts at the start of a UTF-8 file. PowerShell 7's `>` writes UTF-8 without that mark.
 
 ### Save again, and look back
 
