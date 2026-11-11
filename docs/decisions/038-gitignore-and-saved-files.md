@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-02
-- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (a save warns when it keeps a change to a file an ignore rule matches); [decision 046](046-nested-projects-left-out.md) (a folder that holds a repository or project of its own is left out as if ignored)
+- **Refined by:** [decision 043](043-red-team-m2-rulings.md) (a save warns when it keeps a change to a file an ignore rule matches); [decision 046](046-nested-projects-left-out.md) (a folder that holds a repository or project of its own is left out as if ignored); [decision 107](107-a-saved-files-ignore-rules-are-read-only-when-it-changed.md) (a file the last save holds is matched against the rules only when it changed; the warnings are the same); [decision 101](101-the-walk-lists-a-folder-before-it-looks-inside.md) (a folder's ignore files are opened only when its listing could hold them)
 - **Partly superseded by:** [decision 047](047-git-personal-ignore-lists-read.md) (Git's personal lists are read too)
 - **Agenda topic:** none (milestone 2 planning, question 8)
 - **Partly supersedes:** [decision 008](008-layout-and-settings.md) ("Git import copies an existing `.gitignore` into it")

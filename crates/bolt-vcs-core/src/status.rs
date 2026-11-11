@@ -88,8 +88,8 @@ pub fn status(
     let (_, entry) = repo.current()?;
     let save_id = tip_of(&entry)?;
     let save = repo.store().save(&save_id, repo.signatures_allowed())?;
-    let now =
-        read_folder(repo, save.root, full, git_excludes).map_err(|e| e.in_save(save_id, true))?;
+    let now = read_folder(repo, save.root, full, git_excludes, None)
+        .map_err(|e| e.in_save(save_id, true))?;
     let mut warnings = now.warnings;
     let unfinished = writeout::unfinished_warning(repo);
     let unfinished_switch = unfinished.as_ref().map(|w| w.message.clone());

@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 008](008-layout-and-settings.md) (the format version, the feature list, and upgrades only through `bolt setup`); [decision 019](019-review-clarifications.md) (format 1 freezes at the v0.1 release); [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (whether `feature chunks` stays a feature line "is settled when format 1 freezes"); [decision 012](012-lines.md) (how line names are compared)
+- **Refined by:** [decision 109](109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md) (the three format questions it left open: none changes the format)
 
 ## Context
 

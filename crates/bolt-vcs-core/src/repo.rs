@@ -1590,7 +1590,8 @@ impl Repository {
             std::process::id()
         );
         let (held, name) = (&self.held, "lock-info");
-        write_atomic(&held.tmp, &held.state, name, info.as_bytes())
+        // Only ever a hint to a waiting command, so not flushed.
+        fsio::write_unflushed(&held.tmp, &held.state, name, info.as_bytes())
             .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         // Before anything is stored: builds from before chunk lists must refuse this project now.
         if !self.format.features.contains(CHUNKS) {

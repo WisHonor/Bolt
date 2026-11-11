@@ -32,7 +32,7 @@ jobs:
           restore-keys: fuzz-corpus-
       - name: Fuzz every target
         run: |
-          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines decode_project_link open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config change_ids file_cache decode_journal decode_chunk_list cut_chunks parse_rules; do
+          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines decode_project_link open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config change_ids other_lines file_cache decode_journal decode_chunk_list cut_chunks parse_rules; do
             cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 || exit 1
           done
       - name: Upload crash files
@@ -143,3 +143,9 @@ jobs:
   memory-gate:
     if: github.event_name != 'push'
     uses: ./.github/workflows/memory-gate.yml
+
+  # Bolt's status, small save and goto on Git's source, at most twice Git's time.
+  # Nightly and by hand, not on pushes.
+  speed-gate:
+    if: github.event_name != 'push'
+    uses: ./.github/workflows/speed-gate.yml

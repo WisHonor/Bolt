@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 11
-- **Refined by:** [decision 048](048-handle-relative-file-access.md) (folders are held open and worked inside, never through a link); [decision 049](049-writing-files-one-at-a-time.md) (files are written one at a time from a journal a crash leaves to finish); [decision 053](053-file-state-cache.md) (the file-state cache)
+- **Refined by:** [decision 048](048-handle-relative-file-access.md) (folders are held open and worked inside, never through a link); [decision 049](049-writing-files-one-at-a-time.md) (files are written one at a time from a journal a crash leaves to finish); [decision 053](053-file-state-cache.md) (the file-state cache); [decision 110](110-the-last-saves-listings-are-read-ahead-of-the-walk.md) (the last save's listings are read ahead of the walk); [decision 100](100-caches-are-written-without-a-flush-and-only-when-they-changed.md) (caches, `state/lock-info` and the drive test's file are replaced without a flush)
 
 ## Context
 

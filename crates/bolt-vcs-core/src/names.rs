@@ -9,6 +9,7 @@
 //! The limits on names and paths are here too (decision 051).
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
@@ -146,17 +147,54 @@ fn ntfs_base(name: &str) -> &str {
 /// trailing dots or spaces, a `:stream`, the short names `bolt~1` to `bolt~4`, or characters macOS
 /// ignores. It answers the same on every system.
 pub fn is_bolt_alias(name: &str) -> bool {
-    let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
-    let base = ntfs_base(&kept).to_ascii_lowercase();
+    // The characters macOS ignores are all outside ASCII, so an ASCII first byte starts the base.
+    if starts_outside(name, b".bB") {
+        return false;
+    }
+    #[cfg(test)]
+    tests::count_full_check();
+    // `ntfs_base` of the name without its ignorable characters, in ASCII lowercase; both
+    // spellings below are at most 6 characters, so a longer base is neither.
+    let mut base = ['\0'; 6];
+    let mut end = 0;
+    let chars = name.chars().filter(|&c| !is_ignorable(c));
+    for (at, c) in chars
+        .take_while(|c| !matches!(c, ':' | '/' | '\\'))
+        .enumerate()
+    {
+        let trailing = c == '.' || c == ' ';
+        match base.get_mut(at) {
+            Some(slot) => *slot = c.to_ascii_lowercase(),
+            None if trailing => continue,
+            None => return false,
+        }
+        if !trailing {
+            end = at + 1;
+        }
+    }
+    let base = base.get(..end).unwrap_or_default();
     // `bolt~1`..`bolt~4` are NTFS 8.3 short names of `.bolt` (Git accepts ~1..~4).
-    base == ".bolt" || matches!(base.as_bytes(), [b'b', b'o', b'l', b't', b'~', b'1'..=b'4'])
+    base == ['.', 'b', 'o', 'l', 't'] || matches!(base, ['b', 'o', 'l', 't', '~', '1'..='4'])
 }
 
 /// Whether Windows or macOS would take `name` for Git's own folder, `.git`. This is Git's
 /// `is_ntfs_dotgit` and `is_hfs_dotgit`, plus the look its fsck takes at every part after a
 /// backslash, and it answers the same on every system.
 pub fn is_git_alias(name: &str) -> bool {
+    // Without a backslash the name is its only part, and both checks need `.`, `g` or `G` first.
+    if starts_outside(name, b".gG") && !name.contains('\\') {
+        return false;
+    }
+    #[cfg(test)]
+    tests::count_full_check();
     is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+}
+
+/// Whether `name` starts with an ASCII byte that isn't one of `firsts`.
+fn starts_outside(name: &str, firsts: &[u8]) -> bool {
+    name.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii() && !firsts.contains(b))
 }
 
 /// Whether `name`, in the project's top folder, is the project's own `.bolt` or Git's `.git` as
@@ -166,6 +204,53 @@ pub fn own_folder(name: &str, drive: Drive) -> bool {
     [".bolt", ".git"]
         .iter()
         .any(|own| name == *own || (drive.ignores_case && name.eq_ignore_ascii_case(own)))
+}
+
+/// Which of `.git`, `.bolt`, `.gitignore` and `.boltignore` a folder could hold, judged from its
+/// listing. False only where no drive could find the name there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub git: bool,
+    pub bolt: bool,
+    pub gitignore: bool,
+    pub boltignore: bool,
+}
+
+impl Listed {
+    /// Each could be there: ask the drive for all four.
+    pub(crate) const ALL: Listed = Listed {
+        git: true,
+        bolt: true,
+        gitignore: true,
+        boltignore: true,
+    };
+}
+
+/// What a folder could hold, from each entry's name and Windows short name. A drive matches an
+/// all-ASCII name by ASCII letter case at most; any name outside ASCII and Bolt can't tell, so all
+/// four could be there.
+pub(crate) fn listed_hints<'a>(
+    names: impl Iterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Listed {
+    // Elsewhere a FAT or NTFS drive answers to a short name (`.GIT`) its listing doesn't show.
+    let unlisted_short_names = cfg!(not(windows));
+    let mut hints = Listed {
+        git: unlisted_short_names,
+        bolt: unlisted_short_names,
+        gitignore: false,
+        boltignore: false,
+    };
+    for name in names.flat_map(|(name, short)| std::iter::once(name).chain(short)) {
+        let name = name.as_encoded_bytes();
+        if !name.is_ascii() {
+            return Listed::ALL;
+        }
+        hints.git |= name.eq_ignore_ascii_case(b".git");
+        hints.bolt |= name.eq_ignore_ascii_case(b".bolt");
+        hints.gitignore |= name.eq_ignore_ascii_case(b".gitignore");
+        hints.boltignore |= name.eq_ignore_ascii_case(b".boltignore");
+    }
+    hints
 }
 
 fn is_ntfs_dotgit(name: &str) -> bool {
@@ -543,6 +628,254 @@ pub fn project_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// The plain `is_bolt_alias`, which copies the name twice.
+    fn bolt_alias_by_copying(name: &str) -> bool {
+        let kept: String = name.chars().filter(|c| !is_ignorable(*c)).collect();
+        let base = ntfs_base(&kept).to_ascii_lowercase();
+        base == ".bolt" || matches!(base.as_bytes(), [b'b', b'o', b'l', b't', b'~', b'1'..=b'4'])
+    }
+
+    /// Names close to `.bolt` and `.git`: their pieces, in any letter case, among characters
+    /// macOS ignores, trailing dots and spaces, streams and backslashes.
+    fn near_alias() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            Just(".bolt"),
+            Just(".git"),
+            Just("bolt~1"),
+            Just("bolt~2"),
+            Just("bolt~3"),
+            Just("bolt~5"),
+            Just("git~1"),
+            Just("."),
+            Just(" "),
+            Just(":"),
+            Just("\\"),
+            Just("/"),
+            Just("\u{200C}"),
+            Just("\u{FEFF}"),
+            Just("\u{FFFF}"),
+            Just("b"),
+            Just("é"),
+        ];
+        (prop::collection::vec(piece, 0..6), any::<u8>()).prop_map(|(pieces, case)| {
+            pieces
+                .concat()
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if case >> (i % 8) & 1 == 1 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn bolt_aliases_match_the_plain_check(name in near_alias()) {
+            prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
+        }
+
+        #[test]
+        fn bolt_aliases_match_the_plain_check_in_any_string(name in any::<String>()) {
+            prop_assert_eq!(is_bolt_alias(&name), bolt_alias_by_copying(&name));
+        }
+    }
+
+    thread_local! {
+        static FULL_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn count_full_check() {
+        FULL_CHECKS.with(|n| n.set(n.get().saturating_add(1)));
+    }
+
+    fn git_alias_in_full(name: &str) -> bool {
+        is_hfs_dotgit(name) || name.split('\\').any(is_ntfs_dotgit)
+    }
+
+    fn bolt_alias_in_full(name: &str) -> bool {
+        let mut base = ['\0'; 6];
+        let mut end = 0;
+        let chars = name.chars().filter(|&c| !is_ignorable(c));
+        for (at, c) in chars
+            .take_while(|c| !matches!(c, ':' | '/' | '\\'))
+            .enumerate()
+        {
+            let trailing = c == '.' || c == ' ';
+            match base.get_mut(at) {
+                Some(slot) => *slot = c.to_ascii_lowercase(),
+                None if trailing => continue,
+                None => return false,
+            }
+            if !trailing {
+                end = at + 1;
+            }
+        }
+        let base = base.get(..end).unwrap_or_default();
+        base == ['.', 'b', 'o', 'l', 't'] || matches!(base, ['b', 'o', 'l', 't', '~', '1'..='4'])
+    }
+
+    /// Names built from pieces at the edges of the early answer: `.git` and `.bolt` spellings,
+    /// the first bytes it lets through, separators, ignorable characters and ordinary letters.
+    fn near_first_byte() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            Just(".git"),
+            Just(".GIT"),
+            Just("git~1"),
+            Just("GIT~1"),
+            Just("git~2"),
+            Just(".bolt"),
+            Just("bolt~2"),
+            Just("Bolt~3"),
+            Just("BOLT~4"),
+            Just("bolt~5"),
+            Just("."),
+            Just("g"),
+            Just("G"),
+            Just("b"),
+            Just("B"),
+            Just(" "),
+            Just(":"),
+            Just("/"),
+            Just("\\"),
+            Just("\u{200C}"),
+            Just("\u{FEFF}"),
+            Just("é"),
+            Just("x"),
+            Just("7"),
+        ];
+        prop::collection::vec(piece, 0..=6).prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+        #[test]
+        fn the_early_answer_for_git_is_the_full_one(name in near_first_byte()) {
+            prop_assert_eq!(is_git_alias(&name), git_alias_in_full(&name));
+        }
+
+        #[test]
+        fn the_early_answer_for_bolt_is_the_full_one(name in near_first_byte()) {
+            prop_assert_eq!(is_bolt_alias(&name), bolt_alias_in_full(&name));
+        }
+    }
+
+    #[test]
+    fn the_early_answers_match_the_full_ones_around_every_spelling() {
+        let alphabet = [
+            '.', 'g', 'G', 'i', 't', 'b', 'o', 'l', '~', '1', '\\', ':', '/', ' ', 'a',
+        ];
+        // Every string of 0 to 2 bytes from the alphabet.
+        let mut short = vec![String::new()];
+        let mut last = short.clone();
+        for _ in 0..2 {
+            last = last
+                .iter()
+                .flat_map(|n| alphabet.iter().map(move |c| format!("{n}{c}")))
+                .collect();
+            short.extend(last.iter().cloned());
+        }
+        // The empty core keeps every string of up to 4 bytes in the run.
+        let cores = [
+            "", ".git", ".GIT", "git~1", "GIT~1", ".bolt", ".BOLT", "bolt~1", "bolt~2", "bolt~3",
+            "bolt~4",
+        ];
+        let (mut git, mut bolt) = (0, 0);
+        for core in cores {
+            for before in &short {
+                for after in &short {
+                    let name = format!("{before}{core}{after}");
+                    let (git_full, bolt_full) =
+                        (git_alias_in_full(&name), bolt_alias_in_full(&name));
+                    assert_eq!(is_git_alias(&name), git_full, "{name:?}");
+                    assert_eq!(is_bolt_alias(&name), bolt_full, "{name:?}");
+                    git += usize::from(git_full);
+                    bolt += usize::from(bolt_full);
+                }
+            }
+        }
+        // The names must hold look-alikes, or a wrong early `false` would go unseen.
+        assert!(git > 0 && bolt > 0, "{git} {bolt}");
+    }
+
+    #[test]
+    fn ordinary_names_never_reach_the_full_checks() {
+        let before = FULL_CHECKS.with(|n| n.get());
+        for i in 0..1000 {
+            let name = format!("file{i}.txt");
+            assert_eq!(validate_name(&name), Ok(()));
+            assert!(!is_git_alias(&name) && !is_bolt_alias(&name));
+        }
+        assert_eq!(FULL_CHECKS.with(|n| n.get()), before);
+    }
+
+    #[test]
+    fn a_listing_rules_out_only_names_no_drive_could_find() {
+        let hints = |names: &[(&str, Option<&str>)]| {
+            listed_hints(
+                names
+                    .iter()
+                    .map(|(n, s)| (OsStr::new(n), s.map(OsStr::new))),
+            )
+        };
+        // Off Windows a listing shows no short names, so `.git` and `.bolt` are always asked for.
+        let by_listing = cfg!(windows);
+        let only = |git: bool, bolt: bool, gitignore, boltignore| Listed {
+            git: git || !by_listing,
+            bolt: bolt || !by_listing,
+            gitignore,
+            boltignore,
+        };
+        let none = only(false, false, false, false);
+        #[cfg(windows)]
+        assert_eq!(
+            hints(&[("a.txt", None)]),
+            Listed {
+                git: false,
+                bolt: false,
+                gitignore: false,
+                boltignore: false
+            }
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            hints(&[("a.txt", None)]),
+            Listed {
+                git: true,
+                bolt: true,
+                gitignore: false,
+                boltignore: false
+            }
+        );
+        assert_eq!(hints(&[]), none);
+        assert_eq!(hints(&[("a.txt", None), ("sub", None)]), none);
+        assert_eq!(hints(&[(".git", None)]), only(true, false, false, false));
+        assert_eq!(hints(&[(".bolt", None)]), only(false, true, false, false));
+        assert_eq!(
+            hints(&[(".gitignore", None), (".boltignore", None)]),
+            only(false, false, true, true)
+        );
+        assert_eq!(
+            hints(&[(".GiT", None), (".BOLT", None), (".GITignore", None)]),
+            only(true, true, true, false)
+        );
+        assert_eq!(hints(&[(".gitx", None), ("x.git", None)]), none);
+        assert_eq!(hints(&[("a.txt", None), ("é.txt", None)]), Listed::ALL);
+        // `GIT~1` is a short name `.git` can have, but a lookup of `.git` doesn't find it by that.
+        assert_eq!(hints(&[("git-stuff", Some("GIT~1"))]), none);
+        assert_eq!(
+            hints(&[("long", Some(".GIT"))]),
+            only(true, false, false, false)
+        );
+        assert_eq!(hints(&[("long", Some("É"))]), Listed::ALL);
+    }
 
     #[test]
     fn given_paths_become_project_paths() {
@@ -709,6 +1042,7 @@ mod tests {
             "bolt",
             "bolt~5",
             "bolt~12",
+            "x\\.bolt",
         ] {
             assert_eq!(validate_name(ok), Ok(()), "{ok}");
             assert!(!is_bolt_alias(ok), "{ok}");
@@ -1013,6 +1347,8 @@ mod tests {
             "git~1 . :$DATA",
             ".g\u{200c}it",
             "\u{feff}.git",
+            "x\\.git",
+            "\\.git",
         ] {
             assert!(is_git_alias(name), "{name:?}");
         }
@@ -1059,6 +1395,7 @@ mod tests {
             "git",
             ".git2",
             "xgit~1",
+            "a.git",
             ".bolt",
             ".git x",
             ".git .x",

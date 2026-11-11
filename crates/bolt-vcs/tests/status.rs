@@ -282,6 +282,30 @@ fn status_never_writes_to_the_store() {
 }
 
 #[test]
+fn an_unchanged_status_leaves_the_file_cache_untouched() {
+    // Files an hour old, so every entry is trusted and none turns racy.
+    let env = project(&[("a.txt", "a"), ("sub/b.txt", "b")]);
+    let cache = env.root().join(".bolt/cache/files");
+    let look = || {
+        let meta = fs::metadata(&cache).unwrap();
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        (
+            meta.modified().unwrap(),
+            meta.len(),
+            inode,
+            fs::read(&cache).unwrap(),
+        )
+    };
+    assert!(changes(&status_json(&env, &[])).is_empty());
+    let before = look();
+    assert!(changes(&status_json(&env, &[])).is_empty());
+    assert_eq!(look(), before);
+}
+
+#[test]
 fn a_cache_that_cant_be_written_is_a_warning() {
     let env = project(&[("a.txt", "a")]);
     // The save wrote the cache; a folder takes its place.

@@ -12,7 +12,7 @@ use bolt_core::diary::Position;
 use bolt_core::fsio::fault;
 use bolt_core::id::Id;
 use bolt_core::listing::EntryKind;
-use bolt_core::pack::{IndexEntry, ObjectKind, PackReader, set_test_pack_limit};
+use bolt_core::pack::set_test_pack_limit;
 use bolt_core::repo::Repository;
 use bolt_core::shelf::shelf;
 use bolt_core::snapshot::SaveError;
@@ -22,7 +22,7 @@ use bolt_core::warning::{HEAD_NOT_FLUSHED, SWITCH_UNFINISHED};
 use bolt_core::workers::set_test_workers;
 
 mod support;
-use support::{ada, id_of, save_here, top_folder, write_noise};
+use support::{ada, id_of, packs_in, save_here, top_folder, write_noise};
 
 /// A new project holding `big.bin`, 3 MiB or about 48 chunks, to be saved in packs of 16
 /// objects; the file's ID.
@@ -213,36 +213,6 @@ fn stopped_at(n: u64, count: usize) -> (Option<String>, Vec<String>) {
         }
     });
     (place, packs_in(&dir.path().join(".bolt/store/packs")))
-}
-
-/// The packs in the folder `packs`, by name. One that holds a save, whose change ID is drawn at
-/// random, or a record naming one, is told by the files and folders it holds.
-fn packs_in(packs: &std::path::Path) -> Vec<String> {
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(packs).unwrap() {
-        let path = entry.unwrap().path();
-        let objects: Vec<IndexEntry> = PackReader::open(&path)
-            .unwrap()
-            .entries()
-            .map(Result::unwrap)
-            .collect();
-        let made = |e: &&IndexEntry| {
-            use ObjectKind::{ChunkList, Content, FolderListing};
-            matches!(e.kind, Content | ChunkList | FolderListing)
-        };
-        found.push(if objects.iter().all(|e| made(&e)) {
-            path.file_name().unwrap().to_string_lossy().into_owned()
-        } else {
-            let ids: Vec<String> = objects
-                .iter()
-                .filter(made)
-                .map(|e| e.id.to_string())
-                .collect();
-            format!("with a save: {}", ids.join(","))
-        });
-    }
-    found.sort();
-    found
 }
 
 #[test]

@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 5 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 023](023-v0.1-speed-bar.md) (how the two gates are measured and the results published); decisions [009](009-storage-engine.md), [057](057-pack-index-on-disk-and-merging.md) and [077](077-tidy-and-the-undo-window.md) (compressing again at a stronger level waits for these numbers)
+- **Refined by:** [decision 099](099-a-third-speed-gate-within-twice-gits-time.md) (a third gate, and how it is measured and enforced); [decision 103](103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) (what the benchmarks rule on: zstd level 3 and the chunk sizes stay)
 
 ## Context
 

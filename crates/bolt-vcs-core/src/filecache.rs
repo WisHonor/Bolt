@@ -4,11 +4,13 @@
 //! empty.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{self, Write};
+use std::path::Path;
 
-use bolt_platform::dir::{EntryMeta, EntryType};
+use bolt_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::Id;
@@ -50,25 +52,81 @@ struct Entry {
     racy: bool,
 }
 
-/// The file-state cache, by project path.
+/// An entry of the body the cache was read from.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    /// Where its path is in the body: start and end.
+    at: (u32, u32),
+    entry: Entry,
+    /// Vouched for by this scan, so written again.
+    kept: bool,
+    /// Recorded again by this scan: `added` holds what the path is now, if anything.
+    gone: bool,
+}
+
+/// The file-state cache, by project path: the body it was read from, indexed in place, and what
+/// this scan recorded.
 #[derive(Debug, Default, Clone)]
 pub struct FileCache {
-    files: BTreeMap<String, Entry>,
+    body: Vec<u8>,
+    /// In the body's order, which is the paths'.
+    slots: Vec<Slot>,
+    added: BTreeMap<String, Entry>,
+    /// `body` is what `cache/files` holds, so writing the same again can be skipped.
+    loaded: bool,
+    /// The slot after the last one asked for: files are asked for nearly in the slots' order.
+    next: Cell<usize>,
+    #[cfg(test)]
+    searches: Cell<usize>,
 }
 
 impl FileCache {
     /// The cache's body, without its seal.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new();
+        self.body_of(true, None)
+    }
+
+    /// The body holding every entry (`all`) or only those this scan met, each marked racy if
+    /// its file changed after `trusted_before`.
+    fn body_of(&self, all: bool, trusted_before: Option<i128>) -> Vec<u8> {
+        let wanted = |s: &&Slot| !s.gone && (all || s.kept);
+        let count = self
+            .slots
+            .iter()
+            .filter(wanted)
+            .count()
+            .saturating_add(self.added.len());
+        let mut slots = self
+            .slots
+            .iter()
+            .filter(wanted)
+            .map(|s| (self.path_of(s), s.entry))
+            .peekable();
+        let mut added = self
+            .added
+            .iter()
+            .map(|(path, entry)| (path.as_bytes(), *entry))
+            .peekable();
+        let mut w = Writer::with_capacity(self.body.len());
         for b in MAGIC {
             w.u8(*b);
         }
         w.u8(VERSION);
-        w.varint(self.files.len() as u64);
-        for (path, entry) in &self.files {
+        w.varint(count as u64);
+        loop {
+            // A path is never in both.
+            let next = match (slots.peek(), added.peek()) {
+                (Some(s), Some(a)) if s.0 < a.0 => slots.next(),
+                (Some(_), None) => slots.next(),
+                _ => added.next(),
+            };
+            let Some((path, entry)) = next else {
+                break;
+            };
             let s = &entry.state;
-            w.string(path);
+            let racy = entry.racy || trusted_before.is_some_and(|t| s.modified_ns > t);
+            w.bytes(path);
             w.u8(s.kind as u8);
             w.varint(s.size);
             // `record` keeps only times whose seconds fit.
@@ -81,7 +139,7 @@ impl FileCache {
             w.u64(drive);
             w.u64(number as u64);
             w.u64((number >> 64) as u64);
-            w.bool(entry.racy);
+            w.bool(racy);
             w.id(&s.id);
         }
         w.into_bytes()
@@ -89,6 +147,10 @@ impl FileCache {
 
     /// Reads a body `encode` wrote. Paths must be in byte order, each once.
     pub fn decode(body: &[u8]) -> Result<FileCache, DecodeError> {
+        FileCache::decode_owned(body.to_vec())
+    }
+
+    fn decode_owned(body: Vec<u8>) -> Result<FileCache, DecodeError> {
         let rest = body
             .strip_prefix(MAGIC.as_slice())
             .ok_or(DecodeError::Invalid("not a file-state cache"))?;
@@ -97,16 +159,23 @@ impl FileCache {
             return Err(DecodeError::Invalid("file-state cache version"));
         }
         // Each entry takes at least this many bytes, so a count past what is left is refused.
-        let fits = r.remaining().checked_div(MIN_ENTRY).unwrap_or(0) as u64;
-        let count = r.count(fits, "file count")?;
-        let mut files = BTreeMap::new();
+        let fits = r.remaining().checked_div(MIN_ENTRY).unwrap_or(0);
+        let count = r.count(fits as u64, "file count")?;
+        let mut slots = Vec::with_capacity(fits.min(usize::try_from(count).unwrap_or(0)));
         let mut last: Option<&str> = None;
+        let too_big = || DecodeError::Invalid("file-state cache too big");
         for _ in 0..count {
             let path = r.string(MAX_PATH, "path")?;
             if last.is_some_and(|before| before >= path) {
                 return Err(DecodeError::Invalid("paths out of order"));
             }
             last = Some(path);
+            let end = body.len().checked_sub(r.remaining()).ok_or_else(too_big)?;
+            let start = end.checked_sub(path.len()).ok_or_else(too_big)?;
+            let at = (
+                u32::try_from(start).map_err(|_| too_big())?,
+                u32::try_from(end).map_err(|_| too_big())?,
+            );
             let kind = EntryKind::from_u8(r.u8()?)
                 .filter(|k| kind_of_entry(*k))
                 .ok_or(DecodeError::Invalid("file kind"))?;
@@ -128,25 +197,95 @@ impl FileCache {
                 file_id: (drive, u128::from(high) << 64 | u128::from(low)),
                 id,
             };
-            files.insert(path.to_owned(), Entry { state, racy });
+            slots.push(Slot {
+                at,
+                entry: Entry { state, racy },
+                kept: false,
+                gone: false,
+            });
         }
         r.finish()?;
-        Ok(FileCache { files })
+        Ok(FileCache {
+            body,
+            slots,
+            ..FileCache::default()
+        })
     }
 
     /// The cache in `repo`, or an empty one if it is missing, unreadable, or not sealed by the
     /// handle's key, or the handle has none.
     #[must_use]
     pub fn load(repo: &Repository) -> FileCache {
-        let Some(key) = repo.cache_key() else {
+        FileCache::load_from(repo.cache_folder(), &repo.cache_dir(), repo.cache_key())
+    }
+
+    /// `load`, on a helper thread while `meanwhile` runs on this one. Without a thread, the cache
+    /// is loaded here afterwards; a helper that fails gives an empty cache.
+    pub(crate) fn load_during<T>(
+        repo: &Repository,
+        meanwhile: impl FnOnce() -> T,
+    ) -> (T, FileCache) {
+        let (folder, shown, key) = (repo.cache_folder(), repo.cache_dir(), repo.cache_key());
+        std::thread::scope(|scope| {
+            let helper = std::thread::Builder::new()
+                .spawn_scoped(scope, move || FileCache::load_from(folder, &shown, key));
+            let done = meanwhile();
+            let cache = match helper {
+                Ok(helper) => helper.join().unwrap_or_default(),
+                Err(_) => FileCache::load(repo),
+            };
+            (done, cache)
+        })
+    }
+
+    /// The cache in the folder `cache/`, shown as `cache_dir`, sealed with `key`.
+    fn load_from(folder: &Dir, cache_dir: &Path, key: Option<&[u8; keyed::KEY_LEN]>) -> FileCache {
+        let Some(key) = key else {
             return FileCache::default();
         };
-        let shown = repo.cache_dir().join(FILE);
-        let read =
-            safe_fs::read_capped_in(repo.cache_folder(), OsStr::new(FILE), &shown, MAX_BYTES);
-        read.ok()
-            .and_then(|bytes| FileCache::decode(keyed::open_sealed(key, &bytes)?).ok())
+        let shown = cache_dir.join(FILE);
+        let read = safe_fs::read_capped_in(folder, OsStr::new(FILE), &shown, MAX_BYTES);
+        let Ok(mut bytes) = read else {
+            return FileCache::default();
+        };
+        let Some(body_len) = keyed::open_sealed(key, &bytes).map(<[u8]>::len) else {
+            return FileCache::default();
+        };
+        bytes.truncate(body_len);
+        FileCache::decode_owned(bytes)
+            .map(|cache| FileCache {
+                loaded: true,
+                ..cache
+            })
             .unwrap_or_default()
+    }
+
+    fn path_of(&self, slot: &Slot) -> &[u8] {
+        let (start, end) = slot.at;
+        self.body
+            .get(start as usize..end as usize)
+            .unwrap_or_default()
+    }
+
+    /// The slot of `path`, if the body holds it.
+    fn find(&self, path: &str) -> Option<usize> {
+        let next = self.next.get();
+        let at = if self
+            .slots
+            .get(next)
+            .is_some_and(|s| self.path_of(s) == path.as_bytes())
+        {
+            Ok(next)
+        } else {
+            #[cfg(test)]
+            self.searches.set(self.searches.get().saturating_add(1));
+            self.slots
+                .binary_search_by(|s| self.path_of(s).cmp(path.as_bytes()))
+        };
+        // After a path the cache doesn't hold, the next one asked for is likely where it would go.
+        self.next
+            .set(at.map_or_else(|gap| gap, |i| i.saturating_add(1)));
+        at.ok()
     }
 
     /// What the cache knows of `path`, if the file there is still the same file, with that kind,
@@ -154,7 +293,16 @@ impl FileCache {
     /// 0 is never trusted: some network and FUSE drives give every file that number.
     #[must_use]
     pub fn matches(&self, path: &str, meta: &EntryMeta) -> Option<&FileState> {
-        let entry = self.files.get(path).filter(|e| !e.racy)?;
+        self.trusted(path, meta).map(|(_, s)| s)
+    }
+
+    /// `matches`, with the slot the entry came from. Only an entry read from the file is trusted:
+    /// one this scan recorded hasn't been through the two-second rule yet.
+    fn trusted(&self, path: &str, meta: &EntryMeta) -> Option<(usize, &FileState)> {
+        let slot = self
+            .find(path)
+            .filter(|&i| self.slots.get(i).is_some_and(|s| !s.gone))?;
+        let entry = self.slots.get(slot).map(|s| &s.entry).filter(|e| !e.racy)?;
         let s = &entry.state;
         (Some(s.kind) == kind_of(meta)
             && s.size == meta.size
@@ -162,7 +310,29 @@ impl FileCache {
             && s.changed_ns == meta.changed_ns
             && s.file_id == meta.file_id
             && meta.file_id.1 != 0)
-            .then_some(s)
+            .then_some((slot, s))
+    }
+
+    /// `matches`, and keeps the entry for the next write.
+    pub(crate) fn vouch(&mut self, path: &str, meta: &EntryMeta) -> Option<FileState> {
+        self.vouch_if(path, meta, |_| true)
+    }
+
+    /// `vouch`, if `keep` takes what the cache knows.
+    pub(crate) fn vouch_if(
+        &mut self,
+        path: &str,
+        meta: &EntryMeta,
+        keep: impl FnOnce(&FileState) -> bool,
+    ) -> Option<FileState> {
+        let (slot, state) = self
+            .trusted(path, meta)
+            .map(|(slot, s)| (slot, *s))
+            .filter(|(_, s)| keep(s))?;
+        if let Some(slot) = self.slots.get_mut(slot) {
+            slot.kept = true;
+        }
+        Some(state)
     }
 
     /// Records that the file at `path`, with these details, holds the content `id`. Folders and
@@ -171,8 +341,12 @@ impl FileCache {
         let fits = path.len() <= MAX_PATH
             && split_ns(meta.modified_ns).is_some()
             && split_ns(meta.changed_ns).is_some();
+        if let Some(slot) = self.find(path).and_then(|i| self.slots.get_mut(i)) {
+            slot.gone = true;
+            slot.kept = false;
+        }
         let Some(kind) = kind_of(meta).filter(|_| fits) else {
-            self.files.remove(path);
+            self.added.remove(path);
             return;
         };
         let state = FileState {
@@ -183,23 +357,36 @@ impl FileCache {
             file_id: meta.file_id,
             id,
         };
-        self.files
+        self.added
             .insert(path.to_owned(), Entry { state, racy: false });
     }
 
-    /// Writes the cache, sealed, replacing the old one whole; nothing when the handle has no key.
-    /// `now_ns` is the drive's time at the start of the scan (`drive_now`): a file whose modified
-    /// time isn't at least 2 s older is kept as racy, never matched, since it may change again
-    /// within one tick of the drive's clock.
-    pub fn store(mut self, repo: &Repository, now_ns: i128) -> Result<(), RepoError> {
+    /// Writes what this scan vouched for and recorded, sealed, replacing the old cache whole;
+    /// nothing when the handle has no key, or when that is what the file already holds. `now_ns`
+    /// is the drive's time at the start of the scan (`drive_now`): a file whose modified time
+    /// isn't at least 2 s older is kept as racy, never matched, since it may change again within
+    /// one tick of the drive's clock.
+    pub fn store(self, repo: &Repository, now_ns: i128) -> Result<(), RepoError> {
         let Some(key) = repo.cache_key() else {
             return Ok(());
         };
         let trusted_before = now_ns.saturating_sub(RACY_NS);
-        for entry in self.files.values_mut() {
-            entry.racy |= entry.state.modified_ns > trusted_before;
+        // Every entry kept, none added and none turning racy: the same bytes, unencoded. A kept
+        // entry was trusted, so it wasn't racy.
+        let same = self.loaded
+            && self.added.is_empty()
+            && self
+                .slots
+                .iter()
+                .all(|s| s.kept && s.entry.state.modified_ns <= trusted_before);
+        if same {
+            return Ok(());
         }
-        let sealed = keyed::seal(key, &self.encode());
+        let body = self.body_of(false, Some(trusted_before));
+        if self.loaded && body == self.body {
+            return Ok(());
+        }
+        let sealed = keyed::seal(key, &body);
         if sealed.len() as u64 > MAX_BYTES {
             return Err(RepoError::Io(io::Error::other(
                 "the file-state cache would be bigger than 256 MiB",
@@ -372,7 +559,10 @@ mod tests {
             back.matches("old.txt", &file(1, now - 2 * SECOND))
                 .is_some()
         );
-        // A racy entry stays racy when the cache is written again later.
+        // Written again later, a racy entry nobody read again isn't trusted.
+        let mut back = back;
+        assert!(back.vouch("new.txt", &fresh).is_none());
+        back.vouch("old.txt", &file(1, now - 2 * SECOND)).unwrap();
         back.store(&repo, now + 60 * SECOND).unwrap();
         let again = FileCache::load(&reopen(&dir, KEY));
         assert!(again.matches("new.txt", &fresh).is_none());
@@ -396,7 +586,7 @@ mod tests {
         );
         let other = FileCache::load(&reopen(&dir, [8; 32]));
         assert!(other.matches("a.txt", &file(3, THEN)).is_none());
-        assert!(other.files.is_empty());
+        assert!(other.slots.is_empty());
     }
 
     #[test]
@@ -422,19 +612,20 @@ mod tests {
         for bytes in tries {
             std::fs::write(stored(&dir), &bytes).unwrap();
             let back = FileCache::load(&reopen(&dir, KEY));
-            assert!(back.files.is_empty(), "{}", bytes.len());
+            assert!(back.slots.is_empty(), "{}", bytes.len());
         }
         // A folder where the file should be is no cache either, and no error.
         std::fs::remove_file(stored(&dir)).unwrap();
         std::fs::create_dir(stored(&dir)).unwrap();
-        assert!(FileCache::load(&reopen(&dir, KEY)).files.is_empty());
+        assert!(FileCache::load(&reopen(&dir, KEY)).slots.is_empty());
     }
 
     #[test]
     fn size_or_time_or_kind_or_identity_changes_miss() {
         let (_dir, repo) = project();
-        let mut cache = FileCache::load(&repo);
-        cache.record("a", &file(3, THEN), Id([1; 32]));
+        let mut recorded = FileCache::load(&repo);
+        recorded.record("a", &file(3, THEN), Id([1; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches("a", &file(3, THEN)).is_some());
         assert!(cache.matches("a", &file(4, THEN)).is_none());
         assert!(cache.matches("a", &file(3, THEN + 1)).is_none());
@@ -463,7 +654,8 @@ mod tests {
             file_id: (1, 0),
             ..file(3, THEN)
         };
-        cache.record("n", &unnumbered, Id([5; 32]));
+        recorded.record("n", &unnumbered, Id([5; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches("n", &unnumbered).is_none());
         let executable = EntryMeta {
             executable: Some(true),
@@ -475,7 +667,8 @@ mod tests {
             ..file(3, THEN)
         };
         assert!(cache.matches("a", &link).is_none());
-        cache.record("x", &executable, Id([2; 32]));
+        recorded.record("x", &executable, Id([2; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert_eq!(
             cache.matches("x", &executable).unwrap().kind,
             EntryKind::Executable
@@ -486,11 +679,13 @@ mod tests {
             kind: EntryType::Dir,
             ..file(0, THEN)
         };
-        cache.record("d", &folder, Id([3; 32]));
+        recorded.record("d", &folder, Id([3; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches("d", &folder).is_none());
         // Nor a path the file couldn't read back, which would spoil the whole cache.
         let long = "a".repeat(MAX_PATH + 1);
-        cache.record(&long, &file(3, THEN), Id([4; 32]));
+        recorded.record(&long, &file(3, THEN), Id([4; 32]));
+        let cache = FileCache::decode(&recorded.encode()).unwrap();
         assert!(cache.matches(&long, &file(3, THEN)).is_none());
         assert!(FileCache::decode(&cache.encode()).is_ok());
     }
@@ -540,5 +735,246 @@ mod tests {
         long_size.extend_from_slice(&[0x83, 0x00]);
         long_size.extend_from_slice(&body[a_kind + 2..]);
         assert!(FileCache::decode(&long_size).is_err());
+    }
+
+    /// The stored file's ID, which a write through `tmp/` and a rename changes, and its bytes.
+    fn on_disk(dir: &tempfile::TempDir) -> ((u64, u128), Vec<u8>) {
+        let cache = bolt_platform::dir::Dir::open_top(&dir.path().join(".bolt").join("cache"));
+        let meta = cache.unwrap().metadata(OsStr::new(FILE)).unwrap();
+        (meta.file_id, std::fs::read(stored(dir)).unwrap())
+    }
+
+    /// A cache holding `a` and `b`, both long unchanged.
+    fn two_files() -> (tempfile::TempDir, Repository) {
+        let (dir, repo) = project();
+        let mut cache = FileCache::load(&repo);
+        cache.record("a", &file(1, THEN), Id([1; 32]));
+        cache.record("b", &file(2, THEN), Id([2; 32]));
+        cache.store(&repo, THEN + 60 * SECOND).unwrap();
+        (dir, repo)
+    }
+
+    #[test]
+    fn an_unchanged_cache_is_not_written_again() {
+        let (dir, repo) = two_files();
+        let before = on_disk(&dir);
+        let mut cache = FileCache::load(&repo);
+        assert!(cache.vouch("a", &file(1, THEN)).is_some());
+        assert!(cache.vouch("b", &file(2, THEN)).is_some());
+        cache.store(&repo, THEN + 120 * SECOND).unwrap();
+        assert_eq!(on_disk(&dir), before);
+    }
+
+    #[test]
+    fn an_entry_a_check_refuses_is_not_vouched_for_or_kept() {
+        let (dir, repo) = two_files();
+        let mut cache = FileCache::load(&repo);
+        assert!(cache.vouch_if("a", &file(1, THEN), |_| false).is_none());
+        assert!(!cache.slots[0].kept);
+        cache.vouch("b", &file(2, THEN)).unwrap();
+        cache.store(&repo, THEN + 120 * SECOND).unwrap();
+        // Unkept, it is dropped from the next write.
+        let back = FileCache::load(&reopen(&dir, KEY));
+        assert!(back.matches("a", &file(1, THEN)).is_none());
+        assert!(back.matches("b", &file(2, THEN)).is_some());
+    }
+
+    #[test]
+    fn a_cache_is_written_when_an_entry_is_added_dropped_or_changed() {
+        let later = THEN + 120 * SECOND;
+        // Added.
+        let (dir, repo) = two_files();
+        let before = on_disk(&dir);
+        let mut cache = FileCache::load(&repo);
+        cache.vouch("a", &file(1, THEN)).unwrap();
+        cache.vouch("b", &file(2, THEN)).unwrap();
+        cache.record("c", &file(3, THEN), Id([3; 32]));
+        cache.store(&repo, later).unwrap();
+        assert_ne!(on_disk(&dir), before);
+        let back = FileCache::load(&repo);
+        for (path, size) in [("a", 1), ("b", 2), ("c", 3)] {
+            assert!(back.matches(path, &file(size, THEN)).is_some(), "{path}");
+        }
+        // Dropped: `b` wasn't met.
+        let (dir, repo) = two_files();
+        let before = on_disk(&dir);
+        let mut cache = FileCache::load(&repo);
+        cache.vouch("a", &file(1, THEN)).unwrap();
+        cache.store(&repo, later).unwrap();
+        assert_ne!(on_disk(&dir), before);
+        let back = FileCache::load(&repo);
+        assert!(back.matches("a", &file(1, THEN)).is_some());
+        assert!(back.matches("b", &file(2, THEN)).is_none());
+        // Changed: `b` was read again with other details.
+        let (dir, repo) = two_files();
+        let before = on_disk(&dir);
+        let mut cache = FileCache::load(&repo);
+        cache.vouch("a", &file(1, THEN)).unwrap();
+        assert!(cache.vouch("b", &file(5, THEN)).is_none());
+        cache.record("b", &file(5, THEN), Id([5; 32]));
+        // What this scan recorded isn't trusted until it is read back from the file.
+        assert!(cache.matches("b", &file(5, THEN)).is_none());
+        cache.store(&repo, later).unwrap();
+        assert_ne!(on_disk(&dir), before);
+        let back = FileCache::load(&repo);
+        assert!(back.matches("b", &file(2, THEN)).is_none());
+        assert_eq!(back.matches("b", &file(5, THEN)).unwrap().id, Id([5; 32]));
+    }
+
+    #[test]
+    fn an_entry_that_turns_racy_is_written() {
+        let (dir, repo) = two_files();
+        let before = on_disk(&dir);
+        let mut cache = FileCache::load(&repo);
+        cache.vouch("a", &file(1, THEN)).unwrap();
+        cache.vouch("b", &file(2, THEN)).unwrap();
+        // A "now" less than 2 s after the files' time: a drive whose clock went back.
+        cache.store(&repo, THEN + SECOND).unwrap();
+        assert_ne!(on_disk(&dir), before);
+        assert!(
+            FileCache::load(&repo)
+                .matches("a", &file(1, THEN))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_racy_entry_read_again_later_is_written() {
+        let (dir, repo) = project();
+        let mut cache = FileCache::load(&repo);
+        cache.record("a", &file(1, THEN), Id([1; 32]));
+        cache.store(&repo, THEN + SECOND).unwrap();
+        let before = on_disk(&dir);
+        let mut cache = FileCache::load(&repo);
+        assert!(cache.vouch("a", &file(1, THEN)).is_none());
+        cache.record("a", &file(1, THEN), Id([1; 32]));
+        cache.store(&repo, THEN + 60 * SECOND).unwrap();
+        assert_ne!(on_disk(&dir), before);
+        assert!(
+            FileCache::load(&repo)
+                .matches("a", &file(1, THEN))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_torn_file_cache_is_ignored_and_rebuilt() {
+        let (dir, repo) = two_files();
+        let first = std::fs::read(stored(&dir)).unwrap();
+        let mut other = FileCache::default();
+        other.record("a", &file(7, THEN), Id([7; 32]));
+        other.record("b", &file(8, THEN), Id([8; 32]));
+        other.store(&repo, THEN + 60 * SECOND).unwrap();
+        let second = std::fs::read(stored(&dir)).unwrap();
+        assert_eq!(first.len(), second.len());
+        let half = first.len() / 2;
+        let mixed = [&first[..half], &second[half..]].concat();
+        for torn in [first[..half].to_vec(), vec![0; first.len()], mixed] {
+            std::fs::write(stored(&dir), &torn).unwrap();
+            let mut cache = FileCache::load(&repo);
+            assert!(cache.matches("a", &file(1, THEN)).is_none());
+            assert!(cache.matches("a", &file(7, THEN)).is_none());
+            cache.record("a", &file(1, THEN), Id([1; 32]));
+            cache.store(&repo, THEN + 60 * SECOND).unwrap();
+            let back = FileCache::load(&repo);
+            assert!(back.matches("a", &file(1, THEN)).is_some());
+            assert!(back.matches("b", &file(2, THEN)).is_none());
+        }
+    }
+
+    /// A cache read back from a body holding `paths`, each with the ID `[1; 32]`.
+    fn read_back<'a>(paths: impl IntoIterator<Item = &'a str>) -> FileCache {
+        let mut cache = FileCache::default();
+        for path in paths {
+            cache.record(path, &file(1, THEN), Id([1; 32]));
+        }
+        FileCache::decode(&cache.encode()).unwrap()
+    }
+
+    /// The slot a plain search finds.
+    fn searched(cache: &FileCache, path: &str) -> Option<usize> {
+        cache
+            .slots
+            .binary_search_by(|s| cache.path_of(s).cmp(path.as_bytes()))
+            .ok()
+    }
+
+    #[test]
+    fn a_slot_is_found_where_the_last_one_ended() {
+        let paths: Vec<String> = (0..1000)
+            .map(|i| format!("d{:02}/f{i:04}.txt", i / 100))
+            .collect();
+        let cache = read_back(paths.iter().map(String::as_str));
+        for path in &paths {
+            assert!(cache.matches(path, &file(1, THEN)).is_some(), "{path}");
+        }
+        assert!(cache.searches.get() <= 1, "{}", cache.searches.get());
+
+        let mut asked: Vec<&str> = paths.iter().map(String::as_str).rev().collect();
+        asked.extend(["", "a", "d00", "d05/f0500.txt!", "zz", "d09/f0999.txt"]);
+        let mut seed = 7u64;
+        for _ in 0..1000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            asked.push(&paths[(seed >> 33) as usize % paths.len()]);
+        }
+        for path in asked {
+            assert_eq!(cache.find(path), searched(&cache, path), "{path}");
+            let known = searched(&cache, path).is_some();
+            assert_eq!(cache.matches(path, &file(1, THEN)).is_some(), known);
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Ask {
+        Matches(String),
+        Vouch(String),
+        Record(String),
+    }
+
+    fn ask() -> impl Strategy<Value = Ask> {
+        let path = "[ab/]{0,4}";
+        prop_oneof![
+            path.prop_map(Ask::Matches),
+            path.prop_map(Ask::Vouch),
+            path.prop_map(Ask::Record),
+        ]
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn the_hint_never_changes_an_answer(
+            paths in proptest::collection::btree_set("[ab/]{0,4}", 0..12),
+            asks in proptest::collection::vec(ask(), 0..40),
+        ) {
+            let mut hinted = read_back(paths.iter().map(String::as_str));
+            // Pointed past the end before every question, it always searches.
+            let mut plain = hinted.clone();
+            let meta = file(1, THEN);
+            for ask in asks {
+                plain.next.set(usize::MAX);
+                match ask {
+                    Ask::Matches(p) => {
+                        prop_assert_eq!(hinted.find(&p), searched(&plain, &p));
+                        prop_assert_eq!(
+                            hinted.matches(&p, &meta).copied(),
+                            plain.matches(&p, &meta).copied()
+                        );
+                    }
+                    Ask::Vouch(p) => {
+                        prop_assert_eq!(hinted.vouch(&p, &meta), plain.vouch(&p, &meta));
+                    }
+                    Ask::Record(p) => {
+                        hinted.record(&p, &meta, Id([2; 32]));
+                        plain.record(&p, &meta, Id([2; 32]));
+                        // Not trusted until it is read back from the file.
+                        prop_assert!(hinted.matches(&p, &meta).is_none());
+                    }
+                }
+            }
+            prop_assert_eq!(hinted.body_of(false, None), plain.body_of(false, None));
+            prop_assert_eq!(hinted.encode(), plain.encode());
+        }
     }
 }

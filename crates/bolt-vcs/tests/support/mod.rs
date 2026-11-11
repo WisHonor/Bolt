@@ -9,7 +9,7 @@ mod vs_git;
 pub use vs_git::{assert_matches_git, assert_matches_git_counting};
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ use bolt_core::diary::{Action, DiaryEntry, State};
 use bolt_core::history::current_save;
 use bolt_core::id::{ChangeId, ContentHasher, Id, hash_content};
 use bolt_core::listing::{Entry, EntryKind, Listing};
-use bolt_core::pack::{ObjectKind, PackReader, PackSet, Prepared};
+use bolt_core::pack::{ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PackReader, PackSet, Prepared};
 use bolt_core::repo::Repository;
 use bolt_core::save::{EXTRA_GIT_COMMIT, Person, Save};
 use bolt_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
@@ -378,6 +378,63 @@ pub fn id_of(path: &Path) -> Id {
             n => hasher.update(&block[..n]),
         }
     }
+}
+
+/// The packs in the folder `packs`, by name. One that holds a save, whose change ID is drawn at
+/// random, or a record naming one, is told by the files and folders it holds.
+pub fn packs_in(packs: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(packs).unwrap() {
+        let path = entry.unwrap().path();
+        let objects: Vec<IndexEntry> = PackReader::open(&path)
+            .unwrap()
+            .entries()
+            .map(Result::unwrap)
+            .collect();
+        let made = |e: &&IndexEntry| {
+            use ObjectKind::{ChunkList, Content, FolderListing};
+            matches!(e.kind, Content | ChunkList | FolderListing)
+        };
+        found.push(if objects.iter().all(|e| made(&e)) {
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        } else {
+            let ids: Vec<String> = objects
+                .iter()
+                .filter(made)
+                .map(|e| e.id.to_string())
+                .collect();
+            format!("with a save: {}", ids.join(","))
+        });
+    }
+    found.sort();
+    found
+}
+
+/// Each entry of the pack at `path`, in index order, with a fingerprint of its bytes as stored,
+/// header included.
+pub fn entries_with_bytes(path: &Path) -> Vec<(IndexEntry, Id)> {
+    let entries: Vec<IndexEntry> = PackReader::open(path)
+        .unwrap()
+        .entries()
+        .map(Result::unwrap)
+        .collect();
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut block = vec![0u8; 1 << 20];
+    entries
+        .into_iter()
+        .map(|e| {
+            file.seek(SeekFrom::Start(e.offset)).unwrap();
+            let mut bytes = (&mut file).take(ENTRY_HEADER_LEN + e.stored_size);
+            let mut hasher = ContentHasher::new();
+            loop {
+                match bytes.read(&mut block).unwrap() {
+                    0 => break,
+                    n => hasher.update(&block[..n]),
+                }
+            }
+            (e, hasher.finish())
+        })
+        .collect()
 }
 
 /// The kind of each copy of `id` in the store of the project at `root`, a pack at a time.

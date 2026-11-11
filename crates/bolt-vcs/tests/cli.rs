@@ -2098,10 +2098,11 @@ const LONG_FOLDERS: usize = 250;
 #[cfg(unix)]
 const LONG_FILES: usize = 250;
 
-/// The address space `bolt` gets: about 3 times what it needs to run (`save` needs about 35 MB,
-/// mostly for the stack of its scanning thread), and well under all the long paths together.
+/// The address space `bolt` gets: well under all the long paths together, and under 64 MiB, so the
+/// C library can't reserve a whole arena for a thread and starve the rest. `save` needs under
+/// 40 MB.
 #[cfg(unix)]
-const CAP_KB: u32 = 100_000;
+const CAP_KB: u32 = 64_000;
 
 #[cfg(unix)]
 fn plant_long_paths(root: &Path) {
@@ -2414,14 +2415,15 @@ fn history_that_fails_before_its_first_save_prints_nothing() {
         let history = json_as_user(&env, &["--json", "history"]);
         let id = |n: usize| history["saves"][n]["id"].as_str().unwrap().to_owned();
         if at_a_save {
-            // At a save, the saves back from it are read whole before the first row.
+            // At a save, that save is the first row: damage there comes before any row.
             let at = env.bolt().args(["goto", &id(1)]).output().unwrap();
             assert_eq!(at.status.code(), Some(0), "{}", text(&at.stderr));
         } else {
             // Without the cache, the line is read whole before the first row.
             std::fs::remove_file(env.root().join(".bolt/cache/change-ids")).unwrap();
         }
-        rot(env.root(), &Id::from_hex(&id(2)).unwrap());
+        let damaged = if at_a_save { id(1) } else { id(2) };
+        rot(env.root(), &Id::from_hex(&damaged).unwrap());
         let out = env.bolt().arg("history").output().unwrap();
         let said = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{at_a_save}: {said}");

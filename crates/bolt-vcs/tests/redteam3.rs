@@ -425,7 +425,7 @@ fn rt3_3_a_valid_200_mib_file_of_zeros_imports() {
     );
 }
 
-// RT3-4: delta-base amplification. Bolt's base cache holds 256 MiB, so a base built to 300 MiB is
+// RT3-4: delta-base amplification. Bolt's base cache holds 96 MiB, so a base built to 300 MiB is
 // never kept: every read of every commit on it rebuilds it, through every delta below it. Here
 // 16 commits sit on a 300 MiB object rebuilt through 8 deltas (a ~6 KB .git).
 
