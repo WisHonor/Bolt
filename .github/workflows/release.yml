@@ -1,14 +1,18 @@
 name: Release
 
-# Started by hand only. A pull request that changes this file, the notices' settings or the
-# release notes runs everything but the last job, so a change is tried before the real start.
+# Started by hand only. A pull request that changes this file, its scripts, the notices'
+# settings, the agreement or the release notes runs everything but the last job, so a change
+# is tried before the real start.
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - ".github/release/**"
       - about.toml
       - about.hbs
+      - USER-AGREEMENT.md
+      - LICENSE
       - "docs/releases/**"
 
 permissions:
@@ -18,7 +22,7 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
-  # The version, read once, and the notices for the crates Bolt is built from.
+  # The version, read once; the notices for what is built into the program; the website copies.
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -40,6 +44,10 @@ jobs:
             echo "::error::Not a plain version: $version"
             exit 1
           fi
+          if [ ! -f "docs/releases/v$version.md" ]; then
+            echo "::error::No release notes for $version: docs/releases/v$version.md is missing"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Version: $version"
       - name: Download cargo-about and check its SHA-256
@@ -51,7 +59,7 @@ jobs:
           echo "$ABOUT_SHA256  $dir/cargo-about.tar.gz" | sha256sum --check --strict -
           tar -xzf "$dir/cargo-about.tar.gz" -C "$dir" --strip-components=1
           "$dir/cargo-about" --version
-      - name: Write THIRD-PARTY-LICENSES.html
+      - name: Write the notices
         run: |
           "$RUNNER_TEMP/cargo-about/cargo-about" generate --locked -c about.toml \
             -m crates/bolt-vcs/Cargo.toml -o THIRD-PARTY-LICENSES.html about.hbs
@@ -59,11 +67,28 @@ jobs:
             echo "::error::Bolt's own crates are in the notices"
             exit 1
           fi
+          # The standard library is built in too; its notices come with the toolchain.
+          cp "$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html" THIRD-PARTY-LICENSES-RUST.html
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: third-party-licenses
-          path: THIRD-PARTY-LICENSES.html
+          path: |
+            THIRD-PARTY-LICENSES.html
+            THIRD-PARTY-LICENSES-RUST.html
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
+      - name: Make the website copies
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash .github/release/website.sh "$VERSION" "$RUNNER_TEMP/bolt-$VERSION-website.zip"
+          unzip -l "$RUNNER_TEMP/bolt-$VERSION-website.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: website
+          path: ${{ runner.temp }}/bolt-${{ steps.version.outputs.version }}-website.zip
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
 
   build:
     needs: prepare
@@ -113,11 +138,41 @@ jobs:
       - name: Build
         run: |
           cargo build --release --locked -p bolt-vcs --target "$TARGET"
+          bin="target/$TARGET/release/bolt$EXE"
           if [ "$RUNNER_OS" = Linux ]; then
             ldd --version | head -n 1
-            echo "Newest glibc symbol it needs: $(objdump -T "target/$TARGET/release/bolt" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+            echo "Newest glibc symbol it needs: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
           fi
-          if [ "$RUNNER_OS" = macOS ]; then file "target/$TARGET/release/bolt"; fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            file "$bin"
+            echo "The macOS version it declares:"
+            vtool -show-build "$bin" || otool -l "$bin" | grep -A 4 LC_BUILD_VERSION
+          fi
+      - name: Check it reaches no network and starts no program
+        run: |
+          check=.github/release/no-network.sh
+          probes="$RUNNER_TEMP/probes"
+          mkdir "$probes"
+          # First the check must refuse programs that do.
+          rustc -O .github/release/probes/net.rs -o "$probes/net$EXE"
+          rustc -O .github/release/probes/spawn.rs -o "$probes/spawn$EXE"
+          names=(net spawn)
+          if [ "$RUNNER_OS" = Windows ]; then
+            # A dash, not a slash, so Git Bash leaves the switch alone.
+            rustc -O .github/release/probes/net.rs -o "$probes/net-delayed$EXE" \
+              -C link-arg=-DELAYLOAD:ws2_32.dll -C link-arg=delayimp.lib
+            names+=(net-delayed)
+          fi
+          for p in "${names[@]}"; do
+            s=0
+            out=$(bash "$check" "$probes/$p$EXE") || s=$?
+            echo "probe $p: $(wc -l <<< "$out") imports, exit $s"
+            if [ "$s" != 1 ]; then
+              echo "::error::The import check didn't refuse the $p probe (exit $s)"
+              exit 1
+            fi
+          done
+          bash "$check" "target/$TARGET/release/bolt$EXE"
       - name: Smoke test
         run: |
           bin="$GITHUB_WORKSPACE/target/$TARGET/release/bolt$EXE"
@@ -149,10 +204,21 @@ jobs:
           mkdir -p "$stage/docs"
           gh run download "$RUN_ID" --repo "$REPO" --name third-party-licenses --dir "$stage"
           cp "target/$TARGET/release/bolt$EXE" "$stage/"
-          cp README.md "$stage/"
+          cp README.md USER-AGREEMENT.md "$stage/"
           cp docs/guide.md "$stage/docs/"
           archive="bolt-$VERSION-$TARGET.$EXT"
-          files=("bolt$EXE" README.md docs/guide.md THIRD-PARTY-LICENSES.html)
+          files=("bolt$EXE" README.md docs/guide.md USER-AGREEMENT.md
+                 THIRD-PARTY-LICENSES.html THIRD-PARTY-LICENSES-RUST.html)
+          # Not -F: with -i it aborts in Git for Windows' grep.
+          s=0
+          (cd "$stage" && grep -i -l -e "$REPO" "${files[@]}") || s=$?
+          if [ "$s" = 0 ]; then
+            echo "::error::Files above hold the repository's address"
+            exit 1
+          elif [ "$s" != 1 ]; then
+            echo "::error::grep failed looking for the repository's address"
+            exit 1
+          fi
           if [ "$EXT" = zip ]; then
             (cd "$stage" && 7z a -tzip -bd "$RUNNER_TEMP/$archive" "${files[@]}" > /dev/null)
             listing=$(7z l -ba -slt "$RUNNER_TEMP/$archive" | sed -n 's/^Path = //p' | tr '\\' /)
@@ -176,7 +242,7 @@ jobs:
           echo "$archive holds:"
           echo "$listing"
           if [ "$(sort <<< "$listing")" != "$(printf '%s\n' "${files[@]}" | sort)" ]; then
-            echo "::error::$archive doesn't hold exactly its four files"
+            echo "::error::$archive doesn't hold exactly its six files"
             exit 1
           fi
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
@@ -185,44 +251,22 @@ jobs:
           name: ${{ env.ARCHIVE }}
           path: ${{ runner.temp }}/${{ env.ARCHIVE }}
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
 
-  # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
-  release:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+  # The checksums, before anything else checks a download against them.
+  sums:
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    concurrency: release
+    timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: read
     env:
-      TAG: v0.1.0
       VERSION: ${{ needs.prepare.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.run_id }}
       REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check the version and that v0.1.0 is free
-        run: |
-          if [ "v$VERSION" != "$TAG" ]; then
-            echo "::error::Cargo.toml says $VERSION, but this release is $TAG"
-            exit 1
-          fi
-          tags=$(gh api "repos/$REPO/git/matching-refs/tags/$TAG" --jq '.[].ref')
-          if grep -qx "refs/tags/$TAG" <<< "$tags"; then
-            echo "::error::A tag named $TAG already exists"
-            exit 1
-          fi
-          # Drafts included: they have a tag name but no tag yet.
-          releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[] | .tag_name, .name')
-          if grep -qx -- "$TAG" <<< "$releases"; then
-            echo "::error::A release named $TAG already exists"
-            exit 1
-          fi
       - name: Collect the archives and write SHA256SUMS
         run: |
           down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
@@ -240,9 +284,67 @@ jobs:
             exit 1
           fi
           (cd "$dist" && sha256sum -- "${names[@]}" > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sha256sums
+          path: ${{ runner.temp }}/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
+
+  # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: [prepare, build, sums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency: release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TAG: v${{ needs.prepare.outputs.version }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.run_id }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the tag name is free
+        run: |
+          tags=$(gh api "repos/$REPO/git/matching-refs/tags/$TAG" --jq '.[].ref')
+          if grep -qx "refs/tags/$TAG" <<< "$tags"; then
+            echo "::error::A tag named $TAG already exists"
+            exit 1
+          fi
+          # Drafts included: they have a tag name but no tag yet.
+          releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[] | .tag_name, .name')
+          if grep -qx -- "$TAG" <<< "$releases"; then
+            echo "::error::A release named $TAG already exists"
+            exit 1
+          fi
+      - name: Collect the files
+        run: |
+          down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
+          mkdir "$dist"
+          gh run download "$RUN_ID" --repo "$REPO" --pattern "bolt-$VERSION-*" --dir "$down"
+          gh run download "$RUN_ID" --repo "$REPO" --name sha256sums --dir "$dist"
+          gh run download "$RUN_ID" --repo "$REPO" --name website --dir "$dist"
+          for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
+                   aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz; do
+            name="bolt-$VERSION-$t"
+            mv "$down/$name/$name" "$dist/$name"
+          done
+          if [ -n "$(find "$down" -type f)" ]; then
+            echo "::error::Unexpected files among the archives"
+            exit 1
+          fi
+          (cd "$dist" && sha256sum --check --strict SHA256SUMS)
+          ls -l "$dist"
       - name: Make the draft release
         run: |
           dist="$RUNNER_TEMP/dist"
           gh release create "$TAG" --repo "$REPO" --draft --target "$GITHUB_SHA" \
             --title "Bolt $VERSION" --notes-file "docs/releases/$TAG.md" \
-            "$dist"/bolt-"$VERSION"-* "$dist/SHA256SUMS"
+            "$dist"/bolt-"$VERSION"-*.zip "$dist"/bolt-"$VERSION"-*.tar.gz "$dist/SHA256SUMS"
