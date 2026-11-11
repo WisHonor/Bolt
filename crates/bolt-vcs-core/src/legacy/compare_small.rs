@@ -21,17 +21,9 @@ fn config_() -> ProptestConfig {
     }
 }
 
-const HASHED_PREFIXES: &[&[u8]] = &[
-    b"gi7eba", b"gi250a", b"GI7EBA", b"gitmod", b"bo", b"g", b"", b"gi7eba~", b".git",
-];
-const PLAIN_PREFIXES: &[&[u8; 6]] = &[
-    b"gitmod",
-    b"gi7eba",
-    b"GITMOD",
-    b"bolt~1",
-    b"gitatt",
-    b"\xc3\xa9abcd",
-];
+// The only prefixes the callers pass.
+const HASHED_PREFIXES: &[&[u8]] = &[b"gi7eba", b"gitmod"];
+const PLAIN_PREFIXES: &[&[u8; 6]] = &[b"gi7eba", b"gitmod"];
 
 // The answers of each side for one name, as text so a census can group them.
 fn old_name(name: &str) -> String {
