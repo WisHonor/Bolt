@@ -238,7 +238,7 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
             .rules
             .iter()
             .filter(|r| pick(r))
-            .flat_map(|r| r.files.iter().map(|f| escape(f, false)))
+            .flat_map(|r| r.files.iter().map(|f| shown_pattern(f)))
             .collect();
         if all.is_empty() {
             "none".to_owned()
@@ -276,6 +276,17 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
         text += &format!("    {label:<width$}{value}\n");
     }
     text
+}
+
+/// A rule's pattern, escaped; between double quotes, as `bolt.toml` writes it, when it holds a
+/// space, so the list reads as its patterns.
+fn shown_pattern(pattern: &str) -> String {
+    let shown = escape(pattern, false);
+    if pattern.contains(' ') {
+        format!("\"{shown}\"")
+    } else {
+        shown
+    }
 }
 
 pub fn rules_json(read: &RulesRead, block_lines: Option<usize>) -> Value {
@@ -335,8 +346,27 @@ pub fn write_preview(out: &mut dyn Write, changes: &[RuleFileChange]) -> io::Res
     Ok(())
 }
 
+/// What a switch to `preset` says once it is done, after the preview: what it wrote, or that it
+/// wrote nothing.
+pub fn switched(preset: Preset, changes: &[RuleFileChange], written: &[&str]) -> String {
+    let s = style::out();
+    if written.is_empty() {
+        let again = format!("bolt setup --preset {}", preset.name());
+        return format!(
+            "\nNothing was written: the rule files changed while Bolt worked. Run {} again.\n",
+            s.paint(Role::Command, &again)
+        );
+    }
+    format!(
+        "\n{} to {} settings: {}.\n",
+        s.paint(Role::Ok, "Switched"),
+        title(preset),
+        written_words(changes, written)
+    )
+}
+
 /// What a switch did to each file: "made bolt.toml, changed .boltignore".
-pub fn written_words(changes: &[RuleFileChange], written: &[&str]) -> String {
+fn written_words(changes: &[RuleFileChange], written: &[&str]) -> String {
     let words: Vec<String> = changes
         .iter()
         .filter(|c| written.contains(&c.path))
@@ -350,4 +380,48 @@ pub fn written_words(changes: &[RuleFileChange], written: &[&str]) -> String {
         })
         .collect();
     words.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use bolt_core::rules::Rule;
+
+    #[test]
+    fn a_pattern_with_a_space_is_shown_between_quotes() {
+        let mut rules = Rules::default();
+        rules.rules.push(Rule {
+            files: vec!["My Art/*.psd".into(), "*.png".into()],
+            lockable: Some(true),
+            conflict_markers: None,
+        });
+        let read = RulesRead {
+            rules,
+            file: true,
+            skipped: None,
+            ignored: Vec::new(),
+        };
+        let shown = rules_shown(&read, None);
+        let row = shown.lines().find(|l| l.contains("Lockable")).unwrap();
+        assert!(row.ends_with(" \"My Art/*.psd\" *.png"), "{row}");
+    }
+
+    #[test]
+    fn a_switch_that_wrote_nothing_says_so() {
+        let changes = [RuleFileChange {
+            path: "bolt.toml",
+            before: None,
+            after: Some(b"x".to_vec()),
+        }];
+        let said = switched(Preset::Game, &changes, &[]);
+        assert!(!said.contains("Switched"), "{said}");
+        assert_eq!(
+            said,
+            "\nNothing was written: the rule files changed while Bolt worked. Run bolt setup \
+             --preset game again.\n"
+        );
+        let said = switched(Preset::Game, &changes, &["bolt.toml"]);
+        assert_eq!(said, "\nSwitched to Game settings: made bolt.toml.\n");
+    }
 }

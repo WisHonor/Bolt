@@ -262,6 +262,7 @@ fn write_step(
         let path = plan.changes.first().map_or(RULE_FILES[0], |c| c.path);
         return Err(SetupError::ChangedSincePlan { path });
     }
+    crate::fsio::act_point("setup:planned");
     let to_make = Switch {
         head,
         action: Action::Command,

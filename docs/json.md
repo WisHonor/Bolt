@@ -83,7 +83,7 @@ A folder that already has a `bolt.toml` is judged first: there `bolt start` need
 | `preset` | string | The preset asked for. |
 | `found` | object | As in `start`. |
 | `files` | list | One object for each of `bolt.toml` and `.boltignore` that would change: `path`; `before`, the file's text in the folder now, or `null` when there is none; and `after`, its text once written, or `null` when the switch removes it. Bytes that aren't UTF-8 show as U+FFFD. `[]` when the files already are what the preset writes. |
-| `applied` | boolean | Whether the changes were written. |
+| `applied` | boolean | Whether the changes were written. `false` too when every file changed between the plan and the write, so nothing was written: the `changed_since_plan` warning names them, and the exit code is 0, as for a setup with nothing to change. |
 | `warnings` | list | See §4. |
 | `error` | object | Only without `--yes`, when there is something to change: `--json` can't ask, so nothing is written, the exit code is 1, and the hint names `--yes`. The rest of the document is still there, so a script can read what would change. |
 

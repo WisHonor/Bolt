@@ -657,21 +657,20 @@ fn setup_command(
     }?;
     let mut warnings = done.warnings;
     warnings.extend(repo.store().warnings());
+    // Every file changed while Bolt worked: nothing was written.
+    let applied = !done.written.is_empty();
     let text = if json {
-        document["applied"] = true.into();
+        document["applied"] = applied.into();
         document["warnings"] = output::warnings_json(&warnings);
         format!("{document}\n")
     } else {
         // After the preview.
-        let s = style::out();
-        format!(
-            "\n{} to {title} settings: {}.\n",
-            s.paint(style::Role::Ok, "Switched"),
-            setup_output::written_words(&plan.changes, &done.written)
-        )
+        setup_output::switched(preset, &plan.changes, &done.written)
     };
     output::print_done(&text, &warnings)?;
-    style::changed_your_mind();
+    if applied {
+        style::changed_your_mind();
+    }
     Ok(())
 }
 

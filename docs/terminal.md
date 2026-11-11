@@ -163,9 +163,10 @@ A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.
 | `--preset`, a preview | `Switching to Code settings changes these files:` | each file's change as `bolt changes` shows it, one empty line between files; then `Apply these changes? [y/N]` on stderr | |
 | Answered no | `Nothing was changed.` | | |
 | Applied | `Switched to Code settings: made bolt.toml, changed .boltignore.` | | `Changed your mind? bolt undo` |
+| Every file changed between the plan and the write | `Nothing was written: the rule files changed while Bolt worked. Run bolt setup --preset code again.` (exit code 0) | the `changed_since_plan` warning names the files | |
 | No terminal or `--json`, no `--yes` | the preview, then `error: Nothing was changed: Bolt can't ask whether to apply these changes without a terminal.` With `--json`, there is no preview, and the document's `error` says it instead, ending `… these changes with --json.` | `hint: If they are what you want, run: bolt setup --preset <name> --yes` | |
 
-Problems in `bolt.toml` come as `warning:` lines after the list. The engine's refusals (a rule file that is a link or a folder, one over 1 MiB, one changed since the preview) are errors with their own hints.
+The patterns of the `Lockable` and `No conflict markers` rows are separated by spaces; one that holds a space is between double quotes, as `bolt.toml` writes it (`"My Art/*.psd" *.png`). Problems in `bolt.toml` come as `warning:` lines after the list. The engine's refusals (a rule file that is a link or a folder, one over 1 MiB, one changed since the preview) are errors with their own hints.
 
 ### `bolt import`
 

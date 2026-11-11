@@ -143,6 +143,26 @@ fn a_plan_for_the_same_preset_twice_is_empty() {
     assert_eq!(head_entry(&repo).0, head);
 }
 
+#[cfg(feature = "fault-injection")]
+#[test]
+fn files_changed_after_they_were_kept_are_not_written() {
+    use crate::fsio::fault;
+    let (dir, mut repo) = saved(&[("a.txt", b"a")]);
+    fs::write(dir.path().join(".boltignore"), b"mine\n").unwrap();
+    let plan = plan_setup(dir.path(), Preset::Code).unwrap();
+    assert_eq!(plan.changes.len(), 2);
+    let root = dir.path().to_owned();
+    fault::act_at("setup:planned", move || {
+        fs::write(root.join("bolt.toml"), b"edited").unwrap();
+        fs::write(root.join(".boltignore"), b"edited too\n").unwrap();
+    });
+    let done = apply(&mut repo, &plan).unwrap();
+    assert!(done.written.is_empty(), "{done:?}");
+    let changed = done.warnings.iter().any(|w| w.kind == "changed_since_plan");
+    assert!(changed, "{:?}", done.warnings);
+    assert_eq!(fs::read(dir.path().join("bolt.toml")).unwrap(), b"edited");
+}
+
 #[test]
 fn applying_writes_both_files_and_records_one_setup_entry() {
     let (dir, mut repo) = saved(&[("a.txt", b"a")]);
