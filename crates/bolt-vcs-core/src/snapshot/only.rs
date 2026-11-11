@@ -64,10 +64,13 @@ pub(super) fn narrow(
     let mut limits = SaveLimits::default();
     let mut out = Folders::new();
     let mut gone = HashSet::new();
+    // Those gone folders whose listings were counted whole already, with all they hold.
+    let mut whole = HashSet::new();
     let mut blocked = Vec::new();
     let mut todo = vec![String::new()];
     while let Some(rel) = todo.pop() {
         let is_gone = gone.contains(&rel);
+        let in_whole = whole.contains(&rel);
         let before = old.get(&rel).and_then(Option::as_ref);
         let mut kept = Vec::new();
         let mut met = HashSet::new();
@@ -127,11 +130,19 @@ pub(super) fn narrow(
                 // The walk took care of what is named in a folder it found.
                 let into = e.kind == EntryKind::Folder && reaches && (is_gone || !inside);
                 if into {
-                    limits
-                        .check_depth(path.split('/').count())
-                        .map_err(too_large)?;
+                    let depth = path.split('/').count();
+                    limits.check_depth(depth).map_err(too_large)?;
+                    // Met as it is read, a folder met again is counted whole before it is walked.
+                    let again = in_whole
+                        || limits
+                            .enter(e.id, depth, path.len(), |id| store.listing(id))?
+                            .map_err(too_large)?;
                     let (listing, _) = without_git_names(store.listing(&e.id)?)?;
-                    limits.add(listing.entries().len()).map_err(too_large)?;
+                    if again {
+                        whole.insert(path.clone());
+                    } else {
+                        limits.add(listing.entries().len()).map_err(too_large)?;
+                    }
                     read.push((path.clone(), listing));
                     kept.push(Child {
                         name: e.name.clone(),

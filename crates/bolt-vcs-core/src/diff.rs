@@ -130,11 +130,12 @@ enum Step {
         new: Option<Entry>,
     },
     /// Compare two folders, `depth` levels below the root; a side is `None` if it has no folder
-    /// of that name.
+    /// of that name, and `counted` if all of it is counted already.
     Folder {
         old: Option<Id>,
         new: Option<Id>,
         depth: usize,
+        counted: (bool, bool),
     },
 }
 
@@ -184,8 +185,10 @@ fn walk<E: From<StoreError>>(
             old: old_root,
             new: Some(new_root),
             depth: 0,
+            counted: (false, false),
         },
     }];
+    let read = |id: &Id| listing_of(store, unstored, Some(*id));
     // The path of what is being worked on (`/` after every folder's name) is the only path in
     // memory. A waiting name carries just the length of its folder's path: what was pushed after it
     // is deeper, so when it is popped, the path up to that length is still its folder's.
@@ -196,7 +199,12 @@ fn walk<E: From<StoreError>>(
         old_seen.check_path(path.len()).map_err(too_large)?; // the same path in both saves
         match step {
             Step::Entry { old, new } => each(&path, old.as_ref(), new.as_ref())?,
-            Step::Folder { old, new, depth } => {
+            Step::Folder {
+                old,
+                new,
+                depth,
+                counted,
+            } => {
                 // A backstop: a folder this deep has a path past the limit checked above. The new
                 // save is as deep.
                 old_seen.check_depth(depth).map_err(too_large)?;
@@ -207,12 +215,23 @@ fn walk<E: From<StoreError>>(
                     listing_of(store, unstored, old)?,
                     listing_of(store, unstored, new)?,
                 );
-                old_seen.add(old.entries().len()).map_err(too_large)?;
-                new_seen.add(new.entries().len()).map_err(too_large)?;
+                if !counted.0 {
+                    old_seen.add(old.entries().len()).map_err(too_large)?;
+                }
+                if !counted.1 {
+                    new_seen.add(new.entries().len()).map_err(too_large)?;
+                }
                 let (here, first) = (path.len(), todo.len());
                 for (name, o, n) in pairs(old.entries(), new.entries()) {
                     let (of, nf) = (folder_id(o), folder_id(n));
                     if of != nf {
+                        // Each side meets its folders before going into any, so one met again is
+                        // counted whole before its paths are walked.
+                        let at = here + name.len();
+                        let counted = (
+                            counted.0 || again(&mut old_seen, of, depth + 1, at, read)?,
+                            counted.1 || again(&mut new_seen, nf, depth + 1, at, read)?,
+                        );
                         todo.push(Todo {
                             name: name.to_owned(),
                             at: here,
@@ -220,6 +239,7 @@ fn walk<E: From<StoreError>>(
                                 old: of,
                                 new: nf,
                                 depth: depth + 1,
+                                counted,
                             },
                         });
                     }
@@ -275,6 +295,22 @@ fn pairs<'a>(
             }
         })
     })
+}
+
+/// Whether one side of the walk went into the folder listing `id` before, and so has counted all
+/// of it now; see [`SaveLimits::enter`].
+fn again(
+    seen: &mut SaveLimits,
+    id: Option<Id>,
+    depth: usize,
+    at: usize,
+    read: impl FnMut(&Id) -> Result<Listing, StoreError>,
+) -> Result<bool, StoreError> {
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    seen.enter(id, depth, at, read)?
+        .map_err(|detail| StoreError::SaveTooLarge { detail })
 }
 
 fn listing_of(
@@ -572,6 +608,111 @@ mod tests {
         // Either one alone is too big for 8, whichever side of the comparison it is on.
         for (before, after) in [(old, small), (small, new)] {
             let err = collect(&store, Some(before), after, 8).unwrap_err();
+            assert!(matches!(err, StoreError::SaveTooLarge { .. }), "{err:?}");
+        }
+    }
+
+    /// The red team's deep tree: 24 listings each naming the next twice, `a` and `b`, ending in
+    /// a listing of two files; 2^25 files by path.
+    fn deep_tree(pack: &mut PackWriter) -> Id {
+        let two = |kind, id| {
+            let both = ["a", "b"].map(|name| Entry {
+                name: name.into(),
+                kind,
+                id,
+                size: if kind == EntryKind::Folder { 0 } else { 1 },
+            });
+            Listing::new(both.to_vec()).unwrap().encode()
+        };
+        let x = pack.add_content(b"x").unwrap();
+        let mut at = pack
+            .add_record(ObjectKind::FolderListing, &two(EntryKind::File, x))
+            .unwrap();
+        for _ in 0..24 {
+            at = pack
+                .add_record(ObjectKind::FolderListing, &two(EntryKind::Folder, at))
+                .unwrap();
+        }
+        let top = vec![Entry {
+            name: "deep".into(),
+            kind: EntryKind::Folder,
+            id: at,
+            size: 0,
+        }];
+        folder("", top, pack).id
+    }
+
+    #[test]
+    fn a_deep_tree_of_shared_listings_is_refused_at_once_on_either_side() {
+        let (_dir, store, [deep, small]) = store_with(|p| {
+            [
+                deep_tree(p),
+                folder("", vec![file("x", EntryKind::File, b"x", p)], p).id,
+            ]
+        });
+        for (old, new) in [(Some(small), deep), (Some(deep), small), (None, deep)] {
+            let started = std::time::Instant::now();
+            let err = count_changes(&store, old, new).unwrap_err();
+            let StoreError::SaveTooLarge { detail } = &err else {
+                panic!("{err:?}");
+            };
+            assert_eq!(
+                detail,
+                "it has more than 10000000 files and folders in total"
+            );
+            // Walked path by path, it takes minutes.
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        }
+    }
+
+    #[test]
+    fn folders_with_the_same_contents_are_compared_and_counted_as_before() {
+        // Two levels of sharing: `a`, `b` and `c` are one listing holding `x`, `y` and the
+        // folders `p` and `q`, which are one listing of two files.
+        let (_dir, store, [old, new]) = store_with(|p| {
+            let tree = |y: &[u8], p: &mut PackWriter| {
+                let leaf = folder(
+                    "p",
+                    vec![
+                        file("f", EntryKind::File, b"f", p),
+                        file("g", EntryKind::File, y, p),
+                    ],
+                    p,
+                );
+                let inner = vec![
+                    file("x", EntryKind::File, b"x", p),
+                    file("y", EntryKind::File, y, p),
+                    leaf.clone(),
+                    Entry {
+                        name: "q".into(),
+                        ..leaf
+                    },
+                ];
+                let shared = folder("a", inner, p);
+                let top = ["a", "b", "c"].map(|name| Entry {
+                    name: name.into(),
+                    ..shared.clone()
+                });
+                folder("", top.to_vec(), p).id
+            };
+            [tree(b"1", p), tree(b"2", p)]
+        });
+        // 3 at the top, and for each of its 3 folders 4 entries and twice 2: 3 + 3 * 8.
+        const PATHS: u64 = 3 + 3 * (4 + 2 * 2);
+        let got = collect(&store, Some(old), new, PATHS).unwrap();
+        let paths: Vec<&str> = got.iter().map(|c| c.path.as_str()).collect();
+        let want: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .flat_map(|top| ["p/g", "q/g", "y"].map(|below| format!("{top}/{below}")))
+            .collect();
+        assert_eq!(paths, want);
+        assert!(got.iter().all(|c| c.change == ChangeKind::Modified));
+        assert_eq!(count_changes(&store, Some(old), new).unwrap(), 9);
+        assert_eq!(count_changes(&store, None, new).unwrap(), 3 * 6);
+        // Either save alone is one entry too many for one less.
+        for (before, after) in [(Some(old), new), (None, new), (Some(new), old)] {
+            let err = collect(&store, before, after, PATHS - 1).unwrap_err();
             assert!(matches!(err, StoreError::SaveTooLarge { .. }), "{err:?}");
         }
     }

@@ -495,6 +495,32 @@ impl<'a> Base<'a> {
         }
         without_git_names(listing).map(Some)
     }
+
+    /// Notes that the search of gone folders goes into the folder listing `id`, `depth` levels
+    /// down at a path `at` bytes long: `true` if it went into it before, by another path, and so
+    /// counted all of it now. Past the limits the search ends, as for `gone_listing`.
+    fn gone_again(&mut self, id: Id, depth: usize, at: usize) -> Result<bool, SaveError> {
+        if self.spent {
+            return Ok(false);
+        }
+        let store = self.store;
+        match self.limits.enter(id, depth, at, |id| store.listing(id))? {
+            Ok(again) => Ok(again),
+            Err(_) => {
+                self.spent = true;
+                Ok(false)
+            }
+        }
+    }
+
+    /// The listing `id` of a gone folder counted whole already, or `None` once the search has
+    /// ended.
+    fn gone_listing_counted(&self, id: Id) -> Result<Option<(Listing, Vec<String>)>, SaveError> {
+        if self.spent {
+            return Ok(None);
+        }
+        without_git_names(self.read(&id)?).map(Some)
+    }
 }
 
 /// `listing` without its names Git treats as `.git`, and those names.
@@ -1510,12 +1536,22 @@ fn scan_folder(
     let mut back = Vec::new();
     let mut rebuilt = Vec::new();
     let mut gone_kept = Vec::new();
-    for (rel, name, id) in rules.gone(&folders) {
+    let gone = rules.gone(&folders);
+    // All are met before any is searched, so one met again is counted whole first.
+    let mut again = Vec::with_capacity(gone.len());
+    for (rel, name, id) in &gone {
+        let top = path_in(rel, name);
+        again.push(base.gone_again(*id, top.split('/').count(), top.len())?);
+    }
+    for ((rel, name, id), again) in gone.into_iter().zip(again) {
         let found = |c: &[Child]| c.binary_search_by(|c| c.name.as_str().cmp(&name)).is_ok();
         let taken = folders.get(&rel).is_some_and(|c| found(c));
         let top = path_in(&rel, &name);
         let named = &mut rules.git_names;
-        if let Some(gone) = rebuild_gone(&mut base, &mut limits, drive, &top, id, taken, named)? {
+        let listing = (id, again);
+        if let Some(gone) =
+            rebuild_gone(&mut base, &mut limits, drive, &top, listing, taken, named)?
+        {
             rebuilt.extend(gone.listings);
             let kind = Kind::Back {
                 id: gone.id,
@@ -1977,6 +2013,8 @@ struct Open {
     listing: Listing,
     /// Which of its entries are kept as they were.
     kept: Vec<bool>,
+    /// Which of its entries are counted whole already.
+    counted: Vec<bool>,
     /// The next of its entries to look at.
     next: usize,
     /// What it holds once rebuilt: its kept entries, and its subfolders that come back.
@@ -1994,15 +2032,16 @@ fn path_below(top: &str, open: &[Open], name: &str, last: &str) -> String {
 
 /// Rebuilds the gone folder `top` from its base listing `id`, holding only the entries kept as
 /// they were below it and the folders leading to them, counted against `limits`; `None` if none
-/// is kept. If `taken`, something the walk found has `top`'s name, and a kept entry stops the
-/// save. The names Git treats as `.git` it drops go to `git_names`. As in the diff walk, only
-/// names and the listings from `top` down are held.
+/// is kept. `id` comes with whether the base save's listings counted all of it already. If
+/// `taken`, something the walk found has `top`'s name, and a kept entry stops the save. The names
+/// Git treats as `.git` it drops go to `git_names`. As in the diff walk, only names and the
+/// listings from `top` down are held.
 fn rebuild_gone(
     base: &mut Base,
     limits: &mut SaveLimits,
     drive: Drive,
     top: &str,
-    id: Id,
+    (id, counted): (Id, bool),
     taken: bool,
     git_names: &mut Named,
 ) -> Result<Option<Gone>, SaveError> {
@@ -2011,10 +2050,13 @@ fn rebuild_gone(
     let mut open: Vec<Open> = Vec::new();
     let mut kept_in_all = Vec::new();
     let mut listings = Vec::new();
-    let mut read = Some((String::new(), top.len() + 1, id));
+    let mut read = Some((String::new(), top.len() + 1, id, counted));
     loop {
-        if let Some((name, prefix, id)) = read.take()
-            && let Some((listing, dropped)) = base.gone_listing(id, depth + open.len(), prefix)?
+        if let Some((name, prefix, id, counted)) = read.take()
+            && let Some((listing, dropped)) = match counted {
+                true => base.gone_listing_counted(id)?,
+                false => base.gone_listing(id, depth + open.len(), prefix)?,
+            }
         {
             // Only now is a path below `top` needed, to name it.
             for git_name in &dropped {
@@ -2037,11 +2079,23 @@ fn rebuild_gone(
                 holds.push(e.clone());
                 kept_in_all.push(path_below(top, &open, &name, &e.name));
             }
+            // Its folders are met before any is searched, so one met again is counted whole first.
+            let mut again = vec![counted; kept.len()];
+            if !counted {
+                let below = depth + open.len() + 1;
+                let entries = listing.entries().iter().zip(&kept).zip(&mut again);
+                for ((e, kept), again) in entries {
+                    if e.kind == EntryKind::Folder && !kept {
+                        *again = base.gone_again(e.id, below, prefix + e.name.len())?;
+                    }
+                }
+            }
             open.push(Open {
                 name,
                 prefix,
                 listing,
                 kept,
+                counted: again,
                 next: 0,
                 holds,
             });
@@ -2051,9 +2105,11 @@ fn rebuild_gone(
         };
         if let Some(e) = folder.listing.entries().get(folder.next) {
             let kept = folder.kept.get(folder.next).copied().unwrap_or(false);
+            let counted = folder.counted.get(folder.next).copied().unwrap_or(false);
             folder.next += 1;
             if e.kind == EntryKind::Folder && !kept {
-                read = Some((e.name.clone(), folder.prefix + e.name.len() + 1, e.id));
+                let prefix = folder.prefix + e.name.len() + 1;
+                read = Some((e.name.clone(), prefix, e.id, counted));
             }
             continue;
         }
@@ -2088,9 +2144,9 @@ fn rebuild_gone(
     }
 }
 
-/// Counts everything a kept folder holds, from its listing `id` down, against `limits`, one
-/// listing at a time: kept or not, a save holds no more than its format allows. The folder is
-/// `depth` levels down, and its path with a `/` after it is `prefix` bytes long.
+/// Counts everything a kept folder holds, from its listing `id` down, against `limits`, all at
+/// once: kept or not, a save holds no more than its format allows. The folder is `depth` levels
+/// down, and its path with a `/` after it is `prefix` bytes long.
 fn count_kept_folder(
     store: &Store,
     limits: &mut SaveLimits,
@@ -2098,21 +2154,9 @@ fn count_kept_folder(
     prefix: usize,
     id: Id,
 ) -> Result<(), SaveError> {
-    let too_large = |detail| SaveError::TooLarge { detail };
-    let mut todo = vec![(id, depth, prefix)];
-    while let Some((id, depth, prefix)) = todo.pop() {
-        limits.check_depth(depth).map_err(too_large)?;
-        let listing = store.listing(&id)?;
-        limits.add(listing.entries().len()).map_err(too_large)?;
-        for e in listing.entries() {
-            let path = prefix + e.name.len();
-            limits.check_path(path).map_err(too_large)?;
-            if e.kind == EntryKind::Folder {
-                todo.push((e.id, depth + 1, path + 1));
-            }
-        }
-    }
-    Ok(())
+    let at = prefix.saturating_sub(1);
+    let counted = limits.add_all(id, depth, at, |id| store.listing(id))?;
+    counted.map_err(|detail| SaveError::TooLarge { detail })
 }
 
 #[cfg(test)]
@@ -2126,8 +2170,8 @@ mod tests {
     use crate::repo::Repository;
     use crate::snapshot::SaveOutcome;
     use crate::snapshot::tests::{
-        damage_the_only_copy_of, newest, project, save_now, save_with, saved_root, saved_tree,
-        this_drive, walk_project, write,
+        damage_the_only_copy_of, newest, project, save_now, save_only, save_with, saved_root,
+        saved_tree, this_drive, walk_project, write,
     };
     use crate::test_support::{
         add_link, add_listing, plant_damaged_copies, plant_root, plant_save,
@@ -4385,6 +4429,127 @@ mod tests {
         // Nothing past the limits is read, so `b` isn't either: past them the base save is
         // invalid, and nothing in it can be kept.
         assert!(scan.folders[""].is_empty());
+    }
+
+    /// Plants a save holding, in each of the folders `tops`, the red team's deep tree: 24 listings
+    /// each naming the next twice, `a` and `b`, ending in a listing of two files.
+    fn plant_deep_trees(repo: &mut Repository, tops: &[&str]) {
+        plant_root(repo, |packs| {
+            let x = packs.add_content(b"x").unwrap();
+            let two = |kind, id, size| {
+                ["a", "b"].map(|n| Entry {
+                    size,
+                    ..entry(n, kind, id)
+                })
+            };
+            let mut at = add_listing(packs, two(EntryKind::File, x, 1).to_vec()).0;
+            for _ in 0..24 {
+                at = add_listing(packs, two(EntryKind::Folder, at, 0).to_vec()).0;
+            }
+            let top = tops.iter().map(|n| entry(n, EntryKind::Folder, at));
+            add_listing(packs, top.collect()).0
+        });
+    }
+
+    #[test]
+    fn the_search_of_a_deep_tree_gone_from_disk_ends_at_once() {
+        let (dir, mut repo) = project();
+        plant_deep_trees(&mut repo, &["deep"]);
+        let started = std::time::Instant::now();
+        let scan = walk(
+            dir.path(),
+            newest(&repo),
+            SaveLimits::default(),
+            this_drive(),
+            None,
+        );
+        let took = started.elapsed();
+        // Past the limits the base save is invalid, so nothing comes back, as before.
+        assert!(scan.unwrap().folders[""].is_empty());
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
+    fn a_deep_tree_kept_as_it_was_is_refused_at_once() {
+        let (dir, mut repo) = project();
+        // Where the drive ignores letter case both folders are kept, whatever this drive does.
+        plant_deep_trees(&mut repo, &["Deep", "deep"]);
+        let started = std::time::Instant::now();
+        let walked = walk(
+            dir.path(),
+            newest(&repo),
+            SaveLimits::default(),
+            CASE_BLIND,
+            None,
+        );
+        let took = started.elapsed();
+        let Err(SaveError::TooLarge { detail }) = walked else {
+            panic!("2^26 entries by path were accepted");
+        };
+        assert_eq!(
+            detail,
+            "it has more than 10000000 files and folders in total"
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
+    fn a_partial_save_into_a_deep_tree_gone_from_disk_is_refused_at_once() {
+        let (dir, mut repo) = project();
+        plant_deep_trees(&mut repo, &["deep"]);
+        write(dir.path(), "new.txt", b"x");
+        let before = repo.current().unwrap().1.state.lines["main"];
+        let everywhere = crate::names::Given::Pattern {
+            below: String::new(),
+            glob: "**/a".into(),
+        };
+        let started = std::time::Instant::now();
+        let err = save_only(&mut repo, &[everywhere]).unwrap_err();
+        let took = started.elapsed();
+        let said = err.to_string();
+        assert!(
+            said.contains("more than 10000000 files and folders in total"),
+            "{said}"
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        assert_eq!(repo.current().unwrap().1.state.lines["main"], before);
+    }
+
+    #[test]
+    fn gone_folders_with_the_same_contents_count_every_path() {
+        let (dir, mut repo) = project();
+        // Three gone folders of one listing, which holds a link and a folder of another.
+        plant_root(&mut repo, |packs| {
+            let link = add_link(packs, COMMIT);
+            let inner = add_listing(packs, vec![entry("sub", EntryKind::ProjectLink, link)]).0;
+            let both = vec![
+                entry("in", EntryKind::Folder, inner),
+                entry("sub", EntryKind::ProjectLink, link),
+            ];
+            let shared = add_listing(packs, both).0;
+            let top = ["a", "b", "c"].map(|n| entry(n, EntryKind::Folder, shared));
+            add_listing(packs, top.to_vec()).0
+        });
+        // 3 at the top, and for each of its folders 2 entries and 1 below: 3 + 3 * 3.
+        const PATHS: u64 = 3 + 3 * 3;
+        let comes_back_within = |entries| {
+            let base = Base {
+                limits: SaveLimits::new(MAX_SAVE_DEPTH, entries),
+                ..newest(&repo)
+            };
+            let scan = walk(dir.path(), base, SaveLimits::default(), this_drive(), None).unwrap();
+            let back: Vec<String> = scan.folders[""].iter().map(|c| c.name.clone()).collect();
+            (back, scan.gone_kept)
+        };
+        let (back, mut kept) = comes_back_within(PATHS);
+        assert_eq!(back, ["a", "b", "c"]);
+        kept.sort_unstable();
+        let want = [
+            "a/in/sub", "a/sub", "b/in/sub", "b/sub", "c/in/sub", "c/sub",
+        ];
+        assert_eq!(kept, want);
+        // One fewer, and the search ends before it has read them all.
+        assert!(comes_back_within(PATHS - 1).1.len() < want.len());
     }
 
     #[test]

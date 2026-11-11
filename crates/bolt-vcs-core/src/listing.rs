@@ -1,5 +1,7 @@
 //! Folder listings (docs/storage-format.md section 3).
 
+use std::collections::{HashMap, HashSet};
+
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
 use crate::names::{MAX_NAME_BYTES, MAX_PATH_BYTES, validate_name};
@@ -21,6 +23,21 @@ pub struct SaveLimits {
     max_entries: u64,
     max_path: usize,
     entries: u64,
+    /// The folder listings the walk has gone into.
+    entered: HashSet<Id>,
+    /// What each listing measured holds, kept for the whole walk.
+    measured: HashMap<Id, Measure>,
+}
+
+/// How big the part of a save below one folder listing is, counted by path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Measure {
+    /// Its entries and all below them, a listing again for every path to it.
+    entries: u64,
+    /// Levels of folders below it.
+    depth: usize,
+    /// Its longest path, from below it.
+    longest: usize,
 }
 
 impl Default for SaveLimits {
@@ -38,6 +55,8 @@ impl SaveLimits {
             max_entries,
             max_path: MAX_PATH_BYTES,
             entries: 0,
+            entered: HashSet::new(),
+            measured: HashMap::new(),
         }
     }
 
@@ -74,7 +93,11 @@ impl SaveLimits {
     /// Counts `n` more entries, a listing again for every path it is reached by; says what is
     /// wrong if that makes more than the limit.
     pub fn add(&mut self, n: usize) -> Result<(), String> {
-        self.entries = self.entries.saturating_add(n as u64);
+        self.count(n as u64)
+    }
+
+    fn count(&mut self, n: u64) -> Result<(), String> {
+        self.entries = self.entries.saturating_add(n);
         if self.entries > self.max_entries {
             return Err(format!(
                 "it has more than {} files and folders in total",
@@ -82,6 +105,112 @@ impl SaveLimits {
             ));
         }
         Ok(())
+    }
+
+    /// Notes that the walk goes into the folder listing `id`, of a folder `depth` levels down
+    /// whose path is `at` bytes long. If it went into it before, by another path, all of it is
+    /// counted now, and this gives `true`: the walk then goes through it without counting it
+    /// again. A walk calls this as it meets each folder, before going into any of them, so a
+    /// shared listing is counted whole before its paths are walked.
+    pub(crate) fn enter<E>(
+        &mut self,
+        id: Id,
+        depth: usize,
+        at: usize,
+        read: impl FnMut(&Id) -> Result<Listing, E>,
+    ) -> Result<Result<bool, String>, E> {
+        if self.entered.insert(id) {
+            return Ok(Ok(false));
+        }
+        Ok(self.add_all(id, depth, at, read)?.map(|()| true))
+    }
+
+    /// Counts all of the folder listing `id` at once, as [`enter`](Self::enter) does for one met
+    /// again. Each listing below is read once with `read`, however many paths reach it.
+    pub(crate) fn add_all<E>(
+        &mut self,
+        id: Id,
+        depth: usize,
+        at: usize,
+        read: impl FnMut(&Id) -> Result<Listing, E>,
+    ) -> Result<Result<(), String>, E> {
+        let m = match self.measure(id, depth, read)? {
+            Ok(m) => m,
+            Err(why) => return Ok(Err(why)),
+        };
+        let longest = match m.longest {
+            0 => at,
+            below => at.saturating_add(1).saturating_add(below),
+        };
+        Ok(self
+            .check_depth(depth.saturating_add(m.depth))
+            .and_then(|()| self.check_path(longest))
+            .and_then(|()| self.count(m.entries)))
+    }
+
+    /// Measures the listing `id`, of a folder `depth` levels down; a listing that would be deeper
+    /// than the limit stops it, unread.
+    fn measure<E>(
+        &mut self,
+        id: Id,
+        depth: usize,
+        mut read: impl FnMut(&Id) -> Result<Listing, E>,
+    ) -> Result<Result<Measure, String>, E> {
+        enum Step {
+            Read(Id, usize),
+            /// A listing's entries and longest name of a file, and its folders with their names'
+            /// lengths, once all of those are measured.
+            Sum(Id, u64, usize, Vec<(Id, usize)>),
+        }
+        // Below every folder first, without a call per level: a save may nest deeper than a stack.
+        let mut todo = vec![Step::Read(id, depth)];
+        while let Some(step) = todo.pop() {
+            match step {
+                Step::Read(id, level) => {
+                    if self.measured.contains_key(&id) {
+                        continue;
+                    }
+                    if let Err(why) = self.check_depth(level) {
+                        return Ok(Err(why));
+                    }
+                    let listing = read(&id)?;
+                    let (mut longest, mut folders) = (0, Vec::new());
+                    for e in listing.entries() {
+                        if e.kind == EntryKind::Folder {
+                            folders.push((e.id, e.name.len()));
+                        } else {
+                            longest = longest.max(e.name.len());
+                        }
+                    }
+                    let mut below: Vec<Id> = folders.iter().map(|&(f, _)| f).collect();
+                    below.sort_unstable();
+                    below.dedup();
+                    let entries = listing.entries().len() as u64;
+                    todo.push(Step::Sum(id, entries, longest, folders));
+                    let next = level.saturating_add(1);
+                    todo.extend(below.into_iter().map(|f| Step::Read(f, next)));
+                }
+                Step::Sum(id, entries, longest, folders) => {
+                    let mut m = Measure {
+                        entries,
+                        depth: 0,
+                        longest,
+                    };
+                    for (folder, name) in folders {
+                        let below = self.measured.get(&folder).copied().unwrap_or_default();
+                        m.entries = m.entries.saturating_add(below.entries);
+                        m.depth = m.depth.max(below.depth.saturating_add(1));
+                        let path = match below.longest {
+                            0 => name,
+                            longest => name.saturating_add(1).saturating_add(longest),
+                        };
+                        m.longest = m.longest.max(path);
+                    }
+                    self.measured.insert(id, m);
+                }
+            }
+        }
+        Ok(Ok(self.measured.get(&id).copied().unwrap_or_default()))
     }
 }
 
@@ -315,6 +444,163 @@ mod tests {
         assert!(limits.check_path(4096).is_ok());
         let why = limits.check_path(4097).unwrap_err();
         assert_eq!(why, "a path in it is longer than 4096 bytes");
+    }
+
+    /// Listings by ID, as a test's store, and how many reads each took.
+    #[derive(Default)]
+    struct Held {
+        listings: HashMap<Id, Listing>,
+        reads: HashMap<Id, usize>,
+    }
+
+    impl Held {
+        /// Holds a listing of `names`, all of `kind` and naming `id`; its ID.
+        fn add(&mut self, names: impl IntoIterator<Item = String>, kind: EntryKind, id: Id) -> Id {
+            let entries = names.into_iter().map(|name| Entry {
+                name,
+                kind,
+                id,
+                size: 0,
+            });
+            let listing = Listing::new(entries.collect()).unwrap();
+            let id = listing.id();
+            self.listings.insert(id, listing);
+            id
+        }
+
+        fn read(&mut self, id: &Id) -> Result<Listing, &'static str> {
+            *self.reads.entry(*id).or_default() += 1;
+            self.listings.get(id).cloned().ok_or("missing")
+        }
+    }
+
+    fn names(prefix: &str, n: usize) -> impl Iterator<Item = String> + '_ {
+        (0..n).map(move |i| format!("{prefix}{i:05}"))
+    }
+
+    /// The red team's deep tree: 24 listings each naming the next twice, `a` and `b`, ending in
+    /// a listing of two files.
+    fn chain(held: &mut Held) -> Id {
+        let file = Id([7; 32]);
+        let mut at = held.add(["a".into(), "b".into()], EntryKind::File, file);
+        for _ in 0..24 {
+            at = held.add(["a".into(), "b".into()], EntryKind::Folder, at);
+        }
+        at
+    }
+
+    #[test]
+    fn the_measure_counts_a_shared_chain_by_path_reading_each_listing_once() {
+        let mut held = Held::default();
+        let top = chain(&mut held);
+        let mut limits = SaveLimits::default();
+        let m = limits.measure(top, 0, |id| held.read(id)).unwrap().unwrap();
+        // The 2^25 files at the bottom, and the 2^25 - 2 folders above them.
+        let want = Measure {
+            entries: (1 << 26) - 2,
+            depth: 24,
+            longest: "a/".len() * 24 + 1,
+        };
+        assert_eq!(m, want);
+        assert_eq!(held.reads.len(), 25);
+        assert!(held.reads.values().all(|&n| n == 1), "{:?}", held.reads);
+        // Kept for the rest of the walk: met again, nothing is read.
+        assert_eq!(limits.measure(top, 0, |id| held.read(id)).unwrap(), Ok(m));
+        assert!(held.reads.values().all(|&n| n == 1));
+    }
+
+    #[test]
+    fn a_listing_met_again_is_counted_whole_at_once() {
+        let mut held = Held::default();
+        let top = chain(&mut held);
+        let mut limits = SaveLimits::default();
+        // The first time the walk goes into it and counts it itself.
+        assert_eq!(limits.enter(top, 1, 1, |id| held.read(id)), Ok(Ok(false)));
+        assert!(held.reads.is_empty());
+        let refused = limits.enter(top, 1, 1, |id| held.read(id)).unwrap();
+        assert_eq!(
+            refused,
+            Err("it has more than 10000000 files and folders in total".into())
+        );
+        // An unreadable listing gives the walk's own error.
+        let mut limits = SaveLimits::default();
+        let missing = Id([9; 32]);
+        assert_eq!(
+            limits.enter(missing, 1, 1, |id| held.read(id)),
+            Ok(Ok(false))
+        );
+        assert_eq!(
+            limits.enter(missing, 1, 1, |id| held.read(id)),
+            Err("missing")
+        );
+    }
+
+    /// A save of `files` files and ten folders at the top, each holding the same 9,999 folders of
+    /// the same 99 files: 10 + `files` + 10 * 9,999 * 100 entries by path, from four listings.
+    fn shared_save(held: &mut Held, files: usize) -> Id {
+        let x = held.add(names("x", 99), EntryKind::File, Id([7; 32]));
+        let y = held.add(names("y", 9_999), EntryKind::Folder, x);
+        let top = Listing::new(
+            names("t", 10)
+                .map(|name| Entry {
+                    name,
+                    kind: EntryKind::Folder,
+                    id: y,
+                    size: 0,
+                })
+                .chain(names("f", files).map(|name| Entry {
+                    name,
+                    kind: EntryKind::File,
+                    id: Id([7; 32]),
+                    size: 0,
+                }))
+                .collect(),
+        )
+        .unwrap();
+        let id = top.id();
+        held.listings.insert(id, top);
+        id
+    }
+
+    #[test]
+    fn a_save_is_held_to_the_entry_limit_by_path_however_its_listings_are_shared() {
+        let mut held = Held::default();
+        let (under, over) = (shared_save(&mut held, 989), shared_save(&mut held, 991));
+        let mut limits = SaveLimits::default();
+        let m = limits
+            .measure(under, 0, |id| held.read(id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.entries, 9_999_999);
+        let mut counted = |top| SaveLimits::default().add_all(top, 0, 0, |id| held.read(id));
+        assert_eq!(counted(under), Ok(Ok(())));
+        assert_eq!(
+            counted(over),
+            Ok(Err(
+                "it has more than 10000000 files and folders in total".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_listing_counted_whole_is_held_to_the_depth_and_path_limits_from_where_it_is() {
+        let mut held = Held::default();
+        let top = chain(&mut held);
+        // 24 levels below a folder 1 level down, and paths of 49 bytes below one of 1 byte.
+        let mut fits = SaveLimits::new(25, 1 << 26).with_max_path(51);
+        assert_eq!(fits.add_all(top, 1, 1, |id| held.read(id)), Ok(Ok(())));
+        let mut deep = SaveLimits::new(24, MAX_SAVE_ENTRIES);
+        let why = deep
+            .add_all(top, 1, 1, |id| held.read(id))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(why, "its folders nest more than 24 levels deep");
+        let mut long = SaveLimits::new(25, 1 << 26).with_max_path(50);
+        let why = long
+            .add_all(top, 1, 1, |id| held.read(id))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(why, "a path in it is longer than 50 bytes");
     }
 
     #[test]
