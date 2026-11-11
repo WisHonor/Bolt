@@ -19,6 +19,7 @@ The commands you can type along with in the practice project (from [section 3](#
 11. [Personal settings](#11-personal-settings)
 12. [Scripts](#12-scripts)
 13. [What v0.1 doesn't do yet](#13-what-v01-doesnt-do-yet)
+14. [Stopping](#14-stopping)
 
 ## 1. What Bolt is
 
@@ -29,26 +30,44 @@ Bolt keeps every version of your project: the code and the big files together, s
 - **Undo.** Bolt keeps a diary of every command that changed something. `bolt undo` takes back the last one, like Ctrl+Z in an editor. Before a command throws away work you haven't saved, Bolt keeps a copy of it, so undo can bring it back.
 - **Big files.** Files of 1 MiB or more are cut into pieces, called chunks. When you change part of a big file, only the pieces that changed are stored again.
 
-**What v0.1 is.** Bolt v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.bolt`. There is no server yet, so you can't share a project through Bolt or work on one with other people. That comes later (see [section 13](#13-what-v01-doesnt-do-yet)).
+**What v0.1 is.** Bolt v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.bolt`. There is no server yet, so you can't share a project through Bolt or work on one with other people. Combining two lines into one is planned for v0.2, and syncing with a server and locking files for v0.3 (see [section 13](#13-what-v01-doesnt-do-yet)).
 
 ## 2. Installing
 
+Everything starts from the page you downloaded Bolt from: it has the archives, the checksums and the user agreement. Bolt sends nothing over the network and never checks for updates, so new versions are announced on that page too.
+
+### What each system needs
+
+| Your system | What Bolt needs |
+|---|---|
+| Windows | Windows 10 or 11, or Windows Server 2016 or later, on a 64-bit Intel or AMD processor |
+| Linux | A 64-bit Intel or AMD processor, and glibc 2.34 or newer (Ubuntu 22.04, Debian 12, Fedora 35, RHEL, AlmaLinux and Rocky Linux 9, and later) |
+| macOS | macOS 11 or later, on Apple silicon or Intel |
+
+glibc is the library almost every Linux program is built on; `ldd --version` prints its version on the first line. Nothing else needs to be installed: not Git, not a runtime, not a library.
+
 ### Download
 
-Bolt v0.1 comes as one archive per system, on the project's release page: <https://github.com/WisHonor/Bolt/releases>.
+On the page you downloaded Bolt from, take the archive for your system:
 
 | Your system | The archive |
 |---|---|
-| Windows (64-bit Intel or AMD) | `bolt-0.1.0-x86_64-pc-windows-msvc.zip` |
-| Linux (64-bit Intel or AMD) | `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows | `bolt-0.1.0-x86_64-pc-windows-msvc.zip` |
+| Linux | `bolt-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS on Apple silicon (M1 and later) | `bolt-0.1.0-aarch64-apple-darwin.tar.gz` |
 | macOS on Intel | `bolt-0.1.0-x86_64-apple-darwin.tar.gz` |
 
-Each archive holds the program (`bolt.exe` on Windows, `bolt` elsewhere), `README.md`, this guide (`docs/guide.md`), and `THIRD-PARTY-LICENSES.html`, the licenses of the code Bolt is built from. Nothing else needs to be installed. On Linux, Bolt needs glibc 2.34 or newer (Ubuntu 22.04, Debian 12, Fedora 35 and later have it).
+Each archive holds six files:
+
+- the program, `bolt.exe` on Windows and `bolt` elsewhere;
+- `README.md`, a first look at Bolt;
+- this guide, `docs/guide.md`;
+- `USER-AGREEMENT.md`, the user agreement: what you may do with Bolt;
+- `THIRD-PARTY-LICENSES.html` and `THIRD-PARTY-LICENSES-RUST.html`, the notices for the code of other people that is built into Bolt.
 
 ### Check the download
 
-The release also has a file named `SHA256SUMS`. It lists a fingerprint for each archive. If the fingerprint of the file you downloaded is the same as the one listed, the file arrived whole and is the file that was uploaded. Download `SHA256SUMS` into the same folder as the archive, then, in a terminal in that folder:
+The same page has a file named `SHA256SUMS`. It lists a fingerprint (a checksum) for each archive. If the fingerprint of the file you downloaded is the same as the one listed, the file arrived whole and is the file that was put on the page. Download `SHA256SUMS` into the same folder as the archive, then, in a terminal in that folder:
 
 On Windows, in PowerShell:
 
@@ -93,7 +112,7 @@ Your PATH is the list of folders your terminal looks in when you type a command'
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
   ```
 
-  That is macOS; on Linux, write `~/.bashrc` in its place. Then close the terminal and open a new one. The other way, if you have administrator rights, is to put it in `/usr/local/bin`, a folder that is already on the PATH: `sudo mkdir -p /usr/local/bin`, then `sudo mv bolt /usr/local/bin/`.
+  That is macOS; on Linux, write `~/.bashrc` in its place. Then close the terminal and open a new one. The other way, if you have administrator rights, is to put it in `/usr/local/bin`, a folder that is already on the PATH: `sudo mkdir -p /usr/local/bin`, then `sudo mv bolt /usr/local/bin/`. On Linux, don't take this way if `/usr/local/bin/bolt` is already there: another program named bolt (below) puts one there, and `mv` would replace it.
 
 Check that it works, in a new terminal:
 
@@ -107,14 +126,19 @@ It prints:
 bolt 0.1.0
 ```
 
+**If it prints only a number,** such as `5.2.1`, another program named bolt comes first on your PATH: Puppet Bolt, a tool for running tasks on servers, installs a `bolt` command too. Put your folder ahead of it:
+
+- **Windows:** in the same dialog where you added your folder, select it and choose "Move Up" until it is above Puppet's (`C:\Program Files\Puppet Labs\Bolt\bin`). Open a new terminal.
+- **macOS and Linux:** the line you added above puts `~/.local/bin` first, ahead of Puppet's folders (`/opt/puppetlabs/bin`, and `/usr/local/bin` on Linux). If it still loses, a later line in the same file puts one of them in front: move your line below it, and open a new terminal.
+
 ### Windows and macOS warn about Bolt
 
-v0.1 is not signed. Signing means a company or a developer buys a certificate and stamps the program with it, so that Windows and macOS can say who made it. Signing is planned for a later version. Until then, both systems warn you the first time.
+v0.1 is not signed. Signing means a company or a developer buys a certificate and stamps the program with it, so that Windows and macOS can say who made it. Signing is planned for a later version. Until then, either system may warn you the first time.
 
 The warning means only "nobody we know vouched for this program". It doesn't mean something bad was found. Check the download against `SHA256SUMS` first, as above; that is the check you can make yourself.
 
-- **Windows** (SmartScreen) may show "Windows protected your PC". Choose "More info", then "Run anyway". Or, in PowerShell, in the folder that holds it, mark the file as one you trust: `Unblock-File .\bolt.exe`.
-- **macOS** (Gatekeeper) refuses to open a program from an unknown developer the first time you run it. Open System Settings (System Preferences before macOS 13), then Privacy & Security (Security & Privacy in System Preferences); near the bottom it names `bolt` and offers "Open Anyway". Choose it, then run `bolt --version` again and confirm. Or, in Terminal, in the folder that holds it (`~/.local/bin` if you followed the steps above), remove the download mark: `xattr -d com.apple.quarantine bolt`.
+- **Windows.** A program unpacked with "Extract All" keeps the mark Windows puts on downloads. Started from a terminal, as this guide does, it usually runs with no warning. Started from Explorer, SmartScreen shows "Windows protected your PC": choose "More info", then "Run anyway". To remove the mark, in PowerShell, in the folder that holds it: `Unblock-File .\bolt.exe`.
+- **macOS.** Unpacking with `tar` in Terminal, as above, leaves no mark, so nothing is blocked. If you unpacked by double-clicking the `.tar.gz` in Finder instead, `bolt` carries the download mark, and macOS blocks its first run, even from Terminal. To allow it, within about an hour of the block: open System Settings (System Preferences before macOS 13), then Privacy & Security (Security & Privacy in System Preferences); near the bottom it names `bolt` and offers "Open Anyway". Choose it and enter your password, then run `bolt --version` again. Control-clicking and choosing Open no longer works since macOS 15. Or, in Terminal, in the folder that holds it, remove the mark: `xattr -d com.apple.quarantine bolt`.
 
 ### Folders that sync (OneDrive and the like)
 
@@ -1274,7 +1298,7 @@ Every command ends with one of three exit codes:
 | 1 | It failed, or `bolt verify` found a problem. |
 | 2 | Bolt couldn't use the command line: an unknown command or option, `bolt` with no command, or a Git word Bolt explains instead of running. |
 
-[json.md](https://github.com/WisHonor/Bolt/blob/main/docs/json.md) describes every document, field and warning. Every document says its format's version in `bolt_json`, `1` in v0.1. Within one version, a field is never removed, renamed or given another meaning, though new ones may be added; a change that would break that gets the next version number. The words of messages and hints, which are for people, may change at any time.
+The `--json` reference, published on the page you downloaded Bolt from, describes every document, field and warning. Every document says its format's version in `bolt_json`, `1` in v0.1. Within one version, a field is never removed, renamed or given another meaning, though new ones may be added; a change that would break that gets the next version number. The words of messages and hints, which are for people, may change at any time.
 
 ## 13. What v0.1 doesn't do yet
 
@@ -1285,10 +1309,74 @@ Every command ends with one of three exit codes:
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
 - **Not yet:** shelving only some files, dropping a shelf, a warning about files that look like secrets, and installers or package managers.
 - **Not signed.** The programs aren't signed yet, so Windows and macOS warn about them ([section 2](#windows-and-macos-warn-about-bolt)).
-- **No license yet.** Bolt has no license yet.
+- **Closed source.** Bolt's source code isn't published. You may use Bolt under the user agreement, `USER-AGREEMENT.md`, which comes in the same archive as this guide.
+
+### Where Git and Git LFS still do better
+
+Bolt is measured against Git and Git LFS on GitHub's Linux and Windows machines, doing the same steps on the same data. On Git's own source code, Bolt's first save takes a fifth of Git's time on Linux and a tenth on Windows, and a small save is level with Git on Linux and quicker on Windows. Git is ahead elsewhere:
+
+- **`bolt status`** takes 1.6 to 1.8 times Git's time.
+- **Going back to another save** (`bolt goto`) takes about twice Git's time on Linux.
+- **On a slow disk,** Git LFS is quicker at the first save of big files that don't compress.
+- **A long history takes more space** than Git's: 369 MB against 314 MB for Git's own history, since Bolt doesn't yet store a version as its difference from the one before.
+
+Bolt's own bar is to stay within twice Git's time. v0.1 ships without meeting it for `bolt goto`: that is a goal for v0.2. `bolt status` with nothing changed and a small save stay held to it: Bolt's speed check fails when either takes more than twice Git's time.
 
 ### Reporting a problem
 
-To report a bug or ask a question, open an issue at <https://github.com/WisHonor/Bolt/issues>. Say which version `bolt --version` prints, your system, and what you typed and saw.
+To report a bug or ask a question, write to the address on the page you downloaded Bolt from. Say which version `bolt --version` prints, your system, and what you typed and saw.
 
-A security problem (anything that lets a project or repository harm the person using Bolt) must not go in a public issue: see [SECURITY.md](https://github.com/WisHonor/Bolt/blob/main/SECURITY.md).
+A security problem (anything that lets a project or repository harm the person using Bolt) goes to the same address, privately, with "security" in the subject. Please keep it to yourself until it is fixed or ruled on. `SECURITY.md`, published on the same page, says what to include and what counts.
+
+## 14. Stopping
+
+You can stop using Bolt at any time, and keep every file.
+
+### Removing Bolt from a computer
+
+Removing Bolt doesn't touch your projects: each keeps its files and its `.bolt` folder. To remove it, delete the program, take its folder off your PATH, and delete the settings folder of [section 11](#11-personal-settings), which holds your name and email and two files Bolt made for itself. (If you set `BOLT_CONFIG_DIR`, the settings are in that folder instead.)
+
+- **Windows,** in PowerShell, if you put `bolt.exe` in `C:\Users\<you>\bin` as in section 2:
+
+  ```text
+  Remove-Item $HOME\bin\bolt.exe
+  Remove-Item -Recurse $env:APPDATA\bolt
+  ```
+
+  Then take the folder off your PATH: open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", select the folder and choose "Delete". Leave it if other programs live in it.
+
+- **macOS,** in Terminal:
+
+  ```text
+  rm ~/.local/bin/bolt
+  rm -r ~/Library/Application\ Support/bolt
+  ```
+
+- **Linux** (`$XDG_CONFIG_HOME/bolt` in place of `~/.config/bolt`, if you have set that variable):
+
+  ```text
+  rm ~/.local/bin/bolt
+  rm -r ~/.config/bolt
+  ```
+
+  On macOS and Linux, if you put `bolt` in `/usr/local/bin` instead, the first line is `sudo rm /usr/local/bin/bolt`. Then take `~/.local/bin` off your PATH by deleting the `export PATH="$HOME/.local/bin:$PATH"` line from `~/.zshrc` or `~/.bashrc`, unless other programs live in that folder.
+
+### Leaving a project without losing its files
+
+A project's files are ordinary files in an ordinary folder. Bolt keeps its history beside them, in the `.bolt` folder, and nothing else of yours.
+
+1. **Bring your work into the folder.** `bolt shelf --list` shows your shelves: bring each back with `bolt unshelf` and save it, or it stays inside `.bolt`. Then `bolt status` should say "Nothing changed since then"; if not, save.
+2. **Keep the history, if it matters.** Copy the whole project folder, `.bolt` included, somewhere safe. A later Bolt reads it: what v0.1 writes on disk never changes meaning.
+3. **Delete `.bolt`.** The folder is then an ordinary folder, and `bolt.toml` and `.boltignore`, if the project has them, are ordinary files you may keep or delete. Deleting `.bolt` loses the history, the shelves and everything `bolt undo` could take back. In the project's folder:
+
+   ```text
+   Remove-Item -Recurse -Force .bolt
+   ```
+
+   in PowerShell on Windows, or in a terminal on macOS and Linux:
+
+   ```text
+   rm -rf .bolt
+   ```
+
+There is no export to Git yet: to carry on in Git, start a new Git repository in the folder; its history starts there.

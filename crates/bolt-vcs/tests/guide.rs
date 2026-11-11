@@ -1,5 +1,6 @@
 //! The user guide, the README and SECURITY.md against the program: every command the guide shows
-//! runs, and every link points somewhere. And the manifests: no crate can be published, and each
+//! runs, every link points somewhere, and nothing that ships points into the private repository.
+//! And the manifests: no crate can be published, and each
 //! names the license.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -262,6 +263,67 @@ fn every_link_in_the_guide_the_readme_and_security_md_leads_somewhere() {
             );
         }
     }
+}
+
+/// `v1.2.3.md`, a version's notes.
+fn is_notes(name: &str) -> bool {
+    let Some(version) = name.strip_prefix('v').and_then(|n| n.strip_suffix(".md")) else {
+        return false;
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[test]
+fn nothing_that_ships_points_into_the_repository() {
+    let mut shipped: Vec<String> = [
+        "README.md",
+        "docs/guide.md",
+        "SECURITY.md",
+        "USER-AGREEMENT.md",
+        "docs/releases/download-page.md",
+        "docs/releases/welcome.md",
+        "docs/releases/reporting-a-problem.md",
+        "docs/releases/known-problems.md",
+    ]
+    .map(String::from)
+    .to_vec();
+    for entry in std::fs::read_dir(repo_root().join("docs/releases")).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if is_notes(&name) {
+            shipped.push(format!("docs/releases/{name}"));
+        }
+    }
+
+    let mut wrong = Vec::new();
+    for rel in &shipped {
+        // The website's documents are written later, so one not there yet is passed over.
+        let Ok(doc) = std::fs::read_to_string(repo_root().join(rel)) else {
+            continue;
+        };
+        if doc.to_lowercase().contains("github.com/wishonor") {
+            wrong.push(format!("{rel}: holds the repository's address"));
+        }
+        // The README ships beside the guide and the agreement; the others link only to themselves.
+        let beside: &[&str] = if rel == "README.md" {
+            &["docs/guide.md", "USER-AGREEMENT.md"]
+        } else {
+            &[]
+        };
+        for target in link_targets(&doc) {
+            let file = target.split('#').next().unwrap_or_default();
+            if target.starts_with("https://") || file.is_empty() || beside.contains(&file) {
+                continue;
+            }
+            wrong.push(format!(
+                "{rel}: links ({target}), which doesn't ship beside it"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// The trimmed lines of the table `[name]` in `toml`, up to the next table.
