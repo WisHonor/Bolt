@@ -156,7 +156,7 @@ A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.
 
 | State | Outcome line | Details | Next step |
 |---|---|---|---|
-| No flag, with a `bolt.toml` | `Using <label> settings, from bolt.toml:` (`Using the rules in bolt.toml:` without a label) | rows: `Files stored in chunks`, `A save asks first`, `Lockable`, `No conflict markers`, `Left out by the preset` (`N lines in .boltignore`); `none` where there are none | `Next: edit bolt.toml or .boltignore to change a rule, or switch presets with: bolt setup --preset <name>` |
+| No flag, with a `bolt.toml` | `Using <label> settings, from bolt.toml:` (`Using the rules in bolt.toml:` without a label) | rows: `Files stored in chunks`, `A save asks first`, `Lockable`, `No conflict markers` (`none` where there are none), `Left out by the preset` (`N lines in .boltignore`, or `no preset lines in .boltignore`) | `Next: edit bolt.toml or .boltignore to change a rule, or switch presets with: bolt setup --preset <name>` |
 | No flag, no `bolt.toml` | `No bolt.toml here, so Bolt's own values apply:` | the same rows | the same |
 | No flag, a `bolt.toml` Bolt can't use (not TOML, a folder, over 1 MiB) | `bolt.toml couldn't be used, so Bolt's own values apply:`, and a `warning:` says why | the same rows | the same |
 | `--preset`, nothing to change | `Nothing to change: the rule files already are what the Code preset writes.` | | |
