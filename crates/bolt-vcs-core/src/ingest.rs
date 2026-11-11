@@ -33,8 +33,8 @@ impl From<StoreError> for IngestError {
 }
 
 /// Stores the `size` bytes `reader` gives, reading them once, and gives their ID. Fewer or more
-/// bytes than `size` is `Changed`. A file too long to cut is stored whole by `store_long`, which
-/// needs its ID first.
+/// bytes than `size` is `Changed`. A bigger file that isn't cut is stored whole by `store_long`,
+/// which needs its ID first.
 pub(crate) fn store_bytes(
     packs: &mut PackSet,
     store: &Store,
@@ -64,7 +64,7 @@ pub(crate) fn store_held(
     store_whole(packs, store, bytes)
 }
 
-/// Stores whole a file too long to cut, of `size` bytes and the ID `id` (from a first read, or a
+/// Stores whole a file that isn't cut, of `size` bytes and the ID `id` (from a first read, or a
 /// plan), unless the pack being built or the store holds it. `open` gives its bytes, which are
 /// compared with `id` as they are stored; `false` if they aren't `id`'s any more.
 pub(crate) fn store_long<R: Read, E: From<PackError> + From<StoreError>>(
@@ -428,7 +428,7 @@ mod tests {
         }
     }
 
-    /// A file too long to cut is stored whole only if its bytes are its ID's, and not read again
+    /// A file that isn't cut is stored whole only if its bytes are its ID's, and not read again
     /// once held.
     #[test]
     fn a_file_too_long_to_cut_is_stored_whole_once() {

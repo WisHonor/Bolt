@@ -599,7 +599,7 @@ impl Store {
         let mut warnings: Vec<Warning> = self
             .damaged_packs()
             .iter()
-            .map(|pack| Warning::new(warning::DAMAGED_PACK, format!("{pack}.")))
+            .map(|pack| Warning::new(warning::PACK_DAMAGED, format!("{pack}.")))
             .collect();
         let checked = self.checked();
         warnings.extend(checked.unreadable.iter().map(|(path, reason)| {

@@ -1861,6 +1861,13 @@ fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
         assert_eq!(out.status.code(), Some(code), "{args:?}: {said}");
         support::assert_escaped(&said, &format!("{args:?}"));
         assert!(!said.contains("x\\x1b[2J\\x1b[31m"), "{args:?}: {said}");
+        // The planted entry is what stopped it, not something else.
+        if code == 1 {
+            let said = support::without_bolts_codes(&said);
+            let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+            let refused = format!("names diary entry {}, which can't be read", id.short_hex());
+            assert!(said.contains(&refused), "{args:?}: {said}");
+        }
     }
     // Spelled with letters a name may hold: it is only its letters, in Bolt's colours.
     let env = started();

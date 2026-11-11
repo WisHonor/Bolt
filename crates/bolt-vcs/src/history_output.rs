@@ -26,6 +26,7 @@ impl SaveRow {
 /// `bolt history` holds rows to set its columns, but never a whole line: it stops at this many
 /// rows, or at [`HELD_BYTES`] of their text, and a wider row after them runs long.
 const HELD_ROWS: usize = 1_000;
+/// How much of the held rows' text `bolt history` holds before it sets its columns.
 const HELD_BYTES: usize = 1 << 20;
 
 /// `bolt history`'s list, written as its rows come.

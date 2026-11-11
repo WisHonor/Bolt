@@ -4,7 +4,7 @@
 use crate::text::escape;
 
 /// A pack holding a copy that failed a check was passed over.
-pub const DAMAGED_PACK: &str = "pack_damaged";
+pub const PACK_DAMAGED: &str = "pack_damaged";
 /// A stored copy couldn't be read for a reason other than damage, though another copy worked.
 pub const COPY_UNREADABLE: &str = "copy_unreadable";
 /// A pack couldn't be opened or searched for a reason other than damage, such as no permission.
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn a_message_is_escaped_but_keeps_the_lines_bolt_wrote() {
-        let warning = Warning::new(DAMAGED_PACK, "pack a\u{1b}[2Jb is damaged.\nSecond line.");
+        let warning = Warning::new(PACK_DAMAGED, "pack a\u{1b}[2Jb is damaged.\nSecond line.");
         assert_eq!(warning.kind, "pack_damaged");
         assert_eq!(warning.message, "pack a\\x1b[2Jb is damaged.\nSecond line.");
         // Escaping what is escaped changes nothing.

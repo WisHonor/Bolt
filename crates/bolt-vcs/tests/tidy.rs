@@ -113,9 +113,12 @@ fn a_routine_tidy_with_nothing_to_free_says_so() {
         "{said}"
     );
     assert_eq!(told, "");
+    // Old enough to rewrite, so the estimate is worked out, not 0 for packs too young.
+    age(&env, 48);
     let doc: Value =
         serde_json::from_slice(&env.bolt().args(["tidy", "--json"]).output().unwrap().stdout)
             .unwrap();
+    assert_eq!(doc["packs_young"], 0, "{doc}");
     assert_eq!(doc["to_free"], 0, "{doc}");
 }
 

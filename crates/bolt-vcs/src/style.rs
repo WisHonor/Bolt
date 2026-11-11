@@ -294,7 +294,7 @@ impl Screen {
     }
 
     /// `text`, a command to type, in the command colour and kept whole when its line wraps.
-    /// Only for text given to [`Screen::detail`] or [`Screen::prefixed`].
+    /// Only for text given to [`Screen::detail`], [`Screen::prefixed`] or [`Screen::indented`].
     pub fn command(self, text: &str) -> String {
         self.paint(Role::Command, text)
             .replace(' ', &SPACE.to_string())

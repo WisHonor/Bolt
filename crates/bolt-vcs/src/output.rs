@@ -849,7 +849,7 @@ pub fn print_warnings(warnings: &[Warning]) {
             }
             first = false;
             tell(&screen.prefixed(Role::Warning, "warning:", &w.message));
-            damaged |= w.kind == warning::DAMAGED_PACK;
+            damaged |= w.kind == warning::PACK_DAMAGED;
             told.push(w.clone());
         }
     }

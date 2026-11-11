@@ -35,8 +35,8 @@ use crate::save::{
 };
 use crate::store::Store;
 
-/// Blobs up to this size are read whole; bigger ones stream through once, or twice if they are
-/// too long to cut.
+/// Blobs up to this size are read whole; bigger ones stream through once, or twice if they
+/// aren't cut.
 const MAX_WHOLE_BLOB: u64 = 64 << 20;
 
 /// The biggest commit a save can keep exactly: its header lines, the empty line and its message
@@ -1116,7 +1116,7 @@ impl<'r> Converter<'r> {
 
     /// Stores the object of the Git LFS pointer `p` from `.git/lfs/objects` as any file is stored,
     /// computing its SHA-256 as it is read, and gives its content ID only once that is found to
-    /// be the oid. One too long to cut is read twice: once for both hashes, then again to store
+    /// be the oid. One that isn't cut is read twice: once for both hashes, then again to store
     /// it unless a good copy is stored already, which refuses any other bytes.
     fn lfs_object(
         &mut self,
@@ -2624,7 +2624,7 @@ mod tests {
         );
     }
 
-    /// A Git LFS object too long to cut is read once for both its hashes, then again to store it
+    /// A Git LFS object that isn't cut is read once for both its hashes, then again to store it
     /// whole. One whose SHA-256 isn't its pointer's stops the import before anything is stored;
     /// bytes that change between the reads are refused by `add_content_from`, which stores nothing
     /// that isn't the ID it was given.

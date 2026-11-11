@@ -1827,7 +1827,7 @@ pub(crate) fn store_file(
 const READ_BUFFER: usize = 1 << 20;
 
 /// Reads the file `name` in `dir` through and gives it, still open, with its content ID and size:
-/// to know the ID, or as the first of two reads of a file too long to cut. It must stay the file
+/// to know the ID, or as the first of two reads of a file that isn't cut. It must stay the file
 /// the walk saw (`seen`) until read, which is checked once `after_read` has run.
 fn hash_scanned(
     dir: &Dir,
@@ -2458,7 +2458,7 @@ mod tests {
         let root = saved_root(save_now(&mut repo).unwrap());
         let name = pack.file_name().unwrap().to_str().unwrap();
         let warnings = repo.store().warnings();
-        let named = |w: &Warning| w.kind == warning::DAMAGED_PACK && w.message.contains(name);
+        let named = |w: &Warning| w.kind == warning::PACK_DAMAGED && w.message.contains(name);
         assert!(warnings.iter().any(named), "{warnings:?}");
         let fresh = Repository::open(dir.path()).unwrap();
         assert_eq!(saved_tree(fresh.store(), root), disk_tree(dir.path()));
