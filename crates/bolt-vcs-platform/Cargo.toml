@@ -3,6 +3,7 @@ name = "bolt-vcs-platform"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license-file.workspace = true
 
 [lib]
 name = "bolt_platform"

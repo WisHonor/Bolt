@@ -1,5 +1,6 @@
 //! The user guide, the README and SECURITY.md against the program: every command the guide shows
-//! runs, and every link points somewhere.
+//! runs, and every link points somewhere. And the manifests: no crate can be published, and each
+//! names the license.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::{BTreeSet, HashMap};
@@ -261,4 +262,46 @@ fn every_link_in_the_guide_the_readme_and_security_md_leads_somewhere() {
             );
         }
     }
+}
+
+/// The trimmed lines of the table `[name]` in `toml`, up to the next table.
+fn table<'a>(toml: &'a str, name: &str) -> Vec<&'a str> {
+    let header = format!("[{name}]");
+    toml.lines()
+        .map(str::trim)
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
+        .collect()
+}
+
+#[test]
+fn no_crate_can_be_published_and_each_names_the_license() {
+    assert!(read_doc("LICENSE").contains("All rights reserved."));
+    let holds = |rel: &str, name: &str, want: &[&str]| {
+        let doc = read_doc(rel);
+        let lines = table(&doc, name);
+        for line in want {
+            assert!(lines.contains(line), "{rel}: [{name}] lacks `{line}`");
+        }
+    };
+    holds(
+        "Cargo.toml",
+        "workspace.package",
+        &["publish = false", r#"license-file = "LICENSE""#],
+    );
+    for entry in std::fs::read_dir(repo_root().join("crates")).unwrap() {
+        let dir = entry.unwrap().file_name();
+        holds(
+            &format!("crates/{}/Cargo.toml", dir.to_string_lossy()),
+            "package",
+            &["publish.workspace = true", "license-file.workspace = true"],
+        );
+    }
+    // fuzz/ is a workspace of its own, so it can't inherit either key.
+    holds(
+        "fuzz/Cargo.toml",
+        "package",
+        &["publish = false", r#"license-file = "../LICENSE""#],
+    );
 }

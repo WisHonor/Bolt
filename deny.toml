@@ -4,8 +4,8 @@ yanked = "deny"
 
 [licenses]
 version = 2
-# Our own crates (publish = false) have no license yet; the owner has not chosen one.
-# Third-party crates are still checked against the allow list.
+# Bolt's own crates are closed source and never published, so the allow list judges only
+# the crates of others.
 private = { ignore = true }
 allow = [
     "MIT",

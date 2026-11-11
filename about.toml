@@ -23,5 +23,6 @@ targets = [
 # Only what is built into the program: not tests' crates, nor build tools.
 ignore-dev-dependencies = true
 ignore-build-dependencies = true
-# Bolt's own crates (publish = false) are not third parties, and have no license yet.
+# Bolt's own crates are closed source and never published, so the allow list judges only
+# the crates of others, and only theirs go in the notices.
 private = { ignore = true }
