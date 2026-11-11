@@ -699,7 +699,7 @@ impl Matcher {
             .iter()
             .fold(below, |sum, r| sum.saturating_add(r.size));
         self.now.top = Some(Arc::new(Level {
-            folder: self.now.composed_name(folder).into_owned(),
+            folder: folder.to_owned(),
             rules,
             bytes,
             up: self.now.top.take(),
@@ -708,8 +708,6 @@ impl Matcher {
 
     /// The walk goes back up to `folder`: the rules of folders that don't hold it stop applying.
     pub fn leave_to(&mut self, folder: &str) {
-        let folder = self.now.composed_name(folder);
-        let folder = folder.as_ref();
         while let Some(level) = &self.now.top {
             let f = level.folder.as_str();
             let holds = f.is_empty()

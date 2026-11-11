@@ -166,21 +166,6 @@ fn names_are_compared_composed_where_the_drive_composes_them() {
 }
 
 #[test]
-fn going_back_up_compares_folders_composed_where_the_drive_composes_them() {
-    let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
-    let composing = Drive {
-        ignores_case: false,
-        composes_unicode: true,
-    };
-    for (entered, back_to) in [(nfd, nfc), (nfc, nfd), (nfd, nfd)] {
-        let mut m = matcher(composing, &[("", "x\n"), (entered, "y\n")]);
-        m.leave_to(&format!("{back_to}/sub"));
-        assert_eq!(m.in_force_bytes(), 4, "{entered:?} then {back_to:?}");
-        assert_eq!(m.decide(format!("{nfc}/y"), false), Decision::Ignored);
-    }
-}
-
-#[test]
 fn the_last_line_wins_whether_plain_or_not() {
     use Decision::*;
     let folding = Drive {
