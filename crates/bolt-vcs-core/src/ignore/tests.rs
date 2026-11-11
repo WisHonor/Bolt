@@ -460,3 +460,27 @@ fn matching_takes_time_in_proportion_to_pattern_and_path() {
     let path = "a/".repeat(2000) + "zzb";
     assert!(wildmatch(pattern.as_bytes(), path.as_bytes(), false));
 }
+
+#[test]
+fn reading_a_bracket_takes_time_in_proportion_to_its_length() {
+    // A reader that looks ahead for `]` again from every `[:` would take hours over these.
+    let n = 500_000;
+    let started = std::time::Instant::now();
+    let opens = "[:".repeat(n);
+    for (pattern, takes, refuses) in [
+        (format!("[{opens}x]"), "x", "y"),
+        (format!("[{}]", "[:a".repeat(n)), "a", "b"),
+        (format!("[{}]", "\\]".repeat(n)), "]", "\\"),
+        (format!("[a{}]", "-[:".repeat(n)), ":", "b"),
+    ] {
+        assert!(wildmatch(pattern.as_bytes(), takes.as_bytes(), false));
+        assert!(!wildmatch(pattern.as_bytes(), refuses.as_bytes(), false));
+    }
+    // Never closed, or a class name that runs to the end: these match nothing.
+    for pattern in [format!("[{opens}x"), format!("[{opens}:]")] {
+        assert!(!wildmatch(pattern.as_bytes(), b"x", false));
+        let m = matcher(PLAIN, &[("", &format!("{pattern}\n{pattern}\n"))]);
+        assert_eq!(m.decide("x", false), Decision::NoRule);
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+}

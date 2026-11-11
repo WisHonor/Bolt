@@ -360,13 +360,14 @@ fn member_byte(text: &[u8]) -> Option<(u8, &[u8])> {
     }
 }
 
-/// A `[:name:]` at the start of `text`: its name and what follows. The name runs to the first
-/// `]`, and it is a class only if a `:` comes just before that `]`.
-fn class_at(text: &[u8]) -> Option<(&[u8], &[u8])> {
-    let body = text.strip_prefix(b"[:")?;
-    let end = body.iter().position(|&b| b == b']')?;
-    let (inside, after) = body.split_at_checked(end)?;
-    Some((inside.strip_suffix(b":")?, after.get(1..)?))
+/// A `[:name:]` at the start of `text`, whose first `]` is at `close`: its name and what
+/// follows. The name runs to that `]`, and it is a class only if a `:` comes just before it.
+fn class_at(text: &[u8], close: usize) -> Option<(&[u8], &[u8])> {
+    let inside = text.get(..close)?.strip_prefix(b"[:")?;
+    Some((
+        inside.strip_suffix(b":")?,
+        text.get(close.checked_add(1)?..)?,
+    ))
 }
 
 /// The members of a `[…]` whose `[` is already read: whether `!` or `^` turns it over, the
@@ -378,13 +379,22 @@ fn members(text: &[u8]) -> Option<(bool, Vec<Member>, &[u8])> {
         _ => (false, text),
     };
     let mut found = Vec::new();
+    // How much of the text is left at the next `]`, found again only once it is passed, so
+    // that no byte is searched twice.
+    let mut left_at_close = 0;
     loop {
+        if left_at_close == 0 || rest.len() < left_at_close {
+            // With no `]` left the bracket can never close.
+            let at = rest.iter().position(|&b| b == b']')?;
+            left_at_close = rest.len().saturating_sub(at);
+        }
         if !found.is_empty()
             && let Some(after) = rest.strip_prefix(b"]")
         {
             return Some((negated, found, after));
         }
-        if let Some((name, after)) = class_at(rest) {
+        let close = rest.len().saturating_sub(left_at_close);
+        if let Some((name, after)) = class_at(rest, close) {
             found.push(Member::Class(class_named(name)?));
             rest = after;
             continue;
@@ -642,6 +652,9 @@ impl InForce {
 
     /// The path as this drive compares names: composed where it composes them.
     fn composed<'a>(&self, path: &'a [u8]) -> Cow<'a, [u8]> {
+        if !self.drive.composes_unicode || path.is_ascii() {
+            return Cow::Borrowed(path);
+        }
         match std::str::from_utf8(path).map(|s| self.composed_name(s)) {
             Ok(Cow::Owned(s)) => Cow::Owned(s.into_bytes()),
             _ => Cow::Borrowed(path),
