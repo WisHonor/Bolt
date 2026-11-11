@@ -4,7 +4,7 @@
 - **Date:** 2026-11-10
 - **Agenda topic:** none (milestone 6, the red team's first session on presets and polish)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
-- **Refined by:** [decision 127](127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md) (what the size check keeps in memory is bounded; the cost of a deep tree in the other readers is written down)
+- **Refined by:** [decision 127](127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md) (what the size check keeps in memory is bounded; the cost of a deep tree in the other readers is written down); [decision 130](130-a-walk-measures-a-listing-it-meets-again-before-walking-it-again.md) (the other readers refuse a save past the limits at the first listing they meet again)
 - **Refines:** [decision 118](118-bolt-verify.md) (what `bolt verify` checks)
 
 ## Context
