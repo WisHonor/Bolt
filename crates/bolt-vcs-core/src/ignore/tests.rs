@@ -1,4 +1,8 @@
-#![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 use super::*;
 use crate::drive::Drive;
 
@@ -202,4 +206,227 @@ fn bytes_in_force_are_the_files_of_the_folders_entered() {
     assert_eq!(m.in_force_bytes(), 6);
     m.leave_to("");
     assert_eq!(m.in_force_bytes(), 4);
+}
+
+const FOLDING: Drive = Drive {
+    ignores_case: true,
+    composes_unicode: false,
+};
+
+/// Pattern, then the paths it matches and those it doesn't, as `git check-ignore` decided them.
+fn check_wildmatch(cases: &[(&str, &[&str], &[&str])], casefold: bool) {
+    for &(pattern, yes, no) in cases {
+        for path in yes {
+            assert!(
+                wildmatch(pattern.as_bytes(), path.as_bytes(), casefold),
+                "{pattern:?} should match {path:?}"
+            );
+        }
+        for path in no {
+            assert!(
+                !wildmatch(pattern.as_bytes(), path.as_bytes(), casefold),
+                "{pattern:?} should not match {path:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn double_stars_cross_folders_only_as_whole_folder_names() {
+    check_wildmatch(
+        &[
+            ("**", &["a", "a/b"], &[]),
+            ("abc/**", &["abc/x", "abc/x/y"], &["abc"]),
+            ("a/***/b", &["a/b", "a/x/b", "a/x/y/b"], &["a/xb"]),
+            ("***/b", &["b", "x/b", "x/y/b"], &[]),
+            ("a/**/**/b", &["a/b", "a/x/b", "a/x/y/z/b"], &[]),
+            ("**/a", &["a", "x/a", "x/y/a"], &["xa", "a/x"]),
+            ("a/**b", &["a/xb", "a/b"], &["a/x/b"]),
+            ("**a/b", &["xa/b", "a/b"], &["x/a/b"]),
+            ("x/**y/z", &["x/ay/z", "x/y/z"], &["x/a/y/z"]),
+            ("*/**/b", &["a/b", "a/x/b"], &["b"]),
+            // Git 2.52 and later: a `**` after other bytes of a name is a `*`.
+            ("a**/b", &["ax/b", "a/b"], &["ax/y/b"]),
+            ("a/b**", &["a/bc"], &["a/bc/d"]),
+        ],
+        false,
+    );
+}
+
+#[test]
+fn classes_read_as_git_reads_them() {
+    check_wildmatch(
+        &[
+            ("[]a]x", &["]x", "ax"], &["bx"]),
+            ("[!]a]x", &["bx"], &["]x", "ax", "/x"]),
+            ("[^a]x", &["bx"], &["ax"]),
+            ("[a-]x", &["ax", "-x"], &["bx"]),
+            ("[-a]x", &["ax", "-x"], &["bx"]),
+            ("[\\]]x", &["]x"], &["\\x"]),
+            ("[a\\-c]x", &["ax", "-x", "cx"], &["bx"]),
+            ("[\\a-\\c]x", &["ax", "bx", "cx"], &["dx"]),
+            // A backwards range takes nothing, but its first byte stands on its own too.
+            ("[z-a]x", &["zx"], &["ax", "bx"]),
+            ("[a-c-e]x", &["ax", "bx", "cx", "-x", "ex"], &["dx"]),
+            ("[--0]x", &["-x", ".x", "0x"], &["1x", "/x"]),
+            ("[a-\\]]x", &["ax"], &["]x", "bx"]),
+            ("[[:alpha:]]x", &["ax", "Zx"], &["1x"]),
+            ("[[:digit:]-a]x", &["1x", "-x", "ax"], &["bx"]),
+            // `[:` that isn't a class name is a `[` and a `:`.
+            ("[[:alpha]x", &["ax", "lx", "[x", ":x"], &["bx"]),
+            ("[[:]x", &["[x", ":x"], &["]x", "x"]),
+            ("[[:al]pha:]]x", &["apha:]]x"], &["ax", "x"]),
+            ("[{]x", &["{x"], &[]),
+            ("{a,b}", &["{a,b}"], &["a", "b"]),
+            // A class never takes a `/`.
+            ("a[.-0]c", &["a.c"], &["a/c"]),
+            ("a[!b]c", &["adc"], &["a/c", "abc"]),
+            ("**/a[!b]c", &["a/c/adc", "adc"], &[]),
+        ],
+        false,
+    );
+    // These lines match nothing at all.
+    for pattern in [
+        "[[:foo:]]x",
+        "[[::]]x",
+        "a[b",
+        "[^]x",
+        "[]",
+        "a\\",
+        "[a\\",
+        "a[/]b",
+    ] {
+        for path in ["x", "fx", "a[b", "ab", "]x", "^x", "a", "a\\", "a/b", "[]"] {
+            assert!(
+                !wildmatch(pattern.as_bytes(), path.as_bytes(), false),
+                "{pattern} {path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn letter_case_is_folded_as_git_folds_it() {
+    check_wildmatch(
+        &[
+            ("[A-Z]1", &["x1", "X1"], &[]),
+            ("[a-z]2", &["x2", "X2"], &[]),
+            ("[B]3", &[], &["b3", "B3"]),
+            ("[b]4", &["b4", "B4"], &[]),
+            ("[[:upper:]]5", &["x5", "X5"], &["15"]),
+            ("[[:lower:]]6", &["x6", "X6"], &[]),
+            ("\\B7", &[], &["b7", "B7"]),
+            ("\\b8", &["b8", "B8"], &[]),
+            ("[!B]9", &["b9", "B9", "x9"], &[]),
+            ("[!b]0", &["x0"], &["b0", "B0"]),
+            ("[B-B]1", &["b1", "B1"], &[]),
+            ("[Z-a]2", &["z2", "Z2", "_2", "A2"], &["y2"]),
+            ("[Z-A]3", &[], &["z3", "Z3"]),
+            ("[^A-Z]4", &["_4"], &["x4", "X4"]),
+            ("Make*", &["makefile", "MAKEFILE.am"], &["make/x"]),
+        ],
+        true,
+    );
+    check_wildmatch(
+        &[
+            ("[Z-a]2", &["Z2", "a2", "_2"], &["z2", "A2"]),
+            ("[Z-A]3", &["Z3"], &["z3"]),
+            ("[[:upper:]]5", &["X5"], &["x5"]),
+        ],
+        false,
+    );
+}
+
+#[test]
+fn lines_git_cant_use_match_nothing() {
+    use Decision::*;
+    let text = "tab\t\n!\n/\n!/\n\\!bang\n lead\nd\\/\nc//\na\\/b\n*.o\n";
+    let m = matcher(PLAIN, &[("", text)]);
+    for (path, is_dir, want) in [
+        ("tab\t", false, Ignored),
+        ("tab", false, NoRule),
+        ("!", false, NoRule),
+        ("!bang", false, Ignored),
+        ("bang", false, NoRule),
+        (" lead", false, Ignored),
+        ("lead", false, NoRule),
+        ("d", true, NoRule),
+        ("c", true, NoRule),
+        ("x/c", true, NoRule),
+        ("a/b", false, Ignored),
+        ("x/a/b", false, NoRule),
+        ("x/y.o", false, Ignored),
+        ("x/y.o/z", false, NoRule),
+    ] {
+        assert_eq!(m.decide(path, is_dir), want, "{path:?}");
+    }
+}
+
+#[test]
+fn plain_names_and_other_lines_keep_their_order() {
+    use Decision::*;
+    // The plain names are looked up apart from the rest, which mustn't change which line wins.
+    let text = "a\n*\n!a\nb/\n!*.c\nc.c\nc.c/\n";
+    for drive in [PLAIN, FOLDING] {
+        let m = matcher(drive, &[("", text)]);
+        for (path, is_dir, want) in [
+            ("a", false, Kept),
+            ("x/a", false, Kept),
+            ("b", false, Ignored),
+            ("b", true, Ignored),
+            ("q.c", false, Kept),
+            ("c.c", false, Ignored),
+            ("c.c", true, Ignored),
+        ] {
+            assert_eq!(m.decide(path, is_dir), want, "{path:?} {is_dir}");
+        }
+    }
+    let m = matcher(FOLDING, &[("", "A\n!a\n")]);
+    assert_eq!(m.decide("x/A", false), Decision::Kept);
+    let m = matcher(PLAIN, &[("", "A\n!a\n")]);
+    assert_eq!(m.decide("x/A", false), Decision::Ignored);
+    // Plain paths too, tied to the folder or not.
+    for (text, path, want) in [
+        ("/a/b\n!a/*\n", "s/a/b", Kept),
+        ("!a/*\n/a/b\n", "s/a/b", Ignored),
+        ("!a/*\na/b\n", "s/a/b", Ignored),
+        ("a/b\n!b\n", "s/a/b", Kept),
+        ("!b\na/b\n", "s/a/b", Ignored),
+        ("a/b\n", "s/x/a/b", NoRule),
+    ] {
+        let m = matcher(PLAIN, &[("s", text)]);
+        assert_eq!(m.decide(path, false), want, "{text:?} {path:?}");
+    }
+}
+
+#[test]
+fn rules_apply_only_below_their_folder() {
+    use Decision::*;
+    let mut m = matcher(PLAIN, &[("", "*.x\n"), ("sub", "!*.x\n/top\nmid/end\n")]);
+    assert_eq!(m.decide("a.x", false), Ignored);
+    assert_eq!(m.decide("subx/a.x", false), Ignored);
+    assert_eq!(m.decide("sub/a.x", false), Kept);
+    assert_eq!(m.decide("sub", true), NoRule);
+    assert_eq!(m.decide("sub/top", false), Ignored);
+    assert_eq!(m.decide("sub/mid/end", false), Ignored);
+    assert_eq!(m.decide("sub/x/mid/end", false), NoRule);
+    assert_eq!(m.decide("top", false), NoRule);
+    // A sibling folder doesn't keep `sub`'s rules in force.
+    m.leave_to("subway");
+    assert_eq!(m.decide("sub/a.x", false), Ignored);
+    assert_eq!(m.in_force_bytes(), 4);
+}
+
+#[test]
+fn matching_takes_time_in_proportion_to_pattern_and_path() {
+    // A matcher that backtracks would take years over these.
+    let pattern = "**/".repeat(30) + "x";
+    let path = "a/".repeat(3000) + "y";
+    assert!(!wildmatch(pattern.as_bytes(), path.as_bytes(), false));
+    let pattern = "*a".repeat(40) + "b";
+    let path = "a".repeat(5000);
+    assert!(!wildmatch(pattern.as_bytes(), path.as_bytes(), true));
+    let pattern = "a/**/".repeat(30) + "[!/]*?b";
+    let path = "a/".repeat(2000) + "zzb";
+    assert!(wildmatch(pattern.as_bytes(), path.as_bytes(), false));
 }
