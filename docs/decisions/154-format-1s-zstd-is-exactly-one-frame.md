@@ -24,7 +24,6 @@ The last read of the format before the freeze (finding F1, the one it called blo
 - no skippable frame, before or after it;
 - no dictionary;
 - a window of at most 2^27 bytes (128 MiB; a single-segment frame's window is its content size);
-- each block within RFC 8878's block limit: the window, or 128 KiB if that is smaller;
 - a content checksum is optional, and is checked when present;
 - its content size, if it gives one, equal to the entry's uncompressed size;
 - nothing after it.

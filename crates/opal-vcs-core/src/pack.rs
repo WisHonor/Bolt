@@ -2642,6 +2642,29 @@ mod tests {
     }
 
     #[test]
+    fn a_block_walk_takes_the_bytes_in_any_pieces() {
+        // Several blocks: runs of zeros, then text.
+        let mut bytes = vec![0u8; 300 << 10];
+        bytes.extend(b"some text, then more text ".repeat(4000));
+        let frame = zstd::bulk::compress(&bytes, ZSTD_LEVEL).unwrap();
+        let start = frame_start(&frame, bytes.len() as u64).unwrap();
+        for piece in [1, 7, frame.len()] {
+            let mut walk = BlockWalk::new(start);
+            assert!(
+                frame.chunks(piece).all(|p| walk.feed(p)),
+                "pieces of {piece}"
+            );
+        }
+        // A raw block over its window of 1 KiB, its header cut between two pieces.
+        let raw = one_block_frame(0x00, 0, &[1; 2048], 2048);
+        let start = frame_start(&raw, 2048).unwrap();
+        let at = usize::try_from(start.header_len).unwrap() + 1;
+        let mut walk = BlockWalk::new(start);
+        assert!(walk.feed(&raw[..at]));
+        assert!(!walk.feed(&raw[at..]));
+    }
+
+    #[test]
     fn frame_starts_are_judged_at_the_limits() {
         let start = |rest: &[u8], size| frame_start(&[&ZSTD_MAGIC[..], rest].concat(), size);
         // Windows of exactly 2^27, and of 2^27 + 2^24.

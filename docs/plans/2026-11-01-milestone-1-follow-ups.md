@@ -257,7 +257,7 @@ What the rename to Opalro left ([decision 150](../decisions/150-the-name-is-opal
 
 | By | Item |
 |---|---|
-| Later, with a block decoder of Opalro's own | A zstd frame with a compressed block that unpacks past RFC 8878's block limit (the window, at most 128 KiB) is read in an entry stored in at most 1 MiB, and refused in a larger one: zstd's one-call decoder doesn't look for it ([decision 154](../decisions/154-format-1s-zstd-is-exactly-one-frame.md); [the final builds' rulings](2026-11-12-v0.1-final-rulings.md), ruling 10). No writer makes one, and storage-format.md §11 lets a reader do either. |
+| Later, with a block decoder of Opalro's own | A zstd frame with a compressed block that unpacks past RFC 8878's block limit (the window, at most 128 KiB) is read when Opalro reads the entry in one call (stored in at most 1 MiB and, for a file's contents, at most 1 MiB unpacked too), and refused otherwise: zstd's one-call decoder doesn't look for it ([decision 154](../decisions/154-format-1s-zstd-is-exactly-one-frame.md); [the final builds' rulings](2026-11-12-v0.1-final-rulings.md), ruling 10). No writer makes one, and storage-format.md §11 lets a reader do either. |
 
 ## For the owner to decide
 
