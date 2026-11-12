@@ -619,7 +619,10 @@ jobs:
           failed=""
           for image in $CONTAINERS; do
             echo "::group::$image"
-            docker run --rm -e GITHUB_ACTIONS=true -v "$mount:/w:ro" "$image" \
+            # AlmaLinux 9's own start-up files put ~/.local/bin on root's PATH already.
+            case "$image" in almalinux:*) on_path=yes ;; *) on_path=no ;; esac
+            docker run --rm -e GITHUB_ACTIONS=true -e FIRST_RUN_LOCAL_BIN_ON_PATH=$on_path \
+              -v "$mount:/w:ro" "$image" \
               bash /w/first-run.sh /w/fetched "$VERSION" "$TARGET" || failed="$failed ${image%%@*}"
             echo "::endgroup::"
           done

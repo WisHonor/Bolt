@@ -77,10 +77,12 @@ run "mkdir -p ~/.local/bin"
 run "mv opalro ~/.local/bin/"
 
 step "the guide: add ~/.local/bin to the PATH in ~/$rc"
-# Not found before, so the guide's line is what puts it there; unless the system's own start-up
-# files already put ~/.local/bin on the PATH (AlmaLinux 9's do), which the log then says.
+# Not found before, so the guide's line is what puts it there. A system whose own start-up files
+# already put ~/.local/bin on the PATH (AlmaLinux 9's do) is let through only when the caller
+# says it is one, with FIRST_RUN_LOCAL_BIN_ON_PATH=yes.
 case ":$(new_shell 'printf %s "$PATH"'):" in
   *":$HOME/.local/bin:"*)
+    [ "${FIRST_RUN_LOCAL_BIN_ON_PATH:-}" = yes ] || { echo "~/.local/bin is on the PATH before the guide's line adds it" >&2; false; }
     already=yes
     echo "::notice::This system's shell already has ~/.local/bin on its PATH; the guide's line adds it again, which does no harm" ;;
   *)

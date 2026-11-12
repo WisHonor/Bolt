@@ -11,7 +11,7 @@ Two rules of format 1 changed just before it freezes at v0.1. Both are about byt
    - it unpacks to exactly the entry's size, and nothing follows it.
 
    Before this change, the reader also read several frames in a row, passed over skippable frames, and decoded the pre-1.0 formats v0.4 to v0.7. zstd is now built without its legacy decoders. The rule is in [storage-format.md](../docs/storage-format.md) §11.
-2. **More short names of `.opalro` are refused, on every system** ([decision 155](../docs/decisions/155-every-short-name-of-opalro-is-refused.md)). These are `opalro~5` to `opalro~9`, and NTFS's hashed short name of `.opalro`, `OP9975~1`, in the form `git fsck` refuses for `.gitmodules`: up to the six characters of `op9975`, then `~` and a counter (`op997~12`, `~1234567`). Before, only `opalro~1` to `opalro~4` were refused. The rule is in §3.
+2. **More short names of `.opalro` are refused, on every system** ([decision 155](../docs/decisions/155-more-short-names-of-opalro-are-refused.md)). These are `opalro~5` to `opalro~9`, and NTFS's hashed short name of `.opalro`, `OP9975~1`, in the form `git fsck` refuses for `.gitmodules`: up to the six characters of `op9975`, then `~` and a counter (`op997~12`, `~1234567`). Before, only `opalro~1` to `opalro~4` were refused. The rule is in §3.
 
 Your job is to break either rule: find bytes or names that get through, two paths that disagree, or a crash, hang or runaway memory on the way. Threat list: `docs/security.md` §4. The rules: decisions 059, 148, 152, 154 and 155 in `docs/decisions/`.
 

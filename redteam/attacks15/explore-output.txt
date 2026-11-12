@@ -1,0 +1,580 @@
+RT16 explorations, in the sandbox. Not proofs: what each path did with each frame or name.
+
+=== On 1eaa3b1, the code briefed: rt16_explore.rs's rt16_frames (one_plain_frame then took one argument) and rt16_cli.rs
+
+    Finished `release` profile [optimized] target(s) in 2.09s
+     Running unittests src/lib.rs (target/release/deps/opal_core-cccf49f5169bbbe7)
+
+running 1 test
+test pack::rt16_explore::rt16_frames ... RLE blocks of 300 KiB, window 2^21, fcs=true, 204800 B
+    stored=14 size=204800 one_plain=true read_small=ACCEPT [531.4µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [2.7ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+RLE blocks of 300 KiB, window 2^21, fcs=false, 204800 B
+    stored=10 size=204800 one_plain=true read_small=ACCEPT [24.5µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [42.0µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+RLE blocks of 300 KiB, window 2^21, fcs=true, 921600 B
+    stored=22 size=921600 one_plain=true read_small=ACCEPT [248.2µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [63.7µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+RLE blocks of 300 KiB, window 2^21, fcs=true, 1228800 B
+    stored=26 size=1228800 one_plain=true read_small=ACCEPT [71.4µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [31.2µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=ACCEPT
+RLE one block of 200 KiB, single segment
+    stored=13 size=204800 one_plain=true read_small=ACCEPT [24.0µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [30.0µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+raw blocks of 200 KiB, window 2^21, 204800 B
+    stored=204813 size=204800 one_plain=true read_small=ACCEPT [48.2µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [34.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+raw blocks of 200 KiB, window 2^21, 1228800 B
+    stored=1228828 size=1228800 one_plain=true read_small=none [120.0ns] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [38.7µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+raw blocks of 64 KiB, window 1 KiB, 65536 B
+    stored=65549 size=65536 one_plain=true read_small=ACCEPT [104.9µs] decode_into=ACCEPT [93.1µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+raw blocks of 64 KiB, window 1 KiB, 1126400 B
+    stored=1126464 size=1126400 one_plain=true read_small=none [111.0ns] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [49.5µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+raw blocks of 2 KiB, window 1 KiB, no fcs
+    stored=102556 size=102400 one_plain=true read_small=ACCEPT [41.1µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [92.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+compressed 128 KiB blocks, window byte -> 64 KiB, 262144 B
+    stored=48 size=262144 one_plain=true read_small=none [497.6µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [49.7µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+compressed 128 KiB blocks, window byte -> 64 KiB, 2097152 B
+    stored=216 size=2097152 one_plain=true read_small=none [16.1µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [47.6µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+offsets of 204800 B, window byte -> 128 KiB, 409600 B (frame 204888)
+    stored=204888 size=409600 one_plain=true read_small=ACCEPT [104.7µs] decode_into=ACCEPT [127.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+offsets of 460800 B, window byte -> 128 KiB, 921600 B (frame 460914)
+    stored=460914 size=921600 one_plain=true read_small=ACCEPT [192.1µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [193.9µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+offsets of 716800 B, window byte -> 128 KiB, 1433600 B (frame 716930)
+    stored=716930 size=1433600 one_plain=true read_small=ACCEPT [363.6µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [268.4µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=ACCEPT
+content size 2^64-1 (8-byte field), 1000 B
+    stored=1017 size=1000 one_plain=true read_small=ACCEPT [5.7µs] decode_into=ACCEPT [23.1µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+content size 2^64-2 (8-byte field), 1000 B
+    stored=1017 size=1000 one_plain=true read_small=none [1.8µs] decode_into=damaged: the zstd frame of <id> has the wrong size [8.8µs]
+    copy_content=damaged: the zstd frame of <id> has the wrong size
+    read_record=damaged: the zstd frame of <id> has the wrong size
+content size 2^64-1 (8-byte field), 1228800 B
+    stored=1228844 size=1228800 one_plain=true read_small=none [120.0ns] decode_into=ACCEPT [1.4ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+content size 2^64-2 (8-byte field), 1228800 B
+    stored=1228844 size=1228800 one_plain=true read_small=none [110.0ns] decode_into=damaged: the zstd frame of <id> has the wrong size [11.9µs]
+    copy_content=damaged: the zstd frame of <id> has the wrong size
+    read_record=damaged: the zstd frame of <id> has the wrong size
+GOOD bulk::compress, 0 B
+    stored=9 size=0 one_plain=true read_small=ACCEPT [5.4µs] decode_into=ACCEPT [23.3µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 0 B
+    stored=9 size=0 one_plain=true read_small=ACCEPT [2.6µs] decode_into=ACCEPT [16.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1 B
+    stored=10 size=1 one_plain=true read_small=ACCEPT [3.6µs] decode_into=ACCEPT [20.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1 B
+    stored=10 size=1 one_plain=true read_small=ACCEPT [2.7µs] decode_into=ACCEPT [16.7µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1000 B
+    stored=29 size=1000 one_plain=true read_small=ACCEPT [5.6µs] decode_into=ACCEPT [20.7µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1000 B
+    stored=28 size=1000 one_plain=true read_small=ACCEPT [3.3µs] decode_into=ACCEPT [16.7µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1048576 B
+    stored=116 size=1048576 one_plain=true read_small=ACCEPT [775.2µs] decode_into=ACCEPT [880.6µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1048576 B
+    stored=116 size=1048576 one_plain=true read_small=ACCEPT [795.1µs] decode_into=ACCEPT [893.5µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1048577 B
+    stored=120 size=1048577 one_plain=true read_small=ACCEPT [839.2µs] decode_into=ACCEPT [1.1ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1048577 B
+    stored=117 size=1048577 one_plain=true read_small=ACCEPT [779.0µs] decode_into=ACCEPT [876.6µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD window exactly 2^27, raw 128 KiB blocks
+    stored=307219 size=307200 one_plain=true read_small=ACCEPT [123.6µs] decode_into=ACCEPT [106.8µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD window exactly 2^27, no fcs
+    stored=307215 size=307200 one_plain=true read_small=ACCEPT [139.0µs] decode_into=ACCEPT [333.7µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD 8-byte content size 1000
+    stored=1017 size=1000 one_plain=true read_small=ACCEPT [3.6µs] decode_into=ACCEPT [16.8µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD 2-byte content size 1000
+    stored=1011 size=1000 one_plain=true read_small=ACCEPT [3.4µs] decode_into=ACCEPT [21.2µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1062 filtered out; finished in 0.77s
+
+    Finished `release` profile [optimized] target(s) in 2.27s
+     Running tests/rt16_cli.rs (target/release/deps/rt16_cli-df0f8adaf988ecfa)
+
+running 2 tests
+test rt16_cli ... $ opalro save Two files -> Some(0)
+Saved kppo "Two files" on main  (2 files)
+
+  small in 177a9d9ee7c8237bd18b32155b1c0da29b3eccf69e15c6aa0c83602bed31a5cf.pack: 14 B, planted frame: true
+  large in ed710c7e82e9a583142e34749d9644e9487aec066f230373ce826e3ff4f53f1d.pack: 26 B, planted frame: true
+  large in e459a54c978ff2cb3a943b58dd41a5c055b941690faa4c4a57fc42109e31d8a0.pack: 212 B, planted frame: false
+$ opalro verify -> Some(1)
+Checked .tmp2lZ5jT: 1 problem found.
+
+    + 10 of 11 stored objects in 4 packs (6.3 KiB) match their fingerprints
+    x 1 object is damaged:
+        65f531ceffdd  It is damaged: the zstd data of 65f531ceffdd22186bd968e7b354e340f538c4a5a7bbe30a93aff99f543c1f45 is invalid: Data corruption detected. Save 2db809b5fe31 needs it at large.bin.
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+hint: Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+
+$ opalro discard -> Some(0)
+Threw away your unsaved changes to 2 files.
+
+  small.bin written back whole: true
+  large.bin written back whole: true
+$ opalro tidy -> Some(0)
+Freed 3.2 KiB  (4 packs removed, 1 written)
+warning: Pack /tmp/.tmp2lZ5jT/.opalro/store/packs/ed710c7e82e9a583142e34749d9644e9487aec066f230373ce826e3ff4f53f1d.pack wasn't tidied because it is damaged (the zstd data of 65f531ceffdd22186bd968e7b354e340f538c4a5a7bbe30a93aff99f543c1f45 is invalid: Data corruption detected), so it is left as it is. Ask for help before trying to repair the project.
+
+  small after tidy in 15b42261f0d250b6dc39d563077b57ab7d4624d1907370c852f803f988e45e8d.pack: 14 B, planted frame: true
+  large after tidy in ed710c7e82e9a583142e34749d9644e9487aec066f230373ce826e3ff4f53f1d.pack: 26 B, planted frame: true
+  large after tidy in 15b42261f0d250b6dc39d563077b57ab7d4624d1907370c852f803f988e45e8d.pack: 212 B, planted frame: false
+$ opalro verify -> Some(1)
+Checked .tmp2lZ5jT: 1 problem found.
+
+    + 12 of 13 stored objects in 2 packs (4.7 KiB) match their fingerprints
+    x 1 object is damaged:
+        65f531ceffdd  It is damaged: the zstd data of 65f531ceffdd22186bd968e7b354e340f538c4a5a7bbe30a93aff99f543c1f45 is invalid: Data corruption detected. Save 2db809b5fe31 needs it at large.bin.
+    + 3 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (3 entries) is intact
+hint: Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+
+ok
+test rt16_cli_tidy_keeps_which ... $ opalro save Mine -> Some(0)
+Saved wvtz "Mine" on main  (1 file)
+
+  before tidy: 00.pack: 14 B, planted frame: true
+  before tidy: 5aad83f9956f76b4df31da3e738dea895b672cc19e9296bce2e705b518edc1fe.pack: 26 B, planted frame: false
+$ opalro tidy -> Some(0)
+Freed 2.3 KiB  (3 packs removed, 1 written)
+
+  after tidy: 5abb1783e14db7827ab17a91b37884dc487f5fd4d7009fb9efadbda64e318338.pack: 14 B, planted frame: true
+$ opalro verify -> Some(0)
+Verified .tmpQu7GqD: no problems found.
+
+    + 7 stored objects in 1 pack (2.3 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+
+
+=== On c8eedd0, the branch's tip: redteam/attacks15/run.sh explore
+
+    Finished `release` profile [optimized] target(s) in 1m 14s
+     Running unittests src/lib.rs (target/release/deps/opal_core-cccf49f5169bbbe7)
+
+running 4 tests
+test pack::rt16_explore::rt16_cost ... 2 MiB file, window 2^21, no content size: Ok(2097152) in 5.3ms; peak RSS +4 MiB over 7 MiB, peak address space 147 MiB (from 147)
+2 MiB file, window 2^27, no content size: Ok(2097152) in 3.7ms; peak RSS +4 MiB over 7 MiB, peak address space 211 MiB (from 147)
+record recorded 256 MiB, frame makes 256 MiB + 0, 8198 B stored: Ok(268435456) in 216.6ms; peak RSS +255 MiB over 5 MiB, peak address space 339 MiB (from 339)
+record recorded 256 MiB, frame makes 256 MiB + 1, 8202 B stored: Err("damaged: <id> does not have its recorded size") in 320.1ms; peak RSS +258 MiB over 5 MiB, peak address space 595 MiB (from 339)
+ok
+test pack::rt16_explore::rt16_far_matches_large ... offsets of 200 KiB, window byte -> 128 KiB, 1433600 B (frame 204962)
+    stored=204962 size=1433600 one_plain=true read_small=ACCEPT [1.3ms] decode_into=ACCEPT [1.1ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+ok
+test pack::rt16_explore::rt16_fix ... compressed last block: 20480 B literals, decodes 71680 B, window byte 0x58 -> 2^16; block type 2 stored 15405 last 1
+    stored=15414 size=71680 one_plain=true read_small=ACCEPT [96.2µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [162.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+compressed last block: 40960 B literals, decodes 102400 B, window byte 0x58 -> 2^16; block type 2 stored 30765 last 1
+    stored=30774 size=102400 one_plain=true read_small=ACCEPT [74.4µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [83.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+compressed last block: 10240 B literals, decodes 71680 B, window byte 0x58 -> 2^16; block type 2 stored 7723 last 1
+    stored=7732 size=71680 one_plain=true read_small=ACCEPT [39.8µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [75.2µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+compressed last block: 61440 B literals, decodes 131072 B, window byte 0x58 -> 2^16; block type 2 stored 98293 last 0
+    stored=98305 size=131072 one_plain=false read_small=none [13.6µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [39.7µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+compressed last block: 5120 B literals, decodes 40960 B, window byte 0x58 -> 2^15; block type 2 stored 3883 last 1
+    stored=3892 size=40960 one_plain=true read_small=none [12.8µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [410.8µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+compressed last block: 20480 B literals, decodes 122880 B, window byte 0x58 -> 2^16; block type 2 stored 15405 last 1
+    stored=15414 size=122880 one_plain=true read_small=none [24.6µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [57.5µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+GOOD raw blocks, a header across 131075
+    stored=1126437 size=1126400 one_plain=true read_small=none [261.0ns] decode_into=ACCEPT [1.2ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD one RLE block of exactly 128 KiB
+    stored=10 size=131072 one_plain=true read_small=ACCEPT [15.8µs] decode_into=ACCEPT [35.3µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+RLE block of 128 KiB + 1
+    stored=10 size=131073 one_plain=false read_small=none [2.0µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [25.7µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+GOOD single segment 1-byte size 232, RLE 232
+    stored=10 size=232 one_plain=true read_small=ACCEPT [4.2µs] decode_into=ACCEPT [20.6µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+single segment size 200, RLE 232 (over its window)
+    stored=10 size=232 one_plain=false read_small=none [1.6µs] decode_into=damaged: the zstd frame of <id> has the wrong size [8.5µs]
+    copy_content=damaged: the zstd frame of <id> has the wrong size
+    read_record=damaged: the zstd frame of <id> has the wrong size
+ok
+test pack::rt16_explore::rt16_frames ... RLE blocks of 300 KiB, window 2^21, fcs=true, 204800 B
+    stored=14 size=204800 one_plain=false read_small=none [3.4µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [36.7µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+RLE blocks of 300 KiB, window 2^21, fcs=false, 204800 B
+    stored=10 size=204800 one_plain=false read_small=none [2.3µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [29.8µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+RLE blocks of 300 KiB, window 2^21, fcs=true, 921600 B
+    stored=22 size=921600 one_plain=false read_small=none [3.0µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [124.5µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+RLE blocks of 300 KiB, window 2^21, fcs=true, 1228800 B
+    stored=26 size=1228800 one_plain=false read_small=none [2.1µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [26.8µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+RLE one block of 200 KiB, single segment
+    stored=13 size=204800 one_plain=false read_small=none [3.5µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [39.4µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+raw blocks of 200 KiB, window 2^21, 204800 B
+    stored=204813 size=204800 one_plain=false read_small=none [23.2µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [43.8µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+raw blocks of 200 KiB, window 2^21, 1228800 B
+    stored=1228828 size=1228800 one_plain=false read_small=none [340.0ns] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [48.6µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+raw blocks of 64 KiB, window 1 KiB, 65536 B
+    stored=65549 size=65536 one_plain=false read_small=none [11.9µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [42.2µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+raw blocks of 64 KiB, window 1 KiB, 1126400 B
+    stored=1126464 size=1126400 one_plain=false read_small=none [151.0ns] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [41.4µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+raw blocks of 2 KiB, window 1 KiB, no fcs
+    stored=102556 size=102400 one_plain=false read_small=none [12.3µs] decode_into=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows [32.7µs]
+    copy_content=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+    read_record=damaged: the zstd data of <id> is invalid: a block holds more than its frame allows
+compressed 128 KiB blocks, window byte -> 64 KiB, 262144 B
+    stored=48 size=262144 one_plain=true read_small=none [11.9µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [38.5µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+compressed 128 KiB blocks, window byte -> 64 KiB, 2097152 B
+    stored=216 size=2097152 one_plain=true read_small=none [21.7µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [42.5µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=damaged: the zstd data of <id> is invalid: Data corruption detected
+offsets of 204800 B, window byte -> 128 KiB, 409600 B (frame 204888)
+    stored=204888 size=409600 one_plain=true read_small=ACCEPT [82.5µs] decode_into=ACCEPT [126.2µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+offsets of 460800 B, window byte -> 128 KiB, 921600 B (frame 460914)
+    stored=460914 size=921600 one_plain=true read_small=ACCEPT [178.2µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [197.1µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+offsets of 716800 B, window byte -> 128 KiB, 1433600 B (frame 716930)
+    stored=716930 size=1433600 one_plain=true read_small=ACCEPT [301.0µs] decode_into=damaged: the zstd data of <id> is invalid: Data corruption detected [263.0µs]
+    copy_content=damaged: the zstd data of <id> is invalid: Data corruption detected
+    read_record=ACCEPT
+content size 2^64-1 (8-byte field), 1000 B
+    stored=1017 size=1000 one_plain=false read_small=none [1.8µs] decode_into=damaged: the zstd frame of <id> has the wrong size [9.5µs]
+    copy_content=damaged: the zstd frame of <id> has the wrong size
+    read_record=damaged: the zstd frame of <id> has the wrong size
+content size 2^64-2 (8-byte field), 1000 B
+    stored=1017 size=1000 one_plain=false read_small=none [1.8µs] decode_into=damaged: the zstd data of <id> is not a frame format 1 allows [7.9µs]
+    copy_content=damaged: the zstd data of <id> is not a frame format 1 allows
+    read_record=damaged: the zstd data of <id> is not a frame format 1 allows
+content size 2^64-1 (8-byte field), 1228800 B
+    stored=1228844 size=1228800 one_plain=false read_small=none [350.0ns] decode_into=damaged: the zstd frame of <id> has the wrong size [15.2µs]
+    copy_content=damaged: the zstd frame of <id> has the wrong size
+    read_record=damaged: the zstd frame of <id> has the wrong size
+content size 2^64-2 (8-byte field), 1228800 B
+    stored=1228844 size=1228800 one_plain=false read_small=none [250.0ns] decode_into=damaged: the zstd data of <id> is not a frame format 1 allows [13.0µs]
+    copy_content=damaged: the zstd data of <id> is not a frame format 1 allows
+    read_record=damaged: the zstd data of <id> is not a frame format 1 allows
+GOOD bulk::compress, 0 B
+    stored=9 size=0 one_plain=true read_small=ACCEPT [8.0µs] decode_into=ACCEPT [26.3µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 0 B
+    stored=9 size=0 one_plain=true read_small=ACCEPT [4.0µs] decode_into=ACCEPT [22.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1 B
+    stored=10 size=1 one_plain=true read_small=ACCEPT [6.7µs] decode_into=ACCEPT [33.2µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1 B
+    stored=10 size=1 one_plain=true read_small=ACCEPT [6.5µs] decode_into=ACCEPT [34.8µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1000 B
+    stored=29 size=1000 one_plain=true read_small=ACCEPT [10.8µs] decode_into=ACCEPT [32.3µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1000 B
+    stored=28 size=1000 one_plain=true read_small=ACCEPT [19.7µs] decode_into=ACCEPT [88.9µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1048576 B
+    stored=116 size=1048576 one_plain=true read_small=ACCEPT [821.4µs] decode_into=ACCEPT [1.1ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1048576 B
+    stored=116 size=1048576 one_plain=true read_small=ACCEPT [840.5µs] decode_into=ACCEPT [1.5ms]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD bulk::compress, 1048577 B
+    stored=120 size=1048577 one_plain=true read_small=ACCEPT [874.5µs] decode_into=ACCEPT [959.5µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD streamed, 1048577 B
+    stored=117 size=1048577 one_plain=true read_small=ACCEPT [849.0µs] decode_into=ACCEPT [984.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD window exactly 2^27, raw 128 KiB blocks
+    stored=307219 size=307200 one_plain=true read_small=ACCEPT [154.4µs] decode_into=ACCEPT [130.7µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD window exactly 2^27, no fcs
+    stored=307215 size=307200 one_plain=true read_small=ACCEPT [166.4µs] decode_into=ACCEPT [368.5µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD 8-byte content size 1000
+    stored=1017 size=1000 one_plain=true read_small=ACCEPT [6.3µs] decode_into=ACCEPT [22.4µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+GOOD 2-byte content size 1000
+    stored=1011 size=1000 one_plain=true read_small=ACCEPT [8.2µs] decode_into=ACCEPT [27.0µs]
+    copy_content=ACCEPT
+    read_record=ACCEPT
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1063 filtered out; finished in 2.07s
+
+exit=0
+
+=== On c8eedd0: redteam/attacks15/run.sh cli
+
+    Finished `release` profile [optimized] target(s) in 39.44s
+     Running tests/rt16_cli.rs (target/release/deps/rt16_cli-df0f8adaf988ecfa)
+
+running 2 tests
+test rt16_cli ... $ opalro save Two files -> Some(0)
+Saved ksuy "Two files" on main  (2 files)
+warning: pack /tmp/.tmpNiGR4F/.opalro/store/packs/177a9d9ee7c8237bd18b32155b1c0da29b3eccf69e15c6aa0c83602bed31a5cf.pack is damaged: the zstd data of e0bf1d6e115852694f559ab30b79d460d4ae5fb52642d65d663ee69875a9c82c is invalid: a block holds more than its frame allows.
+
+hint: Opalro didn't use the damaged copy. Ask for help before trying to repair it.
+
+  small in 177a9d9ee7c8237bd18b32155b1c0da29b3eccf69e15c6aa0c83602bed31a5cf.pack: 14 B, planted frame: true
+  small in db796f01e64799ae6bdf5e18f966dca4afc07e49d681b1469b069a5cbedc1735.pack: 26 B, planted frame: false
+  large in db796f01e64799ae6bdf5e18f966dca4afc07e49d681b1469b069a5cbedc1735.pack: 212 B, planted frame: false
+  large in ed710c7e82e9a583142e34749d9644e9487aec066f230373ce826e3ff4f53f1d.pack: 26 B, planted frame: true
+$ opalro verify -> Some(1)
+Checked .tmpNiGR4F: 2 problems found.
+
+    + 10 of 12 stored objects in 4 packs (6.4 KiB) match their fingerprints
+    x 2 objects are damaged:
+        e0bf1d6e1158  It is damaged: the zstd data of e0bf1d6e115852694f559ab30b79d460d4ae5fb52642d65d663ee69875a9c82c is invalid: a block holds more than its frame allows. Save 2e01858e0ab2 needs it at small.bin.
+        65f531ceffdd  It is damaged: the zstd data of 65f531ceffdd22186bd968e7b354e340f538c4a5a7bbe30a93aff99f543c1f45 is invalid: a block holds more than its frame allows. Save 2e01858e0ab2 needs it at large.bin.
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+hint: Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+
+$ opalro discard -> Some(0)
+Threw away your unsaved changes to 2 files.
+
+  small.bin written back whole: true
+  large.bin written back whole: true
+$ opalro tidy -> Some(0)
+Freed 2.1 KiB  (3 packs removed, 1 written)
+warning: Pack /tmp/.tmpNiGR4F/.opalro/store/packs/177a9d9ee7c8237bd18b32155b1c0da29b3eccf69e15c6aa0c83602bed31a5cf.pack wasn't tidied because it is damaged (the zstd data of e0bf1d6e115852694f559ab30b79d460d4ae5fb52642d65d663ee69875a9c82c is invalid: a block holds more than its frame allows), so it is left as it is. Ask for help before trying to repair the project.
+warning: Pack /tmp/.tmpNiGR4F/.opalro/store/packs/ed710c7e82e9a583142e34749d9644e9487aec066f230373ce826e3ff4f53f1d.pack wasn't tidied because it is damaged (the zstd data of 65f531ceffdd22186bd968e7b354e340f538c4a5a7bbe30a93aff99f543c1f45 is invalid: a block holds more than its frame allows), so it is left as it is. Ask for help before trying to repair the project.
+
+  small after tidy in 177a9d9ee7c8237bd18b32155b1c0da29b3eccf69e15c6aa0c83602bed31a5cf.pack: 14 B, planted frame: true
+  small after tidy in 5e0d9de3f374389401e249dec2c236c5f8553ac7b75250334376479af2be08fa.pack: 26 B, planted frame: false
+  large after tidy in ed710c7e82e9a583142e34749d9644e9487aec066f230373ce826e3ff4f53f1d.pack: 26 B, planted frame: true
+  large after tidy in 5e0d9de3f374389401e249dec2c236c5f8553ac7b75250334376479af2be08fa.pack: 212 B, planted frame: false
+$ opalro verify -> Some(1)
+Checked .tmpNiGR4F: 2 problems found.
+
+    + 12 of 14 stored objects in 3 packs (5.9 KiB) match their fingerprints
+    x 2 objects are damaged:
+        e0bf1d6e1158  It is damaged: the zstd data of e0bf1d6e115852694f559ab30b79d460d4ae5fb52642d65d663ee69875a9c82c is invalid: a block holds more than its frame allows. Save 2e01858e0ab2 needs it at small.bin.
+        65f531ceffdd  It is damaged: the zstd data of 65f531ceffdd22186bd968e7b354e340f538c4a5a7bbe30a93aff99f543c1f45 is invalid: a block holds more than its frame allows. Save 2e01858e0ab2 needs it at large.bin.
+    + 3 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (3 entries) is intact
+hint: Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+
+ok
+test rt16_cli_tidy_keeps_which ... $ opalro save Mine -> Some(0)
+Saved kplr "Mine" on main  (1 file)
+
+  before tidy: 00.pack: 14 B, planted frame: true
+  before tidy: 8ce8f051e1899d80afde75c33e90edaf61d07eac1010a338ff06ef135686a5b0.pack: 26 B, planted frame: false
+$ opalro tidy -> Some(0)
+Freed 1.1 KiB  (2 packs removed, 1 written)
+warning: Pack /tmp/.tmp91NJ7b/.opalro/store/packs/00.pack wasn't tidied because it is damaged (the zstd data of e0bf1d6e115852694f559ab30b79d460d4ae5fb52642d65d663ee69875a9c82c is invalid: a block holds more than its frame allows), so it is left as it is. Ask for help before trying to repair the project.
+
+  after tidy: 00.pack: 14 B, planted frame: true
+  after tidy: 304507dac2855f65d61d753fd44cae75a38e2bfb783a8e28b2710bca8cce2a73.pack: 26 B, planted frame: false
+$ opalro verify -> Some(1)
+Checked .tmp91NJ7b: 1 problem found.
+
+    + 7 of 8 stored objects in 2 packs (3.5 KiB) match their fingerprints
+    x 1 object is damaged:
+        e0bf1d6e1158  It is damaged: the zstd data of e0bf1d6e115852694f559ab30b79d460d4ae5fb52642d65d663ee69875a9c82c is invalid: a block holds more than its frame allows. Save 6d721bcd3a89 needs it at small.bin.
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+hint: Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+exit=0
+
+=== On c8eedd0: redteam/attacks15/run.sh names
+
+    Finished `release` profile [optimized] target(s) in 30.81s
+     Running tests/rt16_names.rs (target/release/deps/rt16_names-46f606ce6aea4b88)
+
+running 1 test
+3596496 names, 110011 refused as .opalro; 0 differ from the spec's words or between the three checks; 0 differ from Git's form
+  "~$document.docx"      refused=false
+  "~$Budget.xlsx"        refused=false
+  "~lock.file#"          refused=false
+  ".~lock.report.odt#"   refused=false
+  "~WRL0001.tmp"         refused=false
+  "~1"                   refused=false
+  "~10"                  refused=false
+  "~123"                 refused=false
+  "~123456"              refused=false
+  "~1234567"             refused=true
+  "~12345678"            refused=false
+  "~1234567.txt"         refused=false
+  "~0123456"             refused=false
+  "~9999999"             refused=true
+  "~1000000"             refused=true
+  "o~123456"             refused=true
+  "O~654321"             refused=true
+  "op~12345"             refused=true
+  "op9~1234"             refused=true
+  "op99~123"             refused=true
+  "op997~12"             refused=true
+  "op9975~1"             refused=true
+  "OP9975~9"             refused=true
+  "op9975~10"            refused=false
+  "op9975~0"             refused=false
+  "op9975"               refused=false
+  "op9975~"              refused=false
+  "op9975.txt"           refused=false
+  "opalro~0"             refused=false
+  "opalro~5"             refused=true
+  "OPALRO~9"             refused=true
+  "opalro~10"            refused=false
+  "opalr~10"             refused=false
+  "opal~100"             refused=false
+  "op~10000"             refused=true
+  "notes~1"              refused=false
+  "backup~1234567"       refused=false
+  "~"                    refused=false
+  "~~"                   refused=false
+  "~.txt"                refused=false
+  "~1.txt"               refused=false
+  "~1 "                  refused=false
+  "~1234567 ."           refused=true
+test rt16_names ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.95s
+
+    Finished `release` profile [optimized] target(s) in 38.83s
+== save: each name at the top and in sub/
+Saved skky "Names" on main  (12 files)
+warning: Left out 18 entries whose names Git or Opalro keep for themselves, with everything in them:
+  OP997~12 
+  OPALRO~9.
+  op9975~1
+  op9975~1:x
+  opalro~5
+  and 13 more
+Such names stand for .git or .opalro (some spellings only on Windows or macOS), so Opalro leaves them out of saves, as it does on import. If Git uses them (a submodule's or worktree's .git file), list them in .opalroignore to leave them out without this warning; otherwise rename them to save them.
+-- what the save holds, written back:
+./op9975~10
+./opalr~1
+./opalr~10
+./sub/op9975~10
+./sub/opalr~1
+./sub/opalr~10
+./sub/~$doc.docx
+./sub/~1234567.txt
+./sub/~WRL0001.tmp
+./~$doc.docx
+./~1234567.txt
+./~WRL0001.tmp
+== import: Git tracks each name at the top
+   opalro~5   error: Git tracks `opalro~5` at the top of this project, and Opalro can't use it as its own .opalro folder.
+   op9975~1   error: Git tracks `op9975~1` at the top of this project, and Opalro can't use it as its own .opalro folder.
+   ~1234567   error: Git tracks `~1234567` at the top of this project, and Opalro can't use it as its own .opalro folder.
+   o~123456   error: Git tracks `o~123456` at the top of this project, and Opalro can't use it as its own .opalro folder.
+   opalr~1    Imported 1 commit from Git: 1 line, 0 tags.
+== import: Git tracks each name in sub/
+   sub/opalro~6       Left out 1 entry whose name Opalro never writes to disk (such as .git and .opalro), with everything in it: `sub/opalro~6` in commit b3553dc120e8
+   sub/op9975~2       Left out 1 entry whose name Opalro never writes to disk (such as .git and .opalro), with everything in it: `sub/op9975~2` in commit 8ebc75ca1955
+   sub/~1234567       Left out 1 entry whose name Opalro never writes to disk (such as .git and .opalro), with everything in it: `sub/~1234567` in commit 39b74f13d599
+exit=0
+
+=== On c8eedd0: redteam/attacks15/run.sh platforms (lint only; the probe needs a FAT drive)
+
+exit=0
