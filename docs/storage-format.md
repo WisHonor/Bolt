@@ -455,7 +455,8 @@ A reader may read a frame that breaks either rule, or refuse it. No writer may w
 v0.1 reads such a frame wherever zstd does. When it reads the entry in one call (stored in at most 1 MiB and, for a file's contents, at most 1 MiB unpacked too), zstd reads a match back to the frame's start and a compressed block past the limit. When it streams the entry, zstd reads a match within the window plus two blocks, and refuses a compressed block past the limit.
 
 Opalro itself keeps reading what v0.1 reads here. `tidy` and merging copy stored bytes as they are, so such a frame, planted beside a person's own copy, can become their only copy.
- Opalro is built without zstd's legacy decoders, so none of its paths reads a pre-1.0 frame. Opalro itself writes one frame at level 3, with no dictionary. It gives the content size when it compresses an object in one go, and none when it streams a file it stores whole.
+
+Opalro is built without zstd's legacy decoders, so none of its paths reads a pre-1.0 frame. Opalro itself writes one frame at level 3, with no dictionary. It gives the content size when it compresses an object in one go, and none when it streams a file it stores whole.
 
 **Compression 0** needs a stored size equal to the uncompressed size, or the entry counts as an unknown compression; a chunk list (§6) is the one exception. **Pack names:** a reader reads every file in `store/packs/` whose name ends in `.pack` (that exact lowercase ending, after at least one other character), not only those named after their index checksum. **The entry area** may hold gaps or bytes no index line names, which readers pass over; version 1 refuses overlapping entries, and version 2 doesn't check for them.
 
