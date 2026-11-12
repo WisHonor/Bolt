@@ -10,15 +10,9 @@ Bolt 0.1 is for one person on one computer. It can't share a project, combine tw
 
 ## Going back to another save is slower than Git on Linux
 
-`bolt goto` takes about twice Git's time on Linux, which is over Bolt's own bar of staying within twice Git's time. Making it quicker is a goal for the next version.
+`bolt goto` takes about twice Git's time on Linux, sometimes more (1.8 to 2.7 times in GitHub's runs). Bolt's own bar is twice Git's time. In this version `goto` is held to three and a half times Git's time instead; getting back within twice is a goal for v0.2.
 
 **What to do:** nothing; it is only slower.
-
-## A project made to cause harm can take minutes to be refused
-
-A project someone else made on purpose, with a very deep, branching folder tree packed into a few kilobytes, is refused by `bolt goto` and `bolt changes --save`, but only after several minutes and hundreds of megabytes of memory. Nothing is written to your folder.
-
-**What to do:** in a project someone gave you, run `bolt verify` first. It finds such a save in a moment and says so. On a project built to cause harm, `bolt verify` itself may take a while, but it changes none of your files or saves.
 
 ## Files another program has open, on Windows
 

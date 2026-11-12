@@ -438,9 +438,9 @@ The owner decided that Bolt is closed source ([decision 140](decisions/140-bolt-
 **9. Follow-ups** ✅ (2026-11-11; Task 11)
 - *Done when:* no row this session owns says "before v0.1" or "before the first release" ([decision 147](decisions/147-the-package-sessions-follow-ups-before-v0.1.md)).
 
-**10. Reviews** (Tasks 12–14)
+**10. Reviews** ✅ (2026-11-11/12; Tasks 12–14)
 - The storage format read once more against the code before publishing freezes it; the changed workflows read as an attacker would; a whole-branch review.
 - *Done when:* every finding is fixed, or ruled on in writing, and every document matches the code.
 
-**11. The rulings, the page for the owner, and the merge** (Tasks 15–17)
+**11. The rulings, the page for the owner, and the merge** ✅ (2026-11-11/12; Tasks 15–17)
 - *Done when:* the rulings file and `docs/releases/v0.1.0-before-you-publish.md` are written, and the pull request's checks pass on all three systems.
