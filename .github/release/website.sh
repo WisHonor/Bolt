@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Makes the copies of the docs meant for the website, zipped.
 # Usage: website.sh <version> <out-zip>
-# Fails when a copy still holds the repository's address or a link into it.
+# Fails when a copy still holds the repository's address or a link into it, or the old name.
 set -euo pipefail
 
 version=$1
@@ -28,6 +28,14 @@ for f in "${as_is[@]}" "${unlinked[@]}"; do
     grep -i -q -e "$repo" "$dir/$f" && s=0 || s=$?
     if [ "$s" = 0 ]; then
         echo "::error::The website copy of $f holds the repository's address"
+        bad=1
+    elif [ "$s" != 1 ]; then
+        echo "::error::grep failed on $f"
+        exit 2
+    fi
+    grep -i -q -e 'bolt' "$dir/$f" && s=0 || s=$?
+    if [ "$s" = 0 ]; then
+        echo "::error::The website copy of $f still says Bolt, the old name (decision 150)"
         bad=1
     elif [ "$s" != 1 ]; then
         echo "::error::grep failed on $f"

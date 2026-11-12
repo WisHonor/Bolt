@@ -686,4 +686,4 @@ jobs:
           printf '\nMade by %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$REPO" "$RUN_ID" >> "$notes"
           gh release create "$TAG" --repo "$REPO" --draft --target "$GITHUB_SHA" \
             --title "Opalro $VERSION" --notes-file "$notes" \
-            "$dist"/opal-"$VERSION"-*.zip "$dist"/opal-"$VERSION"-*.tar.gz "$dist/SHA256SUMS"
+            "$dist"/opalro-"$VERSION"-*.zip "$dist"/opalro-"$VERSION"-*.tar.gz "$dist/SHA256SUMS"

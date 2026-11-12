@@ -6,7 +6,7 @@ The commands you can type along with in the practice project (from [section 3](#
 
 ## Contents
 
-1. [What Opalro is](#1-what-opal-is)
+1. [What Opalro is](#1-what-opalro-is)
 2. [Installing](#2-installing)
 3. [The first five minutes](#3-the-first-five-minutes)
 4. [Every command](#4-every-command)
@@ -1314,7 +1314,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 - **No repair.** `opal verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
 - **Not yet:** shelving only some files, dropping a shelf, a warning about files that look like secrets, and installers or package managers.
-- **Not signed.** The programs aren't signed yet, so Windows and macOS warn about them ([section 2](#windows-and-macos-warn-about-opal)).
+- **Not signed.** The programs aren't signed yet, so Windows and macOS warn about them ([section 2](#windows-and-macos-warn-about-opalro)).
 - **Closed source.** Opalro's source code isn't published. You may use Opalro under the user agreement, `USER-AGREEMENT.md`, which comes in the same archive as this guide.
 
 ### Where Git and Git LFS still do better

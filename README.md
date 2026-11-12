@@ -28,7 +28,7 @@ Nothing else needs to be installed. Put `opal` on your PATH, the list of folders
 
 ## Five commands
 
-Before the first one, tell Opalro your name and email: the guide's [first five minutes](docs/guide.md#tell-opal-who-you-are) say where.
+Before the first one, tell Opalro your name and email: the guide's [first five minutes](docs/guide.md#tell-opalro-who-you-are) say where.
 
 ```text
 opal start                   Make this folder a project, asking what kind

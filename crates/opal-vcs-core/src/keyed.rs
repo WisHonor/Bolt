@@ -15,7 +15,7 @@ pub const KEY_LEN: usize = 32;
 pub const KEY_FILE: &str = "cache-key";
 
 /// The user's cache key, made on first use in the user's own settings folder; only the command
-/// line asks for it, and hands it to `Repository::set_cache_key`. Two Opalros making it at once end
+/// line asks for it, and hands it to `Repository::set_cache_key`. Two runs making it at once end
 /// with one key. A key file that can't be read, or isn't 32 bytes, is an error naming it, never
 /// replaced: it is the user's own, and replacing it silently could hide that someone changed it.
 /// With no settings folder, none: the command goes without its caches.
