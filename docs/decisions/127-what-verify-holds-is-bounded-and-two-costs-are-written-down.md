@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6, the red team's second session on presets and polish)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 126](126-verify-also-finds-a-save-that-cant-be-written-out.md) (the size check it added) and [decision 118](118-bolt-verify.md)
+- **Refined by:** [decision 130](130-a-walk-measures-a-listing-it-meets-again-before-walking-it-again.md) (the deep tree is refused at once: a walk measures a listing it meets again before it walks it again)
 
 ## Context
 

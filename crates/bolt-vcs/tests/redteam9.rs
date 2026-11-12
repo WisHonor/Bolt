@@ -153,7 +153,7 @@ fn checked_out_with_git_lfs(env: &Env, path: &str) -> Option<Vec<u8>> {
 
 /// RT8-3's fix warns about a blob over 1,024 bytes whose own first 1,024 bytes Git LFS's parser
 /// takes for a pointer. But Git converts a file's line endings on checkout before Git LFS's
-/// smudge filter reads those 1,024 bytes (convert.c: CRLF, then the filter). With `eol=crlf` in
+/// smudge filter reads those 1,024 bytes (CRLF first, then the filter). With `eol=crlf` in
 /// `.gitattributes`, or `core.autocrlf=true` (Git for Windows' default) without `-text`, each of
 /// the pointer's three lines gains a CR, so what sat in the blob's last three of those bytes is
 /// pushed past them. A blob with an `X` there comes into Bolt as its text, tail and all, without

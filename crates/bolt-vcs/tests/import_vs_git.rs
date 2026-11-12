@@ -171,13 +171,13 @@ fn unusual_commits_match_git() {
         ];
         env.git_input(&args, &raw)
     };
-    let people = "author A U Thor <author@example.com> 1112912053 -0700\n\
-                  committer C O Mitter <committer@example.com> 1112912113 +0530\n";
+    let people = "author Ida Lark <ida.lark@example.com> 1601234567 -0400\n\
+                  committer Omar Fenn <omar.fenn@example.com> 1601234627 +0545\n";
     let side = write(&[], format!("{people}\nA side commit\n").as_bytes());
     let mut last = write(&[], format!("{people}\nPlain\n").as_bytes());
     let tag = format!(
         "mergetag object {side}\n type commit\n tag v1.0\n \
-         tagger T Agger <tagger@example.com> 1112912000 +0000\n \n Version 1.0\n"
+         tagger Vera Toll <vera.toll@example.com> 1601234500 +0000\n \n Version 1.0\n"
     );
     for (others, rest) in [
         // A signature, its lines continued with a space.
@@ -212,15 +212,15 @@ fn unusual_commits_match_git() {
         // A zone written -0000.
         (
             None,
-            b"author A U Thor <author@example.com> 1112912053 -0000\n\
-              committer C O Mitter <committer@example.com> 1112912113 -0000\n\nZone\n"
+            b"author Ida Lark <ida.lark@example.com> 1601234567 -0000\n\
+              committer Omar Fenn <omar.fenn@example.com> 1601234627 -0000\n\nZone\n"
                 .to_vec(),
         ),
         // An author line no version of Git writes.
         (
             None,
-            b"author A U Thor <author@example.com>1112912053 -0700\n\
-              committer C O Mitter <committer@example.com> 1112912113 +0530\n\nOdd\n"
+            b"author Ida Lark <ida.lark@example.com>1601234567 -0400\n\
+              committer Omar Fenn <omar.fenn@example.com> 1601234627 +0545\n\nOdd\n"
                 .to_vec(),
         ),
         // A header Git doesn't know, continued on a second line.

@@ -13,6 +13,9 @@ use support::{Env, main_tip, run_limited, text};
 
 const FILES: usize = 100_000;
 const PER_FOLDER: usize = 100;
+// The status gate: each of the two runs of `status` on the 100,000 files takes less than this,
+// in seconds.
+const UNDER_SECS: f64 = 2.0;
 
 // The memory gate's file, and the most memory saving it may take.
 const BIG: u64 = 10 << 30;
@@ -56,6 +59,12 @@ fn status_on_an_unchanged_100_000_file_project() {
         );
     }
     println!("status: {:.2} s, then {:.2} s", times[0], times[1]);
+    assert!(
+        times.iter().all(|&t| t < UNDER_SECS),
+        "status took {:.2} s, then {:.2} s, not both under {UNDER_SECS} s",
+        times[0],
+        times[1]
+    );
 }
 
 #[test]

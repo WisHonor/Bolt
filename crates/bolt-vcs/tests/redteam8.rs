@@ -246,9 +246,8 @@ fn rt8_2_a_save_leaves_out_what_gits_own_ignore_list_leaves_out() {
     );
 }
 
-/// Git LFS reads a pointer from a blob's first 1,024 bytes (`DecodeFrom` reads that much, then
-/// trims), so a blob that starts with a pointer and spaces is smudged into its object, whatever
-/// follows. The import must bring in what Git LFS checks out, or at least say it didn't.
+/// Git LFS reads a pointer from a blob's first 1,024 bytes, then trims them, so a blob that
+/// starts with a pointer and spaces is smudged into its object, whatever follows. The import must bring in what Git LFS checks out, or at least say it didn't.
 #[test]
 fn rt8_3_a_blob_git_lfs_reads_as_a_pointer_never_comes_in_silently_as_text() {
     let env = Env::new();

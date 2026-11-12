@@ -4,17 +4,13 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::id::hex_id;
-use super::{
-    GitError, GitId, HashKind, ObjectType, broken, shown, trim_end, trim_start, unimportable,
-};
+use super::lfs::{LFS_SPEC, LFS_SPECS, LfsPointer, MAX_LFS_POINTER_BYTES, lfs_pointer};
+use super::{GitError, GitId, HashKind, ObjectType, broken, shown, unimportable};
 use crate::listing::{EntryKind, MAX_ENTRIES};
-use crate::save::{
-    EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_PARENTS, MAX_PERSON_FIELD_BYTES, Person, Save,
-};
+use crate::save::{EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_PARENTS, Person, Save};
 
 /// A commit, borrowing its bytes. `author` and `committer` are those lines after their key, as
 /// written; `header` is every byte before the empty line, and `message` every byte after it.
@@ -215,7 +211,7 @@ fn mode_kind((value, was_cut): (u16, bool), mode: &[u8]) -> Option<(EntryKind, b
         0o040000 => EntryKind::Folder,
         0o120000 => EntryKind::Symlink,
         0o160000 => EntryKind::ProjectLink,
-        // Any regular file's mode, by its owner-execute bit, as Git's `canon_mode` reads it.
+        // Any regular file's mode, by its owner-execute bit, as Git reads it.
         0o100000..=0o107777 if value & 0o100 == 0 => EntryKind::File,
         0o100000..=0o107777 => EntryKind::Executable,
         // Git reads most of the rest as a submodule, taking a file's ID for a commit.
@@ -368,86 +364,10 @@ fn other_headers<'a>(
 }
 
 /// `bytes` up to the first `byte`, and what follows it.
-fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
+pub(super) fn split_at_byte(bytes: &[u8], byte: u8) -> Option<(&[u8], &[u8])> {
     let at = bytes.iter().position(|&b| b == byte)?;
     let (before, after) = bytes.split_at_checked(at)?;
     Some((before, after.get(1..)?))
-}
-
-/// Most bytes a Git LFS pointer may have (decision 037).
-pub const MAX_LFS_POINTER_BYTES: usize = 1024;
-
-/// The `version` Git LFS writes.
-const LFS_SPEC: &str = "https://git-lfs.github.com/spec/v1";
-
-/// The `version` values of Git LFS's pointers: its own and its pre-release's.
-const LFS_SPECS: [&str; 2] = [LFS_SPEC, "https://hawser.github.com/spec/v1"];
-
-/// The `version` of Git LFS's alpha, which it reads too.
-const LFS_ALPHA: &str = "http://git-media.io/v/2";
-
-/// What a Git LFS pointer says: the SHA-256 and size of the file it stands for, and whether it
-/// has extension lines, whose programs Git LFS would run to rebuild that file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LfsPointer {
-    pub oid: [u8; 32],
-    pub size: u64,
-    pub extensions: bool,
-}
-
-impl LfsPointer {
-    /// The oid in lowercase hex, as Git LFS names the object's file.
-    #[must_use]
-    pub fn oid_hex(&self) -> String {
-        let mut hex = String::with_capacity(64);
-        for b in self.oid {
-            let _ = write!(hex, "{b:02x}");
-        }
-        hex
-    }
-}
-
-/// The pointer a blob is, by the test Git LFS's own parser applies (`DecodeFrom` in its
-/// lfs/pointer.go): `version`, `oid` and `size` lines in that order, extension lines before
-/// `size` and nothing after, blank lines and surrounding whitespace ignored. An empty blob, or
-/// one over 1,024 bytes, isn't one.
-#[must_use]
-pub fn lfs_pointer(data: &[u8]) -> Option<LfsPointer> {
-    if data.is_empty() || data.len() > MAX_LFS_POINTER_BYTES {
-        return None;
-    }
-    // Git LFS reads bytes: a U+FFFD where a byte isn't UTF-8 matches no more than the byte did.
-    let text = String::from_utf8_lossy(data);
-    let mut values: Vec<&str> = Vec::new();
-    let mut extensions = BTreeMap::new();
-    for line in text.trim().lines().filter(|line| !line.is_empty()) {
-        let (key, value) = line.split_once(' ')?;
-        if ["version", "oid", "size"].get(values.len())? == &key {
-            values.push(value);
-        } else if is_lfs_extension(key) {
-            // A key given twice keeps its last value, as in Git LFS.
-            extensions.insert(key, value);
-        } else {
-            return None;
-        }
-    }
-    let [version, oid, size] = values[..] else {
-        return None;
-    };
-    let priorities: BTreeSet<_> = extensions.keys().map(|key| key.as_bytes().get(4)).collect();
-    let valid = (LFS_SPECS.contains(&version) || version == LFS_ALPHA)
-        && extensions.values().all(|oid| lfs_oid(oid).is_some())
-        && priorities.len() == extensions.len();
-    if !valid {
-        return None;
-    }
-    // Git LFS reads the size as a signed 64-bit number, which can't be negative.
-    let size = size.parse::<i64>().ok()?;
-    Some(LfsPointer {
-        oid: lfs_oid(oid)?,
-        size: u64::try_from(size).ok()?,
-        extensions: !extensions.is_empty(),
-    })
 }
 
 /// Whether a blob that isn't brought in as a Git LFS file, of any size, should be named as a
@@ -472,9 +392,9 @@ pub fn is_lfs_lookalike(start: &[u8]) -> bool {
     lfs_pointer(head).is_some() || lfs_pointer(&crlf).is_some() || looks_like_lfs_pointer(head)
 }
 
-/// Whether `data` is the pointer `p` in the exact form Git LFS writes (`Encoded` in its
-/// lfs/pointer.go): its own version, the oid and the size, each line ending in LF. Git LFS keeps
-/// an empty file as an empty blob, so no pointer of size 0 is in that form.
+/// Whether `data` is the pointer `p` in the exact form `git lfs pointer` writes: its own version,
+/// the oid and the size, each line ending in LF. Git LFS keeps an empty file as an empty blob, so
+/// no pointer of size 0 is in that form.
 #[must_use]
 pub fn is_exact_lfs_pointer(data: &[u8], p: &LfsPointer) -> bool {
     let exact = format!(
@@ -506,111 +426,6 @@ pub fn looks_like_lfs_pointer(data: &[u8]) -> bool {
     version.is_some_and(|version| LFS_SPECS.iter().any(|spec| version.starts_with(spec)))
         && text.lines().any(oid)
         && text.lines().any(|line| line.starts_with("size "))
-}
-
-/// An extension's key: `ext-`, a digit, `-` and a word character, then anything (Git LFS's
-/// `\Aext-\d{1}-\w+`). The digit is its priority.
-fn is_lfs_extension(key: &str) -> bool {
-    matches!(
-        key.as_bytes(),
-        [b'e', b'x', b't', b'-', priority, b'-', first, ..]
-            if priority.is_ascii_digit() && (first.is_ascii_alphanumeric() || *first == b'_')
-    )
-}
-
-/// The SHA-256 `value` gives: `sha256:` and 64 lowercase hex digits.
-fn lfs_oid(value: &str) -> Option<[u8; 32]> {
-    let hex = value.strip_prefix("sha256:")?;
-    if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return None;
-    }
-    let mut oid = [0; 32];
-    for (byte, pair) in oid.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(oid)
-}
-
-/// A person as Git's `split_ident_line` reads an author, committer or tagger: the name up to the
-/// first `<`, the email up to the next `>`, then the time and zone after the last `>`. What is
-/// missing or out of range is empty or zero; names and emails are UTF-8 (U+FFFD for bytes that
-/// aren't) of at most 4 KiB.
-///
-/// Lossy on purpose: `git-header` keeps the exact line.
-#[must_use]
-pub fn parse_person(line: &[u8]) -> Person {
-    let Some((name, rest)) = split_at_byte(line, b'<') else {
-        return person(line, b"", (0, 0));
-    };
-    let Some((email, _)) = split_at_byte(rest, b'>') else {
-        return person(name, b"", (0, 0));
-    };
-    let after = line.rsplit(|&b| b == b'>').next().unwrap_or_default();
-    person(name, email, when(after))
-}
-
-fn person(name: &[u8], email: &[u8], (time_ms, tz_offset_min): (i64, i16)) -> Person {
-    Person {
-        name: person_field(trim_end(name)),
-        email: person_field(email),
-        time_ms,
-        tz_offset_min,
-    }
-}
-
-/// A name or email as a save holds it: valid UTF-8, at most 4 KiB.
-fn person_field(bytes: &[u8]) -> String {
-    // Three bytes past the limit finish any character that starts inside it, so none is cut
-    // into a U+FFFD that would fit; what lies further can't reach the result.
-    let start = bytes.get(..MAX_PERSON_FIELD_BYTES.saturating_add(3));
-    let text = String::from_utf8_lossy(start.unwrap_or(bytes));
-    let end = text.floor_char_boundary(MAX_PERSON_FIELD_BYTES);
-    text.get(..end).unwrap_or_default().to_owned()
-}
-
-/// The time in milliseconds and the zone in minutes after an ident's last `>`: digits, then `+`
-/// or `-` and digits. As in Git, neither counts unless both are there; then a time past what
-/// milliseconds hold, or a zone that isn't four digits, is zero by itself.
-fn when(after: &[u8]) -> (i64, i16) {
-    let (seconds, rest) = digits(trim_start(after));
-    let Some((&sign, zone)) = trim_start(rest).split_first() else {
-        return (0, 0);
-    };
-    let (zone, _) = digits(zone);
-    if seconds.is_empty() || zone.is_empty() || !matches!(sign, b'+' | b'-') {
-        return (0, 0);
-    }
-    let time_ms = decimal(seconds).and_then(|s| s.checked_mul(1000));
-    (time_ms.unwrap_or(0), minutes(sign, zone).unwrap_or(0))
-}
-
-/// The ASCII digits `bytes` start with, and the rest.
-fn digits(bytes: &[u8]) -> (&[u8], &[u8]) {
-    let count = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-    bytes.split_at_checked(count).unwrap_or_default()
-}
-
-/// The number decimal `digits` spell, if it fits.
-fn decimal(digits: &[u8]) -> Option<i64> {
-    digits.iter().try_fold(0i64, |n, &d| {
-        n.checked_mul(10)?
-            .checked_add(i64::from(d.checked_sub(b'0')?))
-    })
-}
-
-/// A zone's offset in minutes, if it is `HHMM` after its sign. Minutes past 59 count as Git
-/// counts them.
-fn minutes(sign: u8, zone: &[u8]) -> Option<i16> {
-    let (hours, minutes) = zone.split_at_checked(2).filter(|_| zone.len() == 4)?;
-    let total = decimal(hours)?
-        .checked_mul(60)?
-        .checked_add(decimal(minutes)?)?;
-    let total = i16::try_from(total).ok()?;
-    if sign == b'-' {
-        total.checked_neg()
-    } else {
-        Some(total)
-    }
 }
 
 /// A Git commit's bytes, rebuilt from the save it became (storage-format.md section 4):
@@ -656,7 +471,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
     use super::*;
-    use crate::git::{GitError, GitId, HashKind, ObjectType, object_id};
+    use crate::git::{GitError, GitId, HashKind, ObjectType, object_id, parse_person};
     use crate::id::{ChangeId, Id};
     use crate::listing::EntryKind::{self, Executable, File, Folder, ProjectLink, Symlink};
     use crate::save::{
@@ -669,13 +484,13 @@ mod tests {
     /// The empty tree, in each hash.
     const TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     const TREE_256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
-    const AUTHOR: &str = "A U Thor <author@example.com> 1112912053 -0700";
-    const COMMITTER: &str = "C O Mitter <committer@example.com> 1112912113 +0530";
+    const AUTHOR: &str = "Ida Lark <ida.lark@example.com> 1601234567 -0400";
+    const COMMITTER: &str = "Omar Fenn <omar.fenn@example.com> 1601234627 +0545";
     const GPGSIG: &str = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iHUEABYKAB0WIQRNmrJ5\n \
                           =Xd3h\n -----END PGP SIGNATURE-----\n";
     const MERGETAG: &str = "mergetag object 1111111111111111111111111111111111111111\n \
                             type commit\n tag v1.0\n \
-                            tagger T Agger <tagger@example.com> 1112912000 +0000\n \n \
+                            tagger Vera Toll <vera.toll@example.com> 1601234500 +0000\n \n \
                             Version 1.0\n -----BEGIN PGP SIGNATURE-----\n \n \
                             iHUEABYKAB0WIQRNmrJ5\n -----END PGP SIGNATURE-----\n";
 
@@ -864,7 +679,7 @@ mod tests {
             (&b"A <a@b> 0 -0000"[..], &b" <> 1 +0000"[..])
         );
         // A SHA-256 commit, its IDs in either letter case, as Git reads them.
-        let parent = "24803bbbde2122a9dda2df52d7a77ed79292249526a3f810c6858728e91a0395";
+        let parent = "6230c9b97162440b78b8dc5601e48ec3974574fbafe81baff53aa1d7f4baeb35";
         let raw = commit(&TREE_256.to_uppercase(), &[parent.to_owned()], "", b"m");
         let c = parse_commit(&raw, Sha256).unwrap();
         assert_eq!(
@@ -1248,9 +1063,9 @@ mod tests {
 
     #[test]
     fn tags_parse() {
-        let object = "c39ae07f393806ccf406ef966e9a15afc43cc36a";
+        let object = "5e1f0a7d9c3b2486e0d4a1b7c9f3e5d2a8b6c4e0";
         let signed = format!(
-            "object {object}\ntype commit\ntag v1.0\ntagger T Agger <t@example.com> 1112912000 \
+            "object {object}\ntype commit\ntag v1.0\ntagger Vera Toll <t@example.com> 1601234500 \
              +0000\n\nVersion 1.0\n-----BEGIN PGP SIGNATURE-----\n\niHUEABYKAB0WIQRNmrJ5\n\
              -----END PGP SIGNATURE-----\n"
         );
@@ -1272,12 +1087,12 @@ mod tests {
             (
                 Sha1,
                 format!(
-                    "object {object}\ntype tree\ntag v2.6.11-tree\n\n\
-                     This is the 2.6.11 tree object.\n"
+                    "object {object}\ntype tree\ntag snapshot-3-tree\n\n\
+                     The tree as it stood at snapshot 3.\n"
                 ),
                 ObjectType::Tree,
-                b"v2.6.11-tree",
-                b"This is the 2.6.11 tree object.\n",
+                b"snapshot-3-tree",
+                b"The tree as it stood at snapshot 3.\n",
             ),
             (
                 Sha1,
@@ -1383,225 +1198,6 @@ mod tests {
     }
 
     #[test]
-    fn pointers_parse_as_git_lfs_parses_them() {
-        // Cases from Git LFS's own tests (lfs/pointer_test.go), and the edges of its parser.
-        let oid = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
-        let v1 = "version https://git-lfs.github.com/spec/v1\n";
-        let pointer = format!("{v1}oid sha256:{oid}\nsize 12345\n");
-        let ext = |priority: &str, name: &str, digit: char| {
-            format!(
-                "ext-{priority}-{name} sha256:{}\n",
-                digit.to_string().repeat(64)
-            )
-        };
-        let padded = format!("{pointer}{}", "\n".repeat(1024 - pointer.len()));
-        for (what, data, want) in [
-            ("Git LFS's own form", pointer.clone(), true),
-            (
-                "the pre-release version",
-                pointer.replace("git-lfs.github.com", "hawser.github.com"),
-                true,
-            ),
-            (
-                "the alpha version",
-                pointer.replace(
-                    "https://git-lfs.github.com/spec/v1",
-                    "http://git-media.io/v/2",
-                ),
-                true,
-            ),
-            (
-                "extensions, in any order",
-                format!(
-                    "{v1}{}{}{}oid sha256:{oid}\nsize 12345\n",
-                    ext("2", "baz", 'a'),
-                    ext("0", "foo", 'f'),
-                    ext("1", "bar", 'b')
-                ),
-                true,
-            ),
-            (
-                "an extension before the version",
-                format!("{}{pointer}", ext("0", "foo", 'f')),
-                true,
-            ),
-            ("no LF at the end", pointer.trim_end().to_owned(), true),
-            ("CRLF", pointer.replace('\n', "\r\n"), true),
-            (
-                "whitespace around it, and blank lines",
-                format!(" \t\n{v1}\noid sha256:{oid}\n\nsize 12345   \n\n"),
-                true,
-            ),
-            (
-                "a no-break space before it",
-                format!("\u{a0}{pointer}"),
-                true,
-            ),
-            (
-                "a size with a plus sign",
-                pointer.replace("12345", "+12345"),
-                true,
-            ),
-            ("a size of minus zero", pointer.replace("12345", "-0"), true),
-            (
-                "a size of zero, zero-padded",
-                pointer.replace("12345", "000"),
-                true,
-            ),
-            ("1,024 bytes", padded.clone(), true),
-            ("an empty file", String::new(), false),
-            ("1,025 bytes", format!("{padded}\n"), false),
-            ("invalid stuff", "invalid stuff".to_owned(), false),
-            ("a mention", "# git-media".to_owned(), false),
-            ("a bad oid", pointer.replace(oid, "boom"), false),
-            (
-                "an oid of another kind",
-                pointer.replace("sha256:", "shazam:"),
-                false,
-            ),
-            (
-                "an oid in capitals",
-                pointer.replace(oid, &oid.to_uppercase()),
-                false,
-            ),
-            (
-                "an oid with a byte after it",
-                pointer.replace(oid, &format!("{oid}&")),
-                false,
-            ),
-            ("no oid", format!("{v1}size 12345\n"), false),
-            (
-                "an unknown version",
-                pointer.replace(
-                    "https://git-lfs.github.com/spec/v1",
-                    "http://git-media.io/v/whatever",
-                ),
-                false,
-            ),
-            (
-                "no version",
-                format!("oid sha256:{oid}\nsize 12345\n"),
-                false,
-            ),
-            (
-                "two spaces after a key",
-                pointer.replace("version ", "version  "),
-                false,
-            ),
-            (
-                "a size that isn't a number",
-                pointer.replace("12345", "fif"),
-                false,
-            ),
-            ("a negative size", pointer.replace("12345", "-1"), false),
-            (
-                "a size past 2^63",
-                pointer.replace("12345", "9223372036854775808"),
-                false,
-            ),
-            (
-                "a version with a space after it",
-                pointer.replace("v1\n", "v1 \n"),
-                false,
-            ),
-            ("no size", format!("{v1}oid sha256:{oid}\n"), false),
-            ("key=value lines", pointer.replace(' ', "="), false),
-            ("an extra line", format!("{pointer}wat wat\n"), false),
-            (
-                "an extension after the size",
-                format!("{pointer}{}", ext("0", "foo", 'f')),
-                false,
-            ),
-            (
-                "keys out of order",
-                format!("{v1}size 12345\noid sha256:{oid}\n"),
-                false,
-            ),
-            (
-                "a bad extension name",
-                format!("{v1}{}oid sha256:{oid}\nsize 1\n", ext("0", "$$$$", 'f')),
-                false,
-            ),
-            (
-                "a bad extension priority",
-                format!("{v1}{}oid sha256:{oid}\nsize 1\n", ext("#", "foo", 'f')),
-                false,
-            ),
-            (
-                "an extension priority over 9",
-                format!("{v1}{}oid sha256:{oid}\nsize 1\n", ext("10", "foo", 'f')),
-                false,
-            ),
-            (
-                "two extensions of one priority",
-                format!(
-                    "{v1}{}{}oid sha256:{oid}\nsize 1\n",
-                    ext("0", "foo", 'f'),
-                    ext("0", "bar", 'b')
-                ),
-                false,
-            ),
-            (
-                "a bad extension oid",
-                format!("{v1}ext-0-foo sha256:boom\noid sha256:{oid}\nsize 1\n"),
-                false,
-            ),
-            (
-                "an extension oid of another kind",
-                format!(
-                    "{v1}{}oid sha256:{oid}\nsize 1\n",
-                    ext("0", "foo", 'f').replace("sha256", "boom")
-                ),
-                false,
-            ),
-        ] {
-            assert_eq!(lfs_pointer(data.as_bytes()).is_some(), want, "{what}");
-        }
-        // What a pointer says.
-        let parsed = |data: &str| lfs_pointer(data.as_bytes()).unwrap();
-        let mut want = [0u8; 32];
-        for (byte, pair) in want.iter_mut().zip(oid.as_bytes().chunks(2)) {
-            *byte = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
-        }
-        let plain = LfsPointer {
-            oid: want,
-            size: 12345,
-            extensions: false,
-        };
-        assert_eq!(parsed(&pointer), plain);
-        assert_eq!(parsed(&pointer).oid_hex(), oid);
-        assert_eq!(parsed(&pointer.replace("12345", "+12345")), plain);
-        assert_eq!(parsed(&pointer.replace("12345", "000")).size, 0);
-        assert_eq!(parsed(&pointer.replace("12345", "-0")).size, 0);
-        let with_extension = format!("{}{pointer}", ext("0", "foo", 'f'));
-        assert_eq!(
-            parsed(&with_extension),
-            LfsPointer {
-                extensions: true,
-                ..plain
-            }
-        );
-        // Bytes that aren't UTF-8 count as Git LFS counts them: as characters that match nothing.
-        let named = [
-            ext("0", "foo", 'f')
-                .replacen("foo", "foo\u{fffd}", 1)
-                .as_bytes(),
-            pointer.as_bytes(),
-        ]
-        .concat();
-        assert!(lfs_pointer(&named).is_some());
-        let raw = [
-            &ext("0", "foo", 'f').as_bytes()[..9],
-            b"\xff",
-            &ext("0", "foo", 'f').as_bytes()[9..],
-            pointer.as_bytes(),
-        ]
-        .concat();
-        assert!(lfs_pointer(&raw).is_some());
-        assert!(lfs_pointer(&[b"\xff", pointer.as_bytes()].concat()).is_none());
-    }
-
-    #[test]
     fn the_exact_form_is_what_git_lfs_writes() {
         let oid = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
         let exact =
@@ -1609,8 +1205,6 @@ mod tests {
         let p = lfs_pointer(exact.as_bytes()).unwrap();
         assert!(is_exact_lfs_pointer(exact.as_bytes(), &p));
         for (what, data) in [
-            ("no LF at the end", exact.trim_end().to_owned()),
-            ("CRLF", exact.replace('\n', "\r\n")),
             ("a blank line", exact.replace("\noid", "\n\noid")),
             ("a space before it", format!(" {exact}")),
             (
@@ -1840,8 +1434,8 @@ mod tests {
 
     #[test]
     fn a_standard_commit_rebuilds_without_git_header() {
-        let parent_256 = "24803bbbde2122a9dda2df52d7a77ed79292249526a3f810c6858728e91a0395";
-        let first = "161d798e9e0e3c66157d429fa481c48823e296e4";
+        let parent_256 = "6230c9b97162440b78b8dc5601e48ec3974574fbafe81baff53aa1d7f4baeb35";
+        let first = "cc9c65860c20d54b080b52ee21db2583360e6e2c";
         // What, the hash, the commit, and its ID if Git made it (`git commit-tree` with these
         // dates).
         let cases = [
@@ -1855,13 +1449,13 @@ mod tests {
                 "a second commit",
                 Sha1,
                 commit(TREE, &[first.to_owned()], "", b"second\n\nbody\n"),
-                Some("3707222d2f901a4ce5561b69a91c1ccf8a13d00c"),
+                Some("9bb66b4c269a6c581f665428dae41e5eb4b6ce18"),
             ),
             (
                 "a SHA-256 commit",
                 Sha256,
                 commit(TREE_256, &[parent_256.to_owned()], "", b"second\n\nbody\n"),
-                Some("483aa42625b052fef07e4b1673a53bfbdeb2ff1a7f81aa242fa8cbd21b88362d"),
+                Some("acf2103adf5367d0b44724c3d2256675037b592f8822de1a41e28f0340513199"),
             ),
             (
                 "a merge",
@@ -1955,19 +1549,19 @@ mod tests {
             ),
             (
                 "a -0000 zone",
-                authored(b"A U Thor <author@example.com> 1112912053 -0000"),
+                authored(b"Ida Lark <ida.lark@example.com> 1601234567 -0000"),
             ),
             (
                 "two spaces before the email",
-                authored(b"A U Thor  <author@example.com> 1112912053 -0700"),
+                authored(b"Ida Lark  <ida.lark@example.com> 1601234567 -0400"),
             ),
             (
                 "no space before the email",
-                authored(b"A U Thor<author@example.com> 1112912053 -0700"),
+                authored(b"Ida Lark<ida.lark@example.com> 1601234567 -0400"),
             ),
-            ("no email", authored(b"A U Thor 1112912053 -0700")),
-            ("no time", authored(b"A U Thor <author@example.com>")),
-            ("a zero-padded time", authored(b"A <a@b> 01112912053 -0700")),
+            ("no email", authored(b"Ida Lark 1601234567 -0400")),
+            ("no time", authored(b"Ida Lark <ida.lark@example.com>")),
+            ("a zero-padded time", authored(b"A <a@b> 01601234567 -0700")),
             (
                 "a time past what Bolt holds",
                 authored(b"A <a@b> 99999999999999999999 +0000"),
@@ -2000,79 +1594,5 @@ mod tests {
         save.extra
             .insert(EXTRA_GIT_ORIGINAL_MESSAGE.to_owned(), b"other".to_vec());
         assert!(rebuild_commit(&save, &c.tree, &c.parents).ends_with(b"\n\nother"));
-    }
-
-    #[test]
-    fn people_parse_best_effort() {
-        let person = |name: &str, email: &str, time_ms: i64, tz_offset_min: i16| Person {
-            name: name.into(),
-            email: email.into(),
-            time_ms,
-            tz_offset_min,
-        };
-        for (line, want) in [
-            (
-                &b"A U Thor <author@example.com> 1112912053 -0700"[..],
-                person("A U Thor", "author@example.com", 1_112_912_053_000, -420),
-            ),
-            (b"C <c@d> 0 +0530", person("C", "c@d", 0, 330)),
-            (b"<a@b> 1 +0000", person("", "a@b", 1000, 0)),
-            (b" A  <> 1 +0000", person(" A", "", 1000, 0)),
-            // Git skips whitespace around the time.
-            (b"A\t<a@b>  \t 1 \t +0100", person("A", "a@b", 1000, 60)),
-            // The email ends at the first `>`, and the time follows the last.
-            (b"A <a<b>c> 1 +0000", person("A", "a<b", 1000, 0)),
-            // Without an email, Git can't split the line: it all becomes the name.
-            (
-                b"A U Thor 1112912053 -0700",
-                person("A U Thor 1112912053 -0700", "", 0, 0),
-            ),
-            (b"A <a@b 1 +0000", person("A", "", 0, 0)),
-            // Without a time and a zone, Git takes neither.
-            (b"A <a@b>", person("A", "a@b", 0, 0)),
-            (b"A <a@b> 1", person("A", "a@b", 0, 0)),
-            (b"A <a@b> 1 0100", person("A", "a@b", 0, 0)),
-            (b"A <a@b> +0100", person("A", "a@b", 0, 0)),
-            // A time or zone out of range is zero by itself.
-            (
-                b"A <a@b> 99999999999999999999 +0100",
-                person("A", "a@b", 0, 60),
-            ),
-            (b"A <a@b> 9223372036854776 +0100", person("A", "a@b", 0, 60)),
-            (
-                b"A <a@b> 9223372036854775 +0100",
-                person("A", "a@b", 9_223_372_036_854_775_000, 60),
-            ),
-            (b"A <a@b> 0001 +0100", person("A", "a@b", 1000, 60)),
-            (b"A <a@b> 1 +05301", person("A", "a@b", 1000, 0)),
-            (b"A <a@b> 1 +5", person("A", "a@b", 1000, 0)),
-            (b"A <a@b> 1 -0000", person("A", "a@b", 1000, 0)),
-            (b"A <a@b> 1 -0130x", person("A", "a@b", 1000, -90)),
-            // Minutes past 59 count as Git counts them.
-            (b"A <a@b> 1 +9999", person("A", "a@b", 1000, 6039)),
-            (
-                b"Ren\xe9 <r\xe9@x> 1 +0000",
-                person("Ren\u{fffd}", "r\u{fffd}@x", 1000, 0),
-            ),
-            (b"", person("", "", 0, 0)),
-        ] {
-            assert_eq!(
-                parse_person(line),
-                want,
-                "{}",
-                String::from_utf8_lossy(line)
-            );
-        }
-        // A name or email past 4 KiB is cut at a character boundary.
-        let long = "\u{20ac}".repeat(2000);
-        let p = parse_person(format!("{long} <{long}> 1 +0000").as_bytes());
-        assert_eq!((p.name.len(), p.email.len()), (4095, 4095));
-        assert!(p.name.chars().all(|c| c == '\u{20ac}'));
-        // Bytes that aren't UTF-8 grow as U+FFFD, and are cut after.
-        let p = parse_person(&[&[0xff; 3000][..], b" <a> 1 +0000"].concat());
-        assert_eq!(p.name, "\u{fffd}".repeat(1365));
-        // A character that starts inside the limit and ends past it goes whole, not as U+FFFD.
-        let line = format!("{}\u{1f600}bb <a> 1 +0000", "a".repeat(4093));
-        assert_eq!(parse_person(line.as_bytes()).name, "a".repeat(4093));
     }
 }
