@@ -4,9 +4,9 @@ Bolt treats every project it is given, and every Git repository it imports, as p
 
 ## How to report a vulnerability
 
-Use GitHub's private vulnerability reporting for this repository: open the repository's **Security** tab, at <https://github.com/WisHonor/Bolt/security>, and choose **Report a vulnerability**. Only the people who look after the repository see the report.
+Write to the address on the page you downloaded Bolt from, with "security" in the subject. Only the people who look after Bolt see it.
 
-Please don't report a vulnerability in a public issue, a pull request or a discussion.
+Please don't describe a vulnerability anywhere public, such as a forum or social media, before it is fixed or ruled on.
 
 ## What to include
 
@@ -33,7 +33,7 @@ A vulnerability is anything a repository or project Bolt was given can make Bolt
 - hang, or exhaust their memory or disk without limit;
 - mislead the person at the terminal, for example by text in a file name or a message that passes for Bolt's own output.
 
-"Given" covers a project copied from someone else (its files, its `bolt.toml` and `.boltignore`, and everything in its `.bolt` folder) and a Git repository passed to `bolt import`. [docs/security.md](docs/security.md) lists the threats Bolt defends against, and how.
+"Given" covers a project copied from someone else (its files, its `bolt.toml` and `.boltignore`, and everything in its `.bolt` folder) and a Git repository passed to `bolt import`. Bolt's own threat model (`docs/security.md`, kept with Bolt's source code) lists the threats Bolt defends against, and how.
 
 ## What doesn't count
 

@@ -1,14 +1,18 @@
 name: Release
 
-# Started by hand only. A pull request that changes this file, the notices' settings or the
-# release notes runs everything but the last job, so a change is tried before the real start.
+# Started by hand only. A pull request that changes this file, its scripts, the notices'
+# settings, the agreement, the license or the release notes runs everything but the last job,
+# so a change is tried before the real start.
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - ".github/release/**"
       - about.toml
       - about.hbs
+      - USER-AGREEMENT.md
+      - LICENSE
       - "docs/releases/**"
 
 permissions:
@@ -18,12 +22,14 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
-  # The version, read once, and the notices for the crates Bolt is built from.
+  # The version, read once; the notices for what is built into the program; the website copies.
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
       version: ${{ steps.version.outputs.version }}
+      # The website zip's SHA-256, so the last job can tell it's the file made here.
+      website-sha256: ${{ steps.website.outputs.sha256 }}
     env:
       ABOUT_URL: https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.3/cargo-about-0.9.3-x86_64-unknown-linux-musl.tar.gz
       ABOUT_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
@@ -40,6 +46,10 @@ jobs:
             echo "::error::Not a plain version: $version"
             exit 1
           fi
+          if [ ! -f "docs/releases/v$version.md" ]; then
+            echo "::error::No release notes for $version: docs/releases/v$version.md is missing"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Version: $version"
       - name: Download cargo-about and check its SHA-256
@@ -51,7 +61,7 @@ jobs:
           echo "$ABOUT_SHA256  $dir/cargo-about.tar.gz" | sha256sum --check --strict -
           tar -xzf "$dir/cargo-about.tar.gz" -C "$dir" --strip-components=1
           "$dir/cargo-about" --version
-      - name: Write THIRD-PARTY-LICENSES.html
+      - name: Write the notices
         run: |
           "$RUNNER_TEMP/cargo-about/cargo-about" generate --locked -c about.toml \
             -m crates/bolt-vcs/Cargo.toml -o THIRD-PARTY-LICENSES.html about.hbs
@@ -59,11 +69,33 @@ jobs:
             echo "::error::Bolt's own crates are in the notices"
             exit 1
           fi
+          # The standard library is built in too; its notices come with the toolchain.
+          cp "$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html" THIRD-PARTY-LICENSES-RUST.html
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: third-party-licenses
-          path: THIRD-PARTY-LICENSES.html
+          path: |
+            THIRD-PARTY-LICENSES.html
+            THIRD-PARTY-LICENSES-RUST.html
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
+      - name: Make the website copies
+        id: website
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          zip="$RUNNER_TEMP/bolt-$VERSION-website.zip"
+          bash .github/release/website.sh "$VERSION" "$zip"
+          unzip -l "$zip"
+          sum=$(sha256sum "$zip" | cut -d ' ' -f 1)
+          echo "SHA-256 of bolt-$VERSION-website.zip: $sum"
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: website
+          path: ${{ runner.temp }}/bolt-${{ steps.version.outputs.version }}-website.zip
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
 
   build:
     needs: prepare
@@ -90,6 +122,12 @@ jobs:
             ext: tar.gz
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # Each archive's SHA-256, one key per target, so later jobs can tell it's the file built here.
+    outputs:
+      sha256-x86_64-pc-windows-msvc: ${{ steps.pack.outputs.sha256-x86_64-pc-windows-msvc }}
+      sha256-x86_64-unknown-linux-gnu: ${{ steps.pack.outputs.sha256-x86_64-unknown-linux-gnu }}
+      sha256-aarch64-apple-darwin: ${{ steps.pack.outputs.sha256-aarch64-apple-darwin }}
+      sha256-x86_64-apple-darwin: ${{ steps.pack.outputs.sha256-x86_64-apple-darwin }}
     permissions:
       contents: read
       # gh run download, for the notices.
@@ -113,11 +151,63 @@ jobs:
       - name: Build
         run: |
           cargo build --release --locked -p bolt-vcs --target "$TARGET"
+          bin="target/$TARGET/release/bolt$EXE"
           if [ "$RUNNER_OS" = Linux ]; then
             ldd --version | head -n 1
-            echo "Newest glibc symbol it needs: $(objdump -T "target/$TARGET/release/bolt" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+            echo "Newest glibc symbol it needs: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
           fi
-          if [ "$RUNNER_OS" = macOS ]; then file "target/$TARGET/release/bolt"; fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            file "$bin"
+            echo "The macOS version it declares:"
+            vtool -show-build "$bin" || otool -l "$bin" | grep -E -A 4 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          fi
+      - name: Check it reaches no network and starts no program
+        run: |
+          check=.github/release/no-network.sh
+          probes="$RUNNER_TEMP/probes"
+          mkdir "$probes"
+          # First the check must refuse programs that do.
+          rustc -O .github/release/probes/net.rs -o "$probes/net$EXE"
+          rustc -O .github/release/probes/spawn.rs -o "$probes/spawn$EXE"
+          names=(net spawn)
+          if [ "$RUNNER_OS" = Windows ]; then
+            # A dash, not a slash, so Git Bash leaves the switch alone.
+            rustc -O .github/release/probes/net.rs -o "$probes/net-delayed$EXE" \
+              -C link-arg=-DELAYLOAD:ws2_32.dll -C link-arg=delayimp.lib
+            names+=(net-delayed)
+            # The linker must really have delay-loaded it, or that probe proves nothing new.
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            dumpbin=$("$vswhere" -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | tr -d '\r' | head -n 1)
+            delayed=$("$(cygpath -u "$dumpbin")" -nologo -imports "$(cygpath -w "$probes/net-delayed$EXE")" | tr -d '\r' | awk '
+              /Section contains the following delay load imports/ { on = 1; next }
+              /Section contains the following imports/ || /^  Summary/ { on = 0 }
+              on && /^    [^ ]+$/ { print $1 }')
+            echo "delay-loaded by the net-delayed probe: $delayed"
+            if ! grep -q -i -x -e 'ws2_32\.dll' <<< "$delayed"; then
+              echo "::error::The net-delayed probe doesn't delay-load WS2_32.dll"
+              exit 1
+            fi
+          fi
+          # What each probe must be refused for, as the check names it.
+          expect() {
+            case "$RUNNER_OS-$1" in
+              Windows-net*) echo '^  WS2_32\.dll' ;;
+              Windows-spawn) echo '^  KERNEL32\.dll CreateProcessW$' ;;
+              *-net) echo '^  (socket|connect)$' ;;
+              *-spawn) echo '^  (fork|execvp|posix_spawnp?)$' ;;
+            esac
+          }
+          for p in "${names[@]}"; do
+            s=0
+            out=$(bash "$check" "$probes/$p$EXE" 2> "$probes/$p.err") || s=$?
+            echo "probe $p: $(wc -l < <(echo "$out") | tr -d ' ') imports, exit $s, refused for:"
+            cat "$probes/$p.err"
+            if [ "$s" != 1 ] || ! grep -q -i -E -e "$(expect "$p")" "$probes/$p.err"; then
+              echo "::error::The import check didn't refuse the $p probe for what it was built to show (exit $s)"
+              exit 1
+            fi
+          done
+          bash "$check" "target/$TARGET/release/bolt$EXE"
       - name: Smoke test
         run: |
           bin="$GITHUB_WORKSPACE/target/$TARGET/release/bolt$EXE"
@@ -140,6 +230,7 @@ jobs:
           set +x
           echo "smoke test passed: $TARGET"
       - name: Pack
+        id: pack
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
@@ -149,10 +240,21 @@ jobs:
           mkdir -p "$stage/docs"
           gh run download "$RUN_ID" --repo "$REPO" --name third-party-licenses --dir "$stage"
           cp "target/$TARGET/release/bolt$EXE" "$stage/"
-          cp README.md "$stage/"
+          cp README.md USER-AGREEMENT.md "$stage/"
           cp docs/guide.md "$stage/docs/"
           archive="bolt-$VERSION-$TARGET.$EXT"
-          files=("bolt$EXE" README.md docs/guide.md THIRD-PARTY-LICENSES.html)
+          files=("bolt$EXE" README.md docs/guide.md USER-AGREEMENT.md
+                 THIRD-PARTY-LICENSES.html THIRD-PARTY-LICENSES-RUST.html)
+          # Not -F: with -i it aborts in Git for Windows' grep.
+          s=0
+          (cd "$stage" && grep -i -l -e "$REPO" "${files[@]}") || s=$?
+          if [ "$s" = 0 ]; then
+            echo "::error::Files above hold the repository's address"
+            exit 1
+          elif [ "$s" != 1 ]; then
+            echo "::error::grep failed looking for the repository's address"
+            exit 1
+          fi
           if [ "$EXT" = zip ]; then
             (cd "$stage" && 7z a -tzip -bd "$RUNNER_TEMP/$archive" "${files[@]}" > /dev/null)
             listing=$(7z l -ba -slt "$RUNNER_TEMP/$archive" | sed -n 's/^Path = //p' | tr '\\' /)
@@ -176,53 +278,37 @@ jobs:
           echo "$archive holds:"
           echo "$listing"
           if [ "$(sort <<< "$listing")" != "$(printf '%s\n' "${files[@]}" | sort)" ]; then
-            echo "::error::$archive doesn't hold exactly its four files"
+            echo "::error::$archive doesn't hold exactly its six files"
             exit 1
           fi
+          if command -v sha256sum > /dev/null; then hash=(sha256sum); else hash=(shasum -a 256); fi
+          # From stdin: given a path with backslashes, sha256sum puts a backslash before the hash.
+          sum=$("${hash[@]}" < "$RUNNER_TEMP/$archive" | cut -d ' ' -f 1)
+          echo "SHA-256 of $archive: $sum"
+          echo "sha256-$TARGET=$sum" >> "$GITHUB_OUTPUT"
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ runner.temp }}/${{ env.ARCHIVE }}
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
 
-  # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
-  release:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+  # The checksums, before anything else checks a download against them.
+  sums:
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    concurrency: release
+    timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: read
     env:
-      TAG: v0.1.0
       VERSION: ${{ needs.prepare.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.run_id }}
       REPO: ${{ github.repository }}
+      BUILT: ${{ toJSON(needs.build.outputs) }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check the version and that v0.1.0 is free
-        run: |
-          if [ "v$VERSION" != "$TAG" ]; then
-            echo "::error::Cargo.toml says $VERSION, but this release is $TAG"
-            exit 1
-          fi
-          tags=$(gh api "repos/$REPO/git/matching-refs/tags/$TAG" --jq '.[].ref')
-          if grep -qx "refs/tags/$TAG" <<< "$tags"; then
-            echo "::error::A tag named $TAG already exists"
-            exit 1
-          fi
-          # Drafts included: they have a tag name but no tag yet.
-          releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[] | .tag_name, .name')
-          if grep -qx -- "$TAG" <<< "$releases"; then
-            echo "::error::A release named $TAG already exists"
-            exit 1
-          fi
       - name: Collect the archives and write SHA256SUMS
         run: |
           down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
@@ -234,15 +320,370 @@ jobs:
             name="bolt-$VERSION-$t"
             mv "$down/$name/$name" "$dist/$name"
             names+=("$name")
+            # Only what the build job hashed goes into SHA256SUMS.
+            built=$(jq -r --arg k "sha256-${t%%.*}" '.[$k] // ""' <<< "$BUILT")
+            got=$(sha256sum "$dist/$name" | cut -d ' ' -f 1)
+            echo "$name: built $built, downloaded $got"
+            if ! [[ "$built" =~ ^[0-9a-f]{64}$ ]] || [ "$got" != "$built" ]; then
+              echo "::error::$name isn't the file its build job made"
+              exit 1
+            fi
           done
           if [ -n "$(find "$down" -type f)" ]; then
             echo "::error::Unexpected files among the archives"
             exit 1
           fi
           (cd "$dist" && sha256sum -- "${names[@]}" > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sha256sums
+          path: ${{ runner.temp }}/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
+
+  # Each archive on fresh runners and in bare containers, with the oldest system each build
+  # claims; then, on each runner, a first run that follows the download page and the guide.
+  clean-machine:
+    needs: [prepare, sums]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            # Server Core ltsc2022, by digest so a changed image can't pass unnoticed.
+            containers: mcr.microsoft.com/windows/servercore:ltsc2022@sha256:301d571fc0cffed67083d4cc7a10167f551212f76b3f91eb7457e89aa5a183da
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+            # AlmaLinux 9 has glibc 2.34, the oldest the guide claims.
+            # almalinux:9, ubuntu:22.04 and debian:12, each by digest.
+            containers: >-
+              almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+              ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
+              debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
+          # Also the oldest Apple-silicon runner GitHub offers: macos-14 was retired in November 2026.
+          - os: macos-15
+            target: aarch64-apple-darwin
+            ext: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+      CONTAINERS: ${{ matrix.containers }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # This run's own artifacts, outside the checkout, failing on a digest mismatch.
+      - name: Download the archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+      - name: Download SHA256SUMS
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sha256sums
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+      - name: Check it with the guide's command, and unpack it
+        if: runner.os != 'Windows'
+        run: |
+          cd "$RUNNER_TEMP/download"
+          # The guide's line names the Apple silicon archive for both Macs.
+          if [ "$RUNNER_OS" = macOS ]; then
+            line="grep bolt-$VERSION-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c"
+          else
+            line="grep bolt-$VERSION-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c"
+          fi
+          if ! grep -qF -- "$line" "$GITHUB_WORKSPACE/docs/guide.md"; then
+            echo "::error::No longer in the guide: $line"
+            exit 1
+          fi
+          said=$(eval "${line/bolt-$VERSION-aarch64-apple-darwin.tar.gz/$ARCHIVE}")
+          echo "$said"
+          [ "$said" = "$ARCHIVE: OK" ]
+          mkdir "$RUNNER_TEMP/pkg"
+          tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP/pkg"
+          ls -lR "$RUNNER_TEMP/pkg"
+      - name: Check it with the guide's command, and unpack it
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:RUNNER_TEMP\download
+          $line = "(Get-FileHash .\$env:ARCHIVE -Algorithm SHA256).Hash"
+          if (-not (Select-String -LiteralPath $env:GITHUB_WORKSPACE\docs\guide.md -SimpleMatch -CaseSensitive -Pattern $line -Quiet)) {
+            Write-Host "::error::No longer in the guide: $line"
+            exit 1
+          }
+          $hash = Invoke-Expression $line
+          $listed = @(Get-Content SHA256SUMS | Where-Object { $_.EndsWith(" $env:ARCHIVE") })
+          Write-Host $hash
+          Write-Host $listed
+          if ($listed.Count -ne 1 -or $hash -ne $listed[0].Split(' ')[0]) {
+            Write-Host "::error::$env:ARCHIVE doesn't match SHA256SUMS"
+            exit 1
+          }
+          Expand-Archive -LiteralPath $env:ARCHIVE -DestinationPath $env:RUNNER_TEMP\pkg
+          Get-ChildItem -Recurse $env:RUNNER_TEMP\pkg | Select-Object -ExpandProperty FullName
+      - name: What the program declares, against what the guide says it needs
+        if: runner.os != 'Windows'
+        run: |
+          bin="$RUNNER_TEMP/pkg/bolt"
+          if [ "$RUNNER_OS" = Linux ]; then
+            grep -qF 'glibc 2.34 or newer' docs/guide.md
+            newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+            echo "Newest glibc symbol it needs: $newest (the guide says glibc 2.34 or newer)"
+            if [ "$(printf '%s\n' "$newest" GLIBC_2.34 | sort -V | tail -n 1)" != GLIBC_2.34 ]; then
+              echo "::error::The program needs $newest, newer than the guide's glibc 2.34"
+              exit 1
+            fi
+          else
+            grep -qF 'macOS 11 or later' docs/guide.md
+            otool -l "$bin" | grep -E -A 4 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+            minos=$(otool -l "$bin" | awk '
+              /LC_BUILD_VERSION/ { b = 1 } b && $1 == "minos" { print $2; exit }
+              /LC_VERSION_MIN_MACOSX/ { v = 1 } v && $1 == "version" { print $2; exit }')
+            echo "The macOS version it declares: $minos (the guide says macOS 11 or later)"
+            # Above 11.0 would break the guide's promise; below it is fine.
+            if [ -z "$minos" ] || ! awk -v v="$minos" 'BEGIN { split(v, p, "."); exit !(p[1] < 11 || (p[1] == 11 && p[2] + 0 == 0)) }'; then
+              echo "::error::The program declares macOS $minos, not 11.0 or older"
+              exit 1
+            fi
+          fi
+      - name: Make a small Git repository
+        run: bash .github/release/make-git-repo.sh "$RUNNER_TEMP/repo"
+      - name: The clean-machine script
+        if: runner.os != 'Windows'
+        run: bash .github/release/clean-machine.sh "$RUNNER_TEMP/pkg/bolt" "$VERSION" "$RUNNER_TEMP/repo"
+      - name: The clean-machine script
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\clean-machine.ps1 `
+            -Bolt $env:RUNNER_TEMP\pkg\bolt.exe -Version $env:VERSION -GitRepo $env:RUNNER_TEMP\repo
+          exit $LASTEXITCODE
+      - name: In bare containers
+        if: matrix.containers && runner.os != 'Windows'
+        run: |
+          mount="$RUNNER_TEMP/mount"
+          mkdir "$mount"
+          cp -R "$RUNNER_TEMP/pkg" "$RUNNER_TEMP/repo" .github/release/clean-machine.sh "$mount/"
+          for image in $CONTAINERS; do
+            echo "::group::$image"
+            docker run --rm -v "$mount:/w:ro" "$image" bash /w/clean-machine.sh /w/pkg/bolt "$VERSION" /w/repo
+            echo "::endgroup::"
+          done
+      - name: In bare containers
+        if: matrix.containers && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $mount = "$env:RUNNER_TEMP\mount"
+          New-Item -ItemType Directory $mount | Out-Null
+          Copy-Item -Recurse -Force $env:RUNNER_TEMP\pkg, $env:RUNNER_TEMP\repo, .github\release\clean-machine.ps1 $mount
+          # Docker's progress on stderr is not an error; its exit code says.
+          $ErrorActionPreference = 'Continue'
+          foreach ($image in $env:CONTAINERS -split ' ') {
+            Write-Host "::group::$image"
+            docker run --rm -v "${mount}:C:\w" $image powershell -NoProfile -ExecutionPolicy Bypass `
+              -File C:\w\clean-machine.ps1 -Bolt C:\w\pkg\bolt.exe -Version $env:VERSION -GitRepo C:\w\repo
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host '::endgroup::'
+          }
+      - name: The first run, as the download page and the guide say
+        if: runner.os != 'Windows'
+        run: |
+          bash .github/release/first-run.sh "$RUNNER_TEMP/download" "$VERSION" "$TARGET" \
+            "$GITHUB_WORKSPACE/docs/releases/download-page.md"
+      - name: The first run, as the download page and the guide say
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\first-run.ps1 `
+            -From $env:RUNNER_TEMP\download -Version $env:VERSION `
+            -Page $env:GITHUB_WORKSPACE\docs\releases\download-page.md
+          exit $LASTEXITCODE
+
+  # Bolt where ordinary computers keep projects: FAT32 and exFAT drives, their top, a network
+  # share. What it says is written down in testing.md, not gated: the release doesn't need this.
+  ordinary-computers:
+    needs: [prepare, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+      - name: Unpack it
+        run: |
+          mkdir "$RUNNER_TEMP/pkg"
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z x -bd -o"$RUNNER_TEMP/pkg" "$RUNNER_TEMP/download/$ARCHIVE" > /dev/null
+          else
+            tar -xzf "$RUNNER_TEMP/download/$ARCHIVE" -C "$RUNNER_TEMP/pkg"
+            # Without Ubuntu's mirror the tries use whatever tools the runner already has.
+            sudo apt-get update -q > /dev/null || true
+            sudo apt-get install -y --no-install-recommends dosfstools exfatprogs > /dev/null \
+              || echo "::warning::Couldn't install dosfstools and exfatprogs"
+          fi
+      - name: The tries
+        if: runner.os != 'Windows'
+        run: bash .github/release/ordinary-computers.sh "$RUNNER_TEMP/pkg/bolt"
+      - name: The tries
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\ordinary-computers.ps1 `
+            -Bolt $env:RUNNER_TEMP\pkg\bolt.exe
+          exit $LASTEXITCODE
+
+  # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: [prepare, build, sums, clean-machine]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency: release
+    permissions:
+      contents: write
+      actions: read
+      # The commit's CI results.
+      checks: read
+    env:
+      TAG: v${{ needs.prepare.outputs.version }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.run_id }}
+      REPO: ${{ github.repository }}
+      BUILT: ${{ toJSON(needs.build.outputs) }}
+      WEBSITE_SHA256: ${{ needs.prepare.outputs.website-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the tag name is free
+        run: |
+          tags=$(gh api "repos/$REPO/git/matching-refs/tags/$TAG" --jq '.[].ref')
+          if grep -qx "refs/tags/$TAG" <<< "$tags"; then
+            echo "::error::A tag named $TAG already exists"
+            exit 1
+          fi
+          # Drafts included: they have a tag name but no tag yet.
+          releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[] | .tag_name, .name')
+          if grep -qx -- "$TAG" <<< "$releases"; then
+            echo "::error::A release named $TAG already exists"
+            exit 1
+          fi
+      # Pull requests are tested against an older main, so the merged commit is checked here.
+      - name: Check that CI passed on this commit
+        run: |
+          runs=$(gh api --paginate "repos/$REPO/commits/$GITHUB_SHA/check-runs" \
+            --jq '.check_runs[] | [.name, .started_at, .conclusion // "pending"] | @tsv')
+          bad=0
+          for name in "test (windows-latest)" "test (macos-latest)" "test (ubuntu-latest)" deny; do
+            # The latest attempt counts, so a rerun that passed is enough.
+            last=$(awk -F '\t' -v n="$name" '$1 == n' <<< "$runs" | sort -t $'\t' -k 2 | tail -n 1 | cut -f 3)
+            echo "$name: ${last:-not run}"
+            if [ "$last" != success ]; then bad=1; fi
+          done
+          if [ "$bad" = 1 ]; then
+            echo "::error::CI hasn't passed on $GITHUB_SHA"
+            exit 1
+          fi
+      - name: Collect the files
+        run: |
+          down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
+          mkdir "$dist"
+          gh run download "$RUN_ID" --repo "$REPO" --pattern "bolt-$VERSION-*" --dir "$down"
+          gh run download "$RUN_ID" --repo "$REPO" --name sha256sums --dir "$dist"
+          gh run download "$RUN_ID" --repo "$REPO" --name website --dir "$dist"
+          for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
+                   aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz; do
+            name="bolt-$VERSION-$t"
+            mv "$down/$name/$name" "$dist/$name"
+          done
+          if [ -n "$(find "$down" -type f)" ]; then
+            echo "::error::Unexpected files among the archives"
+            exit 1
+          fi
+          (cd "$dist" && sha256sum --check --strict SHA256SUMS)
+          # Each file against the hash the job that made it gave, not only against SHA256SUMS.
+          for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
+                   aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz website.zip; do
+            name="bolt-$VERSION-$t"
+            if [ "$t" = website.zip ]; then
+              made=$WEBSITE_SHA256
+            else
+              made=$(jq -r --arg k "sha256-${t%%.*}" '.[$k] // ""' <<< "$BUILT")
+            fi
+            got=$(sha256sum "$dist/$name" | cut -d ' ' -f 1)
+            echo "$name: made $made, downloaded $got"
+            if ! [[ "$made" =~ ^[0-9a-f]{64}$ ]] || [ "$got" != "$made" ]; then
+              echo "::error::$name isn't the file the job that made it hashed"
+              exit 1
+            fi
+            if [ "$t" != website.zip ]; then printf '%s  %s\n' "$made" "$name" >> "$RUNNER_TEMP/SHA256SUMS"; fi
+          done
+          # SHA256SUMS must list exactly the four bound hashes, as sums wrote them.
+          if ! cmp "$RUNNER_TEMP/SHA256SUMS" "$dist/SHA256SUMS"; then
+            echo "::error::SHA256SUMS isn't the one the build jobs' hashes make"
+            exit 1
+          fi
+          ls -l "$dist"
+          want=$(printf '%s\n' SHA256SUMS "bolt-$VERSION-website.zip" "bolt-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "bolt-$VERSION-"{x86_64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-apple-darwin}.tar.gz | sort)
+          if [ "$(ls -A "$dist" | sort)" != "$want" ]; then
+            echo "::error::The draft's files aren't exactly the four archives, SHA256SUMS and the website copies"
+            exit 1
+          fi
       - name: Make the draft release
         run: |
           dist="$RUNNER_TEMP/dist"
+          # The run's address tells the owner which logs to check the files against.
+          notes="$RUNNER_TEMP/notes.md"
+          cp "docs/releases/$TAG.md" "$notes"
+          printf '\nMade by %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$REPO" "$RUN_ID" >> "$notes"
           gh release create "$TAG" --repo "$REPO" --draft --target "$GITHUB_SHA" \
-            --title "Bolt $VERSION" --notes-file "docs/releases/$TAG.md" \
-            "$dist"/bolt-"$VERSION"-* "$dist/SHA256SUMS"
+            --title "Bolt $VERSION" --notes-file "$notes" \
+            "$dist"/bolt-"$VERSION"-*.zip "$dist"/bolt-"$VERSION"-*.tar.gz "$dist/SHA256SUMS"

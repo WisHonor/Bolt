@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 18 (design review); first proposed as risk 16 at kickoff
-- **Refined by:** [decision 048](048-handle-relative-file-access.md) (folders are held open and worked inside, never through a link)
+- **Refined by:** [decision 048](048-handle-relative-file-access.md) (folders are held open and worked inside, never through a link); [decision 142](142-bolt-sends-nothing-and-each-build-proves-it.md) (no networking code, and each release program checked for networking and for starting other programs)
 
 ## Context
 
