@@ -405,9 +405,9 @@ fn rt4_3_a_opalignore_from_the_repository_does_not_save_what_git_ignores_silentl
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);
     let files: [(&str, &[u8]); 4] = [
-        (".opalignore", b"!.env\n!*.pem\n"),
         (".env", b"API_KEY=put-yours-here\n"),
         (".gitignore", b".env\n*.pem\n"),
+        (".opalignore", b"!.env\n!*.pem\n"),
         ("app.py", b"print('hi')\n"),
     ];
     let entries: Vec<(&[u8], &[u8], GitId)> = files

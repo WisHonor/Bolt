@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/import.rs
 expression: json
 ---
 {
-  "opal_json": 1,
   "commits": 2,
   "inexact_commits": 1,
   "inexact_lfs_pointers": 0,
@@ -13,14 +12,15 @@ expression: json
     "count": 0
   },
   "lines": 2,
+  "opal_json": 1,
   "position": {
     "line": "main"
   },
   "renamed": [
     {
-      "opal": "feature-x",
       "git": "feature+x",
-      "kind": "line"
+      "kind": "line",
+      "opal": "feature-x"
     }
   ],
   "server_lines": 1,
@@ -29,7 +29,7 @@ expression: json
     "count": 1,
     "first": [
       {
-        "commit": "37c94309676b7d12b75fc0032539494aca56a0db",
+        "commit": "3b0c5a80dfceb3df41a83b515a028775d9bdb227",
         "path": "sub/.opal"
       }
     ]

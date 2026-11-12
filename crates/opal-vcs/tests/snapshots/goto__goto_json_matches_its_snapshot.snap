@@ -3,8 +3,8 @@ source: crates/opal-vcs/tests/goto.rs
 expression: doc
 ---
 {
-  "opal_json": 1,
   "not_written": [],
+  "opal_json": 1,
   "placeholders": [],
   "position": {
     "line": "feature"

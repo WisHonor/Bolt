@@ -3,11 +3,11 @@ source: crates/opal-vcs/tests/cli.rs
 expression: json
 ---
 {
-  "opal_json": 1,
   "found": {
     "engines": [],
     "languages": []
   },
+  "opal_json": 1,
   "position": {
     "line": "main"
   },

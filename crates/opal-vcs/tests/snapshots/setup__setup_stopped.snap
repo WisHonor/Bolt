@@ -4,7 +4,6 @@ expression: stopped
 ---
 {
   "applied": false,
-  "opal_json": 1,
   "error": {
     "hint": "If they are what you want, run: opal setup --preset custom --yes",
     "message": "Nothing was changed: Opalro can't ask whether to apply these changes with --json."
@@ -25,6 +24,7 @@ expression: stopped
     "engines": [],
     "languages": []
   },
+  "opal_json": 1,
   "preset": "custom",
   "warnings": []
 }

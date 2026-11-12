@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/status.rs
 expression: doc
 ---
 {
-  "opal_json": 1,
   "changes": [
     {
       "change": "modified",
@@ -28,6 +27,7 @@ expression: doc
     }
   ],
   "not_written": [],
+  "opal_json": 1,
   "position": {
     "line": "main"
   },

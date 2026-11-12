@@ -4,12 +4,12 @@ expression: doc
 ---
 {
   "applied": false,
-  "opal_json": 1,
   "files": [],
   "found": {
     "engines": [],
     "languages": []
   },
+  "opal_json": 1,
   "preset": "code",
   "warnings": []
 }

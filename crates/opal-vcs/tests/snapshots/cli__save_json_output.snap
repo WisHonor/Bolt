@@ -3,8 +3,8 @@ source: crates/opal-vcs/tests/cli.rs
 expression: json
 ---
 {
-  "opal_json": 1,
   "changed_files": 1,
+  "opal_json": 1,
   "paths": [],
   "replaced": null,
   "result": "saved",

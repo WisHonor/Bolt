@@ -3,10 +3,10 @@ source: crates/opal-vcs/tests/shelf.rs
 expression: "doc(&[\"unshelf\"])"
 ---
 {
-  "opal_json": 1,
   "carried": 0,
   "finished": false,
   "not_written": [],
+  "opal_json": 1,
   "placeholders": [],
   "removed": 3,
   "shelf": {

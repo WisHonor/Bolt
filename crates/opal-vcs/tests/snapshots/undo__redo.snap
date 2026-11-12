@@ -3,8 +3,8 @@ source: crates/opal-vcs/tests/undo.rs
 expression: "doc(&[\"redo\"])"
 ---
 {
-  "opal_json": 1,
   "finished": false,
+  "opal_json": 1,
   "position": {
     "save": "[redacted]"
   },

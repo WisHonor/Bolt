@@ -2834,8 +2834,8 @@ mod tests {
                 "only",
                 "only/.opalignore",
                 "sub",
-                "sub/.opalignore",
                 "sub/.gitignore",
+                "sub/.opalignore",
                 "sub/c.txt"
             ]
         );
@@ -3503,7 +3503,7 @@ mod tests {
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
-            [".opalignore", ".gitignore", "keep.log"]
+            [".gitignore", ".opalignore", "keep.log"]
         );
     }
 
@@ -3748,9 +3748,9 @@ mod tests {
         assert_eq!(
             saved_paths(&repo, saved),
             [
-                ".opalignore",
                 ".env",
                 ".gitignore",
+                ".opalignore",
                 "deploy.pem",
                 "notes.txt",
                 "secrets",

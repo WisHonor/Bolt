@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/verify.rs
 expression: found
 ---
 {
-  "opal_json": 1,
   "bytes": "[redacted]",
   "entries": 2,
   "error": {
@@ -11,6 +10,7 @@ expression: found
     "message": "[redacted]"
   },
   "objects": 8,
+  "opal_json": 1,
   "packs": 3,
   "problems": [
     {

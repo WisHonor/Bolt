@@ -3,9 +3,9 @@ source: crates/opal-vcs/tests/discard.rs
 expression: "discard_json(&env, &[])"
 ---
 {
-  "opal_json": 1,
   "folders": 0,
   "not_written": [],
+  "opal_json": 1,
   "placeholders": [],
   "removed_paths": [
     "n.txt"

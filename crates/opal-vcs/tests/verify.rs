@@ -149,10 +149,10 @@ fn verify_json_matches_json_md() {
     let clean = doc(&out);
     let keys: Vec<&String> = clean.as_object().unwrap().keys().collect();
     let fields = [
-        "opal_json",
         "bytes",
         "entries",
         "objects",
+        "opal_json",
         "packs",
         "problems",
         "problems_total",

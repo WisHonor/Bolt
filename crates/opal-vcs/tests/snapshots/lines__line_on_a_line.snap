@@ -3,10 +3,10 @@ source: crates/opal-vcs/tests/lines.rs
 expression: line(&env)
 ---
 {
-  "opal_json": 1,
   "lines": [
     "main"
   ],
+  "opal_json": 1,
   "position": {
     "line": "main"
   },

@@ -3,9 +3,9 @@ source: crates/opal-vcs/tests/shelf.rs
 expression: "doc(&[\"shelf\", \"Mine\"])"
 ---
 {
-  "opal_json": 1,
   "changed_again": false,
   "not_written": [],
+  "opal_json": 1,
   "placeholders": [],
   "removed": 3,
   "shelf": {

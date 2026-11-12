@@ -3,13 +3,13 @@ source: crates/opal-vcs/tests/setup.rs
 expression: doc
 ---
 {
-  "opal_json": 1,
   "found": {
     "engines": [
       "unity"
     ],
     "languages": []
   },
+  "opal_json": 1,
   "position": {
     "line": "main"
   },

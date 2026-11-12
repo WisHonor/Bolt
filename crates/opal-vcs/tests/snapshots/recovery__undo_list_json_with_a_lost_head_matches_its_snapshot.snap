@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/recovery.rs
 expression: masked(doc)
 ---
 {
-  "opal_json": 1,
   "ends": [
     {
       "action": "command",
@@ -23,5 +22,6 @@ expression: masked(doc)
     }
   ],
   "head_lost": true,
+  "opal_json": 1,
   "warnings": []
 }

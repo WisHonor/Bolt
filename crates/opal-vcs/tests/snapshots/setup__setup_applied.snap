@@ -4,7 +4,6 @@ expression: applied
 ---
 {
   "applied": true,
-  "opal_json": 1,
   "files": [
     {
       "after": null,
@@ -21,6 +20,7 @@ expression: applied
     "engines": [],
     "languages": []
   },
+  "opal_json": 1,
   "preset": "custom",
   "warnings": []
 }

@@ -333,7 +333,7 @@ fn an_entry_without_a_folder_change_has_milestone_1s_bytes() {
     let e = minimal_diary_entry();
     assert_eq!(hex(&e.encode()), minimal.hex);
     // The ID milestone 1 gave it, which pins every byte.
-    let milestone_1 = "e8a8c4124cea6f96ae6e108873a3d80e96af68bde8a7aef919c1419062cd97c8";
+    let milestone_1 = "616fa137a45ee91eeed7711ed61dec1fa79ce8d2d96011d9eb87e090170ec07c";
     assert_eq!(e.id().to_hex(), milestone_1);
 }
 
@@ -488,6 +488,76 @@ fn version_1_packs_still_read() {
     }
 }
 
+/// `pack`, a version 2 pack, with its index in version 1, built from storage-format.md section 11,
+/// since the writer no longer writes version 1.
+fn as_version_1(pack: &[u8]) -> Vec<u8> {
+    let u64_at = |at: usize| u64::from_le_bytes(pack[at..at + 8].try_into().unwrap());
+    let index_at = usize::try_from(u64_at(pack.len() - 48)).unwrap();
+    // (id, kind, offset, uncompressed size, stored size), read from the entries' own headers.
+    let mut lines = Vec::new();
+    let mut at = 16;
+    while at < index_at {
+        let id: [u8; 32] = pack[at + 1..at + 33].try_into().unwrap();
+        let (size, stored) = (u64_at(at + 33), u64_at(at + 41));
+        lines.push((id, pack[at], at as u64, size, stored));
+        at += 50 + usize::try_from(stored).unwrap();
+    }
+    lines.sort();
+    let mut index = opal_core::encoding::Writer::new();
+    index.varint(lines.len() as u64);
+    for l in &lines {
+        index.id(&Id(l.0));
+        index.u8(l.1);
+        index.u64(l.2);
+        index.varint(l.3);
+        index.varint(l.4);
+    }
+    let index = index.into_bytes();
+    let mut out = b"OPALPACK".to_vec();
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&pack[12..index_at]);
+    out.extend_from_slice(&index);
+    out.extend_from_slice(&(index_at as u64).to_le_bytes());
+    out.extend_from_slice(blake3::hash(&index).as_bytes());
+    out.extend_from_slice(b"OPALPEND");
+    out
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/pack.json"]
+fn print_pack_vectors() {
+    let rows: Vec<String> = pack_vectors("pack.json")
+        .iter()
+        .map(|v| {
+            // What the writer writes of the vector's objects, in their order, in version 1.
+            let root = tempfile::tempdir().unwrap();
+            let mut w = PackWriter::create(root.path()).unwrap();
+            for o in &v.objects {
+                let bytes = unhex(&o.hex);
+                match ObjectKind::from_u8(o.kind).unwrap() {
+                    ObjectKind::Content => w.add_content(&bytes).unwrap(),
+                    kind => w.add_record(kind, &bytes).unwrap(),
+                };
+            }
+            let path = w.finish(root.path()).unwrap().unwrap();
+            let pack = as_version_1(&std::fs::read(path).unwrap());
+            let name = hex(&pack[pack.len() - 40..pack.len() - 8]);
+            let objects: Vec<String> = v
+                .objects
+                .iter()
+                .map(|o| format!("{{\"kind\": {}, \"hex\": \"{}\"}}", o.kind, o.hex))
+                .collect();
+            format!(
+                "  {{\"name\": \"{}\", \"file\": \"{name}.pack\", \"hex\": \"{}\", \"objects\": [{}]}}",
+                v.name,
+                hex(&pack),
+                objects.join(", ")
+            )
+        })
+        .collect();
+    println!("[\n{}\n]", rows.join(",\n"));
+}
+
 /// `pack`, a version 1 pack, with its index in version 2, built from storage-format.md section 11
 /// and not with the writer.
 fn as_version_2(pack: &[u8]) -> Vec<u8> {
@@ -637,7 +707,7 @@ struct SealedVector {
 fn change_ids_v1_body() -> String {
     let id = |byte: &str, n: usize| byte.repeat(n);
     format!(
-        "424f4c5443484944010204{}{}02{}{}04{}{}01{}",
+        "4f50414c43484944010204{}{}02{}{}04{}{}01{}",
         hex(b"main"),
         id("11", 32),
         id("22", 16),
@@ -653,7 +723,7 @@ fn change_ids_v1_body() -> String {
 fn change_ids_body() -> String {
     let id = |byte: &str, n: usize| byte.repeat(n);
     format!(
-        "424f4c544348494402030001{}{}04{}02{}{}{}{}04{}01{}{}",
+        "4f50414c4348494402030001{}{}04{}02{}{}{}{}04{}01{}{}",
         id("33", 32),
         id("44", 16),
         hex(b"main"),
@@ -784,7 +854,7 @@ fn other_lines_match_their_vector() {
 /// on drive 7 (a 128-bit file ID), with content 22…22.
 fn file_cache_body() -> String {
     format!(
-        "424f4c5446494c45030205{}0103{}{}{}{}{}01{}016202ac02{}{}{}{}{}00{}",
+        "4f50414c46494c45030205{}0103{}{}{}{}{}01{}016202ac02{}{}{}{}{}00{}",
         hex(b"a.txt"),
         hex(&1_700_000_000i64.to_le_bytes()),
         hex(&123_456_789u32.to_le_bytes()),
@@ -1000,6 +1070,7 @@ fn the_format_file_matches_its_vector() {
 
 #[derive(Deserialize)]
 struct Chunking {
+    gear_context: String,
     noise_context: String,
     inputs: Vec<ChunkingInput>,
 }
@@ -1021,10 +1092,9 @@ fn chunking() -> Chunking {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// The bytes of the input `name` of chunking.json, checked against its file ID. The noise is
-/// BLAKE3's extendable output in key-derivation mode, with no key material.
-fn input_bytes(v: &Chunking, name: &str) -> Vec<u8> {
-    let input = v.inputs.iter().find(|i| i.name == name).unwrap();
+/// The bytes of `input`. The noise is BLAKE3's extendable output in key-derivation mode, with no
+/// key material.
+fn chunking_input(v: &Chunking, input: &ChunkingInput) -> Vec<u8> {
     let mut bytes = vec![0; input.noise.or(input.zeros).unwrap()];
     if input.noise.is_some() {
         blake3::Hasher::new_derive_key(&v.noise_context)
@@ -1034,6 +1104,13 @@ fn input_bytes(v: &Chunking, name: &str) -> Vec<u8> {
     if let Some(at) = input.insert_at {
         bytes.insert(at, input.insert_byte.unwrap());
     }
+    bytes
+}
+
+/// The bytes of the input `name` of chunking.json, checked against its file ID.
+fn input_bytes(v: &Chunking, name: &str) -> Vec<u8> {
+    let input = v.inputs.iter().find(|i| i.name == name).unwrap();
+    let bytes = chunking_input(v, input);
     assert_eq!(blake3::hash(&bytes).to_hex().as_str(), input.file, "{name}");
     bytes
 }
@@ -1049,6 +1126,48 @@ fn cut(bytes: &[u8]) -> Vec<Chunk> {
         });
     }
     chunks
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/chunking.json"]
+fn print_chunking_vectors() {
+    let v = chunking();
+    // GEAR as storage-format.md section 6 makes it: 256 little-endian numbers from BLAKE3.
+    let mut table = [0; 2048];
+    blake3::Hasher::new_derive_key(&v.gear_context)
+        .finalize_xof()
+        .fill(&mut table);
+    let gear = |at: usize| u64::from_le_bytes(table[8 * at..8 * at + 8].try_into().unwrap());
+    let rows: Vec<String> = v
+        .inputs
+        .iter()
+        .map(|input| {
+            let bytes = chunking_input(&v, input);
+            let sizes: Vec<u64> = cut(&bytes).iter().map(|c| c.size).collect();
+            let mut row = format!("    {{\"name\": \"{}\"", input.name);
+            for (key, n) in [
+                ("noise", input.noise),
+                ("zeros", input.zeros),
+                ("insert_at", input.insert_at),
+                ("insert_byte", input.insert_byte.map(usize::from)),
+            ] {
+                if let Some(n) = n {
+                    row += &format!(", \"{key}\": {n}");
+                }
+            }
+            let file = blake3::hash(&bytes).to_hex();
+            format!("{row}, \"file\": \"{file}\", \"sizes\": {sizes:?}}}")
+        })
+        .collect();
+    println!(
+        "{{\n  \"gear_context\": \"{}\",\n  \"gear\": {{\"0\": \"{:016x}\", \"1\": \"{:016x}\", \"255\": \"{:016x}\"}},\n  \"noise_context\": \"{}\",\n  \"inputs\": [\n{}\n  ]\n}}",
+        v.gear_context,
+        gear(0),
+        gear(1),
+        gear(255),
+        v.noise_context,
+        rows.join(",\n")
+    );
 }
 
 #[test]
@@ -1069,12 +1188,12 @@ fn one_inserted_byte_changes_one_chunk() {
     let v = chunking();
     let before = cut(&input_bytes(&v, "noise-3mib"));
     let after = cut(&input_bytes(&v, "noise-3mib-one-byte-inserted"));
-    assert_eq!((before.len(), after.len()), (40, 40));
-    // The 12th chunk holds the inserted byte; every other is the same chunk as before.
-    assert_eq!(before[..11], after[..11]);
-    assert_ne!(before[11].id, after[11].id);
-    assert_eq!(before[11].size + 1, after[11].size);
-    assert_eq!(before[12..], after[12..]);
+    assert_eq!((before.len(), after.len()), (41, 41));
+    // The 13th chunk holds the inserted byte; every other is the same chunk as before.
+    assert_eq!(before[..12], after[..12]);
+    assert_ne!(before[12].id, after[12].id);
+    assert_eq!(before[12].size + 1, after[12].size);
+    assert_eq!(before[13..], after[13..]);
 }
 
 #[derive(Deserialize)]
@@ -1099,6 +1218,7 @@ struct ValidChunkList {
 struct InvalidChunkList {
     name: String,
     hex: String,
+    why: String,
 }
 
 fn chunk_list_vectors() -> ChunkListVectors {
@@ -1109,36 +1229,82 @@ fn chunk_list_vectors() -> ChunkListVectors {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// The list of `vector`'s file: cut into the pieces it gives, or as Opalro's cutter cuts it.
+fn valid_chunk_list(vector: &ValidChunkList) -> ChunkList {
+    let (file, chunks) = match (&vector.text, &vector.chunks, &vector.input) {
+        (Some(text), Some(pieces), None) => {
+            assert_eq!(pieces.concat(), *text, "{}", vector.name);
+            let chunks = pieces
+                .iter()
+                .map(|piece| Chunk {
+                    id: hash_content(piece.as_bytes()),
+                    size: piece.len() as u64,
+                })
+                .collect();
+            (text.as_bytes().to_vec(), chunks)
+        }
+        (None, None, Some(input)) => {
+            let name = input.strip_prefix("chunking.json ").unwrap();
+            let bytes = input_bytes(&chunking(), name);
+            let chunks = cut(&bytes);
+            (bytes, chunks)
+        }
+        _ => panic!("{}: a text and its chunks, or an input", vector.name),
+    };
+    ChunkList {
+        file: hash_content(&file),
+        size: file.len() as u64,
+        chunks,
+    }
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/chunk_list.json"]
+fn print_chunk_list_vectors() {
+    let v = chunk_list_vectors();
+    let valid: Vec<String> = v
+        .valid
+        .iter()
+        .map(|vector| {
+            let list = valid_chunk_list(vector);
+            let given = match (&vector.text, &vector.chunks, &vector.input) {
+                (Some(text), Some(pieces), _) => {
+                    format!("\"text\": \"{text}\", \"chunks\": {pieces:?}")
+                }
+                (_, _, input) => format!("\"input\": \"{}\"", input.as_ref().unwrap()),
+            };
+            format!(
+                "    {{\"name\": \"{}\", {given}, \"file\": \"{}\", \"size\": {}, \"hex\": \"{}\"}}",
+                vector.name,
+                list.file,
+                list.size,
+                hex(&list.encode())
+            )
+        })
+        .collect();
+    let invalid: Vec<String> = v
+        .invalid
+        .iter()
+        .map(|i| {
+            format!(
+                "    {{\"name\": \"{}\", \"hex\": \"{}\", \"why\": \"{}\"}}",
+                i.name, i.hex, i.why
+            )
+        })
+        .collect();
+    println!(
+        "{{\n  \"valid\": [\n{}\n  ],\n  \"invalid\": [\n{}\n  ]\n}}",
+        valid.join(",\n"),
+        invalid.join(",\n")
+    );
+}
+
 #[test]
 fn chunk_lists_match_their_vectors() {
     let v = chunk_list_vectors();
     assert_eq!(v.valid.len(), 2);
     for vector in &v.valid {
-        let (file, chunks) = match (&vector.text, &vector.chunks, &vector.input) {
-            (Some(text), Some(pieces), None) => {
-                assert_eq!(pieces.concat(), *text, "{}", vector.name);
-                let chunks = pieces
-                    .iter()
-                    .map(|piece| Chunk {
-                        id: hash_content(piece.as_bytes()),
-                        size: piece.len() as u64,
-                    })
-                    .collect();
-                (text.as_bytes().to_vec(), chunks)
-            }
-            (None, None, Some(input)) => {
-                let name = input.strip_prefix("chunking.json ").unwrap();
-                let bytes = input_bytes(&chunking(), name);
-                let chunks = cut(&bytes);
-                (bytes, chunks)
-            }
-            _ => panic!("{}: a text and its chunks, or an input", vector.name),
-        };
-        let list = ChunkList {
-            file: hash_content(&file),
-            size: file.len() as u64,
-            chunks,
-        };
+        let list = valid_chunk_list(vector);
         assert_eq!(list.file.to_hex(), vector.file, "{}", vector.name);
         assert_eq!(list.size, vector.size, "{}", vector.name);
         assert_eq!(hex(&list.encode()), vector.hex, "{}", vector.name);

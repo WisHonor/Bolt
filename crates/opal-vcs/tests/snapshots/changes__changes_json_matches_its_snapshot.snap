@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/changes.rs
 expression: doc
 ---
 {
-  "opal_json": 1,
   "changes": [
     {
       "change": "modified",
@@ -77,6 +76,7 @@ expression: doc
       "timed_out": false
     }
   ],
+  "opal_json": 1,
   "save": {
     "author": {
       "email": "test@example.com",

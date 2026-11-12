@@ -170,8 +170,8 @@ fn the_fields_of_a_table_are_read_from_its_first_column() {
     let undo = &spec[&("`opal undo --json` and `opal redo --json`".to_owned(), 0)];
     let names: Vec<&str> = undo.iter().map(String::as_str).collect();
     let want = [
-        "opal_json",
         "finished",
+        "opal_json",
         "position",
         "redone",
         "shelved",

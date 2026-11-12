@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/cli.rs
 expression: show
 ---
 {
-  "opal_json": 1,
   "changes": [
     {
       "change": "added",
@@ -13,6 +12,7 @@ expression: show
       "path": "b.txt"
     }
   ],
+  "opal_json": 1,
   "save": {
     "author": {
       "email": "test@example.com",

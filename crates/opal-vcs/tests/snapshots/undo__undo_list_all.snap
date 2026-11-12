@@ -3,7 +3,6 @@ source: crates/opal-vcs/tests/undo.rs
 expression: "doc(&[\"undo\", \"--list\", \"--all\"])"
 ---
 {
-  "opal_json": 1,
   "entries": [
     {
       "action": "redo",
@@ -119,5 +118,6 @@ expression: "doc(&[\"undo\", \"--list\", \"--all\"])"
       "time_ms": "[redacted]"
     }
   ],
+  "opal_json": 1,
   "warnings": []
 }
