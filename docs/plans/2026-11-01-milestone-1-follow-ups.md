@@ -244,6 +244,14 @@ What the package session left, each with when and why ([decision 147](../decisio
 | The owner's call | `SECURITY.md` names `docs/security.md`, which a website reader can't open: publish it, or drop the mention. |
 | Known limit | No unit test checks the message at the top of a FAT drive; only the CI try does ([run 43064346101](https://github.com/WisHonor/Bolt/actions/runs/43064346101)). |
 
+## The name (2026-11-12)
+
+What the rename to Opalro left ([decision 150](../decisions/150-the-name-is-opalro.md); [the plan](2026-11-12-the-name-opalro.md), ruling 10).
+
+| By | Item |
+|---|---|
+| The owner's call | A project can't be started or imported on Windows in a folder of about 253 characters or more (255 with the old name): `hide_path` hands `SetFileAttributesW` a plain path, so `.opalro` past 260 characters fails with an error, touching nothing else. Lifting it means giving the `\\?\` form of the path, or setting the attribute through the folder's open handle; either changes what the platform crate hands to Windows. The known problems tell the limit. |
+
 ## For the owner to decide
 
 - ~~The line-ending stop never asks~~ (kept 2026-11-04 in decision 039's review: the hint names both ways on, and a question could offer only saving the CRLF files, since Bolt never runs Git). From milestone 2's build, 2026-11-03. [Decision 039](../decisions/039-first-save-after-import.md) says the stop offers two ways on, and that without a terminal it names the flag; Bolt never asks, even in a terminal: the hint always offers both ways. Confirm, or ask for a question in a terminal.

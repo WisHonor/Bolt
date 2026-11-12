@@ -45,3 +45,9 @@ On Windows, a project on these drives can't be used in this version. They don't 
 Some network shares (some NAS drives, Windows shares and WebDAV folders) give every folder the same identity. Opalro can't be sure which folder a `safe-folders` entry names there, so the entry doesn't count, and a project Opalro refuses there stays refused.
 
 **What to do:** work on a copy of the project on a drive of your own.
+
+## A project folder deep in other folders, on Windows
+
+On Windows, a project can't be started or imported in a folder whose full path is longer than about 250 characters: Opalro stops with "The system cannot find the path specified" and leaves an unfinished `.opalro` folder there. No file of yours is changed. Files deeper inside a project are fine at any length.
+
+**What to do:** delete that `.opalro` folder, move the project nearer the top of the drive, such as into `C:\Projects\`, and start it there.

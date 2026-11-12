@@ -116,14 +116,16 @@ fn a_read_only_big_file_with_unsaved_work_is_never_lost() {
 /// A folder name as long as Windows lets a test make in one step.
 const LONG: &str = "a-folder-name-long-enough-to-pass-max-path";
 
-/// A project folder's path just under 260 characters, so that what Opalro writes in `.opalro/tmp`,
-/// the files in it, and Git LFS's objects in `.git/lfs/objects` are over. Its parent is made.
+/// A project folder's path of 245 characters, so that what Opalro writes in `.opalro/tmp`, the files
+/// in it, and Git LFS's objects in `.git/lfs/objects` are over 260. `.opalro` itself stays under,
+/// since it is hidden by its path, even where Windows spells the temp folder out longer (GitHub's
+/// `RUNNER~1`). Its parent is made.
 fn deep_folder(base: &Path) -> PathBuf {
     let mut deep = base.to_path_buf();
-    while deep.as_os_str().len() + LONG.len() + 1 < 250 {
+    while deep.as_os_str().len() + LONG.len() + 1 < 245 {
         deep.push(LONG);
     }
-    let left = 250 - deep.as_os_str().len() - 1;
+    let left = 245 - deep.as_os_str().len() - 1;
     deep.push("x".repeat(left.max(1)));
     fs::create_dir_all(deep.parent().unwrap()).unwrap();
     deep
