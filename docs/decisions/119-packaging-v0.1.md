@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 018](018-milestone-plan.md) (milestone 6's "packaging"); [decision 024](024-red-team-gate.md) (`SECURITY.md` before the first public release)
-- **Superseded in part by:** [decision 140](140-bolt-is-closed-source.md) (the license: Bolt is closed source); [decision 144](144-where-people-get-bolt-and-report-problems.md) (people get Bolt from the owner's website and report problems at the owner's address); [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opal`)
+- **Superseded in part by:** [decision 140](140-bolt-is-closed-source.md) (the license: Bolt is closed source); [decision 144](144-where-people-get-bolt-and-report-problems.md) (people get Bolt from the owner's website and report problems at the owner's address); [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`)
 - **Refined by:** [decision 143](143-the-notices-cover-what-is-built-in.md) (the notices cover the standard library and the C runtime); [decision 145](145-one-release-workflow-for-every-version.md) (one workflow for every version, six files in each archive); [decision 146](146-the-clean-machine-check-and-which-systems-each-build-needs.md) (the clean-machine check)
 
 ## Context
