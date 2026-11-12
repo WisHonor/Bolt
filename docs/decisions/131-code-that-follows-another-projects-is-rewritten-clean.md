@@ -4,6 +4,7 @@
 - **Date:** 2026-11-11
 - **Agenda topic:** none (getting v0.1 ready: clean code and the gate)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
+- **Refined by:** [decision 133](133-red-team-v0.1-rulings.md) (two findings in the rewritten readers fixed)
 - **Refines:** the owner's license decision for v0.1 (closed: all rights reserved, the source private, builds downloaded under a user agreement), which the package session records as decision 140
 
 ## Context

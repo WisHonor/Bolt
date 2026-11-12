@@ -246,6 +246,7 @@ Questions 2 to 12 were decided by Claude on 2026-11-05 at the owner's request to
 - [x] Going back is held to three and a half times Git's time, not three: the first run under decision 129, on unchanged code, passed three on a runner whose Git was the fastest on record (supersedes the limit of decision 129) → [decision 132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md)
 - [x] A walk over a save measures a listing it meets a second time before walking it again, so a planted deep tree is refused at once (refines decisions 127 and 126) → [decision 130](decisions/130-a-walk-measures-a-listing-it-meets-again-before-walking-it-again.md)
 - [x] Code that follows another project's code is rewritten clean (ignore rules, Git's config files, the look-alike names, the tidying of Git's paths, person lines, Git LFS pointers), copied test material is replaced, and the platform crate's Windows code that follows Rust's standard library stays under Rust's license (the code audit) → [decision 131](decisions/131-code-that-follows-another-projects-is-rewritten-clean.md)
+- [x] Rulings after the red team's session before v0.1: a boolean Git refuses is refused, the ignore matcher keeps its working space, and a planted save within the limits stays a known cost (refines decisions 130 and 131) → [decision 133](decisions/133-red-team-v0.1-rulings.md)
 
 ## 5. Design
 

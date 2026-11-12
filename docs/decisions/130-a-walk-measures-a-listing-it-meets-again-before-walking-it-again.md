@@ -4,6 +4,7 @@
 - **Date:** 2026-11-11
 - **Agenda topic:** none (getting v0.1 ready: clean code and the gate)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
+- **Refined by:** [decision 133](133-red-team-v0.1-rulings.md) (a planted save within the limits stays a known cost)
 - **Refines:** [decision 127](127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md) (its second ruling: the deep tree's cost in `goto` and `changes --save`, left for v0.1); [decision 126](126-verify-also-finds-a-save-that-cant-be-written-out.md) (a save past the readers' limits)
 
 ## Context
